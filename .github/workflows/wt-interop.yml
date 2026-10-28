@@ -61,13 +61,18 @@ jobs:
       # 10g is the per-job memory budget.
       # The trusted route also mounts the persistent compiler cache (core-ci.yml's
       # COMPILER CACHE header); the guard is the `runs-on` one verbatim.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Measured max 1.42 min, healthy max 1.38, p50 1.23 — trivially short on the msquic
     # cache-HIT path. Set to 45 for the same unmeasured reason as quic.yml: this job
     # carries the identical `Build msquic from source (cache miss only)` step, which never
     # executed in 500 sampled runs, and it also pulls ~200 MB of Chromium below. Kept
     # EQUAL to quic.yml so the two msquic consumers share one reviewable ceiling.
     timeout-minutes: 45
+    defaults:
+      run:
+        # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
+        # to `sh` (dash), and these steps were written for the hosted bash (#2348).
+        shell: bash -e {0}
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an

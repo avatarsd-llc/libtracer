@@ -120,6 +120,13 @@
 # Each job logs its own hit rate (`CCACHE_STATSLOG`, printed by the "Compiler cache
 # statistics" step) — the cache's global counters are shared by every runner at once.
 #
+# CGROUP (#2348): on the trusted route every container job passes
+# `--cgroup-parent=runners-ci.slice`, inside the same guard as the ccache mount. dockerd's
+# own default parent on these runners is runners-adhoc.slice (CPUWeight 20, 16 GB cap),
+# which is meant for ad-hoc agent builds; CI runs at normal weight in runners-ci.slice, a
+# child of runners.slice, so the slice's limits still bound it. A hosted or fork run gets
+# no such flag: the slice exists only on these machines.
+#
 # BUILD_JOBS=4 on the self-hosted route: the slice gives ALL runners and containers 11
 # cores / 24 GB, and the three `ci-local` runners (studio-ci-1, studio-lt-7, studio-lt-8)
 # run up to 3 container jobs at once, so 3 x 4 = 12 is ~one compiler per core with a
@@ -192,7 +199,7 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     timeout-minutes: 10
     env:
       # DERIVED by tools/gen_ci_paths.py -- do not hand-edit: this list is what
@@ -207,6 +214,11 @@ jobs:
         .github/workflows/core-ci.yml
     outputs:
       relevant: ${{ steps.decide.outputs.relevant }}
+    defaults:
+      run:
+        # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
+        # to `sh` (dash), and these steps were written for the hosted bash (#2348).
+        shell: bash -e {0}
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
@@ -274,12 +286,12 @@ jobs:
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
-      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
-      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # CPU is bounded host-side: the trusted route's `--cgroup-parent` puts every container in
+      # runners-ci.slice, under runners.slice (11 cores for all runners + containers together), so no per-container
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Measured healthy max 4.82 min across the three legs (p50 ~4.5). 20 = ~4x, with
     # extra room over a bare 3x because the image pull and the apt step below are inside
     # the measured job time and are exactly the wedge surface.
@@ -400,12 +412,12 @@ jobs:
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
-      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
-      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # CPU is bounded host-side: the trusted route's `--cgroup-parent` puts every container in
+      # runners-ci.slice, under runners.slice (11 cores for all runners + containers together), so no per-container
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Measured healthy max 2.97 min. Held at the build-test group's 20 rather than
     # tightened: same container + apt step, same wedge surface.
     timeout-minutes: 20
@@ -500,12 +512,12 @@ jobs:
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
-      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
-      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # CPU is bounded host-side: the trusted route's `--cgroup-parent` puts every container in
+      # runners-ci.slice, under runners.slice (11 cores for all runners + containers together), so no per-container
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Same container + apt step as the group above; held at its 20-minute wedge bound.
     timeout-minutes: 20
     steps:
@@ -612,12 +624,12 @@ jobs:
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
-      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
-      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # CPU is bounded host-side: the trusted route's `--cgroup-parent` puts every container in
+      # runners-ci.slice, under runners.slice (11 cores for all runners + containers together), so no per-container
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Same container + apt step as the group above; held at its 20-minute wedge bound.
     timeout-minutes: 20
     steps:
@@ -783,12 +795,12 @@ jobs:
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
-      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
-      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # CPU is bounded host-side: the trusted route's `--cgroup-parent` puts every container in
+      # runners-ci.slice, under runners.slice (11 cores for all runners + containers together), so no per-container
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Measured healthy max 4.68 min (5.17 on the incident day) — the worst of the
     # build-test group, because it adds an `add-apt-repository` PPA round-trip on top of
     # the container apt step. 20 = ~3.9x.
@@ -880,7 +892,7 @@ jobs:
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
       # Same container budget and compiler-cache mount as build-test (see there).
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     timeout-minutes: 20
     strategy:
       matrix:
@@ -1142,12 +1154,12 @@ jobs:
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
-      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
-      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # CPU is bounded host-side: the trusted route's `--cgroup-parent` puts every container in
+      # runners-ci.slice, under runners.slice (11 cores for all runners + containers together), so no per-container
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Measured max 1.78 min (p50 ~1.1). Short-job floor of 15 rather than 3x (~5 min):
     # the entire risk here is the container apt step, so the ceiling answers "how long is
     # it acceptable to be wedged", not "how long does the work take".
@@ -1236,12 +1248,12 @@ jobs:
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
-      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
-      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # CPU is bounded host-side: the trusted route's `--cgroup-parent` puts every container in
+      # runners-ci.slice, under runners.slice (11 cores for all runners + containers together), so no per-container
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Measured max 2.10 min (p50 ~1.3) — the longest of the short container jobs.
     # Short-job floor of 15; see install-consume for why it is not 3x.
     timeout-minutes: 15
@@ -1317,12 +1329,12 @@ jobs:
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
-      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
-      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # CPU is bounded host-side: the trusted route's `--cgroup-parent` puts every container in
+      # runners-ci.slice, under runners.slice (11 cores for all runners + containers together), so no per-container
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # One bench target plus libtracer, then two sub-second runs. Short-job floor of 15.
     timeout-minutes: 15
     steps:
@@ -1409,11 +1421,11 @@ jobs:
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
-      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
-      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # CPU is bounded host-side: the trusted route's `--cgroup-parent` puts every container in
+      # runners-ci.slice, under runners.slice (11 cores for all runners + containers together), so no per-container
       # `--cpus` (#1691). 10g is the per-job memory budget; harmless on the hosted fallback
       # (ubuntu-24.04 runners have 16 GB).
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # Measured max 1.80 min (p50 ~1.0). Short-job floor of 15 (has a package install).
     timeout-minutes: 15
     steps:
@@ -1462,11 +1474,11 @@ jobs:
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
-      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
-      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # CPU is bounded host-side: the trusted route's `--cgroup-parent` puts every container in
+      # runners-ci.slice, under runners.slice (11 cores for all runners + containers together), so no per-container
       # `--cpus` (#1691). 10g is the per-job memory budget; harmless on the hosted fallback
       # (ubuntu-24.04 runners have 16 GB).
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # Measured max 1.17 min (p50 0.7) when it still apt-installed twice; the short-job
     # floor of 15 stays.
     timeout-minutes: 15
@@ -1508,11 +1520,11 @@ jobs:
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
-      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
-      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # CPU is bounded host-side: the trusted route's `--cgroup-parent` puts every container in
+      # runners-ci.slice, under runners.slice (11 cores for all runners + containers together), so no per-container
       # `--cpus` (#1691). 10g is the per-job memory budget; harmless on the hosted fallback
       # (ubuntu-24.04 runners have 16 GB).
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # Measured max 1.30 min (p50 0.8) when it still apt-installed twice. Short-job
     # floor of 15.
     timeout-minutes: 15
@@ -1558,8 +1570,13 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     timeout-minutes: 10
+    defaults:
+      run:
+        # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
+        # to `sh` (dash), and these steps were written for the hosted bash (#2348).
+        shell: bash -e {0}
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an

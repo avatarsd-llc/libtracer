@@ -101,11 +101,16 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # Measured max 0.13 min (8 seconds), p50 0.08 — a pure file-list comparison with no
     # network beyond checkout. 10 = the short-job floor, and still fails an hour and a
     # half sooner than doing nothing. See core-ci.yml's header for the policy.
     timeout-minutes: 10
+    defaults:
+      run:
+        # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
+        # to `sh` (dash), and these steps were written for the hosted bash (#2348).
+        shell: bash -e {0}
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
@@ -160,7 +165,7 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # A single -Os cross-compile of seven modules plus the sentinel fixture; the image
     # pull dominates. 20 keeps it equal to the other container jobs in this file.
     timeout-minutes: 20
@@ -214,7 +219,7 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     strategy:
       fail-fast: false
       matrix:
@@ -283,7 +288,7 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # Measured 3.90-4.15 min across the four targets. 20 = ~4.8x, kept equal to `build`
     # so the container-image pull is covered by one reviewable number.
     timeout-minutes: 20
@@ -432,7 +437,7 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # Measured max 3.92 min. 20 = ~5x, same group and same image pull as `full-node`.
     timeout-minutes: 20
     steps:
@@ -500,7 +505,7 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # Measured max 2.83 min, p50 2.50. 15 = ~5.3x — extra headroom over 3x because this
     # job apt-installs g++-12 inside the IDF container, i.e. the demonstrated wedge point.
     timeout-minutes: 15
@@ -577,7 +582,7 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # Measured max 2.83 min, p50 2.37. 15 = ~5.3x, same reasoning as full-node-host: it
     # carries the same g++-12 apt step inside the container.
     timeout-minutes: 15
@@ -650,7 +655,7 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # One -Os component build per leg, like esp-build's esp32c6 leg (measured 6.07 min max).
     timeout-minutes: 20
     strategy:
@@ -696,7 +701,7 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # Five host component builds in one job, ~2.4 min each as in host-build, plus the g++-12
     # install. 30 = ~2.3x.
     timeout-minutes: 30

@@ -89,7 +89,7 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -124,6 +124,11 @@ jobs:
         .github/workflows/docs.yml
     outputs:
       relevant: ${{ steps.decide.outputs.relevant }}
+    defaults:
+      run:
+        # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
+        # to `sh` (dash), and these steps were written for the hosted bash (#2348).
+        shell: bash -e {0}
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
@@ -190,7 +195,7 @@ jobs:
       # 10g is the per-job memory budget.
       # The trusted route also mounts the persistent compiler cache (core-ci.yml's
       # COMPILER CACHE header); the guard is the `runs-on` one verbatim.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Its verdict is the REQUIRED status check `build` (through `build-required`), so a
     # hung step here does not fail a PR — it blocks every merge behind it for GitHub's
     # 6-hour default. That is not theoretical:
@@ -205,6 +210,11 @@ jobs:
     # healthy cold runs. The fixes are the cache save that survives a cancellation and
     # the scaled endpoint budget (see those steps); this margin is only the backstop.
     timeout-minutes: 75
+    defaults:
+      run:
+        # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
+        # to `sh` (dash), and these steps were written for the hosted bash (#2348).
+        shell: bash -e {0}
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
@@ -522,10 +532,15 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     timeout-minutes: 10
     permissions:
       contents: read
+    defaults:
+      run:
+        # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
+        # to `sh` (dash), and these steps were written for the hosted bash (#2348).
+        shell: bash -e {0}
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an

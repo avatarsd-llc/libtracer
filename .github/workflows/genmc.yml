@@ -64,9 +64,14 @@ jobs:
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
-      options: --memory 10g
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # Warm: ~1 min of apt, ~1 min of checks. Cold: plus the GenMC build (~10 min on 4 vCPUs).
     timeout-minutes: 30
+    defaults:
+      run:
+        # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
+        # to `sh` (dash), and these steps were written for the hosted bash (#2348).
+        shell: bash -e {0}
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
