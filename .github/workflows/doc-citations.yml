@@ -37,8 +37,8 @@
 # network, and a fork PR runs attacker-authored steps. The expression is the ONLY thing
 # standing between a fork PR and that machine; keep it verbatim, and note Actions cannot
 # expand a YAML anchor or read a job `env:` from `runs-on:`, so it is repeated per job
-# by necessity. A fork PR falls back to `ubuntu-24.04`, so this required check never
-# waits on hardware a fork cannot use.
+# by necessity. A fork PR skips the job on every route (core-ci.yml's header, FORK PULL
+# REQUESTS RUN NOTHING).
 #
 # CONTAINER: the self-hosted runners are bare machines with no preinstalled tool set,
 # so the job runs in `container: ubuntu:24.04` on BOTH routes.
@@ -119,6 +119,7 @@ concurrency:
 
 jobs:
   check:
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8

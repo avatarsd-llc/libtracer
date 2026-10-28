@@ -5,8 +5,9 @@
 # strict Doxygen documentation gate. Keeps `main` green on every change to core/.
 #
 # RUNNER ROUTING (self-hosted `ci-local`). Most x86 legs below pick the maintainer's
-# self-hosted runners when — and ONLY when — the run is trusted; every other run falls
-# back to `ubuntu-24.04`. The guard repeated in each `runs-on:` reads:
+# self-hosted runners when — and ONLY when — the run is trusted; a trusted run with the
+# route switched off (below) falls back to `ubuntu-24.04`. The guard repeated in each
+# `runs-on:` reads:
 #
 #   this repository (not a fork of it) AND (the event is not a pull_request OR the PR's
 #   head branch lives in this same repository, i.e. it is not a fork PR)
@@ -22,8 +23,18 @@
 # owns the box and everything it can reach. That expression is the ONLY thing standing
 # between a fork PR and that machine, so it is repeated verbatim per job (Actions does
 # not expand YAML anchors, and a shared `env:` cannot be read from `runs-on:`) rather
-# than factored out. Because the fallback is automatic, no required check ever waits on
-# hardware a fork cannot use. NEVER route here: a `pull_request_target` job, anything
+# than factored out.
+#
+# FORK PULL REQUESTS RUN NOTHING (#2348). Every job of every pull_request workflow also
+# carries the event half of that guard as its `if:` — `github.event_name !=
+# 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`
+# — so a fork PR's jobs are SKIPPED on every route: not run locally, not on a hosted
+# fallback, not even the hosted-only legs (arm64, the setarch sanitizer legs, vcan,
+# mesh). There is no ok-to-test label and no `labeled` re-run. To test a fork, the
+# maintainer reviews it and pushes its head to `ci/fork-<N>` in this repository, then
+# opens a pull request from that branch: it is now same-repo, so every check runs as
+# trusted code. A fork PR is never merged on its own checks (CONTRIBUTING.md,
+# docs/agents/pr-review.md). NEVER route here: a `pull_request_target` job, anything
 # touching secrets (release.yml, publish-npm.yml, docs.yml's deploy), the arm64 leg
 # below, or perf.yml (its gate takes the pinned bench-local runner by its own guard).
 #
@@ -197,8 +208,9 @@ on:
 jobs:
   # Decides whether this change can affect anything core-ci builds. It executes no build,
   # but our own runs still take the `ci-local` route like every other job (#2348): no
-  # pull request of this repository runs on a hosted runner. A fork PR falls back to one.
+  # pull request of this repository runs on a hosted runner. A fork PR skips it (header).
   changes:
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -292,7 +304,9 @@ jobs:
         run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
   build-test:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -424,7 +438,9 @@ jobs:
   # sources, the minimal option set, BUILD_TESTING=ON, and the reduced ctest suite run.
   build-test-minimal-set:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -530,7 +546,9 @@ jobs:
   # is absent AND that every door which could ask for it refuses rather than degrading.
   build-test-bus-closed:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -648,7 +666,9 @@ jobs:
   # path is never compiled under the test suite and the knob rots.
   build-test-self-heal-closed:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -779,7 +799,9 @@ jobs:
   # permanently.
   build-test-arm64:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ubuntu-24.04-arm
     # Measured healthy max 4.92 min. 20 = ~4x. No container and no apt step here, but the
     # number is kept equal to the rest of the build-test group so one review covers them.
@@ -831,7 +853,9 @@ jobs:
   # GCC 15 is not in ubuntu-24.04's default repos; the toolchain test PPA carries it.
   build-test-gcc15:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -933,7 +957,9 @@ jobs:
   # MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS as ESP-IDF sets it.
   build-test-noise:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1049,7 +1075,9 @@ jobs:
   # it needs a runner-side `--security-opt seccomp=unconfined` decision first.
   sanitizers:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ubuntu-24.04
     # Measured healthy max 7.98 min, p50 7.4-7.6, min 7.33 — a very tight distribution.
     # 25 = ~3.1x the observed max; ASan/UBSan runtime here is stable.
@@ -1105,7 +1133,9 @@ jobs:
   # NOT routed to `ci-local` (phase 2) — same `setarch -R` seccomp bar as `sanitizers`.
   tsan:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ubuntu-24.04
     # The longest core-ci jobs and legitimately the most variable: measured healthy max
     # 12.27 min (sp_atomic) / 8.22 (hazard) against a p50 of 6.5, and 15.67 on the
@@ -1165,7 +1195,9 @@ jobs:
   # LT_EXPECT_MEMBARRIER=1, so a runner that refuses membarrier(2) fails the leg loudly.
   tsan-membarrier:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ubuntu-24.04
     name: tsan (fence=membarrier)
     steps:
@@ -1218,7 +1250,9 @@ jobs:
   # target before they reach a consumer.
   install-consume:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1318,7 +1352,9 @@ jobs:
   # load. Ablate it by reverting any bench to a deleted API — the job goes red.
   bench-compile:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1405,7 +1441,9 @@ jobs:
   # `census_canary_seam_only ... verdict=FAIL`.
   census-gate:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1503,7 +1541,9 @@ jobs:
   # — the job goes red naming that entry.
   ci-paths:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1556,7 +1596,9 @@ jobs:
 
   format:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1602,7 +1644,9 @@ jobs:
 
   doxygen-gate:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1648,7 +1692,9 @@ jobs:
   # `changes`: it builds nothing and reads only the `needs` context.
   build-test-required:
     name: build-test
-    if: always()
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (always())
     needs: [changes, build-test, build-test-minimal-set, build-test-bus-closed, build-test-self-heal-closed, build-test-arm64, build-test-gcc15, build-test-noise, sanitizers, tsan, tsan-membarrier, install-consume, bench-compile, census-gate, ci-paths, format, doxygen-gate]
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:

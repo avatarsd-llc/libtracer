@@ -61,6 +61,7 @@ concurrency:
 
 jobs:
   tsan-qsbr-fenced:
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     name: tsan qsbr (membarrier refused, fenced entry)
     runs-on: ubuntu-24.04
     timeout-minutes: 60

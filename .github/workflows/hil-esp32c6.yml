@@ -20,7 +20,7 @@
 #
 # ── DORMANCY ────────────────────────────────────────────────────────────────
 # This file lands BEFORE the hardware exists and must cost nothing until it does.
-# The `guard` job runs on the `ci-local` pool (a fork PR on a hosted runner) and decides;
+# The `guard` job runs on the `ci-local` pool (a fork PR skips every job) and decides;
 # every job that touches the device is `needs: guard` and skips cleanly when the answer
 # is no. Three gates, in order, and each answers a different way of not being ready:
 #
@@ -98,7 +98,9 @@ jobs:
     # label that summons a hardware run is a reason to re-decide; any other label
     # changes nothing the guard reads, since opened/synchronize/reopened already
     # evaluated this head. The skip happens before a runner is allocated.
-    if: github.event.action != 'labeled' || github.event.label.name == 'hil'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'hil')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -199,7 +201,9 @@ jobs:
   # build here is not new coverage; the artifact is the point.
   build-image:
     needs: guard
-    if: needs.guard.outputs.ready == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.guard.outputs.ready == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: espressif/idf:release-v6.0
@@ -258,7 +262,9 @@ jobs:
   # dependency here is `esptool` from pip.
   flash-and-boot:
     needs: [guard, build-image]
-    if: needs.guard.outputs.ready == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.guard.outputs.ready == 'true')
     runs-on: [self-hosted, hil-esp32c6]
     # Flash is ~10 s, the console watch is bounded by --timeout (90 s default), the
     # pip install dominates a cold run. 25 leaves room for a slow index and still

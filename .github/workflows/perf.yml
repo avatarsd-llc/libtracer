@@ -55,8 +55,8 @@
 #     and re-runs a contended execution. Only a clean run may PASS or FAIL: a gate whose
 #     executions stayed contended prints `PERF: INCONCLUSIVE` (blocking tier: exit 3, re-run
 #     the job; advisory: a warning). A trusted gate runs on the pinned bench host
-#     (`gate-pr`, below); a fork PR's fallback VM is unpinned, so its conditions are read
-#     over the whole affinity set. The interleaved A/B is the primary defence on both, and
+#     (`gate-pr`, below); the hosted fallback VM (a trusted run off the bench route) is
+#     unpinned, so its conditions are read over the whole affinity set. The interleaved A/B is the primary defence on both, and
 #     no gate run is compared against the perf-local pinned-host series.
 name: perf
 
@@ -106,7 +106,9 @@ env:
 jobs:
   # --- PR gate: same-runner baseline against main --------------------------------
   gate-pr:
-    if: github.event_name == 'pull_request'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event_name == 'pull_request')
     # The pinned bench host, not a hosted VM. On `ubuntu-24.04` the gate shared its 4 vCPUs
     # with unknown neighbours: about half of its verdicts on 2026-10-02 came back
     # INCONCLUSIVE (host psi 8–17 > 5), and each one cost a full rerun. The `bench-local`
@@ -317,7 +319,7 @@ jobs:
           done
       - name: Performance gate (INTERLEAVED same-runner A/B vs main) — BLOCKING tier
         # The self-hosted bench runner has the instruction counter and must keep it: the
-        # layout-bound allocator rows have no other 10% guard (#2030). A fork's hosted runner
+        # layout-bound allocator rows have no other 10% guard (#2030). A hosted fallback runner
         # may lack it and keeps print-and-pass.
         env:
           PERF_GATE_REQUIRE_INSTR: ${{ runner.environment == 'self-hosted' && '1' || '' }}
@@ -362,6 +364,7 @@ jobs:
   # The Zenoh arm is optional (bench/fetch_zenoh.sh vendors it) and is not fetched here,
   # matching how the ratchet job treats the Zenoh control series: absent is not a failure.
   compose-audit:
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -479,7 +482,9 @@ jobs:
   # build HEAD, build the parent commit, gate HEAD against the parent. fail-fast is
   # off so one replica's verdict (or infrastructure hiccup) never hides the others'.
   ratchet:
-    if: github.event_name == 'push'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event_name == 'push')
     runs-on: ubuntu-24.04
     # Measured healthy max 9.92 min, p50 ~9.1, min 7.67 (16.45 on the incident day, 6.78
     # of it in checkout). The dominant step is the interleaved A/B ratchet at ~6-6.8 min,
@@ -644,7 +649,9 @@ jobs:
   # not served directly; docs.yml mirrors dev/bench/ from the branch into each
   # deploy, so the chart is served at https://libtracer.avatarsd.com/dev/bench/.
   history:
-    if: github.event_name == 'push' && always()
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event_name == 'push' && always())
     needs: ratchet
     runs-on: ubuntu-24.04
     # Measured healthy max 1.00 min, p50 0.85; the 6.20 outlier is one slow

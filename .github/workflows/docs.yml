@@ -79,10 +79,8 @@ jobs:
     # A `workflow_run` rebuild runs only for a SUCCESSFUL perf-local run of this
     # repository's `main` or a release tag, started by a push, the schedule or a dispatch.
     if: >-
-      github.event_name != 'workflow_run' || (
-        github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.head_repository.full_name == github.repository &&
-        contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event.workflow_run.event))
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event_name != 'workflow_run' || ( github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event.workflow_run.event)))
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -190,7 +188,9 @@ jobs:
 
   docs-build:
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -538,7 +538,9 @@ jobs:
     name: build
     # Not on a workflow_run rebuild: no pull request reads its check, and a skipped
     # `changes` there is a decision, not a failure.
-    if: always() && github.event_name != 'workflow_run'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (always() && github.event_name != 'workflow_run')
     needs: [changes, docs-build]
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
@@ -589,7 +591,9 @@ jobs:
 
   deploy:
     needs: docs-build
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     # The deployment lock (see the workflow `concurrency:` above): newest deploy wins.
     concurrency:

@@ -30,6 +30,7 @@ on:
 
 jobs:
   vcan-e2e:
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     # Measured max 4.22 min, p50 3.50, min 2.65 over 40 runs, none of them on the
     # incident day — a tight, honest distribution. 15 = ~3.6x the observed max.

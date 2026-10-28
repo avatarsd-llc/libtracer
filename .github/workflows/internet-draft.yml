@@ -10,8 +10,8 @@
 # the script). CI and a local run use the same script.
 #
 # RUNNER ROUTING (#2348): the trusted-run guard core-ci.yml documents under RUNNER ROUTING
-# sends this repository's own runs to the self-hosted `ci-local` runners and a fork PR to
-# `ubuntu-24.04`. The job runs in the CI base image on both routes and installs what the
+# sends this repository's own runs to the self-hosted `ci-local` runners (`ubuntu-24.04`
+# when the route is switched off); a fork PR skips it. The job runs in the CI base image on both routes and installs what the
 # hosted image used to carry (gawk, ruby for kramdown-rfc, curl for idnits); its toolchain
 # and reference data still come from the network (RubyGems, PyPI, bib.ietf.org, the
 # Datatracker for idnits).
@@ -49,6 +49,7 @@ env:
 
 jobs:
   render:
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8

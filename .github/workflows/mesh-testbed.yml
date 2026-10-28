@@ -48,6 +48,7 @@ on:
 
 jobs:
   mesh-testbed:
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     # Measured max 1.65 min, p50 1.47, min 1.27. 15 = the short-job floor (~9x observed);
     # it exists for the `npm ci` below. See core-ci.yml's header for the policy.

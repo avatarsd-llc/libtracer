@@ -230,6 +230,11 @@ name inside `tr::mem`.
 
 - **Green CI means it compiles and the suites pass. Nothing more.** It is not
   evidence about footprint, throughput, allocation behaviour or interoperability.
+- **On a fork PR, CI ran nothing.** Every job skips for a pull request from a
+  fork, so its checks are "skipped", not passed. To test a fork, the maintainer
+  reviews it and pushes its head to `ci/fork-<N>` and opens a pull request from
+  that branch, where it runs as trusted code. A fork PR is never merged on its own
+  checks; for one, cite the `ci/fork-<N>` run at the same head or say it is missing.
 - **A claim with no number is not a claim.** "Faster", "smaller", "less
   allocation" without a before and an after **from the same build
   configuration** is unreviewed. The standing referees are named in

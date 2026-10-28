@@ -8,7 +8,7 @@
 # SELF-HOSTED ONLY. The build runs on the `ci-local` runners and only for trusted runs (the
 # same guard core-ci.yml documents under RUNNER ROUTING). A fork PR never reaches this
 # machine, so for a fork PR the job is skipped, not rerouted to a hosted runner. The image
-# is pushed to the registry because the hosted fallback of core-ci's fork-PR route still
+# is pushed to the registry because the hosted fallback (CI_SELF_HOSTED=false) still
 # pulls it from there.
 #
 # CACHING, two levels:
