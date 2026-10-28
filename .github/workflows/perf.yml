@@ -80,6 +80,7 @@ on:
       - 'bench/**'
       - 'docs/methodology.md'
       - '.github/workflows/perf*.yml'
+      - "!**/*.md" # Markdown is never an input here (core-ci.yml, DOCS-ONLY PULL REQUESTS)
 
 # A newer push to a PR supersedes its running gate: its verdict would describe a head that is
 # no longer the PR's, and queued behind it it holds the bench CPUs that local benches and the

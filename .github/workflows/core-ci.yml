@@ -199,10 +199,30 @@ name: core-ci
 # and turns the `needs` results into one verdict (see that job). Run and skip come
 # from the one derived list, so there is no hand-kept complement that could drift into
 # a green check on a diff that should have been built.
+#
+# PUSH TO MAIN RUNS THE SMOKE SET (#2348). A train merge lands a tree equal to the PR
+# head that already passed the full matrix, so a branch push to main runs only
+# `changes`, `build-test` (the default leg), `ci-paths`, `format` and the
+# `build-test-required` verdict; every other core-ci job is skipped and the verdict
+# requires it to be. The full matrix runs on pull requests, nightly at 00:00 UTC (02:00
+# Kyiv winter time, clear of the HIL and perf-local bench windows), on every release tag
+# and on a manual dispatch. `changes` exports the choice as `full`. Outside core-ci the
+# smoke set is no-binaries and doc-citations; the push-only jobs (docs deploy, perf
+# ratchet and history, ci-image publish, perf-local) are unchanged, and every other
+# PR-gated workflow runs nightly and on tags instead of per main push.
+#
+# DOCS-ONLY PULL REQUESTS (#2348). A changed `*.md` file never makes core-ci relevant
+# (nothing core-ci builds reads one), so a PR of docs/ and Markdown alone skips every
+# job here and the required `build-test` verdict reports success on the skips. The
+# path-filtered C++ workflows exclude `**/*.md` the same way; doc-citations, docs and
+# mermaid-lint still run.
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+  schedule:
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 jobs:
@@ -232,6 +252,8 @@ jobs:
         .github/workflows/core-ci.yml
     outputs:
       relevant: ${{ steps.decide.outputs.relevant }}
+      # false on a branch push (main): run the smoke set only (header, PUSH TO MAIN).
+      full: ${{ github.event_name == 'push' && github.ref_type == 'branch' && 'false' || 'true' }}
     defaults:
       run:
         # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
@@ -277,6 +299,8 @@ jobs:
           if [ "$relevant" = false ]; then
             mapfile -t patterns <<< "$CORE_CI_PATHS"
             while IFS= read -r -d '' file; do
+              # Markdown is never a core-ci input (header, DOCS-ONLY PULL REQUESTS).
+              [[ "$file" == *.md ]] && continue
               for pat in "${patterns[@]}"; do
                 [ -n "$pat" ] || continue
                 # shellcheck disable=SC2053  # $pat is a glob on purpose
@@ -440,7 +464,7 @@ jobs:
     needs: changes
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -548,7 +572,7 @@ jobs:
     needs: changes
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -668,7 +692,7 @@ jobs:
     needs: changes
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -801,7 +825,7 @@ jobs:
     needs: changes
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
     runs-on: ubuntu-24.04-arm
     # Measured healthy max 4.92 min. 20 = ~4x. No container and no apt step here, but the
     # number is kept equal to the rest of the build-test group so one review covers them.
@@ -855,7 +879,7 @@ jobs:
     needs: changes
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -959,7 +983,7 @@ jobs:
     needs: changes
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1077,7 +1101,7 @@ jobs:
     needs: changes
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
     runs-on: ubuntu-24.04
     # Measured healthy max 7.98 min, p50 7.4-7.6, min 7.33 — a very tight distribution.
     # 25 = ~3.1x the observed max; ASan/UBSan runtime here is stable.
@@ -1135,7 +1159,7 @@ jobs:
     needs: changes
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
     runs-on: ubuntu-24.04
     # The longest core-ci jobs and legitimately the most variable: measured healthy max
     # 12.27 min (sp_atomic) / 8.22 (hazard) against a p50 of 6.5, and 15.67 on the
@@ -1197,7 +1221,7 @@ jobs:
     needs: changes
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
     runs-on: ubuntu-24.04
     name: tsan (fence=membarrier)
     steps:
@@ -1252,7 +1276,7 @@ jobs:
     needs: changes
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1354,7 +1378,7 @@ jobs:
     needs: changes
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1443,7 +1467,7 @@ jobs:
     needs: changes
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1646,7 +1670,7 @@ jobs:
     needs: changes
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1718,6 +1742,7 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
           RELEVANT: ${{ needs.changes.outputs.relevant }}
+          FULL: ${{ needs.changes.outputs.full }}
         run: |
           set -euo pipefail
           changes="$(jq -r '.changes.result' <<< "$NEEDS")"
@@ -1726,10 +1751,17 @@ jobs:
             exit 1
           fi
           if [ "$RELEVANT" = "true" ]; then want=success; else want=skipped; fi
-          echo "relevant=$RELEVANT, so every job must be '$want'"
-          bad="$(jq -r --arg want "$want" 'to_entries[] | select(.key != "changes" and .value.result != $want) | "\(.key)=\(.value.result)"' <<< "$NEEDS")"
+          # On a branch push only the smoke set runs (header, PUSH TO MAIN); the rest
+          # must be skipped, so a smoke run can never pass on a job it silently ran.
+          if [ "$FULL" = "true" ]; then rest="$want"; else rest=skipped; fi
+          echo "relevant=$RELEVANT full=$FULL: smoke jobs must be '$want', the rest '$rest'"
+          bad="$(jq -r --arg want "$want" --arg rest "$rest" '
+            ["build-test","ci-paths","format"] as $smoke
+            | to_entries[] | select(.key != "changes")
+            | (if (.key | IN($smoke[])) then $want else $rest end) as $w
+            | select(.value.result != $w) | "\(.key)=\(.value.result) (want \($w))"' <<< "$NEEDS")"
           if [ -n "$bad" ]; then
-            echo "::error::core-ci jobs not '$want': $(tr '\n' ' ' <<< "$bad")"
+            echo "::error::core-ci jobs not as required: $(tr '\n' ' ' <<< "$bad")"
             exit 1
           fi
           echo "ok"

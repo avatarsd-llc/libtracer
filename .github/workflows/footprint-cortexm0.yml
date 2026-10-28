@@ -36,14 +36,15 @@
 name: footprint-cortexm0
 
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
-    paths:
-      - "core/**"
-      - "tools/cortexm0_footprint.py"
-      - "tools/check_no_heap.py"
-      - "tools/no_heap_baseline.json"
-      - ".github/workflows/footprint-cortexm0.yml"
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
   pull_request:
     paths:
       - "core/**"
@@ -51,6 +52,7 @@ on:
       - "tools/check_no_heap.py"
       - "tools/no_heap_baseline.json"
       - ".github/workflows/footprint-cortexm0.yml"
+      - "!**/*.md" # Markdown is never an input here (core-ci.yml, DOCS-ONLY PULL REQUESTS)
   workflow_dispatch:
 
 jobs:

@@ -44,22 +44,15 @@ name: pio-esp32-can
 # source filter compiles the whole core, so a shared-header change can break this build
 # without touching a single platformio/ file (the trap quic.yml's allowlist fell into).
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
-    paths:
-      - "library.json"
-      - "integrations/platformio/**"
-      - "integrations/esp-idf/libtracer/twai_link.cpp"
-      - "integrations/esp-idf/libtracer/esp_thread.hpp"
-      - "integrations/esp-idf/libtracer/include/**"
-      - "integrations/esp-idf/libtracer/compat/**"
-      - "core/include/**"
-      - "core/src/**"
-      - "tests/packaging/pio_esp32_can/**"
-      - "tools/check_esp_ws_plane.py"
-      - "tools/check_source_list.py"
-      - "core/cmake/libtracer_sources.cmake"
-      - ".github/workflows/pio-esp32-can.yml"
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
   pull_request:
     paths:
       - "library.json"
@@ -75,6 +68,7 @@ on:
       - "tools/check_source_list.py"
       - "core/cmake/libtracer_sources.cmake"
       - ".github/workflows/pio-esp32-can.yml"
+      - "!**/*.md" # Markdown is never an input here (core-ci.yml, DOCS-ONLY PULL REQUESTS)
   workflow_dispatch:
 
 jobs:

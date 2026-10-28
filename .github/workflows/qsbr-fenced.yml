@@ -26,18 +26,16 @@
 name: qsbr-fenced
 
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
-    paths:
-      - "core/include/libtracer/qsbr.hpp"
-      - "core/include/libtracer/reclaim.hpp"
-      - "core/include/libtracer/lkv_slot.hpp"
-      - "core/include/libtracer/config.hpp"
-      - "core/src/graph.cpp"
-      - "core/tests/qsbr_*.cpp"
-      - "core/tests/presets/reclaim-qsbr-membarrier/**"
-      - "tools/refuse_membarrier.c"
-      - ".github/workflows/qsbr-fenced.yml"
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
   # The same list: Actions does not expand YAML anchors.
   pull_request:
     paths:
@@ -50,6 +48,7 @@ on:
       - "core/tests/presets/reclaim-qsbr-membarrier/**"
       - "tools/refuse_membarrier.c"
       - ".github/workflows/qsbr-fenced.yml"
+      - "!**/*.md" # Markdown is never an input here (core-ci.yml, DOCS-ONLY PULL REQUESTS)
 
 permissions:
   contents: read

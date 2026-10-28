@@ -35,20 +35,15 @@
 name: esp-idf
 
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
-    paths:
-      - "integrations/esp-idf/**"
-      - "core/src/**"
-      - "core/include/**"
-      - "tools/check_source_list.py"
-      - "core/cmake/**"
-      - "integrations/platformio/pio_esp32_can.py"
-      - "tools/check_esp_ws_plane.py"
-      - "tools/check_esp_thread_id.py"
-      - "tools/check_no_heap.py"
-      - "tools/no_heap_baseline.json"
-      - ".github/workflows/esp-idf.yml"
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
   pull_request:
     paths:
       - "integrations/esp-idf/**"
@@ -64,6 +59,7 @@ on:
       - "tools/no_heap_baseline.json"
       - "core/tests/footprint/**"
       - ".github/workflows/esp-idf.yml"
+      - "!**/*.md" # Markdown is never an input here (core-ci.yml, DOCS-ONLY PULL REQUESTS)
   workflow_dispatch:
 
 # ── Footprint contract (full-node job): TRACKED, never GATED ─────────────────

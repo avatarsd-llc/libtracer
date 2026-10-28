@@ -23,16 +23,15 @@
 name: genmc
 
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
-    paths:
-      - "core/include/libtracer/qsbr.hpp"
-      - "core/include/libtracer/edge_pin.hpp"
-      - "core/include/libtracer/reclaim.hpp"
-      - "core/include/libtracer/config.hpp"
-      - "core/tests/genmc/**"
-      - "tools/genmc_qsbr.sh"
-      - ".github/workflows/genmc.yml"
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
   pull_request:
     # Duplicated rather than a YAML anchor: GitHub Actions does not expand aliases.
     paths:

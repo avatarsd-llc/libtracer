@@ -21,19 +21,15 @@
 name: wt-interop
 
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
-    paths:
-      - "core/src/transport_webtransport.cpp"
-      - "core/include/libtracer/transport_webtransport.hpp"
-      - "core/src/wt_h3.hpp"
-      - "core/src/msquic_endpoint.hpp"
-      - "core/include/libtracer/length_prefix_framer.hpp"
-      - "core/tests/wt_interop_server.cpp"
-      - "core/CMakeLists.txt"
-      - "core/tests/CMakeLists.txt"
-      - "bindings/typescript/packages/transport-webtransport/**"
-      - ".github/workflows/wt-interop.yml"
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
   pull_request:
     paths:
       - "core/src/transport_webtransport.cpp"
@@ -46,6 +42,7 @@ on:
       - "core/tests/CMakeLists.txt"
       - "bindings/typescript/packages/transport-webtransport/**"
       - ".github/workflows/wt-interop.yml"
+      - "!**/*.md" # Markdown is never an input here (core-ci.yml, DOCS-ONLY PULL REQUESTS)
   workflow_dispatch:
 
 env:

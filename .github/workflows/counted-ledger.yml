@@ -25,9 +25,22 @@
 name: counted-ledger
 
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+  # Docs-only PRs skip (core-ci.yml's header, DOCS-ONLY PULL REQUESTS). Not a required
+  # check, so a workflow-level filter is safe here.
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
 
 permissions:
   contents: read
@@ -99,7 +112,7 @@ jobs:
             echo "no usable base; measuring"; exit 0
           fi
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
-          if git diff --name-only "$BASE" HEAD | grep -qE '^(core|bench)/|^\.github/workflows/counted-ledger\.yml$'; then
+          if git diff --name-only "$BASE" HEAD | grep -v '\.md$' | grep -qE '^(core|bench)/|^\.github/workflows/counted-ledger\.yml$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"; echo "core/ or bench/ changed; measuring"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"; echo "nothing under core/ or bench/ changed; no count can move"

@@ -24,20 +24,15 @@
 name: complexity
 
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
-    paths:
-      - "core/include/**"
-      - "core/src/**"
-      - "CLAUDE.md"
-      - "CONTEXT.md"
-      - "tools/check_ccn.py"
-      - "tools/ccn_pins.json"
-      - "tools/tests/test_check_ccn.py"
-      - "tools/check_public_std.py"
-      - "tools/public_std_baseline.json"
-      - "tools/tests/test_check_public_std.py"
-      - ".github/workflows/complexity.yml"
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
   pull_request:
     # Duplicated rather than a YAML anchor: GitHub Actions does not expand aliases.
     paths:

@@ -24,8 +24,16 @@
 name: symbol-ratchet
 
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
   pull_request:
 
 jobs:
@@ -101,7 +109,7 @@ jobs:
              || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"; echo "no usable base; gating"; exit 0
           fi
-          if git diff --name-only "$BASE" HEAD | grep -qE '^(core|bench)/|^\.github/workflows/symbol-ratchet\.yml$'; then
+          if git diff --name-only "$BASE" HEAD | grep -v '\.md$' | grep -qE '^(core|bench)/|^\.github/workflows/symbol-ratchet\.yml$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"; echo "core/ or bench/ changed; gating"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"; echo "nothing under core/ or bench/ changed; no pinned symbol can move"
