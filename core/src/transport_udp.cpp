@@ -87,7 +87,11 @@ udp_transport_t::udp_transport_t(std::uint16_t bind_port, std::string_view peer_
     // (the posix_endpoint_t SO_RCVTIMEO idiom).
     set_rcv_timeout(fd_);
 
-    start([this] { run(); }, recv_stack);
+    // A refused receive-thread spawn (#2288) leaves the link inert: ok() false.
+    if (!start([this] { run(); }, recv_stack, config.memory.stack_or_default())) {
+        ::close(fd_);
+        fd_ = -1;
+    }
 }
 
 udp_transport_t::~udp_transport_t() {

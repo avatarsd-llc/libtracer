@@ -5,24 +5,58 @@
 
 #include "libtracer/loopback.hpp"
 
-#include <utility>
+#include <algorithm>
+#include <new>
 
 namespace tr::net {
 
-void loopback_endpoint_t::send(std::span<const std::byte> frame) {
-    if (peer_) peer_->enqueue(std::vector<std::byte>(frame.begin(), frame.end()));
+namespace {
+
+constexpr std::size_t kFrameAlign = alignof(std::max_align_t);
+
+}  // namespace
+
+void loopback_endpoint_t::release(frame_t* f) noexcept {
+    src_.release(f, sizeof(frame_t) + f->len, kFrameAlign);
 }
 
-void loopback_endpoint_t::enqueue(std::vector<std::byte> frame) {
+void loopback_endpoint_t::send(std::span<const std::byte> frame) {
+    if (peer_ == nullptr) return;
+    // The block comes from the RECEIVING endpoint's source, which releases it after delivery.
+    mem::block_source_t& src = peer_->src_;
+    void* const p = src.try_alloc(sizeof(frame_t) + frame.size(), kFrameAlign);
+    if (p == nullptr) {
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    auto* const f = ::new (p) frame_t{nullptr, frame.size()};
+    std::copy(frame.begin(), frame.end(), reinterpret_cast<std::byte*>(f + 1));
+    if (!peer_->enqueue(f)) {
+        peer_->release(f);
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+bool loopback_endpoint_t::enqueue(frame_t* f) {
     {
         const std::lock_guard lock(m_);
-        inbox_.push_back(std::move(frame));
+        if (!running_) return false;
+        if (tail_ != nullptr) {
+            tail_->next = f;
+        } else {
+            head_ = f;
+        }
+        tail_ = f;
     }
     cv_.notify_one();
+    return true;
 }
 
+void loopback_endpoint_t::entry(void* self) { static_cast<loopback_endpoint_t*>(self)->run(); }
+
 void loopback_endpoint_t::start() {
-    thread_ = std::thread([this] { run(); });
+    const std::lock_guard lock(m_);
+    running_ = thread_.start(&loopback_endpoint_t::entry, this, 0, "tr_loop", src_);
 }
 
 void loopback_endpoint_t::stop() {
@@ -31,26 +65,34 @@ void loopback_endpoint_t::stop() {
         stop_ = true;
     }
     cv_.notify_all();
-    if (thread_.joinable()) thread_.join();
+    thread_.join();
+    // The thread drained the inbox before it returned, and once stop_ is set nothing new is
+    // queued: running_ goes false with it.
 }
 
 void loopback_endpoint_t::run() {
     for (;;) {
-        std::vector<std::byte> frame;
+        frame_t* f = nullptr;
         {
             std::unique_lock lock(m_);
-            cv_.wait(lock, [this] { return stop_ || !inbox_.empty(); });
-            if (inbox_.empty()) return;  // woken to stop with nothing left to drain
-            frame = std::move(inbox_.front());
-            inbox_.pop_front();
+            cv_.wait(lock, [this] { return stop_ || head_ != nullptr; });
+            if (head_ == nullptr) {  // woken to stop with nothing left to drain
+                running_ = false;
+                return;
+            }
+            f = head_;
+            head_ = f->next;
+            if (head_ == nullptr) tail_ = nullptr;
         }
         // The slot snapshots its {fn, ctx} pair under its own lock and dispatches
         // outside it (TSan-safe vs a concurrent set_receiver).
-        rx_.deliver_borrowed(frame);
+        rx_.deliver_borrowed(
+            std::span<const std::byte>(reinterpret_cast<std::byte*>(f + 1), f->len));
+        release(f);
     }
 }
 
-loopback_channel_t::loopback_channel_t() {
+loopback_channel_t::loopback_channel_t(mem::block_source_t& src) : a_(src), b_(src) {
     a_.peer_ = &b_;
     b_.peer_ = &a_;
     a_.start();

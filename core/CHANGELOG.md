@@ -16,6 +16,39 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **Library threads draw from a block source, never the platform heap (#2288).** New
+  `tr::static_thread_t` (`libtracer/static_thread.hpp`) is the one thread spawn the library uses.
+  On ESP-IDF it is a static FreeRTOS task whose control block and stack are ONE block drawn from
+  the caller's source; on a POSIX host it is `pthread_create` and the source pays only a small
+  boot record. A refused draw is a failed spawn, never an abort. The source rules:
+  - New `link_memory_t::stack`, a fourth plane beside `rx`, `io` and `state`, default
+    `&mem::stack_source()` (`stack_or_default()` for a null). The tcp, udp and ws links draw
+    every receive thread from it, and `twai_link_t` its dispatch thread. It is its own plane
+    because a stack is the largest single block a link draws: from `io` (often a fixed-slot frame
+    pool) or `state` it would compete with frames or peers. It must outlive the link.
+  - New `mem::stack_source()`: on an MCU arena build with
+    `config_t::kThreadStackArenaBytes` set (new knob, default 0), a static `.bss` region of its
+    own, apart from the `kArenaBytes` arena, so a spawn never starves the value and table pools.
+    With the knob at 0 it is `mem::default_root()`; on a host it is the net sub-pool (a host
+    thread draws only its boot record). It lives for the process.
+  - **BREAKING:** `posix_endpoint_t::start` takes the source with no default and returns a
+    `[[nodiscard]] bool`; a caller must report a refusal. `transport_t::start_receiving()` now
+    returns `bool`: false means the receive could not start, the link is closed and `ok()` is
+    false. It fires no link-down from that call, because the owner may hold its locks there.
+    `transport_vertex_t` takes such a connection down and answers `BACKPRESSURE`;
+    `self_heal_link_t` counts it as a failed attempt and retries on its backoff. A listener or
+    udp link whose receive thread is refused is not `ok()`. Overrides of `start_receiving()`
+    must change their return type.
+  - `self_heal_link_t` takes a trailing `stack` source (default `mem::stack_source()`) for its
+    worker; a refused spawn is retried at the next transition and counted in that source's
+    census.
+  - `loopback_channel_t` takes an optional source (default `mem::net_source()`) that must
+    outlive the channel. Each queued frame is one block from it, on an intrusive FIFO, and both
+    receive threads come from it. A frame whose block is refused, or sent to a stopped peer, is
+    dropped and counted in the new `loopback_endpoint_t::drop_stats()` (`dropped_tx`).
+  - A thread that may be DETACHED (`static_thread_t::detach`) must draw from a source that
+    outlives the process (`mem::stack_source()` or `mem::default_root()`): on ESP-IDF its block is parked on an intrusive
+    list and released only after its body returns, at the next spawn, join or detach.
 - **A QUIC or WebTransport dial no longer waits for its handshake (#2306).** The DIAL
   constructors of `quic_transport_t` and `webtransport_transport_t` return as soon as the
   connection is started; `ok()` now means the dial started, not that the link is up. The link

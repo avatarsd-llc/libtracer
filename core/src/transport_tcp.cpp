@@ -155,7 +155,8 @@ tcp_transport_t::tcp_transport_t(std::string_view peer_host, std::uint16_t peer_
                                  const tcp_config_t& config)
     : stream_endpoint_t(config.memory.io_or_default()),
       backend_(config.memory.rx),
-      recv_stack_(config.recv_stack) {
+      recv_stack_(config.recv_stack),
+      stack_src_(&config.memory.stack_or_default()) {
     const std::size_t max_frame = config.max_frame;
     const std::uint32_t liveness_window_ms = config.liveness_window_ms;
     liveness_window_ms_ = liveness_window_ms;                        // the #838 send bound's source
@@ -185,27 +186,34 @@ tcp_transport_t::tcp_transport_t(std::string_view peer_host, std::uint16_t peer_
     // owner installs a sink, and the empty slot would drop it with no counter moving.
 }
 
-void tcp_transport_t::start_receiving() {
+bool tcp_transport_t::start_receiving() {
     // A LISTEN link's accept loop IS its one `start`, spawned in its constructor. Without
     // this arm an owner arming every link it wires would spawn a SECOND thread onto an
     // already-accepted peer's fd — two `serve` loops splitting one stream, over a `body_`
     // the second `start` reassigns while the first is running it.
-    if (listen_) return;
+    if (listen_) return true;
     const int fd = conn_fd_.load(std::memory_order_relaxed);
-    if (fd < 0) return;  // the dial failed: there is no socket to serve
+    if (fd < 0) return true;  // the dial failed: there is no socket to serve, and ok() says so
     // One-shot: `posix_endpoint_t::start` may be called at most once per endpoint, and this
     // is reachable both from the one-phase constructor and from an owner that calls it
     // unconditionally on every link it wires.
-    if (recv_started_.exchange(true, std::memory_order_relaxed)) return;
-    start(
-        [this, fd] {
-            serve(fd);
-            teardown_peer(fd);  // close the egress, then reset and close (stream_endpoint_t)
-            // Departure seam (RFC-0009 §D extended): the one connection died under us —
-            // not a local stop — so report the link down (no locks held here).
-            if (!stop_.load(std::memory_order_relaxed)) notify_down();
-        },
-        recv_stack_);
+    if (recv_started_.exchange(true, std::memory_order_relaxed)) return true;
+    if (start(
+            [this, fd] {
+                serve(fd);
+                teardown_peer(fd);  // close the egress, then reset and close (stream_endpoint_t)
+                // Departure seam (RFC-0009 §D extended): the one connection died under us —
+                // not a local stop — so report the link down (no locks held here).
+                if (!stop_.load(std::memory_order_relaxed)) notify_down();
+            },
+            recv_stack_, *stack_src_))
+        return true;
+    // A refused spawn (#2288) is the connection dying before its first byte: closed, and
+    // ok() false. The owner hears it from the return, not from a link-down fired under
+    // whatever lock it holds while it wires the link.
+    teardown_peer(fd);
+    came_up_ = false;
+    return false;
 }
 
 tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, const tcp_config_t& config)
@@ -236,7 +244,11 @@ tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, const tcp_config_t& co
     if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
         bound_port_ = ntohs(bound.sin_port);
 
-    start([this] { run_listen(); }, recv_stack);
+    // A refused accept-loop spawn (#2288) leaves the listener inert: ok() false.
+    if (!start([this] { run_listen(); }, recv_stack, config.memory.stack_or_default())) {
+        ::close(listen_fd_);
+        listen_fd_ = -1;
+    }
 }
 
 tcp_transport_t::~tcp_transport_t() {
@@ -371,7 +383,9 @@ tcp_server_transport_t::tcp_server_transport_t(std::uint16_t bind_port,
       backend_(config.memory.rx) {
     max_frame_ = length_prefix_framer_t::configured_cap(config.max_frame);  // tighten-only (#1035)
     if (!bind_listen(bind_port)) return;
-    start([this] { run(); }, config.recv_stack);
+    // A refused poll-loop spawn (#2288) leaves the listener inert: ok() false.
+    if (!start([this] { run(); }, config.recv_stack, config.memory.stack_or_default()))
+        close_listen();
 }
 
 tcp_server_transport_t::~tcp_server_transport_t() {

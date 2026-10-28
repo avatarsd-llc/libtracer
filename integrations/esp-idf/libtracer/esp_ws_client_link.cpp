@@ -22,10 +22,10 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 #include "esp_log.h"
-#include "esp_thread.hpp"
 #include "esp_timer.h"
 #include "esp_transport.h"
 #include "esp_transport_tcp.h"
@@ -365,7 +365,7 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string_view host, std::uint16_t 
     // spawned at the owner's arm, never here (#2249).
 }
 
-void esp_ws_client_link_t::start_receiving() {
+bool esp_ws_client_link_t::start_receiving() {
     // Idempotent, and safe on a link that never connected: `transport_vertex_t::
     // make_connection` arms every link unconditionally once the receiver is installed, so
     // a second call finds the exchange returning true and does nothing. The latch is never
@@ -380,8 +380,18 @@ void esp_ws_client_link_t::start_receiving() {
     // through the graph's on_write seam, so a node that knows its delivery depth must be
     // able to size it (#900).
     if (stop_.load(std::memory_order_acquire) || armed_.exchange(true, std::memory_order_acq_rel))
-        return;
-    recv_thread_ = esp::spawn_thread(recv_stack_, "ws_cli_rx", [this] { recv_loop(); });
+        return true;
+    // The stack comes from the process thread-stack source (`mem::stack_source()`, its own
+    // Kconfig-sized region on an arena build), never a source that dies with this link:
+    // shut_down may detach the thread mid-dial, and a detached static task's block is reaped
+    // later (static_thread_t::detach, #2288). A refused draw is reported to the owner, which
+    // rolls the link back, rather than leaving a link that never dials.
+    return recv_thread_.start(&esp_ws_client_link_t::recv_entry, this, recv_stack_, "ws_cli_rx",
+                              mem::stack_source());
+}
+
+void esp_ws_client_link_t::recv_entry(void* self) {
+    static_cast<esp_ws_client_link_t*>(self)->recv_loop();
 }
 
 void esp_ws_client_link_t::shut_down() {

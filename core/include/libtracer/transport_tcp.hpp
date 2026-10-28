@@ -260,7 +260,7 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
      * never receives and never reports the link down; it is simply an open socket until it
      * is destroyed.
      */
-    void start_receiving() override;
+    bool start_receiving() override;
 
     /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042):
      *         one frame = one refcounted segment from the injected backend,
@@ -361,6 +361,8 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
     std::atomic<std::size_t> dropped_rx_{0};
     std::atomic<std::size_t> malformed_rx_{0};
     std::size_t recv_stack_ = 0; /**< @brief The stack hint, held for @ref start_receiving. */
+    /** @brief `memory.stack`, held for @ref start_receiving (#2288). */
+    mem::block_source_t* stack_src_ = nullptr;
     /** @brief One-shot latch making @ref start_receiving idempotent — `start()` may be
      *         called at most once per endpoint. DIAL only; a LISTEN link spends its one
      *         `start` on the accept loop and never enters the latched path at all. */

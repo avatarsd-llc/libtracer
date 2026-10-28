@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "libtracer/loopback.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
@@ -275,8 +276,136 @@ void run_contract() {
 
 }  // namespace
 
+/** @brief A source that refuses every draw. */
+/**
+ * @brief A source that serves its first @p budget draws from the default root and refuses
+ *        every later one, counting both (#2288). A budget of 0 refuses everything.
+ */
+class budget_source_t final : public tr::mem::block_source_t {
+   public:
+    explicit budget_source_t(std::size_t budget) noexcept
+        : block_source_t("test_budget_src"), left_(budget) {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        const std::lock_guard lock(m_);
+        if (left_ == 0) {
+            ++refused_;
+            return nullptr;
+        }
+        void* const p = tr::mem::default_root().try_alloc(bytes, align);
+        if (p == nullptr) return nullptr;
+        --left_;
+        ++served_;
+        return p;
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::default_root().release(p, bytes, align);
+    }
+    [[nodiscard]] std::size_t served() const {
+        const std::lock_guard lock(m_);
+        return served_;
+    }
+    [[nodiscard]] std::size_t refused() const {
+        const std::lock_guard lock(m_);
+        return refused_;
+    }
+
+   private:
+    mutable std::mutex m_;
+    std::size_t left_;
+    std::size_t served_ = 0;
+    std::size_t refused_ = 0;
+};
+
+/**
+ * @brief #2288 — a loopback frame whose block the source refuses is a COUNTED drop.
+ *
+ * The source serves the two endpoints' thread records and refuses from then on, so both
+ * endpoints are running and the drops isolate the refused-frame path, not "peer not running".
+ */
+void test_loopback_refused_frame_is_counted() {
+    std::printf("loopback: a refused frame block is counted in dropped_tx:\n");
+    budget_source_t src(2);
+    tr::net::loopback_channel_t ch(src);
+    check(src.served() == 2 && src.refused() == 0, "both receive threads were spawned");
+    const auto frame = frame_of({0x01, 0x02, 0x03});
+    ch.a().send(frame);
+    ch.a().send(frame);
+    check(src.refused() == 2, "each frame's block was asked for and refused");
+    check(ch.a().drop_stats().dropped_tx == 2, "both refused frames were counted");
+    check(ch.b().drop_stats().dropped_tx == 0, "the receiving end counted nothing");
+}
+
+/**
+ * @brief #2288 — every socket link draws its receive thread from `memory.stack`, and a
+ *        refusal there is reported: a listener or a udp link is inert (`ok()` false), a dial
+ *        link's `start_receiving()` answers false and the link is closed, never up and deaf.
+ */
+void test_refused_receive_spawn_is_reported() {
+    std::printf("socket links: a refused receive-thread spawn is reported:\n");
+    budget_source_t none(0);
+    const tr::net::link_memory_t refused{.stack = &none};
+
+    const tr::net::udp_transport_t udp(0, "", 0, tr::net::udp_config_t{.memory = refused});
+    check(!udp.ok(), "udp: ok() is false");
+    const tr::net::tcp_transport_t tcp_listen(0, tr::net::tcp_config_t{.memory = refused});
+    check(!tcp_listen.ok(), "tcp listener: ok() is false");
+    const tr::net::tcp_server_transport_t tcp_server(
+        0, tr::net::tcp_server_config_t{.memory = refused});
+    check(!tcp_server.ok(), "tcp server: ok() is false");
+    const tr::net::ws_server_transport_t ws_server(0,
+                                                   tr::net::ws_server_config_t{.memory = refused});
+    check(!ws_server.ok(), "ws server: ok() is false");
+
+    // The dials need a live peer to come up at all; their peers draw from the default.
+    tr::net::tcp_transport_t tcp_peer(0);
+    tr::net::tcp_transport_t tcp_dial("127.0.0.1", tcp_peer.local_port(),
+                                      tr::net::tcp_config_t{.memory = refused});
+    check(tcp_dial.ok(), "tcp dial: came up before its receive was asked for");
+    check(!tcp_dial.start_receiving(), "tcp dial: start_receiving() answers false");
+    check(!tcp_dial.ok() && !tcp_dial.link_up(), "tcp dial: closed, ok() and link_up() false");
+    tr::net::ws_server_transport_t ws_peer(0);
+    tr::net::ws_client_transport_t ws_dial("127.0.0.1", ws_peer.local_port(),
+                                           tr::net::ws_client_config_t{.memory = refused});
+    check(ws_dial.ok(), "ws dial: came up before its receive was asked for");
+    check(!ws_dial.start_receiving(), "ws dial: start_receiving() answers false");
+    check(!ws_dial.ok() && !ws_dial.link_up(), "ws dial: closed, ok() and link_up() false");
+    check(none.refused() == 6, "each of the six spawns asked the stack source and was refused");
+}
+
+/**
+ * @brief #2288 — the socket set a full node brings up (udp listener and dial, tcp listener
+ *        and dial, ws server and dial) spawns every receive thread from `memory.stack`, and
+ *        none draws from the link's frame or state planes for it.
+ */
+void test_full_socket_set_spawns_every_receive() {
+    std::printf("socket links: the full set spawns every receive thread from memory.stack:\n");
+    budget_source_t stacks(64);
+    const tr::net::link_memory_t mem{.stack = &stacks};
+    tr::net::udp_transport_t udp_listen(0, "", 0, tr::net::udp_config_t{.memory = mem});
+    tr::net::udp_transport_t udp_dial(0, "127.0.0.1", udp_listen.local_port(),
+                                      tr::net::udp_config_t{.memory = mem});
+    tr::net::tcp_transport_t tcp_listen(0, tr::net::tcp_config_t{.memory = mem});
+    tr::net::tcp_transport_t tcp_dial("127.0.0.1", tcp_listen.local_port(),
+                                      tr::net::tcp_config_t{.memory = mem});
+    tr::net::ws_server_transport_t ws_server(0, tr::net::ws_server_config_t{.memory = mem});
+    tr::net::ws_client_transport_t ws_dial("127.0.0.1", ws_server.local_port(),
+                                           tr::net::ws_client_config_t{.memory = mem});
+    check(tcp_dial.start_receiving() && ws_dial.start_receiving(), "both dials started");
+    check(udp_listen.ok() && udp_dial.ok() && tcp_listen.ok() && tcp_dial.ok() && ws_server.ok() &&
+              ws_dial.ok(),
+          "every link is up");
+    check(stacks.served() == 6 && stacks.refused() == 0,
+          "six receive threads, each drawn from memory.stack, none refused");
+    check(tcp_dial.start_receiving() && ws_dial.start_receiving(),
+          "a repeat start is a no-op that answers true");
+    check(stacks.served() == 6, "and spawns nothing more");
+}
+
 int main() {
     std::printf("transport_t seam conformance — one contract over every adapter:\n");
+    test_loopback_refused_frame_is_counted();
+    test_refused_receive_spawn_is_reported();
+    test_full_socket_set_spawns_every_receive();
     run_contract<loopback_pair>();
     run_contract<udp_pair>();
     run_contract<tcp_pair>();

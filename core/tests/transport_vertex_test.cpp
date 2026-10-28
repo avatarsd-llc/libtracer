@@ -746,9 +746,10 @@ struct arm_probe_link_t : tr::net::transport_t {
     void send(std::span<const std::byte> /*frame*/) override {}
 
     /** @brief Record the slot's state, then count the call. */
-    void start_receiving() override {
+    bool start_receiving() override {
         sink_at_arm.store(rx_.has_any(), std::memory_order_relaxed);
         starts.fetch_add(1, std::memory_order_relaxed);
+        return true;
     }
 };
 

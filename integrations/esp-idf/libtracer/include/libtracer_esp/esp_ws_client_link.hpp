@@ -67,7 +67,7 @@
  *     behaviour.) "Set it before the link first dials"
  *     was not a contract the API could express, only one it could ask for; a ctor argument
  *     makes it structural. A knob that must be applied before the thread starts belongs in
- *     the ctor, which is the same rule that made `recv_stack` reach `esp_pthread_set_cfg`
+ *     the ctor, which is the same rule that made `recv_stack` reach the spawn
  *     (#900) rather than be discarded after the spawn.
  *   - THE PRE-SINK WINDOW IS CLOSED BY NOT DIALLING (ADR-0081, #1102). The receiver sink
  *     is installed by the owner AFTER construction (`provide_link` → the creating write →
@@ -198,13 +198,13 @@
 #include <mutex>
 #include <span>
 #include <string_view>
-#include <thread>
 
 #if __has_include("sdkconfig.h")
 #include "sdkconfig.h"
 #endif
 
 #include "esp_transport.h"
+#include "libtracer/static_thread.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/tx_handoff.hpp"
 #include "libtracer_esp/fixed_array.hpp"
@@ -416,7 +416,7 @@ class esp_ws_client_link_t final : public transport_t {
      * re-closes the gate, because every re-dial happens on a link that was already armed
      * and the router keeps the receiver installed across a `link_down`.
      */
-    void start_receiving() override;
+    bool start_receiving() override;
 
     /**
      * @brief Stop for good, short of being destroyed (the @ref transport_t::shut_down
@@ -646,6 +646,8 @@ class esp_ws_client_link_t final : public transport_t {
 
     /** @brief The recv thread body: (re)connect, then poll+read+deliver until stopped. */
     void recv_loop();
+    /** @brief The recv thread's entry: `recv_loop()` on the link @p self. */
+    static void recv_entry(void* self);
     /** @brief One dial attempt: build the tcp+ws transports, connect, draw the read scratch,
      *         apply the per-socket policy (Nagle off, bounded write, keepalive probes), mark
      *         up — or release all of it on the failure path (#1606).
@@ -819,7 +821,10 @@ class esp_ws_client_link_t final : public transport_t {
     /** @brief Receive-path message drops — see @ref dropped_rx. Written only by the recv
      *         thread, read by anyone, so relaxed is enough (it is a statistic). */
     std::atomic<std::uint64_t> dropped_rx_{0};
-    std::thread recv_thread_;
+    /** @brief The recv thread: a static task drawn from `tr::mem::default_root()` (#2288),
+     *         never the link's own source, because @ref shut_down may DETACH it mid-dial and
+     *         a detached thread's block is released only after this link is gone. */
+    static_thread_t recv_thread_;
 };
 
 }  // namespace tr::net

@@ -60,6 +60,7 @@
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/fwd_router.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_source_sync.hpp"
@@ -486,7 +487,7 @@ extern "C" void app_main(void) {
         static_cast<unsigned>(kNodePort), static_cast<unsigned>(rx_backend_slots()),
         static_cast<unsigned>(kRxSlotPayload), static_cast<unsigned>(kLinkRegion));
 
-    const int failures = run_host_probe(dev);
+    int failures = run_host_probe(dev);
     // The link source's own census, AFTER the self-proof has driven real deliveries through
     // the router. Both of its bounds are injected, so both are reported:
     // a `used` near the region size means raise `kLinkRegion`, a non-zero `overflowed`
@@ -498,6 +499,17 @@ extern "C" void app_main(void) {
                 static_cast<unsigned>(dev.link_src.classes_used()),
                 static_cast<unsigned>(kLinkClasses),
                 static_cast<unsigned>(dev.link_src.overflowed()));
+    // The thread-stack region's census (#2288): every receive thread and worker the node
+    // brought up drew its stack from `tr::mem::stack_source()`. On a chip that is a region
+    // of its own (CONFIG_LIBTRACER_THREAD_STACKS), and a refusal there is a thread that never
+    // ran, so it fails the self-proof. Elsewhere the source is the default root, whose census
+    // also counts value refusals, so it is only printed.
+    const tr::mem::source_stats_t stacks = tr::mem::stack_source().stats();
+    std::printf("thread stacks: %u/%u B peak, %u refused\n", static_cast<unsigned>(stacks.peak),
+                static_cast<unsigned>(stacks.capacity), static_cast<unsigned>(stacks.refused));
+    const int stack_failures = tr::mem::kThreadStackArenaBytes != 0 && stacks.refused != 0 ? 1 : 0;
+    if (stack_failures != 0) std::printf("FAIL: a library thread's stack was refused\n");
+    failures += stack_failures;
     std::printf("full_node self-proof: %s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED",
                 failures, failures == 1 ? "" : "s");
 
