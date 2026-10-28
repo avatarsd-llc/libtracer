@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
-# CI base image for every `container:` job in core-ci.yml and doc-citations.yml.
+# CI base image for every `container:` job (core-ci.yml, doc-citations.yml and the rest).
 #
 # WHY. Those jobs used to start from a bare `ubuntu:24.04` and apt-install their tool set
 # on every run: an `apt-get update` plus a few hundred MB unpacked into a fresh container
@@ -15,7 +15,16 @@
 #   build-essential cmake ccache git ca-certificates   every build / test leg
 #   python3                                            ci-paths, doc-citations
 #   clang-format                                       format
-#   doxygen                                            doxygen-gate
+#   doxygen                                            doxygen-gate, docs-build
+#   unzip curl                                         docs-build
+#   gcc-arm-none-eabi libnewlib-arm-none-eabi          footprint-cortexm0
+#     libstdc++-arm-none-eabi-newlib gh
+# The docs-build and footprint-cortexm0 rows (#2348) are baked in so those jobs run no apt
+# step: an install step is where both jobs wedged (their headers carry the measurements).
+# libnewlib-arm-none-eabi and libstdc++-arm-none-eabi-newlib are named explicitly because
+# the install is
+# --no-install-recommends and the toolchain only Recommends them (transitively), yet
+# nano.specs / nosys.specs and the target's C++ headers come from them.
 # g++-15 is NOT here: build-test-gcc15 adds the ubuntu-toolchain-r PPA on top, because a
 # PPA compiler baked into an image would silently stop tracking the PPA.
 #
@@ -34,4 +43,6 @@ RUN apt-get update -qq \
       python3 \
       clang-format \
       doxygen \
+      unzip curl \
+      gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib gh \
  && rm -rf /var/lib/apt/lists/*
