@@ -1011,9 +1011,18 @@ struct fwd_rebuild_t {
      */
     template <class Cursor, class Push>
     void gather(const Cursor& cur, Push&& push) const {
+        // A contiguous source's region is one sub-span, walked inline. A chained source's
+        // region is a link walk, and up to seven of them inlined into the forward hop grew
+        // it by ~1.5 KiB (#2284), so each takes the out-of-line `walk`.
+        const auto region = [&](std::size_t off, std::size_t len) {
+            if constexpr (std::is_same_v<Cursor, wire::grammar::span_cursor>)
+                cur.for_each_span(off, len, push);
+            else
+                walk(cur, off, len, push);
+        };
         push(head1.span());
-        if (rem_dst_len > 0) cur.for_each_span(rem_dst_off, rem_dst_len, push);
-        if (sel_total > 0) cur.for_each_span(sel_pos, sel_total, push);
+        if (rem_dst_len > 0) region(rem_dst_off, rem_dst_len);
+        if (sel_total > 0) region(sel_pos, sel_total);
         push(head2.span());
         // This hop's own part of the route, prepended: its PAIR on a reply that has one, else
         // its NAME run — ONE span for the precomputed mount run, plus at most a
@@ -1023,8 +1032,8 @@ struct fwd_rebuild_t {
         } else {
             push_run(push);
         }
-        if (src_body_len > 0) cur.for_each_span(src_body_off, src_body_len, push);
-        if (tail_len > 0) cur.for_each_span(tail_off, tail_len, push);
+        if (src_body_len > 0) region(src_body_off, src_body_len);
+        if (tail_len > 0) region(tail_off, tail_len);
         // A subscribe request's reverse child, re-headed one element longer: `tail` stops
         // short of the old child, so it is never forwarded twice (RFC-0029 §7.1).
         if (rev) gather_reverse(cur, push);
@@ -1032,7 +1041,14 @@ struct fwd_rebuild_t {
         // included —
         // because that is where the grammar's `total = header + length + ts_size` reads it
         // (#1109). Verbatim source bytes: this hop reads no clock and rewrites no stamp.
-        if (const std::size_t ts = ts_bytes(); ts > 0) cur.for_each_span(ts_off(), ts, push);
+        if (const std::size_t ts = ts_bytes(); ts > 0) region(ts_off(), ts);
+    }
+
+    /** @brief One region of a chained source, kept out of line (see @ref gather). */
+    template <class Cursor, class Push>
+    [[gnu::noinline]] static void walk(const Cursor& cur, std::size_t off, std::size_t len,
+                                       Push& push) {
+        cur.for_each_span(off, len, push);
     }
 };
 

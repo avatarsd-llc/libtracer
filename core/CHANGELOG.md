@@ -282,6 +282,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   constructed DIAL link installs its receivers and then calls `start_receiving()`, as
   `transport_vertex_t` and the self-heal engine already do. A link that is never armed never
   receives. LISTEN links are unchanged.
+### Added
+
+- **`view::rope_t` draws its spilled link table from a block source, not the process heap
+  (#2284).** Past two links the chain lived in a `std::vector<view_t>`; it now lives in a block
+  from a `mem::block_source_t`: the one passed to the new `explicit rope_t(mem::block_source_t&)`,
+  else `mem::table_source()` (the static arena on an MCU build, the host table pool otherwise).
+  A receive path that builds a multi-link rope can pass the receiving link's own source, so the
+  receiver pays for the chain. `try_reserve` now refuses exactly on every profile: the block
+  comes from `try_alloc`, so there is no probe window for another task to take it (#850).
+  `append` and the copy constructor keep their old failure behaviour (`std::bad_alloc`, or
+  `std::abort()` without exceptions), and `sizeof(rope_t)` shrinks by one word on 64-bit
+  targets and is unchanged on 32-bit ones. A fragmented WebSocket message is delivered as a rope
+  whose chain is drawn from the link's `memory.rx` source; a refusal there sheds the message as
+  `dropped_rx`, as a refused fragment chain already did. On esp32c6 the no-heap census drops from
+  1834 to 1598 references and from 593 to 556 functions; the Cortex-M0 required-module flash
+  drops from 15,544 B to 15,220 B.
+
 ### Fixed
 
 - **`fwd_router_t` drops a frame from a removed child (#2302).** After `remove_child`, a FWD

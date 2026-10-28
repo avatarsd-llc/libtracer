@@ -12,7 +12,9 @@
  *
  * A rope_t keeps its first two links in inline small-buffer storage, so the hot
  * path — a single-link value (or a two-link head+payload) — allocates nothing
- * for the chain; only a third link spills the chain to the heap. This is the
+ * for the chain; only a third link spills the chain, into a block drawn from a
+ * `tr::mem::block_source_t` (the one the rope was built with, else
+ * `tr::mem::table_source()`), never from the process heap directly (#2284). This is the
  * ADR-0053 §6 trivial-case cost guard: a rope-valued vertex slot costs exactly
  * what a view-valued slot cost, so the contention/latency benches do not move.
  */
@@ -22,7 +24,11 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <expected>
+#include <limits>
+#include <new>
 #include <span>
 #include <utility>
 #include <vector>
@@ -68,26 +74,53 @@ enum class flatten_err_t : std::uint8_t {
  */
 class rope_t {
    public:
-    rope_t() = default;
+    /** @brief An empty rope whose spilled chain, if it ever spills, draws from
+     *         `mem::table_source()`. */
+    rope_t() noexcept {}
+    /**
+     * @brief An empty rope whose spilled chain draws from @p src (#2284): a receive path
+     *        passes the receiving link's own source, so the receiver pays for the chain.
+     * @note @p src must outlive the rope and every rope copied or moved from it.
+     */
+    explicit rope_t(mem::block_source_t& src) noexcept : src_(&src) {}
     /** @brief Implicitly adopt a single view as a one-link rope. */
-    rope_t(view_t v) { append(std::move(v)); }
+    rope_t(view_t v) noexcept : n_(1) { ::new (static_cast<void*>(inline_)) view_t(std::move(v)); }
+
+    /** @brief Copy: the links are cloned (refcount bumps) into a chain from the same source. */
+    rope_t(const rope_t& o) : src_(o.src_) {
+        if (o.n_ > kInline) grow_or_die(o.n_);
+        const view_t* from = o.data();
+        for (std::uint32_t i = 0; i < o.n_; ++i)
+            ::new (static_cast<void*>(data() + i)) view_t(from[i]);
+        n_ = o.n_;
+    }
+    /** @brief Move: the chain changes hands; @p o is left empty, keeping its source. */
+    rope_t(rope_t&& o) noexcept : src_(o.src_) { take(o); }
+    /** @brief Copy-assign (copy, then move into place). */
+    rope_t& operator=(const rope_t& o) {
+        if (this != &o) *this = rope_t(o);
+        return *this;
+    }
+    /** @brief Move-assign: this rope's links are dropped and its block returned first. */
+    rope_t& operator=(rope_t&& o) noexcept {
+        if (this != &o) {
+            clear();
+            src_ = o.src_;
+            take(o);
+        }
+        return *this;
+    }
+    /** @brief Drops every link and returns a spilled chain's block to its source. */
+    ~rope_t() { clear(); }
 
     /** @brief Append a link (chaining — no copy). */
     void append(view_t v) {
-        if (!heap_.empty()) {
-            heap_.push_back(std::move(v));  // already spilled — stays on the heap chain
-            return;
-        }
-        if (inline_n_ < kInline) {
-            inline_[inline_n_++] = std::move(v);  // fits in small-buffer storage — no alloc
-            return;
-        }
-        // The kInline+1-th link spills the whole chain to the heap (the only allocation).
-        heap_.reserve(kInline + 1);
-        for (std::size_t i = 0; i < inline_n_; ++i) heap_.push_back(std::move(inline_[i]));
-        heap_.push_back(std::move(v));
-        inline_n_ = 0;
-        for (view_t& s : inline_) s = view_t{};  // drop the moved-from links' refcounts eagerly
+        // The first kInline links fill the small buffer and allocate nothing; the next one
+        // spills the chain into a block from the source, and a full block grows. A refused
+        // growth here has no failure channel: see `failed_growth`.
+        if (n_ == cap_) grow_or_die(n_ + 1);
+        ::new (static_cast<void*>(data() + n_)) view_t(std::move(v));
+        ++n_;
     }
     /**
      * @brief Chain @p other's links onto this rope (no copy).
@@ -98,21 +131,21 @@ class rope_t {
      * case gets its own arm and the cross-rope arm pays for none of its guards.
      *
      * On the ALIASING arm, @ref append mutates the very storage `other.links()` spans: the
-     * inline→heap spill blanks every inline slot and zeroes `inline_n_` mid-walk (so a
-     * naive range-for yielded `[a,b,a,{}]` instead of `[a,b,a,b]`), and a heap `push_back`
-     * can reallocate the vector the walk points into (a dangling span). Two independent
+     * spill moves the inline links out and blanks their slots mid-walk (a naive range-for
+     * once yielded `[a,b,a,{}]` instead of `[a,b,a,b]`), and a growth moves the chain the
+     * walk points into to a new block (a dangling span). Two independent
      * guards close that: @ref try_reserve pins the final link count up front, so none of
      * the appends spills or reallocates; and the walk indexes the source afresh each step,
      * so link `i` is re-read from wherever the chain now lives even if the reservation
      * soft-failed. `append` only ever adds a link at the end — it never reorders or drops
-     * one, and the spill migrates link `i` to heap index `i` — so index `i` names the same
+     * one, and the spill migrates link `i` to block index `i` — so index `i` names the same
      * link for the whole walk.
      *
      * The CROSS-ROPE arm walks the source span once and appends: `other`'s storage is
      * disjoint from ours, so nothing this loop does can invalidate it, and neither guard
      * buys anything. Charging them there cost path-target delivery +3.5% / +10.1%
      * (`inproc-target-*`, #1022) for the hot 1–2-link clone. A caller that wants one sized
-     * growth instead of the geometric `push_back` ladder for a long cross-rope join calls
+     * growth instead of the doubling ladder for a long cross-rope join calls
      * @ref try_reserve itself with the count it already holds — which is what the delivery
      * clone, the composed-read reply builder and the folded child listing do.
      */
@@ -123,10 +156,7 @@ class rope_t {
         }
         const std::size_t add = link_count();
         // Best effort: on soft-fail the indexed walk below is still correct, it just pays
-        // the ordinary spill/growth path that concat paid before. #981 residual: that
-        // fallback path is `std::vector<view_t>` growth, which under `-fno-exceptions`
-        // abort()s the node on OOM — see @ref try_reserve for why the chain cannot take the
-        // ADR-0065 failable seam.
+        // the ordinary growth path of @ref append, whose refusal has no failure channel.
         static_cast<void>(try_reserve(add));
         for (std::size_t i = 0; i < add; ++i) append(links()[i]);
         return *this;
@@ -136,60 +166,42 @@ class rope_t {
      * @brief Nothrow-reserve room for @p links more @ref append / @ref concat links —
      *        the soft-fail growth the composed-reply builder needs.
      *
-     * The chain's spill to `heap_` is a `std::vector` growth that throws `std::bad_alloc`
-     * on OOM, which under `-fno-exceptions` is an `abort()` — a node reboot when a large
-     * (e.g. composed-root) reply is assembled on a fragmented heap. A caller that knows
-     * its final link count reserves it here up front: on success the next @p links
-     * @ref append calls are guaranteed **non-reallocating hence nothrow**.
+     * @ref append has no failure channel, so a refused growth there ends the process
+     * (`failed_growth`). A caller that knows its final link count reserves it here up
+     * front: on success the next @p links @ref append calls are guaranteed
+     * **non-reallocating hence nothrow**, and on refusal it drops the work instead.
      *
      * While the whole chain still fits INLINE (`have + links <= kInline`) this is a no-op
-     * that touches neither `heap_` nor the allocator — every `append` is then a pure
-     * `inline_[]` array write that cannot throw, so the hot small-reply delivery path
-     * (`assemble`) keeps its zero-alloc small-buffer fast path (ADR-0053 §6). Only once
-     * the chain WILL spill does it reserve `heap_` to `have + links` and migrate the
-     * inline links there, so no later `append` re-enters the inline→heap spill `reserve`
-     * (an empty rope that still spills keeps the reserved capacity, making even that one
-     * spill `reserve` a no-op). On failure the rope is unchanged and the caller drops the
-     * reply (BACKPRESSURE) instead of aborting.
-     *
-     * @note #981 residual — the ONE thing this promise does not cover. "Instead of aborting"
-     *       is exact on every profile whose growth THROWS, and exact on ANY profile while
-     *       the chain still fits inline (that arm reaches no allocator). Once the chain
-     *       spills under `-fno-exceptions`, the `heap_` growth runs through
-     *       `%tr::detail::try_reserve`, which there can only PROBE the global heap, free the
-     *       probe block, and then run the throwing `reserve` — and a FreeRTOS context switch
-     *       in that window lets another task take the block, so the `reserve` hits
-     *       exhaustion inside a `noexcept` and abort()s the node (#850). The chain cannot
-     *       move to the ADR-0065 seam (`%tr::mem::block_array_t`) as it stands: `view_t` is
-     *       refcounted, and that container relocates by `memcpy` and never runs a
-     *       destructor. Closing it needs a failable array that relocates by MOVE (#873).
+     * that touches no allocator — every `append` is then a construction into the small buffer
+     * that cannot fail, so the hot small-reply delivery path (`assemble`) keeps its
+     * zero-alloc small-buffer fast path (ADR-0053 §6). Only once the chain WILL spill does
+     * it draw a block of `have + links` links from the source and migrate the inline links
+     * there. On refusal the rope is unchanged and the caller drops the reply
+     * (BACKPRESSURE). The block comes from a `block_source_t`'s `try_alloc`, which answers
+     * `nullptr` on exhaustion, so the refusal is exact on every profile: there is no probe
+     * window in which another task can take the block (#850, #981, closed by #2284).
      *
      * The no-op arm is the ONLY thing this function body holds, so it stays cheap enough for
-     * the compiler to inline (#1065). The spilling arm — the `max_size` guard, the allocator
-     * call and the inline→heap migration — lives in a separate out-of-line member. Charging
+     * the compiler to inline (#1065). The spilling arm — the count guard, the allocator
+     * call and the inline→block migration — lives in a separate out-of-line member. Charging
      * the delivery clone a real `call` for a check that folds to one compare at a fresh
      * 1-link rope is a fixed per-dispatch cost on the hottest leg the rope has.
      * @retval false Reservation failed (OOM / impossible count) — the rope is untouched.
      */
     [[nodiscard]] bool try_reserve(std::size_t links) noexcept {
-        // `heap_.empty()` is exactly "the chain is still inline", so `link_count()` is
-        // `inline_n_` here and `kInline - inline_n_` cannot underflow (`inline_n_ <= kInline`
-        // is the small-buffer invariant). The condition is therefore the same
-        // `have + links <= kInline` no-op test as before, spelled without the addition so no
-        // overflow guard is needed to reach it — and a caller holding a fresh empty rope
-        // constant-folds `inline_n_` to 0.
-        if (heap_.empty() && links <= kInline - inline_n_) return true;
+        // `cap_ - n_` is the room where the links are now (the small buffer, or the block) and
+        // cannot underflow. The condition is the `have + links <= cap` no-op test spelled
+        // without the addition, so no overflow guard is needed to reach it — and a caller
+        // holding a fresh empty rope constant-folds it to `links <= kInline`.
+        if (links <= cap_ - n_) return true;
         return reserve_spilled(links);
     }
 
     /** @brief Number of links in the chain. */
-    [[nodiscard]] std::size_t link_count() const noexcept {
-        return heap_.empty() ? inline_n_ : heap_.size();
-    }
+    [[nodiscard]] std::size_t link_count() const noexcept { return n_; }
     /** @brief The links, in order (inline small-buffer storage or the spilled chain). */
     [[nodiscard]] std::span<const view_t> links() const noexcept {
-        if (heap_.empty()) return std::span<const view_t>(inline_.data(), inline_n_);
-        return std::span<const view_t>(heap_);
+        return std::span<const view_t>(data(), n_);
     }
 
     /**
@@ -199,10 +211,7 @@ class rope_t {
      * A link moved from is an empty view still counted in `link_count()`; reset the rope
      * afterwards rather than reading it.
      */
-    [[nodiscard]] std::span<view_t> links() noexcept {
-        if (heap_.empty()) return std::span<view_t>(inline_.data(), inline_n_);
-        return std::span<view_t>(heap_);
-    }
+    [[nodiscard]] std::span<view_t> links() noexcept { return std::span<view_t>(data(), n_); }
 
     /**
      * @brief The single contiguous link — the consumer's explicit "this value is
@@ -419,43 +428,149 @@ class rope_t {
 
     // The SPILLING arm of try_reserve, kept OUT OF LINE so the no-op arm stays inlinable:
     // this half calls the allocator and migrates the small buffer. Carrying it in the same
-    // body is what kept the whole check out of line at the path-target delivery clone on
-    // this toolchain — v0.8.0 inlined try_reserve into `dispatch_edge_target`, `main` emits a
-    // `call`, and lifting ONLY this arm out (nothing else changed) restores the inline
-    // (#1065). Reached only when the chain has already spilled or the reservation will spill
-    // it, so the `call` is charged to the case that allocates. Body-identical to the
-    // pre-#1065 try_reserve, including the max_size guard: try_reserve now filters out only
-    // inputs for which that guard cannot fire (links <= kInline).
+    // body is what kept the whole check out of line at the path-target delivery clone
+    // (#1065), so the `call` is charged to the case that allocates.
     [[gnu::noinline]] [[nodiscard]] bool reserve_spilled(std::size_t links) noexcept {
-        const std::size_t have = link_count();
-        if (links > heap_.max_size() - have) return false;  // impossible count (also guards +)
-        // A chain that fits the small-buffer storage never allocates and never throws on
-        // append, so no reservation is needed (the +12% delivery tax was forcing heap_ here
-        // for every small reply). `have + links` cannot overflow — the max_size guard above
-        // bounds it below SIZE_MAX.
-        if (have + links <= kInline) return true;
-        // THE spill growth, and the one site that carries the whole rope's #981 residual:
-        // under `-fno-exceptions` this is probe-then-commit and abort()s the node when a
-        // racer takes the freed probe block (#850). See try_reserve's @note for why
-        // `vector<view_t>` cannot become a `block_array_t`.
-        if (!tr::detail::try_reserve(heap_, have + links)) return false;
-        // Force heap_ mode: migrate the inline links so subsequent append()s take the
-        // push_back fast path and never re-enter the inline→heap spill reserve.
-        for (std::size_t i = 0; i < inline_n_; ++i) heap_.push_back(std::move(inline_[i]));
-        if (inline_n_ > 0) {
-            inline_n_ = 0;
-            for (view_t& s : inline_) s = view_t{};
-        }
+        if (links > kMaxLinks - n_) return false;  // impossible count (also guards the +)
+        const std::size_t want = n_ + links;
+        if (want <= cap_) return true;
+        return grow(want);
+    }
+
+    /**
+     * @brief Move the chain into a block of at least @p want links (and at least double the
+     *        current one), drawn from the rope's source.
+     * @retval false The source refused, or @p want is past `kMaxLinks`; the rope is
+     *               untouched.
+     */
+    [[gnu::noinline]] [[nodiscard]] bool grow(std::size_t want) noexcept {
+        if (want > kMaxLinks) return false;
+        // The first spill takes kInline + 1 links, as the `std::vector` chain did; then doubles.
+        std::size_t cap = spill_ != nullptr ? cap_ * std::size_t{2} : kInline + 1;
+        if (cap < want) cap = want;
+        if (cap > kMaxLinks) cap = kMaxLinks;
+        if (src_ == nullptr) src_ = &mem::table_source();
+        auto* fresh = static_cast<view_t*>(src_->try_alloc(cap * sizeof(view_t), alignof(view_t)));
+        if (fresh == nullptr) return false;
+        relocate(fresh, data(), n_);
+        if (spill_ != nullptr) src_->release(spill_, cap_ * sizeof(view_t), alignof(view_t));
+        spill_ = fresh;
+        cap_ = static_cast<std::uint32_t>(cap);
         return true;
     }
 
-    // Inline small-buffer storage for the first two links (the ADR-0053 §6 cost
-    // guard). `heap_` is empty iff the chain is inline; the kInline+1-th append
-    // spills the whole chain there and `inline_n_` goes to 0 (see @ref append).
+    /** @brief `grow`, for the callers with no failure channel (@ref append, the copy). */
+    void grow_or_die(std::size_t want) {
+        if (!grow(want)) failed_growth();
+    }
+
+    /**
+     * @brief The end of a growth that cannot fail by value: `std::bad_alloc` where exceptions
+     *        exist (what the `std::vector` chain before #2284 threw), `std::abort()` where they
+     *        do not (what that throw became there). A caller that must survive exhaustion
+     *        calls @ref try_reserve first.
+     */
+    [[noreturn]] [[gnu::cold]] [[gnu::noinline]] static void failed_growth() {
+#if defined(__cpp_exceptions)
+        throw std::bad_alloc();
+#else
+        std::abort();
+#endif
+    }
+
+    /**
+     * @brief Move @p n links from @p from to the raw storage at @p to, ending them at
+     *        @p from. A view is a segment pointer and two sizes and nothing points at one,
+     *        so its bytes at a new address are the same view: no move constructor and no
+     *        destructor runs, which keeps relocation off the segment release path.
+     *
+     * Up to `kInline` links, the common case (a move, and the first spill), each link is one
+     * fixed-size copy the compiler emits as loads and stores. A `memcpy` of a runtime length
+     * would be a library call, which every move of a rope on the relay path would pay.
+     */
+    static void relocate(view_t* to, view_t* from, std::size_t n) noexcept {
+        static_assert(mem::bitwise_relocatable<view_t> && mem::bitwise_relocatable<segment_ptr_t>,
+                      "rope_t relocates its links by memcpy");
+        if (n > kInline) {
+            std::memcpy(static_cast<void*>(to), static_cast<const void*>(from), n * sizeof(view_t));
+            return;
+        }
+        for (std::size_t i = 0; i < kInline; ++i)
+            if (i < n)
+                std::memcpy(static_cast<void*>(to + i), static_cast<const void*>(from + i),
+                            sizeof(view_t));
+    }
+
+    /** @brief Adopt @p o's links (@p o is left empty and inline); this rope holds none. */
+    void take(rope_t& o) noexcept {
+        static_assert(mem::bitwise_relocatable<view_t>,
+                      "rope_t hands its links over by memcpy (relocate) or by the block pointer");
+        if (o.spill_ != nullptr) {
+            spill_ = o.spill_;
+            cap_ = o.cap_;
+        } else {
+            relocate(inline_, o.inline_, o.n_);
+        }
+        n_ = o.n_;
+        o.spill_ = nullptr;
+        o.n_ = 0;
+        o.cap_ = kInline;
+    }
+
+    /**
+     * @brief Drop every link and return a spilled chain's block; the rope is then empty.
+     *
+     * Always inlined (it is the destructor's body, and a function of its own would put one
+     * more function on the segment release path for the no-heap census to count), so it
+     * holds only the inline arm: at most `kInline` links, unrolled. A spilled chain is
+     * the case that allocated, and its release is the cold `drop_spilled`.
+     */
+    [[gnu::always_inline]] void clear() noexcept {
+        if (spill_ != nullptr) [[unlikely]] {
+            drop_spilled();
+            return;
+        }
+        for (std::size_t i = 0; i < kInline; ++i)
+            if (i < n_) inline_[i].~view_t();
+        n_ = 0;
+    }
+
+    /** @brief `clear` for a spilled chain: drop its links and return its block. */
+    [[gnu::cold]] [[gnu::noinline]] void drop_spilled() noexcept {
+        for (std::uint32_t i = 0; i < n_; ++i) spill_[i].~view_t();
+        src_->release(spill_, cap_ * sizeof(view_t), alignof(view_t));
+        spill_ = nullptr;
+        n_ = 0;
+        cap_ = kInline;
+    }
+
+    /** @brief Where the links live: the block once spilled, the small buffer before. */
+    [[nodiscard]] view_t* data() noexcept { return spill_ != nullptr ? spill_ : inline_; }
+    /** @brief Read-only `data`. */
+    [[nodiscard]] const view_t* data() const noexcept {
+        return spill_ != nullptr ? spill_ : inline_;
+    }
+
+    // Inline small-buffer storage for the first two links (the ADR-0053 §6 cost guard).
+    // `spill_` is null iff the chain is inline; the links are `data()[0, n_)` and `cap_` is
+    // the room there (kInline while inline); the kInline+1-th append moves the whole chain
+    // into a block from `src_` (see `grow`).
     static constexpr std::size_t kInline = 2;
-    std::array<view_t, kInline> inline_{};
-    std::size_t inline_n_ = 0;
-    std::vector<view_t> heap_;
+    /** @brief The longest chain: a 32-bit count, so the rope stays the size it was, whose
+     *         block size cannot overflow `std::size_t`. */
+    static constexpr std::size_t kMaxLinks =
+        std::numeric_limits<std::uint32_t>::max() < SIZE_MAX / sizeof(view_t)
+            ? std::numeric_limits<std::uint32_t>::max()
+            : SIZE_MAX / sizeof(view_t);
+    // Raw small-buffer storage: a slot holds a live view only below `n_` while inline, so
+    // an empty or one-link rope constructs and destroys nothing it does not hold.
+    union {
+        view_t inline_[kInline];
+    };
+    view_t* spill_ = nullptr;
+    std::uint32_t n_ = 0;
+    std::uint32_t cap_ = kInline;         // the inline slots, until the chain spills
+    mem::block_source_t* src_ = nullptr;  // null until the first spill: then table_source()
 };
 
 /** @brief Concatenate two ropes (chaining — no copy). */

@@ -329,6 +329,9 @@ void test_handler_delivery_allocates_nothing() {
     for (int& c : counts) (void)g.subscribe(path_t("/h/fan"), count_cb, &c);
     const auto before = g.delivery_drops();
     {
+        // Built before the hook: its own chain draws from the table source, which the hook
+        // refuses as well (#2284); the write is what is under test.
+        rope_t three = three_link();
         // The SAME rejection the shed used to need: exactly the chain reserve a 3-link rope
         // clone takes. A blanket refusal would prove nothing here — it would shed something
         // else and this arm would read as green for the wrong reason.
@@ -340,7 +343,7 @@ void test_handler_delivery_allocates_nothing() {
         rope_t probe;
         check(!probe.try_reserve(3),
               "canary: the injection is live and refuses the 3-link chain reserve");
-        check(g.write(v, three_link()).has_value(), "the handler write reports success");
+        check(g.write(v, std::move(three)).has_value(), "the handler write reports success");
     }
     check(handled == 1, "the handler ran — the value was consumed, not lost");
     int delivered = 0;
@@ -448,12 +451,15 @@ void test_target_adopt_allocates_nothing() {
     (void)g.subscribe(path_t("/s/src"), path_t("/s/dst"));
     const std::uint64_t oom_before = g.delivery_drops().out_of_memory;
     {
+        // Built before the hook: its own chain draws from the table source, which the hook
+        // refuses as well (#2284); the write is what is under test.
+        rope_t three = three_link();
         g_reject_size = 3 * sizeof(view_t);  // exactly the chain reserve the old clone took
         const hook_guard_t oom(fail_exact);
         rope_t probe;
         check(!probe.try_reserve(3),
               "canary: the injection is live and refuses the 3-link chain reserve");
-        check(g.write(a, three_link()).has_value(), "the source write itself succeeds");
+        check(g.write(a, std::move(three)).has_value(), "the source write itself succeeds");
     }
     const auto src = g.read(a);
     const auto dst = g.read(b);
@@ -491,9 +497,12 @@ void test_handler_target_takes_no_clone() {
     check(g.write(a, three_link()).has_value() && handled == 1, "baseline delivery lands");
     const std::uint64_t oom_before = g.delivery_drops().out_of_memory;
     {
+        // Built before the hook: its own chain draws from the table source, which the hook
+        // refuses as well (#2284); the write is what is under test.
+        rope_t three = three_link();
         g_reject_size = 3 * sizeof(view_t);  // exactly the chain reserve the old clone took
         const hook_guard_t oom(fail_exact);
-        check(g.write(a, three_link()).has_value(), "the source write itself succeeds");
+        check(g.write(a, std::move(three)).has_value(), "the source write itself succeeds");
     }
     check(handled == 2, "the handler target was delivered under the refusal");
     check(seen_links == 3, "... the whole three-link value, by reference");

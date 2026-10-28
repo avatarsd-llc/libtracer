@@ -65,7 +65,7 @@
   "core/include/libtracer/rope.hpp": {
     "owner": "#1781 step 2: the link spill moves onto the seam; step 3 removes the vector to_iovec",
     "counts": {
-      "vector": 4
+      "vector": 3
     }
   },
   "core/include/libtracer/security_acl.hpp": {
