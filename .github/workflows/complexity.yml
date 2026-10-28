@@ -95,7 +95,7 @@ jobs:
           python-version: "3.12"
       - name: Install lizard (pinned; must match LIZARD_VERSION in tools/check_ccn.py)
         timeout-minutes: 5
-        run: pip install --quiet "lizard==1.24.0"
+        run: python -m pip install --quiet "lizard==1.24.0"
       # The gate's own logic first, so a tool bug reports as a tool bug.
       - name: Ratchet unit tests
         run: python3 -m unittest discover -s tools/tests -p "test_check_ccn.py" -v

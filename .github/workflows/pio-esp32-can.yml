@@ -127,7 +127,9 @@ jobs:
         # Measured max 0.18 min, but a cold PlatformIO cache pulls a full toolchain later
         # in the job, so this install step gets 10 rather than the 8-minute floor.
         timeout-minutes: 10
-        run: pip install --quiet "platformio==6.1.18"
+        # Through the interpreter: on the persistent self-hosted tool cache a `pip` script can
+        # carry a shebang from another runner's path and fail to execute (#2348).
+        run: python -m pip install --quiet "platformio==6.1.18"
 
       # Pack the package the way the release job publishes it, so the consumer
       # below compiles the file set `export.include` really ships — not the

@@ -47,7 +47,7 @@ jobs:
       # 10g is the per-job memory budget.
       # The trusted route also mounts the persistent compiler cache (core-ci.yml's
       # COMPILER CACHE header); the guard is the `runs-on` one verbatim.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
     timeout-minutes: 30
     defaults:
       run:
@@ -61,7 +61,11 @@ jobs:
         run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice (this one included): $n"
+            if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
+          else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
           if [ -d /ccache ]; then

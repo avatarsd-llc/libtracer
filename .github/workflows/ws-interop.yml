@@ -39,7 +39,7 @@ jobs:
       # 10g is the per-job memory budget.
       # The trusted route also mounts the persistent compiler cache (core-ci.yml's
       # COMPILER CACHE header); the guard is the `runs-on` one verbatim.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
     # Measured max 1.15 min (healthy 1.07), p50 ~0.9. 15 = the short-job floor, ~13x
     # observed: the ceiling exists for the `npm ci` below, not for the work. See
     # core-ci.yml's header for the tree-wide policy.
@@ -54,14 +54,20 @@ jobs:
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
         # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
         run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
-      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
-      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # Build parallelism (#1637, #1691, #2348): on the self-hosted runners, 4 while at most 3
+      # CI containers share the 11-core slice and 2 above that or when the count is
+      # unreadable (see BUILD_JOBS in core-ci.yml's header); `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes
       # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
       # switches on only where `/ccache` is mounted (core-ci.yml's COMPILER CACHE header).
       # POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice (this one included): $n"
+            if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
+          else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
           if [ -d /ccache ]; then
@@ -140,7 +146,7 @@ jobs:
       # 10g is the per-job memory budget.
       # The trusted route also mounts the persistent compiler cache (core-ci.yml's
       # COMPILER CACHE header); the guard is the `runs-on` one verbatim.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
     # Measured max 1.38 min (healthy 1.08), p50 ~0.9. Short-job floor, same `npm ci`.
     timeout-minutes: 15
     defaults:
@@ -153,14 +159,20 @@ jobs:
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
         # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
         run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
-      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
-      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # Build parallelism (#1637, #1691, #2348): on the self-hosted runners, 4 while at most 3
+      # CI containers share the 11-core slice and 2 above that or when the count is
+      # unreadable (see BUILD_JOBS in core-ci.yml's header); `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes
       # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
       # switches on only where `/ccache` is mounted (core-ci.yml's COMPILER CACHE header).
       # POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice (this one included): $n"
+            if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
+          else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
           if [ -d /ccache ]; then
@@ -239,7 +251,7 @@ jobs:
       # 10g is the per-job memory budget.
       # The trusted route also mounts the persistent compiler cache (core-ci.yml's
       # COMPILER CACHE header); the guard is the `runs-on` one verbatim.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
     # Measured max 1.35 min (healthy 1.07), p50 ~0.9. Short-job floor, same `npm ci`.
     timeout-minutes: 15
     defaults:
@@ -252,14 +264,20 @@ jobs:
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
         # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
         run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
-      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
-      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # Build parallelism (#1637, #1691, #2348): on the self-hosted runners, 4 while at most 3
+      # CI containers share the 11-core slice and 2 above that or when the count is
+      # unreadable (see BUILD_JOBS in core-ci.yml's header); `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes
       # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
       # switches on only where `/ccache` is mounted (core-ci.yml's COMPILER CACHE header).
       # POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice (this one included): $n"
+            if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
+          else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
           if [ -d /ccache ]; then
