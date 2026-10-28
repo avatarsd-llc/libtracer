@@ -127,10 +127,13 @@ class self_heal_link_t final : public transport_t {
      *                       the ENGINE exactly once, at registration.
      * @param src            The store each dial's socket, and the engine's record of it, is
      *                       drawn from — the factory's third argument (receiver pays).
+     * @param stack          The engine's thread-stack store (`link_memory_t::stack`, #2288):
+     *                       its worker's stack and task block. Default
+     *                       `tr::mem::stack_source()`; must outlive the engine.
      */
     self_heal_link_t(transport_factory_t factory, conn_settings_t settings,
                      std::span<const std::byte> raw_config, bool inner_delivers_ropes,
-                     mem::block_source_t& src);
+                     mem::block_source_t& src, mem::block_source_t& stack = mem::stack_source());
 
     /** @brief Stops the engine (see @ref stop) and destroys any remaining socket. */
     ~self_heal_link_t();
@@ -336,6 +339,7 @@ class self_heal_link_t final : public transport_t {
                                                               (borrowed, see the ctor). */
     const bool inner_ropes_;                      /**< @brief The kind's delivery capability. */
     mem::block_source_t& src_;      /**< @brief Where each socket and its record come from. */
+    mem::block_source_t& stack_;    /**< @brief Where the worker's stack comes from (#2288). */
     liveness_publish_fn_t publish_; /**< @brief Set once, before router wiring. */
 
     link_state_t state_ = link_state_t::DORMANT; /**< @brief The machine (DIAL subset). */
@@ -354,7 +358,7 @@ class self_heal_link_t final : public transport_t {
     // THROWS on spawn failure, which is a `std::abort()` under `-fno-exceptions`, and on
     // ESP-IDF it takes its stack (`CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`, 12,288 B stock)
     // from the platform heap per link. Here the worker's stack and control block come from
-    // `tr::mem::stack_source()` on ESP-IDF (one block, sized by
+    // @ref stack_ on ESP-IDF (one block, sized by
     // `tr::net::kSelfHealWorkerStackBytes`), and a refused spawn is an error the engine absorbs.
     static_thread_t worker_;          /**< @brief Joined by @ref stop. */
     bool worker_started_ = false;     /**< @brief Lazy; claimed and cleared by @ref stop. */
