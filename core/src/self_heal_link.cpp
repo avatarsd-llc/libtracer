@@ -219,12 +219,13 @@ void self_heal_link_t::worker_entry(void* self) {
 void self_heal_link_t::ensure_worker_locked() {
     if (stop_ || worker_started_) return;
     // The #1470 stack knob (0 = the platform default; every host build). On ESP-IDF the
-    // stack is drawn from the link's own source with its control block (#2288); a refused
-    // spawn, from the source or the platform, simply leaves the engine unworkered and the
-    // next transition tries again. Never a throw: a `std::thread` spawn failure is a
-    // `std::abort()` under -fno-exceptions.
+    // stack is drawn with its control block from the process thread-stack source (#2288),
+    // never from `src_`, the sockets' store, which on an MCU is the shared value arena. A
+    // refused spawn, from the source or the platform, leaves the engine unworkered (counted
+    // in that source's census) and the next transition tries again. Never a throw: a
+    // `std::thread` spawn failure is a `std::abort()` under -fno-exceptions.
     worker_started_ = worker_.start(&self_heal_link_t::worker_entry, this,
-                                    kSelfHealWorkerStackBytes, "tr_heal", src_);
+                                    kSelfHealWorkerStackBytes, "tr_heal", mem::stack_source());
 }
 
 void self_heal_link_t::publish_unlocked(std::unique_lock<std::mutex>& l, link_state_t s) {
@@ -270,8 +271,9 @@ bool self_heal_link_t::wire_socket(sock_t& sock) {
             s->self->on_socket_down(*s);
         },
         &sock);
-    sock.link->start_receiving();
-    return went_down;
+    // A receive that could not start (#2288: its stack refused) is a socket dead on arrival:
+    // the same failed attempt as a went-down, retried on the engine's backoff.
+    return !sock.link->start_receiving() || went_down;
 }
 
 void self_heal_link_t::on_socket_down(sock_t& sock) {

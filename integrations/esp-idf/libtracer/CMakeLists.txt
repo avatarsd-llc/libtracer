@@ -292,6 +292,23 @@ elseif(CONFIG_LIBTRACER_ARENA_BYTES)
 else()
     set(LIBTRACER_ARENA_BYTES 32768)
 endif()
+# The thread-stack region (#2288): THREAD_STACKS default-sized stacks plus each one's task
+# block (640 B covers the record, StaticTask_t and the done semaphore on every chip), apart from
+# the arena above. Same two-pass fallback; the heap-rooted opt-out and the linux target bind 0.
+if(DEFINED CONFIG_LIBTRACER_THREAD_STACKS)
+    set(LIBTRACER_THREAD_STACKS ${CONFIG_LIBTRACER_THREAD_STACKS})
+elseif(CONFIG_LIBTRACER_DEFAULT_ROOT_HEAP OR IDF_TARGET STREQUAL "linux")
+    set(LIBTRACER_THREAD_STACKS 0)
+else()
+    set(LIBTRACER_THREAD_STACKS 4)
+endif()
+if(CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT)
+    set(LIBTRACER_THREAD_STACK_BYTES ${CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT})
+else()
+    set(LIBTRACER_THREAD_STACK_BYTES 3072)
+endif()
+math(EXPR LIBTRACER_THREAD_STACK_ARENA_BYTES
+     "${LIBTRACER_THREAD_STACKS} * (${LIBTRACER_THREAD_STACK_BYTES} + 640)")
 # The build-wide copy-or-share hint (#2226). The early pass falls back to the Kconfig default,
 # DEFAULT (follow the block source), like the link modules below.
 if(CONFIG_LIBTRACER_DEFAULT_SHARE_HINT_COPY)
@@ -471,6 +488,7 @@ struct esp_config_t : default_config_t {
     static constexpr std::size_t kRxDrainBytes = ${LIBTRACER_RX_DRAIN_BYTES};
     static constexpr bool kSlabPool = false;
     static constexpr std::size_t kArenaBytes = ${LIBTRACER_ARENA_BYTES};
+    static constexpr std::size_t kThreadStackArenaBytes = ${LIBTRACER_THREAD_STACK_ARENA_BYTES};
     static constexpr share_hint_t kDefaultShareHint = share_hint_t::${LIBTRACER_DEFAULT_SHARE_HINT};
 ${LIBTRACER_SLOT_BINDING}};
 

@@ -489,6 +489,25 @@ struct default_config_t {
     static constexpr std::size_t kArenaBytes = 32768;
 
     /**
+     * @brief Bytes of the static THREAD-STACK arena behind `tr::mem::stack_source()` on a
+     *        build whose @ref kSlabPool is `false` (#2288); 0 = none.
+     *
+     * Every library thread is a `tr::static_thread_t`. On ESP-IDF its stack and task block
+     * are one block from the link's `link_memory_t::stack`, whose default is
+     * `tr::mem::stack_source()`. A nonzero value gives those defaults a static region of
+     * their own, apart from the value/table/net arena of @ref kArenaBytes, so a thread spawn
+     * can never starve the value and table pools, and the reverse. The region holds whole
+     * stacks: a released stack is reused by the next request of the same size. At 0,
+     * `stack_source()` is `tr::mem::default_root()`.
+     *
+     * Not read where @ref kSlabPool is `true`: a host thread's stack is the platform's
+     * mapping, and its source pays only a boot record.
+     *
+     * Override fragment: `static constexpr std::size_t kThreadStackArenaBytes = 16384;`.
+     */
+    static constexpr std::size_t kThreadStackArenaBytes = 0;
+
+    /**
      * @brief The slab the host slab pool draws for a class, in bytes: the smallest unit it asks
      *        the root for (#1777). A power of two.
      *
@@ -1379,6 +1398,8 @@ inline constexpr std::size_t kSlabBytes = tr::graph::config_t::kSlabBytes;
 inline constexpr std::size_t kSlabClassCap = tr::graph::config_t::kSlabClassCap;
 /** @brief @ref tr::graph::default_config_t::kArenaBytes for this build (#1783). */
 inline constexpr std::size_t kArenaBytes = tr::graph::config_t::kArenaBytes;
+/** @brief @ref tr::graph::default_config_t::kThreadStackArenaBytes for this build (#2288). */
+inline constexpr std::size_t kThreadStackArenaBytes = tr::graph::config_t::kThreadStackArenaBytes;
 /**
  * @brief Whether this build's default root is the platform heap (#2090): `kSlabPool` is
  *        `false` and `kArenaBytes` is 0, so no static arena is compiled and

@@ -207,10 +207,9 @@ posix_endpoint_t::~posix_endpoint_t() { stop_and_join(); }
 
 void posix_endpoint_t::thread_entry(void* self) { static_cast<posix_endpoint_t*>(self)->body_(); }
 
-void posix_endpoint_t::start(thread_body_t body, std::size_t stack_size, mem::block_source_t& src) {
+bool posix_endpoint_t::start(thread_body_t body, std::size_t stack_size, mem::block_source_t& src) {
     body_ = body;
-    // A refused spawn (source or platform) leaves the endpoint not receiving; see the contract.
-    (void)thread_.start(&posix_endpoint_t::thread_entry, this, stack_size, "tr_recv", src);
+    return thread_.start(&posix_endpoint_t::thread_entry, this, stack_size, "tr_recv", src);
 }
 
 void posix_endpoint_t::stop_and_join() {
@@ -504,8 +503,7 @@ bool slot_server_t::bind_listen(std::uint16_t bind_port) {
     // accept_peer (the max_peers deployment cap), never a synthetic backlog.
     if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&local), sizeof(local)) < 0 ||
         ::listen(listen_fd_, SOMAXCONN) < 0) {
-        ::close(listen_fd_);
-        listen_fd_ = -1;
+        close_listen();
         return false;
     }
     sockaddr_in bound{};
@@ -513,6 +511,11 @@ bool slot_server_t::bind_listen(std::uint16_t bind_port) {
     if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
         bound_port_ = ntohs(bound.sin_port);
     return true;
+}
+
+void slot_server_t::close_listen() noexcept {
+    ::close(listen_fd_);
+    listen_fd_ = -1;
 }
 
 void slot_server_t::enumerate_peers(const peer_visitor_t& visit) const {

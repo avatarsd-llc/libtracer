@@ -292,10 +292,9 @@ class posix_endpoint_t {
      *
      * Spawns through @ref static_thread_t (#2288), never `std::thread`: the constructor of the
      * latter THROWS on failure, which under `-fno-exceptions` (the MCU build) `std::abort`s.
-     * A refused spawn leaves the endpoint simply not receiving (no abort). On ESP-IDF the
-     * thread is a static FreeRTOS task whose control block and stack are ONE block drawn from
-     * @p src; on a POSIX host it is a `pthread_create` and @p src pays only a small boot
-     * record.
+     * On ESP-IDF the thread is a static FreeRTOS task whose control block and stack are ONE
+     * block drawn from @p src; on a POSIX host it is a `pthread_create` and @p src pays only
+     * a small boot record.
      *
      * @param body       The thread body (the transport's accept/recv loop).
      * @param stack_size Recv-thread stack size in bytes, or 0 for the platform
@@ -303,12 +302,13 @@ class posix_endpoint_t {
      *        right-sizes this thread instead of inflating that default for every pthread in
      *        the system. On POSIX a hint below the platform floor is ignored (the default
      *        stack is used) rather than failing the spawn.
-     * @param src        Where the thread's memory comes from (see above); it MUST outlive
-     *        @ref stop_and_join. The default is the build's net sub-pool, which on an MCU
-     *        arena build is the static arena: size the arena for the stack, or pass a source.
+     * @param src        Where the thread's memory comes from: the link's
+     *        `link_memory_t::stack`. It MUST outlive @ref stop_and_join.
+     * @retval false The spawn was refused (by @p src or the platform): nothing runs. The
+     *         caller MUST report it, by leaving the link inert (`ok()` false) or bringing it
+     *         down; a link that comes up and never receives is the failure this forbids.
      */
-    void start(thread_body_t body, std::size_t stack_size = 0,
-               mem::block_source_t& src = mem::net_source());
+    [[nodiscard]] bool start(thread_body_t body, std::size_t stack_size, mem::block_source_t& src);
 
     /**
      * @brief Request shutdown and join the receive thread (idempotent).
@@ -1037,6 +1037,10 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *               poll thread (`ok()` stays false).
      */
     bool bind_listen(std::uint16_t bind_port);
+
+    /** @brief Close the listen socket, leaving `ok()` false: a bind that failed, or a poll
+     *         thread whose spawn was refused (#2288). */
+    void close_listen() noexcept;
 
     /**
      * @brief The ONE poll thread body: one `poll(2)` pass multiplexes the listen socket

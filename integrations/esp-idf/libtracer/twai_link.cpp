@@ -101,6 +101,7 @@ twai_link_t::twai_link_t(const twai_link_config_t& config)
     // so twai_node_transmit below never needs the driver's own (queue-full)
     // wait — the pool semaphore is the ONE backpressure point.
     : src_(&config.memory.io_or_default()),
+      stack_src_(&config.memory.stack_or_default()),
       tx_pool_(config.tx_queue_depth + 1, *src_),
       tx_timeout_ms_(clamp_tx_timeout_ms(config.tx_timeout_ms)),
       stack_size_(config.stack_size) {
@@ -163,9 +164,10 @@ void twai_link_t::start() {
     if (node_ == nullptr || thread_.joinable()) return;
 
     // A static task right-sized by stack_size_ (libtracer #486), its stack and task block
-    // drawn from the link's source (#2288). A refused draw leaves the link not receiving;
-    // the next start() tries again.
-    (void)thread_.start(&twai_link_t::entry, this, stack_size_, "twai_rx", *src_);
+    // drawn from the link's thread-stack store (#2288), not from `memory.io`, so a stack
+    // never competes with the frames. A refused draw leaves the link not receiving, which
+    // receiving() and the store's census report; the next start() tries again.
+    (void)thread_.start(&twai_link_t::entry, this, stack_size_, "twai_rx", *stack_src_);
 }
 
 void twai_link_t::entry(void* self) { static_cast<twai_link_t*>(self)->run(); }

@@ -1215,7 +1215,15 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     // ws DIAL) spawns it here, which is what
     // stops a server's push-on-connect message being decoded into an empty sink and dropped.
     // Unconditional by design: the owner should not have to know which kinds defer.
-    link->start_receiving();
+    //
+    // A link whose receive could not start (#2288: its thread's stack refused) is dead on
+    // arrival. It fired no link-down — we hold `ctl_m_` — so it is taken down here, the way
+    // `remove_connection` takes any connection down, and the creation answers the exhausted-
+    // resource status, as a refused `add_child` does above. `qv` is not read after this.
+    if (!link->start_receiving()) {
+        (void)remove_connection_locked(txn, qv);
+        return std::unexpected(status_t::BACKPRESSURE);
+    }
     // An engine-managed connection is born RESTING (RFC-0014 §4: vertex exists, no
     // socket, refcount 0) — the one initial publish the engine's worker does not own.
     // COLLECTED here, before any op can reach the link, and written by phase 2 once

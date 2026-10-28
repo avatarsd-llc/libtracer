@@ -17,17 +17,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   queue on ESP-IDF comes from the platform heap any more: each thread is a
   `tr::static_thread_t`, a static FreeRTOS task whose `StaticTask_t` and stack are one block
   drawn from a source. The source rules:
-  - `twai_link_t` draws its dispatch thread's stack, its ISR→dispatch queue storage and (as
-    before) its TX pool from `twai_link_config_t::memory.io`, null meaning the net sub-pool; it
-    must outlive the link. The queue and the TX-slot semaphore are `xQueueCreateStatic` /
-    `xSemaphoreCreateCountingStatic`. A refused queue leaves `ok()` false; a refused stack leaves
-    the link not receiving. `stack_size` still sizes the thread, now without `esp_pthread_set_cfg`.
-  - `esp_ws_client_link_t`'s recv thread draws from `tr::mem::default_root()`, never the link's
-    source: a teardown mid-dial detaches it, and a detached task's block is released after the
-    link is gone. `recv_stack` sizes it as before.
-  - The tcp, udp and ws receive threads draw from the core default, `mem::net_source()`: on an
-    arena build that is the static arena (`CONFIG_LIBTRACER_ARENA_BYTES`), which must now hold
-    each receive stack too.
+  - New Kconfig `CONFIG_LIBTRACER_THREAD_STACKS` (default 4; 0 on the linux target and with
+    `LIBTRACER_DEFAULT_ROOT_HEAP`) sizes a static thread-stack region of THREAD_STACKS x
+    (`CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT` + 640) bytes, bound to
+    `config_t::kThreadStackArenaBytes`. It is the default `link_memory_t::stack`
+    (`tr::mem::stack_source()`), apart from the `CONFIG_LIBTRACER_ARENA_BYTES` arena, so a
+    receive stack never comes out of the value and table pool. The default holds the full_node
+    example's set (two udp receive loops and a link-liveness worker) plus one spare.
+  - The tcp, udp and ws receive threads, the link-liveness worker and the TWAI dispatch task draw
+    from it. A refused spawn is reported: a listener or udp link is not `ok()`, a dial link's
+    creation answers `BACKPRESSURE`, a TWAI link's new `receiving()` stays false, and the
+    region's `stats().refused` counts it. full_node's self-proof fails on a refusal there.
+  - `twai_link_t` draws its ISR→dispatch queue storage and (as before) its TX pool from
+    `twai_link_config_t::memory.io`, and its dispatch thread from `memory.stack`; both must
+    outlive the link. The queue and the TX-slot semaphore are `xQueueCreateStatic` /
+    `xSemaphoreCreateCountingStatic`. A refused queue leaves `ok()` false. `stack_size` still
+    sizes the thread, now without `esp_pthread_set_cfg`.
+  - `esp_ws_client_link_t`'s recv thread draws from `tr::mem::stack_source()`, never a source
+    that dies with the link: a teardown mid-dial detaches it, and a detached task's block is
+    released after the link is gone. A refused spawn makes `start_receiving()` answer false.
+    `recv_stack` sizes it as before.
+  - On the linux target `tr::static_thread_t` is a host pthread, as `std::thread` was: its
+    FreeRTOS port runs tasks on one simulated CPU, where a receive loop blocked in a host socket
+    call would starve the task that spawned it.
   - The private `esp_thread.hpp` helper (`esp::spawn_thread`) is gone.
 - **BREAKING: the auth deadline is the application's
   ([#2257](https://github.com/avatarsd-llc/libtracer/issues/2257)).** `httpd_ws_link_t` no

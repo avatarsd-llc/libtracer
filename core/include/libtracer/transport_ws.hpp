@@ -545,7 +545,7 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
      * receives, never answers a PING and never reports the link down; it is simply an open socket
      * until it is destroyed.
      */
-    void start_receiving() override;
+    bool start_receiving() override;
 
     /** @brief True — WS reassembles fragmented messages into ropes (ADR-0053 §5):
      *         each message crosses the seam as a `rope_t`, one owning link per WS
@@ -686,6 +686,8 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
      */
     mem::bytes_t pipelined_;
     std::size_t recv_stack_ = 0; /**< @brief The stack hint, held for `start_receiving`. */
+    /** @brief `memory.stack`, held for `start_receiving` (#2288). */
+    mem::block_source_t* stack_src_ = nullptr;
     /** @brief One-shot latch making @ref start_receiving idempotent — `start()` may be
      *         called at most once per endpoint. */
     std::atomic<bool> recv_started_{false};

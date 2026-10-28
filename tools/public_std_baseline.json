@@ -36,13 +36,6 @@
       "vector": 1
     }
   },
-  "core/include/libtracer/loopback.hpp": {
-    "owner": "#1781 step 2: the dev/test loopback inbox moves onto the seam",
-    "counts": {
-      "deque": 1,
-      "vector": 2
-    }
-  },
   "core/include/libtracer/mem_heap.hpp": {
     "owner": "#1783: the std-container try_* adapters retire with the throwing adapters",
     "counts": {

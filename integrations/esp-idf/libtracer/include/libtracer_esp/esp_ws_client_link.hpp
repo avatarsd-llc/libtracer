@@ -416,7 +416,7 @@ class esp_ws_client_link_t final : public transport_t {
      * re-closes the gate, because every re-dial happens on a link that was already armed
      * and the router keeps the receiver installed across a `link_down`.
      */
-    void start_receiving() override;
+    bool start_receiving() override;
 
     /**
      * @brief Stop for good, short of being destroyed (the @ref transport_t::shut_down

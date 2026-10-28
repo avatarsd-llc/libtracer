@@ -17,6 +17,11 @@
  * block | | ESP-IDF (`ESP_PLATFORM`) | `xTaskCreateStatic` | ONE block: the control record, the
  * task's `StaticTask_t` and its stack |
  *
+ * The IDF linux target takes the POSIX row. Its FreeRTOS port runs every task on one simulated
+ * CPU, and a receive loop blocked in a host `recvfrom` never blocks in FreeRTOS terms, so a
+ * receive task at the pthread priority would starve the lower-priority task that spawned it.
+ * A host pthread is outside that scheduler, as a `std::thread` there always was.
+ *
  * On ESP-IDF a `pthread_create` (and a `std::thread`, which is one) draws the task's stack and
  * its pthread record from the platform heap, which is what the zero-heap gate refuses in the
  * archive. A FreeRTOS task created static allocates nothing, so the block a link's own source
@@ -25,14 +30,20 @@
  *
  * The thread runs a plain function pointer with one argument. It is not a pthread on ESP-IDF:
  * `std::mutex`, `std::condition_variable` and `thread_local` all work from a FreeRTOS task
- * there, and a `thread_local` destructor runs when the task is deleted, which `static_thread_t::join` does
- * before it returns the block.
+ * there, and a `thread_local` destructor runs when the task is deleted, which
+ * `static_thread_t::join` does before it returns the block.
  */
 #pragma once
 
 #include <cstddef>
 
-#if !defined(ESP_PLATFORM)
+#if defined(ESP_PLATFORM)
+#include "sdkconfig.h"
+#endif
+#if defined(ESP_PLATFORM) && !defined(CONFIG_IDF_TARGET_LINUX)
+/** @brief Set when @ref tr::static_thread_t spawns static FreeRTOS tasks (an ESP-IDF chip). */
+#define LIBTRACER_STATIC_THREAD_FREERTOS 1
+#else
 #include <pthread.h>
 #endif
 
@@ -100,7 +111,7 @@ class static_thread_t {
     [[nodiscard]] bool joinable() const noexcept;
 
    private:
-#if defined(ESP_PLATFORM)
+#if defined(LIBTRACER_STATIC_THREAD_FREERTOS)
     void* ctl_ = nullptr; /**< @brief The control record at the head of the drawn block. */
 #else
     pthread_t t_{};        /**< @brief The thread, valid while `started_` is set. */

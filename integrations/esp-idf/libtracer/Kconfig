@@ -354,8 +354,9 @@ menu "libtracer"
         help
             Stack size for the link-liveness engine's worker thread, PER ENGINE-
             MANAGED CONNECTION. 0 means the platform default, which on IDF is
-            CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT taken from the heap for every
-            such link — 12,288 B on the reporter's sdkconfig in #1470.
+            CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT, drawn from the thread-stack
+            region (LIBTRACER_THREAD_STACKS, #2288) for every such link — 12,288 B
+            on the reporter's sdkconfig in #1470.
 
             The worker is the sole dialer and the sole liveness publisher, so its
             stack has to carry a connect() and the publish fan-out beneath it.
@@ -488,6 +489,41 @@ menu "libtracer"
             LIBTRACER_DEFAULT_ROOT_HEAP, removed.
 
             Binds tr::graph::config_t::kArenaBytes.
+
+    config LIBTRACER_THREAD_STACKS
+        int "Thread-stack region: library threads it holds"
+        depends on !LIBTRACER_DEFAULT_ROOT_HEAP
+        range 0 64
+        default 0 if IDF_TARGET_LINUX
+        default 4
+        help
+            How many library threads the static thread-stack region holds
+            (libtracer #2288). Every thread libtracer spawns (a socket link's
+            receive loop, a udp link's, a ws dial's, the link-liveness worker,
+            the TWAI dispatch task) is a static FreeRTOS task whose stack and
+            task block are one block from the link's link_memory_t::stack. Its
+            default, tr::mem::stack_source(), is this region: a .bss array of
+            THREAD_STACKS x (CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT + 640) bytes,
+            apart from the LIBTRACER_ARENA_BYTES arena, so a spawn can never
+            starve the value and table pools and a full value pool can never
+            refuse a spawn.
+
+            The default, 4, holds what the full_node example brings up (the udp
+            listener's and the udp dial's receive loops and the dial's
+            link-liveness worker) plus one spare for a heal that builds a new
+            socket before the dead one is reaped. Count one per listener, one
+            per DIAL link, one per engine-managed connection's worker, and one
+            per TWAI link. A thread whose stack hint differs from the pthread
+            default draws that size instead; size the count for it.
+
+            A refused spawn is reported, never silent: a listener or udp link
+            is not ok(), a DIAL link's creation answers BACKPRESSURE, and the
+            region's tr::mem::stack_source().stats() counts the refusal. 0
+            compiles no region: the stacks then draw from the default root.
+            The linux target defaults to 0, because its threads are host
+            pthreads that draw no stack from any source.
+
+            Binds tr::graph::config_t::kThreadStackArenaBytes.
 
     config LIBTRACER_VERTEX_LOCK_STRIPES
         int "Vertex lock-stripe count"
