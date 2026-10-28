@@ -9,10 +9,9 @@
  * Same construction as the four `httpd_ws_link` suites: the REAL chip translation
  * unit (`integrations/esp-idf/libtracer/twai_link.cpp`) compiled against a host
  * fake of the facilities it rests on — `esp_driver_twai`'s node API, FreeRTOS's
- * counting semaphore and queue, and `esp_pthread`'s stack-sizing seam
- * (fake_twai.hpp). This is the first suite to compile that TU anywhere, so nothing
- * exercised the TWAI link's own FULL policy on a host before it. That is a claim about
- * the TWAI LINK, not about CAN: `core/tests/transport_can_vcan_test.cpp` already drives
+ * counting semaphore and queue (fake_twai.hpp). This is the first suite to compile that TU
+ * anywhere, so nothing exercised the TWAI link's own FULL policy on a host before it. That is a
+ * claim about the TWAI LINK, not about CAN: `core/tests/transport_can_vcan_test.cpp` already drives
  * real `socketcan_link_t` instances over kernel `vcan0` on a host, with its own CI leg.
  *
  * The bus state every case here stages is the one that makes the defect bite: a

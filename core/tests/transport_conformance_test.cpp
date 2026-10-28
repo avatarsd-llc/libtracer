@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "libtracer/loopback.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
@@ -275,8 +276,29 @@ void run_contract() {
 
 }  // namespace
 
+/** @brief A source that refuses every draw. */
+class refusing_source_t final : public tr::mem::block_source_t {
+   public:
+    refusing_source_t() noexcept : block_source_t("test_refusing_src") {}
+    [[nodiscard]] void* try_alloc(std::size_t, std::size_t) noexcept override { return nullptr; }
+    void release(void*, std::size_t, std::size_t) noexcept override {}
+};
+
+/** @brief #2288 — a loopback frame whose block the source refuses is a COUNTED drop. */
+void test_loopback_refused_frame_is_counted() {
+    std::printf("loopback: a refused frame block is counted in dropped_tx:\n");
+    refusing_source_t src;
+    tr::net::loopback_channel_t ch(src);
+    const auto frame = frame_of({0x01, 0x02, 0x03});
+    ch.a().send(frame);
+    ch.a().send(frame);
+    check(ch.a().drop_stats().dropped_tx == 2, "both refused frames were counted");
+    check(ch.b().drop_stats().dropped_tx == 0, "the receiving end counted nothing");
+}
+
 int main() {
     std::printf("transport_t seam conformance — one contract over every adapter:\n");
+    test_loopback_refused_frame_is_counted();
     run_contract<loopback_pair>();
     run_contract<udp_pair>();
     run_contract<tcp_pair>();
