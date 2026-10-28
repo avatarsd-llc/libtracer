@@ -21,8 +21,7 @@
   ],
   "targets": {
     "cortex-m0": {
-      "source": "tools/cortexm0_footprint.py --archive-out (arm-none-eabi-g++ 13.2, core/tests/footprint/config)",
-      "sites": {}
+      "source": "tools/cortexm0_footprint.py --archive-out (arm-none-eabi-g++ 13.2, core/tests/footprint/config)"
     },
     "esp32c6": {
       "source": "integrations/esp-idf/examples/full_node, idf.py set-target esp32c6 (espressif/idf:release-v6.0)",
@@ -62,106 +61,6 @@
           "_ZNSt6threadC2IZN2tr3net20esp_ws_client_link_t15start_receivingEvEUlvE_JEvEEOT_DpOT0_": {
             "_ZNSt6thread15_M_start_threadESt10unique_ptrINS_6_StateESt14default_deleteIS1_EEPFvvE": 1,
             "operator new": 1
-          }
-        },
-        "graph.cpp.obj": {
-          "_ZN2tr5graph12_GLOBAL__N_1L10name_unsetERNS0_15vertex_policy_tERKNS0_8vertex_tE": {
-            "via _ZNSt6vectorIN2tr5graph11app_field_tESaIS2_EED1Ev": 3
-          },
-          "_ZN2tr5graph7graph_t10set_policyENS0_15vertex_handle_tENS0_15vertex_policy_tE": {
-            "via _ZN2tr5graph12_GLOBAL__N_1L10name_unsetERNS0_15vertex_policy_tERKNS0_8vertex_tE": 1
-          },
-          "_ZN2tr5graph7graph_t15register_vertexERKNS0_6path_tENS0_6role_tENS0_10handlers_tENS0_15vertex_policy_tE": {
-            "via _ZN2tr5graph7graph_t19try_register_vertexERKNS0_6path_tENS0_6role_tENS0_10handlers_tENS0_15vertex_policy_tE": 1,
-            "via _ZNSt6vectorIN2tr5graph11app_field_tESaIS2_EED1Ev": 1
-          },
-          "_ZN2tr5graph7graph_t19register_vertex_keyESt4spanIKSt4byteLj4294967295EENS0_6role_tENS0_10handlers_tENS0_15vertex_policy_tES5_": {
-            "via _ZN2tr5graph7graph_t24register_vertex_key_spanESt4spanIKSt4byteLj4294967295EENS0_6role_tERKNS0_10handlers_tES5_NS0_15vertex_policy_tE": 1,
-            "via _ZNSt6vectorIN2tr5graph11app_field_tESaIS2_EED1Ev": 1
-          },
-          "_ZN2tr5graph7graph_t19try_register_vertexERKNS0_6path_tENS0_6role_tENS0_10handlers_tENS0_15vertex_policy_tE": {
-            "via _ZN2tr5graph7graph_t24register_vertex_key_spanESt4spanIKSt4byteLj4294967295EENS0_6role_tERKNS0_10handlers_tES5_NS0_15vertex_policy_tE": 1,
-            "via _ZNSt6vectorIN2tr5graph11app_field_tESaIS2_EED1Ev": 1
-          },
-          "_ZN2tr5graph7graph_t24register_vertex_key_spanESt4spanIKSt4byteLj4294967295EENS0_6role_tERKNS0_10handlers_tES5_NS0_15vertex_policy_tE": {
-            "via _ZN2tr5graph12_GLOBAL__N_1L10name_unsetERNS0_15vertex_policy_tERKNS0_8vertex_tE": 1
-          },
-          "_ZN2tr5graph7graph_tC2ERNS_3mem14block_source_tENS0_13graph_hooks_tE": {
-            "via _ZZN2tr5graph7graph_tC4ERNS_3mem14block_source_tENS0_13graph_hooks_tEENUlPvRS1_St4spanIKSt4byteLj4294967295EEPKNS_4wire10tlv_node_tEE_4_FUNES6_S7_SB_SF_": 2
-          },
-          "_ZNSt12_Vector_baseISt4byteSaIS0_EED2Ev": {
-            "operator delete": 1
-          },
-          "_ZNSt6vectorIN2tr5graph11app_field_tESaIS2_EED2Ev": {
-            "operator delete": 2,
-            "via _ZNSt12_Vector_baseISt4byteSaIS0_EED2Ev": 2
-          },
-          "_ZZN2tr5graph7graph_tC4ERNS_3mem14block_source_tENS0_13graph_hooks_tEENUlPvRS1_St4spanIKSt4byteLj4294967295EEPKNS_4wire10tlv_node_tEE_4_FUNES6_S7_SB_SF_": {
-            "via _ZN2tr5graph7graph_t19register_vertex_keyESt4spanIKSt4byteLj4294967295EENS0_6role_tENS0_10handlers_tENS0_15vertex_policy_tES5_": 1,
-            "via _ZNSt6vectorIN2tr5graph11app_field_tESaIS2_EED1Ev": 1
-          }
-        },
-        "graph_fields.cpp.obj": {
-          "_ZN2tr5graph11app_field_tD2Ev": {
-            "via _ZNSt12_Vector_baseISt4byteSaIS0_EED2Ev": 2,
-            "via _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE10_M_disposeEv": 1
-          },
-          "_ZN2tr5graph12_GLOBAL__N_1L13app_field_selERKNS0_12field_path_tERNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE.constprop.0": {
-            "via _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE10_M_disposeEv": 2,
-            "via _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE9_M_mutateEjjPKcj": 2
-          },
-          "_ZN2tr5graph7graph_t15field_surface_t11read_schemaERKS1_PNS0_8vertex_tERKNS0_12field_path_tESt17basic_string_viewIcSt11char_traitsIcEE": {
-            "via _ZNK2tr5graph7graph_t11read_schemaEPNS0_8vertex_tE": 1
-          },
-          "_ZN2tr5graph7graph_t15field_surface_t13read_settingsERKS1_PNS0_8vertex_tERKNS0_12field_path_tESt17basic_string_viewIcSt11char_traitsIcEE": {
-            "via _ZN2tr5graph12_GLOBAL__N_1L13app_field_selERKNS0_12field_path_tERNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE.constprop.0": 1,
-            "via _ZNK2tr5graph7graph_t13read_settingsEPNS0_8vertex_tE": 1,
-            "via _ZNK2tr5graph7graph_t17read_settings_appEPNS0_8vertex_tE": 1,
-            "via _ZNSt12_Vector_baseISt4byteSaIS0_EED2Ev": 1,
-            "via _ZNSt6vectorISt4byteSaIS0_EE13_M_assign_auxIPS0_EEvT_S5_St20forward_iterator_tag.isra.0": 1,
-            "via _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE10_M_disposeEv": 1
-          },
-          "_ZN2tr5graph7graph_t15field_surface_t14write_settingsERS1_PNS0_8vertex_tERKNS0_12field_path_tERKNS_4view6view_tERKNS0_11write_ctx_tE": {
-            "via _ZN2tr5graph12_GLOBAL__N_1L13app_field_selERKNS0_12field_path_tERNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE.constprop.0": 1,
-            "via _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE10_M_disposeEv": 1
-          },
-          "_ZN2tr5graph8vertex_t19app_fields_snapshotEv": {
-            "operator delete": 2,
-            "operator new": 3,
-            "via _ZN2tr5graph11app_field_tD1Ev": 2,
-            "via _ZNSt6vectorIN2tr5graph11app_field_tESaIS2_EED1Ev": 1,
-            "via _ZNSt6vectorISt4byteSaIS0_EE13_M_assign_auxIPS0_EEvT_S5_St20forward_iterator_tag.isra.0": 1,
-            "via _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE9_M_mutateEjjPKcj": 1
-          },
-          "_ZNK2tr5graph7graph_t11read_schemaEPNS0_8vertex_tE": {
-            "via _ZN2tr5graph8vertex_t19app_fields_snapshotEv": 1,
-            "via _ZNSt6vectorIN2tr5graph11app_field_tESaIS2_EED1Ev": 1
-          },
-          "_ZNK2tr5graph7graph_t13read_settingsEPNS0_8vertex_tE": {
-            "via _ZN2tr5graph8vertex_t19app_fields_snapshotEv": 1,
-            "via _ZNSt6vectorIN2tr5graph11app_field_tESaIS2_EED1Ev": 1
-          },
-          "_ZNK2tr5graph7graph_t17read_settings_appEPNS0_8vertex_tE": {
-            "via _ZN2tr5graph8vertex_t19app_fields_snapshotEv": 1,
-            "via _ZNSt6vectorIN2tr5graph11app_field_tESaIS2_EED1Ev": 1
-          },
-          "_ZNSt12_Vector_baseISt4byteSaIS0_EED2Ev": {
-            "operator delete": 1
-          },
-          "_ZNSt6vectorIN2tr5graph11app_field_tESaIS2_EED2Ev": {
-            "operator delete": 1,
-            "via _ZN2tr5graph11app_field_tD1Ev": 1
-          },
-          "_ZNSt6vectorISt4byteSaIS0_EE13_M_assign_auxIPS0_EEvT_S5_St20forward_iterator_tag.isra.0": {
-            "operator delete": 1,
-            "operator new": 1
-          },
-          "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE10_M_disposeEv": {
-            "operator delete": 1
-          },
-          "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE9_M_mutateEjjPKcj": {
-            "operator new": 1,
-            "via _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE10_M_disposeEv": 1
           }
         },
         "loopback.cpp.obj": {
@@ -293,32 +192,17 @@
             "via _ZN2tr3net18transport_vertex_t18mint_module_lockedESt17basic_string_viewIcSt11char_traitsIcEENS0_14conn_catalog_tE": 1
           },
           "_ZN2tr3net18transport_vertex_t18mint_module_lockedESt17basic_string_viewIcSt11char_traitsIcEENS0_14conn_catalog_tE": {
-            "via _ZN2tr5graph7graph_t19register_vertex_keyESt4spanIKSt4byteLj4294967295EENS0_6role_tENS0_10handlers_tENS0_15vertex_policy_tES5_": 2,
-            "via _ZNSt22_Optional_payload_baseIN2tr5graph17app_fields_decl_tEE8_M_resetEv": 2,
             "via _ZZN2tr3net18transport_vertex_t18mint_module_lockedESt17basic_string_viewIcSt11char_traitsIcEENS0_14conn_catalog_tEENUlPvRKNS_5graph7value_tERKNS8_11write_ctx_tEE_4_FUNES7_SB_SE_": 2
           },
           "_ZN2tr3net18transport_vertex_t22endpoint_create_lockedERNS1_9ctl_txn_tESt17basic_string_viewIcSt11char_traitsIcEENS0_14conn_catalog_tERKNS_4wire10tlv_node_tE": {
             "via _ZN2tr3net18transport_vertex_t22make_connection_lockedERNS1_9ctl_txn_tESt17basic_string_viewIcSt11char_traitsIcEES7_PKNS_4wire10tlv_node_tENS_3mem13block_array_tISt4byteEENS0_15conn_settings_tE": 1
           },
-          "_ZN2tr3net18transport_vertex_t22make_connection_lockedERNS1_9ctl_txn_tESt17basic_string_viewIcSt11char_traitsIcEES7_PKNS_4wire10tlv_node_tENS_3mem13block_array_tISt4byteEENS0_15conn_settings_tE": {
-            "via _ZN2tr5graph7graph_t19register_vertex_keyESt4spanIKSt4byteLj4294967295EENS0_6role_tENS0_10handlers_tENS0_15vertex_policy_tES5_": 2,
-            "via _ZNSt22_Optional_payload_baseIN2tr5graph17app_fields_decl_tEE8_M_resetEv": 2
-          },
           "_ZN2tr3net18transport_vertex_tC2ERNS_5graph7graph_tERNS0_12fwd_router_tESt17basic_string_viewIcSt11char_traitsIcEEPNS_3mem13mem_backend_tENS0_10slim_net_tEPNSB_14block_source_tE": {
-            "via _ZN2tr3net18transport_vertex_t15link_hold_thunkEPvNS_5graph11link_pair_tEb": 2,
-            "via _ZN2tr5graph7graph_t15register_vertexERKNS0_6path_tENS0_6role_tENS0_10handlers_tENS0_15vertex_policy_tE": 1,
-            "via _ZNSt22_Optional_payload_baseIN2tr5graph17app_fields_decl_tEE8_M_resetEv": 1
+            "via _ZN2tr3net18transport_vertex_t15link_hold_thunkEPvNS_5graph11link_pair_tEb": 2
           },
           "_ZN2tr3net18transport_vertex_tC2ERNS_5graph7graph_tERNS0_12fwd_router_tESt17basic_string_viewIcSt11char_traitsIcEEPNS_3mem13mem_backend_tEPNSB_14block_source_tE": {
             "via _ZN2tr3net18transport_vertex_tC1ERNS_5graph7graph_tERNS0_12fwd_router_tESt17basic_string_viewIcSt11char_traitsIcEEPNS_3mem13mem_backend_tENS0_10slim_net_tEPNSB_14block_source_tE": 1,
             "via _ZN2tr3net27register_builtin_transportsERNS0_18transport_vertex_tEPNS_3mem13mem_backend_tEPNS3_14block_source_tE": 1
-          },
-          "_ZNSt12_Vector_baseISt4byteSaIS0_EED2Ev": {
-            "operator delete": 1
-          },
-          "_ZNSt22_Optional_payload_baseIN2tr5graph17app_fields_decl_tEE8_M_resetEv": {
-            "operator delete": 2,
-            "via _ZNSt12_Vector_baseISt4byteSaIS0_EED2Ev": 2
           },
           "_ZZN2tr3net18transport_vertex_t18mint_module_lockedESt17basic_string_viewIcSt11char_traitsIcEENS0_14conn_catalog_tEENUlPvRKNS_5graph7value_tERKNS8_11write_ctx_tEE_4_FUNES7_SB_SE_": {
             "via _ZN2tr3net18transport_vertex_t14endpoint_writeESt17basic_string_viewIcSt11char_traitsIcEENS0_14conn_catalog_tERKNS_5graph7value_tE": 1

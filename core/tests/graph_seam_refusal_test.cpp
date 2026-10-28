@@ -475,8 +475,8 @@ void test_set_policy() {
         p.retention = retention_t::N;
         p.depth = 4;
         p.share_hint = tr::graph::share_hint_t::COPY;
-        p.app_fields = {
-            app_field_t{.name = "k", .access = app_access_t::RW, .value = {std::byte{1}}}};
+        static constexpr std::byte kOne[]{std::byte{1}};
+        p.app_fields = {app_field_t{.name = "k", .access = app_access_t::RW, .value = kOne}};
         p.delivery_mode = delivery_mode_t::UNCONDITIONAL;
         return verdict(g.set_policy(c.v, std::move(p)));
     };

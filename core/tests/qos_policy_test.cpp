@@ -689,7 +689,7 @@ void test_conformance_vectors() {
         tr::wire::emit_name(desc, "dtype");
         tr::wire::emit_name(desc, "f32");
         table.push_back(tr::graph::app_field_t{
-            .name = "kp", .access = tr::graph::app_access_t::RW, .descriptor = std::move(desc)});
+            .name = "kp", .access = tr::graph::app_access_t::RW, .descriptor = desc});
         (void)g.set_policy(v, {.app_fields = std::move(table)});
         const std::optional<decoded_t> got = decode_read(g.read(path_t("/temp:schema")));
         const std::vector<std::byte> want = vector_bytes("tlv-types/point-schema-app");

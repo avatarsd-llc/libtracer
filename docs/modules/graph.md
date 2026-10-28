@@ -553,24 +553,25 @@ Every undeclared name answers `SCHEMA_NOT_FOUND`.
 ```cpp
 enum class app_access_t { RO, RW, WO };   // constrains REMOTE callers only
 
-struct app_field_t {                      // owning install
-    std::string           name;           // key below settings.app. ("kp", "wifi.ssid")
-    app_access_t          access;
-    std::vector<std::byte> descriptor;    // §B.1 record served verbatim inside :schema
-    std::vector<std::byte> value;         // optional initial value
+struct app_field_t {                      // owning install: views, copied at declaration
+    std::string_view           name;       // key below settings.app. ("kp", "wifi.ssid")
+    app_access_t               access;
+    retention_t                retention;
+    std::span<const std::byte> descriptor; // §B.1 record served verbatim inside :schema
+    std::span<const std::byte> value;      // optional initial value
 };
 
 // declared through vertex_policy_t::app_fields (an app_fields_decl_t), at registration or
 // through set_policy — one member, two spellings:
-g.set_policy(v, {.app_fields = std::vector<app_field_t>{...}});  // owning (moved in)
+g.set_policy(v, {.app_fields = {app_field_t{...}, ...}});        // owning (copied)
 g.set_policy(v, {.app_fields = kFlashTable});                    // borrowed, zero-copy
 ```
 
-| | owning (`std::vector<app_field_t>`) | borrowed (`borrowed_fields_t`) |
+| | owning (a braced list, span or `std::vector` of `app_field_t`) | borrowed (`borrowed_fields_t`) |
 | --- | --- | --- |
-| Name and descriptor bytes | copied into the graph | **viewed**, never copied |
+| Name and descriptor bytes | copied into one block of the declaration, then into the graph | **viewed**, never copied |
 | Initial value | may carry one | declaration only; write values afterwards |
-| Caller obligation | none | the table array **and** the bytes it points at outlive the vertex |
+| Caller obligation | the viewed bytes outlive the declaration's construction | the table array **and** the bytes it points at outlive the vertex |
 
 `borrowed_fields_t` converts implicitly from the array spellings a `constexpr` table in
 flash takes, and **not** from a `std::vector` — so a caller whose storage cannot satisfy
