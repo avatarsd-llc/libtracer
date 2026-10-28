@@ -1,7 +1,7 @@
 /**
  * @file
  * @brief The model behind fake_twai.hpp — the TWAI node, the FreeRTOS queue and
- *        counting semaphore, and the `esp_pthread` stack-sizing seam.
+ *        counting semaphore.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -24,7 +24,6 @@
 #include <vector>
 
 #include "driver/gpio.h"
-#include "esp_pthread.h"
 #include "esp_twai_onchip.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -95,7 +94,8 @@ std::mutex g_node_m;
 
 // --- FreeRTOS: counting semaphore -------------------------------------------------
 
-SemaphoreHandle_t xSemaphoreCreateCounting(UBaseType_t max_count, UBaseType_t initial_count) {
+SemaphoreHandle_t xSemaphoreCreateCountingStatic(UBaseType_t max_count, UBaseType_t initial_count,
+                                                 StaticSemaphore_t* /*storage*/) {
     auto* s = new fake_semaphore_t();
     s->max_count = static_cast<unsigned>(max_count);
     s->count = static_cast<unsigned>(initial_count);
@@ -135,7 +135,8 @@ BaseType_t xSemaphoreGiveFromISR(SemaphoreHandle_t semaphore,
 
 // --- FreeRTOS: queue --------------------------------------------------------------
 
-QueueHandle_t xQueueCreate(UBaseType_t length, UBaseType_t item_size) {
+QueueHandle_t xQueueCreateStatic(UBaseType_t length, UBaseType_t item_size,
+                                 unsigned char* /*storage*/, StaticQueue_t* /*queue_buf*/) {
     auto* q = new fake_queue_t();
     q->capacity = static_cast<std::size_t>(length);
     q->item_size = static_cast<std::size_t>(item_size);
@@ -171,45 +172,6 @@ BaseType_t xQueueSendFromISR(QueueHandle_t queue, const void* item,
 
 void vTaskDelay(TickType_t ticks_to_delay) {
     std::this_thread::sleep_for(ticks_to_wall(ticks_to_delay));
-}
-
-// --- esp_pthread: the stack-sizing seam -------------------------------------------
-//
-// The TWAI link reaches it through esp_thread.hpp. Nothing here resizes a host
-// thread (glibc sizes through pthread_attr_t, not a thread-local config); these
-// exist so a link constructed with a non-zero stack_size links and behaves. The
-// WS client suite proves the ARMING contract on its own fake, which records it.
-
-namespace {
-/** @brief The config armed on this thread, if any. */
-thread_local esp_pthread_cfg_t g_pthread_cfg{};
-/** @brief Whether @ref g_pthread_cfg has ever been set on this thread. */
-thread_local bool g_pthread_cfg_set = false;
-}  // namespace
-
-esp_pthread_cfg_t esp_pthread_get_default_config(void) {
-    esp_pthread_cfg_t cfg{};
-    cfg.stack_size = 4096;
-    return cfg;
-}
-
-esp_err_t esp_pthread_set_cfg(const esp_pthread_cfg_t* cfg) {
-    if (cfg == nullptr || cfg->stack_size == 0) return ESP_ERR_INVALID_ARG;
-    g_pthread_cfg = *cfg;
-    g_pthread_cfg_set = true;
-    return ESP_OK;
-}
-
-esp_err_t esp_pthread_get_cfg(esp_pthread_cfg_t* p) {
-    if (p == nullptr) return ESP_ERR_INVALID_ARG;
-    if (!g_pthread_cfg_set) {
-        // IDF's own behaviour, and the reason esp_thread.hpp checks the return
-        // code: a thread with no config gets its out-param ZEROED, not left alone.
-        *p = esp_pthread_cfg_t{};
-        return ESP_ERR_NOT_FOUND;
-    }
-    *p = g_pthread_cfg;
-    return ESP_OK;
 }
 
 // --- esp_driver_twai: the node API ------------------------------------------------

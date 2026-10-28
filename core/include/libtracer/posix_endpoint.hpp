@@ -24,8 +24,6 @@
  */
 #pragma once
 
-#include <pthread.h>
-
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -38,7 +36,9 @@
 #include "libtracer/egress.hpp"
 #include "libtracer/function_ref.hpp"
 #include "libtracer/inline_fn.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
+#include "libtracer/static_thread.hpp"
 #include "libtracer/transport.hpp"
 
 /** @brief The POSIX scatter-gather descriptor (`<sys/uio.h>`), forward-declared
@@ -290,23 +290,25 @@ class posix_endpoint_t {
      * frame can be decoded) calls it from there instead, and owns the one-shot
      * latch that keeps "at most once" true.
      *
-     * Spawns via `pthread_create` (not `std::thread`): the constructor of the
-     * latter THROWS on failure, which under `-fno-exceptions` (the MCU build)
-     * `std::abort`s — a thread-spawn OOM on a starved node would bring the whole
-     * process down instead of soft-failing. `pthread_create` returns an error
-     * code; a failed spawn leaves the endpoint simply not receiving (no abort).
+     * Spawns through @ref static_thread_t (#2288), never `std::thread`: the constructor of the
+     * latter THROWS on failure, which under `-fno-exceptions` (the MCU build) `std::abort`s.
+     * A refused spawn leaves the endpoint simply not receiving (no abort). On ESP-IDF the
+     * thread is a static FreeRTOS task whose control block and stack are ONE block drawn from
+     * @p src; on a POSIX host it is a `pthread_create` and @p src pays only a small boot
+     * record.
      *
      * @param body       The thread body (the transport's accept/recv loop).
      * @param stack_size Recv-thread stack size in bytes, or 0 for the platform
-     *        default (the ONLY value that preserves prior behavior). A non-zero
-     *        hint is applied via `pthread_attr_setstacksize`, honored by glibc
-     *        AND the ESP-IDF pthread layer (where it maps to the FreeRTOS task
-     *        stack) — the portable knob that lets an integrator right-size this
-     *        thread instead of inflating `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`
-     *        for every pthread in the system. A hint below the platform floor is
-     *        ignored (the default stack is used) rather than failing the spawn.
+     *        default (`CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT` on ESP-IDF). A non-zero hint
+     *        right-sizes this thread instead of inflating that default for every pthread in
+     *        the system. On POSIX a hint below the platform floor is ignored (the default
+     *        stack is used) rather than failing the spawn.
+     * @param src        Where the thread's memory comes from (see above); it MUST outlive
+     *        @ref stop_and_join. The default is the build's net sub-pool, which on an MCU
+     *        arena build is the static arena: size the arena for the stack, or pass a source.
      */
-    void start(thread_body_t body, std::size_t stack_size = 0);
+    void start(thread_body_t body, std::size_t stack_size = 0,
+               mem::block_source_t& src = mem::net_source());
 
     /**
      * @brief Request shutdown and join the receive thread (idempotent).
@@ -378,19 +380,11 @@ class posix_endpoint_t {
     std::atomic<bool> stop_{false};
 
    private:
-    /**
-     * @brief pthread entry trampoline — runs `body_` then returns.
-     *
-     * @param self The owning @ref posix_endpoint_t (the `pthread_create` arg).
-     * @return Always nullptr (the thread's exit value is unused).
-     */
-    static void* thread_entry(void* self);
+    /** @brief The thread entry trampoline: runs `body_` of the @ref posix_endpoint_t @p self. */
+    static void thread_entry(void* self);
 
-    thread_body_t body_;   /**< @brief The thread body `thread_entry` runs. */
-    pthread_t thread_{};   /**< @brief The receive thread (joined by stop_and_join;
-                                      valid only while `started_`). */
-    bool started_ = false; /**< @brief Whether `thread_` holds a joinable thread
-                                      (a failed/never-attempted spawn stays false). */
+    thread_body_t body_;     /**< @brief The thread body `thread_entry` runs. */
+    static_thread_t thread_; /**< @brief The receive thread (joined by stop_and_join). */
 };
 
 /**

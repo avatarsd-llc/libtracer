@@ -17,7 +17,6 @@
 #include <utility>
 
 #include "driver/gpio.h"
-#include "esp_thread.hpp"
 #include "freertos/task.h"
 
 namespace tr::net {
@@ -101,16 +100,22 @@ twai_link_t::twai_link_t(const twai_link_config_t& config)
     // hardware TX slot. A free pool slot therefore implies driver-side room,
     // so twai_node_transmit below never needs the driver's own (queue-full)
     // wait — the pool semaphore is the ONE backpressure point.
-    : tx_pool_(config.tx_queue_depth + 1, config.memory.io_or_default()),
+    : src_(&config.memory.io_or_default()),
+      tx_pool_(config.tx_queue_depth + 1, *src_),
       tx_timeout_ms_(clamp_tx_timeout_ms(config.tx_timeout_ms)),
       stack_size_(config.stack_size) {
-    // The ISR→dispatch handoff: fixed-size copies of the seam's frame record.
-    rx_queue_ = xQueueCreate(config.rx_queue_depth, sizeof(can_frame_data_t));
+    // The ISR→dispatch handoff: fixed-size copies of the seam's frame record, in storage
+    // drawn from the link's source and a queue the RTOS creates over it statically (#2288).
+    rx_queue_bytes_ = std::size_t{config.rx_queue_depth} * sizeof(can_frame_data_t);
+    rx_queue_storage_ = src_->try_alloc(rx_queue_bytes_, alignof(can_frame_data_t));
+    if (rx_queue_storage_ == nullptr) return;
+    rx_queue_ = xQueueCreateStatic(config.rx_queue_depth, sizeof(can_frame_data_t),
+                                   static_cast<std::uint8_t*>(rx_queue_storage_), &rx_queue_buf_);
     if (rx_queue_ == nullptr) return;
 
     // Free-slot gate for the TX pool, given back from the tx-done ISR.
     const auto slots = static_cast<UBaseType_t>(tx_pool_.capacity());
-    tx_free_sem_ = xSemaphoreCreateCounting(slots, slots);
+    tx_free_sem_ = xSemaphoreCreateCountingStatic(slots, slots, &tx_free_sem_buf_);
     if (tx_free_sem_ == nullptr) {
         vQueueDelete(rx_queue_);
         rx_queue_ = nullptr;
@@ -157,16 +162,17 @@ void twai_link_t::start() {
     // error channel and ok() already answers that question.
     if (node_ == nullptr || thread_.joinable()) return;
 
-    // Right-size the dispatch thread's FreeRTOS task stack without inflating the global
-    // CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT (libtracer #486). The save/set/spawn/restore
-    // recipe this used to spell out in place now lives in esp_thread.hpp, shared with the
-    // WS client link — which accepted the same knob and discarded it (#900).
-    thread_ = esp::spawn_thread(stack_size_, "twai_rx", [this] { run(); });
+    // A static task right-sized by stack_size_ (libtracer #486), its stack and task block
+    // drawn from the link's source (#2288). A refused draw leaves the link not receiving;
+    // the next start() tries again.
+    (void)thread_.start(&twai_link_t::entry, this, stack_size_, "twai_rx", *src_);
 }
+
+void twai_link_t::entry(void* self) { static_cast<twai_link_t*>(self)->run(); }
 
 twai_link_t::~twai_link_t() {
     stop_.store(true, std::memory_order_relaxed);
-    if (thread_.joinable()) thread_.join();
+    thread_.join();
     // Reset the node under the write lock before teardown so an in-flight
     // write_raw never touches a disabled/deleted controller.
     twai_node_handle_t doomed = nullptr;
@@ -198,6 +204,8 @@ twai_link_t::~twai_link_t() {
     }
     if (tx_free_sem_ != nullptr) vSemaphoreDelete(tx_free_sem_);
     if (rx_queue_ != nullptr) vQueueDelete(rx_queue_);
+    if (rx_queue_storage_ != nullptr)
+        src_->release(rx_queue_storage_, rx_queue_bytes_, alignof(can_frame_data_t));
 }
 
 void twai_link_t::on_receive(rx_fn_t rx) {
