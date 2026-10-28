@@ -39,8 +39,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     `self_heal_link_t` counts it as a failed attempt and retries on its backoff. A listener or
     udp link whose receive thread is refused is not `ok()`. Overrides of `start_receiving()`
     must change their return type.
-  - `self_heal_link_t`'s worker draws from `mem::stack_source()`; a refused spawn is retried at
-    the next transition and counted in that source's census.
+  - `self_heal_link_t` takes a trailing `stack` source (default `mem::stack_source()`) for its
+    worker; a refused spawn is retried at the next transition and counted in that source's
+    census.
   - `loopback_channel_t` takes an optional source (default `mem::net_source()`) that must
     outlive the channel. Each queued frame is one block from it, on an intrusive FIFO, and both
     receive threads come from it. A frame whose block is refused, or sent to a stopped peer, is

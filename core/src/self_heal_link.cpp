@@ -35,7 +35,7 @@ using wire::tlv_node_t;
 
 self_heal_link_t::self_heal_link_t(transport_factory_t factory, conn_settings_t settings,
                                    std::span<const std::byte> raw_config, bool inner_delivers_ropes,
-                                   mem::block_source_t& src)
+                                   mem::block_source_t& src, mem::block_source_t& stack)
     : factory_(factory),
       // Defaults resolved ONCE, at bind time, so the factory and every wait in this file
       // read the same effective values (RFC-0014 §4: config overrides the engine's own
@@ -48,7 +48,8 @@ self_heal_link_t::self_heal_link_t(transport_factory_t factory, conn_settings_t 
       }()),
       raw_config_(raw_config),
       inner_ropes_(inner_delivers_ropes),
-      src_(src) {}
+      src_(src),
+      stack_(stack) {}
 
 self_heal_link_t::~self_heal_link_t() { stop(); }
 
@@ -219,13 +220,14 @@ void self_heal_link_t::worker_entry(void* self) {
 void self_heal_link_t::ensure_worker_locked() {
     if (stop_ || worker_started_) return;
     // The #1470 stack knob (0 = the platform default; every host build). On ESP-IDF the
-    // stack is drawn with its control block from the process thread-stack source (#2288),
-    // never from `src_`, the sockets' store, which on an MCU is the shared value arena. A
+    // stack is drawn with its control block from the engine's thread-stack store (#2288,
+    // `link_memory_t::stack`, default `mem::stack_source()`), never from `src_`, the sockets'
+    // store, which on an MCU is the shared value arena. A
     // refused spawn, from the source or the platform, leaves the engine unworkered (counted
     // in that source's census) and the next transition tries again. Never a throw: a
     // `std::thread` spawn failure is a `std::abort()` under -fno-exceptions.
     worker_started_ = worker_.start(&self_heal_link_t::worker_entry, this,
-                                    kSelfHealWorkerStackBytes, "tr_heal", mem::stack_source());
+                                    kSelfHealWorkerStackBytes, "tr_heal", stack_);
 }
 
 void self_heal_link_t::publish_unlocked(std::unique_lock<std::mutex>& l, link_state_t s) {

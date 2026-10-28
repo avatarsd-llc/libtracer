@@ -1131,21 +1131,6 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
         return v;  // PATH_IN_USE on a duplicate connection name
     }
 
-    // The engine is the sole writer of this connection's DIAL transitions (RFC-0014 §4):
-    // its publisher writes the vertex VALUE directly — deliberately NOT through
-    // set_link_state, whose ctl_m_ the engine's worker must never take (the teardown
-    // path joins that worker while HOLDING ctl_m_). remove_connection stops the engine
-    // before the vertex retires, so no publish lands on a retired vertex.
-    if constexpr (kSelfHealLinks) {  // #1470 module gate — see `ctl_txn_t::discharge`
-        if (engine != nullptr) {
-            graph::graph_t* const g = &graph_;
-            const vertex_handle_t vh = *v;
-            engine->set_liveness_publisher([g, vh](link_state_t s) {
-                (void)g->write(vh, link_state_value(s, g->value_backend()));
-            });
-        }
-    }
-
     const conn_role_t effective_role = settings.role;
     conn_t made{.vertex = *v,
                 .config = std::move(config_bytes),
@@ -1205,7 +1190,9 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     // the registry call would make the rollback above lossy: the caller's provide_link
     // staging would be gone, so a retry once the pressure clears would no longer find its
     // link and would fail NOT_FOUND instead of succeeding. (Unconditional: with nothing
-    // staged under this key, the erase finds nothing.)
+    // staged under this key, the erase finds nothing.) A staged link whose receive then
+    // refuses to start (below) is NOT kept for a retry: it is closed and not ok(), so a retry
+    // must be handed a new link.
     (void)pending_links_.erase(staged_key);
     // LAST WIRING STEP (#1025): the link may now deliver. Everything an inbound frame needs
     // is in place — the registry entry is published and `add_child` has installed the
@@ -1239,9 +1226,24 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     // S7 that is always the endpoint module's declared role and nothing else can move it; the
     // read is kept honest anyway, because publishing anything but what the factory acted on is
     // how a `client`'s `UP` once landed over a socket the factory had just BOUND as a listener.
-    if (engine != nullptr)
+    //
+    // The engine is the sole writer of this connection's later DIAL transitions (RFC-0014
+    // §4): its publisher, installed here with the birth publish, writes the vertex VALUE
+    // directly — deliberately NOT through set_link_state, whose ctl_m_ the engine's worker
+    // must never take (the teardown path joins that worker while HOLDING ctl_m_). Nothing
+    // can make the engine publish before this: it has no socket and no worker until an op
+    // binds it, and every op waits on the `ctl_m_` held here. remove_connection stops the
+    // engine before the vertex retires, so no publish lands on a retired vertex.
+    if (engine != nullptr) {
+        if constexpr (kSelfHealLinks) {  // #1470 module gate — see `ctl_txn_t::discharge`
+            graph::graph_t* const g = &graph_;
+            const vertex_handle_t vh = *v;
+            engine->set_liveness_publisher([g, vh](link_state_t s) {
+                (void)g->write(vh, link_state_value(s, g->value_backend()));
+            });
+        }
         (void)set_link_state_locked(txn, qv, link_state_t::DORMANT);
-    else if (conn->owned)
+    } else if (conn->owned)
         (void)set_link_state_locked(
             txn, qv,
             effective_role == conn_role_t::LISTEN ? link_state_t::LISTENING : link_state_t::UP);

@@ -519,7 +519,8 @@ menu "libtracer"
             A refused spawn is reported, never silent: a listener or udp link
             is not ok(), a DIAL link's creation answers BACKPRESSURE, and the
             region's tr::mem::stack_source().stats() counts the refusal. 0
-            compiles no region: the stacks then draw from the default root.
+            compiles no region and puts the stacks back in the value arena
+            (the default root), where a spawn can starve values and tables.
             The linux target defaults to 0, because its threads are host
             pthreads that draw no stack from any source.
 
