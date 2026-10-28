@@ -470,6 +470,18 @@ class heap_backend_t final : public mem_backend_t {
 [[nodiscard]] block_source_t& net_source() noexcept;
 
 /**
+ * @brief The default THREAD-STACK source (#2288): where a link's `tr::static_thread_t` draws
+ *        its stack and task block when the application injects no `link_memory_t::stack`.
+ *
+ * On an MCU build with `config_t::kThreadStackArenaBytes` set (the ESP-IDF component binds it
+ * from `CONFIG_LIBTRACER_THREAD_STACKS`), a static region of its own: the value, table and
+ * net sub-pools never see a stack, and a stack never sees them. Without one it is
+ * @ref default_root. On a host it is @ref net_source (a host thread draws only a boot
+ * record). It lives for the process, so a thread that may be detached can draw from it.
+ */
+[[nodiscard]] block_source_t& stack_source() noexcept;
+
+/**
  * @brief The segment backend over @ref net_source, the default receive, flatten and egress
  *        backend of the router and the links when the application injects none (Q21).
  *

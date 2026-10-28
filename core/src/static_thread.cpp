@@ -14,7 +14,7 @@
 #include <cstddef>
 #include <new>
 
-#if defined(ESP_PLATFORM)
+#if defined(LIBTRACER_STATIC_THREAD_FREERTOS)
 #include <mutex>
 
 #include "freertos/FreeRTOS.h"  // IWYU pragma: keep — ordering: FreeRTOS.h before task.h
@@ -25,7 +25,7 @@
 
 namespace tr {
 
-#if defined(ESP_PLATFORM)
+#if defined(LIBTRACER_STATIC_THREAD_FREERTOS)
 
 namespace {
 
@@ -62,6 +62,11 @@ struct ctl_t {
 };
 
 constexpr std::size_t kCtlBytes = (sizeof(ctl_t) + kAlign - 1) / kAlign * kAlign;
+// The ESP component sizes its thread-stack region at 640 B of task block per stack
+// (integrations/esp-idf/libtracer/CMakeLists.txt, CONFIG_LIBTRACER_THREAD_STACKS).
+static_assert(kCtlBytes + 64 <= 640,
+              "the thread-stack region's per-stack budget no longer "
+              "holds a task block; raise it in the ESP CMakeLists.txt");
 
 /** @brief Detached blocks not yet reaped, guarded by @ref g_parked_m. */
 ctl_t* g_parked = nullptr;
@@ -76,8 +81,18 @@ void task_entry(void* p) {
     vTaskSuspend(nullptr);
 }
 
-/** @brief Delete a task whose body has returned and release its block. The give precedes the
- *         suspend, so the task may still be on its way there: wait it off the CPU first. */
+/**
+ * @brief Delete a task whose body has returned and release its block. The give precedes the
+ *        suspend, so the task may still be on its way there: wait it off the CPU first.
+ *
+ * `eSuspended` means off every core. IDF's `eTaskGetState` (FreeRTOS-Kernel/tasks.c, v5.x and
+ * v6.0) tests `taskIS_CURRENTLY_RUNNING(pxTCB)`, which compares the TCB against
+ * `pxCurrentTCBs[0]` AND `pxCurrentTCBs[1]` on a dual-core build, under the kernel lock, before
+ * it looks at any state list. A task that has put itself on the suspended list but is still
+ * current on the other core therefore reads `eRunning`, and only reads `eSuspended` once that
+ * core has switched away. So the delete below always finds the task off-CPU and deletes it
+ * here, rather than deferring it to the idle task while its stack is still live.
+ */
 void finish(ctl_t* c) noexcept {
     while (eTaskGetState(c->task) != eSuspended) vTaskDelay(1);
     vTaskDelete(c->task);  // a suspended task is deleted here, running its TLS destructors

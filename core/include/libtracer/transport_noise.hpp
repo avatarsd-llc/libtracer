@@ -428,9 +428,7 @@ class noise_link_t final : public transport_t {
     }
 
     /** @brief The carrier receives from its constructor; a later start is passed on. */
-    void start_receiving() override {
-        if (carrier_) carrier_->start_receiving();
-    }
+    bool start_receiving() override { return carrier_ ? carrier_->start_receiving() : true; }
 
    private:
     /** @brief What a transport datagram adds to its frame: type, nonce and tag. */
