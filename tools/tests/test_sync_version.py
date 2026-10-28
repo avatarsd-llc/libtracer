@@ -278,13 +278,16 @@ class RepoTreeTest(unittest.TestCase):
     def test_the_lockfile_is_in_the_gate_workflow_trigger(self):
         """A gate that never runs on the file it guards is the bug, one level up.
 
-        `version-consistency.yml` filters on `paths:`, which is an allowlist: without
-        the lockfile listed, a PR touching only the lockfile skips the job entirely
-        and the drift lands unseen.
+        `version-consistency.yml` filters its pull_request trigger on `paths:`, which
+        is an allowlist: without the lockfile listed, a PR touching only the lockfile
+        skips the job entirely and the drift lands unseen. Its push trigger (release
+        tags) and the nightly schedule carry no path filter, so they always run (#2348).
         """
         workflow = read(os.path.join(REPO, ".github", "workflows", "version-consistency.yml"))
         rel = str(sv.TS_LOCKFILE.relative_to(sv.ROOT))
-        self.assertEqual(workflow.count(f"- {rel}"), 2, f"{rel} must be in both the push and pull_request paths")
+        self.assertEqual(workflow.count(f"- {rel}"), 1, f"{rel} must be in the pull_request paths")
+        push = workflow.split("\n  push:\n", 1)[1].split("\n  pull_request:", 1)[0]
+        self.assertNotIn("paths", push, "the push trigger must not be path-filtered")
 
     def test_every_stamped_artifact_exists(self):
         """The tool's file list matches the tree; a moved manifest fails here, not at a tag."""
