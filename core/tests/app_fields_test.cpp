@@ -165,11 +165,10 @@ void test_declare_read_write() {
     const vertex_handle_t v = g.register_vertex(path_t("/ctrl/pid"), role_t::STORED_VALUE);
 
     const std::vector<std::byte> initial = value_tlv("kp0");
+    const std::vector<std::byte> f32 = dtype_desc("f32");
     std::vector<app_field_t> table;
-    table.push_back(app_field_t{.name = "kp",
-                                .access = app_access_t::RW,
-                                .descriptor = dtype_desc("f32"),
-                                .value = initial});
+    table.push_back(
+        app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = f32, .value = initial});
     (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     check(reads_back(g.read(path_t("/ctrl/pid:settings.app.kp")), initial),
@@ -345,9 +344,9 @@ void test_schema_merge() {
               before->tlv.children[1].type == type_t::SETTINGS,
           "no table: POINT{NAME, SETTINGS} — today's synthesized shape, no app member");
 
+    const std::vector<std::byte> f32 = dtype_desc("f32");
     std::vector<app_field_t> table;
-    table.push_back(
-        app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = dtype_desc("f32")});
+    table.push_back(app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = f32});
     table.push_back(app_field_t{.name = "secret", .access = app_access_t::WO});
     (void)g.set_policy(v, {.app_fields = std::move(table)});
 
@@ -431,11 +430,13 @@ void test_storage_shape() {
     graph_t g;
     const vertex_handle_t v = g.register_vertex(path_t("/dev/n"), role_t::STORED_VALUE);
 
+    // The fields view these until the install copies them (#2288).
+    const std::vector<std::byte> u32 = dtype_desc("u32");
+    std::vector<std::string> names;
+    for (int i = 0; i < 16; ++i) names.push_back("f" + std::to_string(i));
     std::vector<app_field_t> table;
-    for (int i = 0; i < 16; ++i)
-        table.push_back(app_field_t{.name = "f" + std::to_string(i),
-                                    .access = app_access_t::RW,
-                                    .descriptor = dtype_desc("u32")});
+    for (const std::string& n : names)
+        table.push_back(app_field_t{.name = n, .access = app_access_t::RW, .descriptor = u32});
     (void)g.set_policy(v, {.app_fields = std::move(table)});
     bool all_writes_ok = true;
     for (int i = 0; i < 16; ++i) {
@@ -473,12 +474,12 @@ void test_container_reads() {
           ":settings on a table-less vertex: an EMPTY container (RFC-0022 §4) — present, "
           "not absent, and carrying no knobs");
 
+    const std::vector<std::byte> w = value_tlv("w");
+    const std::vector<std::byte> s = value_tlv("s");
     std::vector<app_field_t> table;
-    table.push_back(
-        app_field_t{.name = "written", .access = app_access_t::RW, .value = value_tlv("w")});
+    table.push_back(app_field_t{.name = "written", .access = app_access_t::RW, .value = w});
     table.push_back(app_field_t{.name = "unwritten", .access = app_access_t::RW});
-    table.push_back(
-        app_field_t{.name = "secret", .access = app_access_t::WO, .value = value_tlv("s")});
+    table.push_back(app_field_t{.name = "secret", .access = app_access_t::WO, .value = s});
     (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     const std::optional<decoded_t> app = decode_read(g.read(path_t("/dev/c:settings.app")));
@@ -680,9 +681,10 @@ void test_shape_gates_no_test_defended() {
     const vertex_handle_t v = g.register_vertex(path_t("/ctrl/pid"), role_t::STORED_VALUE);
 
     const std::vector<std::byte> good = value_tlv("kp-original");
+    const std::vector<std::byte> f32 = dtype_desc("f32");
     std::vector<app_field_t> table;
-    table.push_back(app_field_t{
-        .name = "kp", .access = app_access_t::RW, .descriptor = dtype_desc("f32"), .value = good});
+    table.push_back(
+        app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = f32, .value = good});
     (void)g.set_policy(v, {.app_fields = std::move(table)});
     check(reads_back(g.read(path_t("/ctrl/pid:settings.app.kp")), good),
           "the declared field is readable to begin with");

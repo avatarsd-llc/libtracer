@@ -1721,6 +1721,7 @@ bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
     // An unset table arrives named as a view of the installed one (`name_unset`), so it moves
     // nothing (#2239).
     const app_fields_decl_t& fields = *policy.app_fields;
+    if (fields.failed()) return false;  // its owning copy was refused at construction (#2288)
     const std::span<const app_field_slot_t> have = vx->app_field_slots();
     const std::span<const app_field_slot_t> want =
         fields.is_borrowed() ? fields.borrowed().slots() : std::span<const app_field_slot_t>{};

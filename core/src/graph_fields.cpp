@@ -31,6 +31,7 @@
 #include "libtracer/config_reader.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/key_view.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -43,6 +44,54 @@ using wire::opt_t;
 using wire::tlv_node_t;
 using wire::type_t;
 
+// -- app_fields_decl_t: the owning declaration's one block (#2288) -------------------------
+
+app_fields_decl_t::app_fields_decl_t(std::span<const app_field_t> owned,
+                                     mem::block_source_t* src) noexcept {
+    std::size_t bytes = 0;
+    for (const app_field_t& f : owned)
+        bytes += f.name.size() + f.descriptor.size() + f.value.size();
+    if (owned.empty() || !reserve(owned.size(), bytes, src ? *src : mem::default_root())) return;
+    for (const app_field_t& f : owned) push(f);
+}
+
+app_fields_decl_t::app_fields_decl_t(const app_fields_decl_t& o) noexcept
+    : app_fields_decl_t(o.owned(), o.src_) {
+    failed_ = failed_ || o.failed_;
+    borrowed_ = o.borrowed_;
+}
+
+app_fields_decl_t::~app_fields_decl_t() {
+    if (block_ != nullptr) src_->release(block_, bytes_, alignof(app_field_t));
+}
+
+bool app_fields_decl_t::reserve(std::size_t n, std::size_t bytes,
+                                mem::block_source_t& src) noexcept {
+    src_ = &src;
+    off_ = n * sizeof(app_field_t);
+    bytes_ = off_ + bytes;
+    block_ = static_cast<std::byte*>(src.try_alloc(bytes_, alignof(app_field_t)));
+    if (block_ == nullptr) bytes_ = 0;
+    failed_ = block_ == nullptr;
+    return !failed_;
+}
+
+void app_fields_decl_t::push(const app_field_t& f) noexcept {
+    const auto take = [this](std::span<const std::byte> b) {
+        std::byte* const at = block_ + off_;
+        if (!b.empty()) std::memcpy(at, b.data(), b.size());
+        off_ += b.size();
+        return std::span<const std::byte>(at, b.size());
+    };
+    const std::span<const std::byte> name = take(std::as_bytes(std::span(f.name)));
+    const std::span<const std::byte> desc = take(f.descriptor);
+    const std::span<const std::byte> value = take(f.value);
+    ::new (block_ + n_ * sizeof(app_field_t))
+        app_field_t{std::string_view(reinterpret_cast<const char*>(name.data()), name.size()),
+                    f.access, f.retention, desc, value};
+    ++n_;
+}
+
 namespace {
 
 /** @brief True iff @p s is a plain NAME step (no `[N]` / `[]` / `[*]` selector). */
@@ -53,19 +102,36 @@ namespace {
 /**
  * @brief The flat descriptor-table key of an app-field path — field steps [2..) dot-joined
  *        (RFC-0010 §A.1: nesting below `settings.app.` is the owner's; the runtime keys the
- *        joined spelling as one flat string). Empty ⇒ a `[...]` selector step was present
- *        (no app field has an indexed surface — the caller maps that to SCHEMA_NOT_FOUND).
+ *        joined spelling as one flat string), built in place (#2288).
+ *
+ * The bound is the field grammar's own: at most @ref kMaxFieldDepth steps of at most
+ * @ref kMaxSegmentBytes each, so the key never allocates.
  */
-[[nodiscard]] std::string app_field_key(const field_path_t& field) {
-    std::string key;
-    for (std::size_t i = 2; i < field.steps.size(); ++i) {
-        const field_step_t& s = field.steps[i];
-        if (!plain_step(s)) return {};
-        if (i > 2) key += '.';
-        key += s.name;
+class app_field_key_t {
+   public:
+    /** @brief Join @p field's steps [2..); the key is empty when a `[...]` selector step was
+     *         present or a step is past the segment bound (no app field has that surface — the
+     *         caller maps it to SCHEMA_NOT_FOUND). */
+    void build(const field_path_t& field) noexcept {
+        n_ = 0;
+        for (std::size_t i = 2; i < field.steps.size(); ++i) {
+            const field_step_t& s = field.steps[i];
+            if (!plain_step(s) || s.name.size() > kMaxSegmentBytes) {
+                n_ = 0;
+                return;
+            }
+            if (i > 2) buf_[n_++] = '.';
+            std::memcpy(buf_.data() + n_, s.name.data(), s.name.size());
+            n_ += s.name.size();
+        }
     }
-    return key;
-}
+    /** @brief The joined key. */
+    [[nodiscard]] std::string_view view() const noexcept { return {buf_.data(), n_}; }
+
+   private:
+    std::array<char, kMaxFieldDepth*(kMaxSegmentBytes + 1)> buf_;
+    std::size_t n_ = 0;
+};
 
 /**
  * @brief True iff @p field is the "served whole" shape — exactly one plain NAME step.
@@ -141,13 +207,13 @@ enum class app_sel_t : std::uint8_t {
  *            an out-param rather than a `{kind, key}` return, which measured 1408 bytes of
  *            graph.cpp `.text` larger at -O3 across the two doors.
  */
-[[nodiscard]] app_sel_t app_field_sel(const field_path_t& field, std::string& key) {
+[[nodiscard]] app_sel_t app_field_sel(const field_path_t& field, app_field_key_t& key) {
     if (field.steps.size() < 2) return app_sel_t::NONE;
     if (field.steps[1].name != "app") return app_sel_t::CORE_KNOB;
     if (!plain_step(field.steps[1])) return app_sel_t::MALFORMED;
     if (field.steps.size() == 2) return app_sel_t::CONTAINER;
-    key = app_field_key(field);
-    if (key.empty()) return app_sel_t::MALFORMED;
+    key.build(field);
+    if (key.view().empty()) return app_sel_t::MALFORMED;
     return app_sel_t::NAMED;
 }
 
@@ -336,7 +402,7 @@ constexpr std::size_t kScratchBytes = 256;
  *         stored ones, so the container never disagrees with the named read.
  *  @return False when @p live answered a refused allocation, or @p out's source refused
  *          (BACKPRESSURE). */
-[[nodiscard]] bool emit_app_container(mem::bytes_t& out, const std::vector<app_field_t>& table,
+[[nodiscard]] bool emit_app_container(mem::bytes_t& out, std::span<const app_field_t> table,
                                       const app_field_read_hook_t& live) {
     for (const app_field_t& f : table) {
         if (f.access == app_access_t::WO) continue;
@@ -776,7 +842,7 @@ struct graph_t::field_surface_t {
      */
     static result_t<value_ref_t> read_settings(const graph_t& g, vertex_t* v,
                                                const field_path_t& field, std::string_view caller) {
-        std::string key;
+        app_field_key_t key;
         const app_sel_t app = app_field_sel(field, key);
         if (app == app_sel_t::CORE_KNOB) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (!g.acl_allows(v, caller, acl_right_t::READ))
@@ -787,8 +853,8 @@ struct graph_t::field_surface_t {
         if (app != app_sel_t::NAMED) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         // ONE locked lookup classifies the field and copies its stored bytes, as before: a
         // vertex without the owner's read seam pays nothing more for it.
-        std::vector<std::byte> bytes;
-        const vertex_t::app_read_t got = v->app_field_get(key, bytes);
+        mem::bytes_t bytes(*g.tables_);
+        const vertex_t::app_read_t got = v->app_field_get(key.view(), bytes);
         // ENOTTY (undeclared), and `wo` has no read surface either (the secret never mirrors
         // back) — the same caller-independent identity, deliberately indistinguishable. Both
         // answer before the owner's read seam is asked, so it never runs on a field without a
@@ -799,14 +865,15 @@ struct graph_t::field_surface_t {
         // a write the owner did not adopt never reads back as state. A decline reads the
         // stored bytes; an empty answer is the owner's refused allocation.
         if (const app_field_read_hook_t live = g.app_field_reader(v); live)
-            if (std::optional<value_ref_t> owner = live(key))
+            if (std::optional<value_ref_t> owner = live(key.view()))
                 return *owner ? result_t<value_ref_t>{std::move(*owner)}
                               : std::unexpected(status_t::BACKPRESSURE);
         if (got == vertex_t::app_read_t::UNSET)  // declared but empty — distinct
             return std::unexpected(status_t::NOT_FOUND);
+        if (got == vertex_t::app_read_t::REFUSED) return std::unexpected(status_t::BACKPRESSURE);
         // `bytes` is a non-empty stored TLV; `nullopt` is exactly an alloc
         // failure → BACKPRESSURE (the audited alloc/copy/over locus).
-        const auto out = view::over_bytes(bytes, *g.value_backend_);
+        const auto out = view::over_bytes(mem::as_span(bytes), *g.value_backend_);
         if (!out) return std::unexpected(status_t::BACKPRESSURE);
         return g.composed_or_backpressure(view::rope_t{*out});
     }
@@ -829,7 +896,7 @@ struct graph_t::field_surface_t {
      */
     static result_t<void> write_settings(graph_t& g, vertex_t* v, const field_path_t& field,
                                          const view::view_t& value, const write_ctx_t& ctx) {
-        std::string key;
+        app_field_key_t key;
         if (app_field_sel(field, key) != app_sel_t::NAMED)
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         // GATE-BEFORE-RESOLVE (#435, RFC-0010 §A erratum 2026-08-12). Owner-defined names
@@ -843,7 +910,7 @@ struct graph_t::field_surface_t {
         // branch answering SCHEMA_NOT_FOUND pre-gate, which leaked field existence.
         if (!ctx.is_local_owner() && !g.acl_allows(v, ctx.subject, acl_right_t::WRITE))
             return std::unexpected(status_t::PERMISSION_DENIED);
-        const std::optional<app_access_t> access = v->app_field_access(key);
+        const std::optional<app_access_t> access = v->app_field_access(key.view());
         if (!access)  // undeclared stays ENOTTY — the table opens only its own names
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         // A field not declared remotely writable has NO write surface (RFC-0010 §A.3
@@ -875,14 +942,14 @@ struct graph_t::field_surface_t {
         if (const app_field_admit_hook_t on_admit =
                 g.admission_hook(v, &graph_t::admission_node_t::side_t::on_app_field_admit);
             on_admit) {
-            result_t<view::view_t> decided = on_admit(key, value, ctx);
+            result_t<view::view_t> decided = on_admit(key.view(), value, ctx);
             if (!decided) return std::unexpected(decided.error());
             admitted = std::move(*decided);
         }
         // Store (§D — bytes in, bytes out). SCHEMA_NOT_FOUND means a concurrent table
         // replacement un-declared the name between gate and store; BACKPRESSURE means the
         // value's bytes did not fit the table source (#1778).
-        if (const result_t<void> stored = v->app_field_store(key, admitted.bytes()); !stored)
+        if (const result_t<void> stored = v->app_field_store(key.view(), admitted.bytes()); !stored)
             return std::unexpected(stored.error());
         // The owner apply seam (§A.3), OUTSIDE the vertex lock — it may re-enter the
         // graph (apply the config, restructure children, then ANNOUNCE per §C). The
@@ -892,7 +959,7 @@ struct graph_t::field_surface_t {
         // app-field group), then fire the copy here, unlocked.
         // Fired with the ADMITTED bytes — what actually landed, which is what an apply seam
         // must act on. Absent a filter that is the written value, byte-for-byte as before.
-        if (auto seam = v->on_app_field_write(); seam) seam(key, admitted);
+        if (auto seam = v->on_app_field_write(); seam) seam(key.view(), admitted);
         return {};
     }
 
@@ -1113,11 +1180,12 @@ result_t<view::view_t> graph_t::read_schema(vertex_t* v) const {
     // runtime-projected `access` member — the one §B.1 datum the runtime holds natively,
     // so the schema can never contradict the write gate — then the owner's descriptor
     // bytes verbatim. A vertex without a table keeps today's POINT byte-for-byte.
-    const std::vector<app_field_t> table = v->app_fields_snapshot();
-    if (!table.empty()) {
+    const app_fields_decl_t snap = v->app_fields_snapshot(*tables_);
+    if (snap.failed()) return std::unexpected(status_t::BACKPRESSURE);
+    if (!snap.empty()) {
         mem::bytes_t app_children(*tables_);
         mem::bytes_t desc(*tables_);
-        for (const app_field_t& f : table) {
+        for (const app_field_t& f : snap.owned()) {
             desc.clear();
             const std::string_view a = to_string(f.access);
             if (!wire::emit_name(desc, "access") ||
@@ -1253,10 +1321,11 @@ result_t<view::view_t> graph_t::read_settings(vertex_t* v) const {
     // which is honest rather than absent.
     // Staged on the table source (#1885); a refusal anywhere is BACKPRESSURE.
     mem::bytes_t children(*tables_);
-    const std::vector<app_field_t> table = v->app_fields_snapshot();
-    if (!table.empty()) {
+    const app_fields_decl_t snap = v->app_fields_snapshot(*tables_);
+    if (snap.failed()) return std::unexpected(status_t::BACKPRESSURE);
+    if (!snap.empty()) {
         mem::bytes_t app_children(*tables_);
-        if (!emit_app_container(app_children, table, app_field_reader(v)) ||
+        if (!emit_app_container(app_children, snap.owned(), app_field_reader(v)) ||
             !wire::emit_name(children, "app") ||
             !wire::emit_tlv(children, type_t::SETTINGS, opt_t{.pl = true},
                             mem::as_span(app_children)))
@@ -1277,11 +1346,12 @@ result_t<view::view_t> graph_t::read_settings_app(vertex_t* v) const {
     // closed (SCHEMA_NOT_FOUND — byte-for-byte the pre-RFC vertex); an installed table
     // serves the declared, non-`wo`, value-holding fields verbatim (possibly an empty
     // SETTINGS when nothing has been written yet).
-    const std::vector<app_field_t> table = v->app_fields_snapshot();
-    if (table.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    const app_fields_decl_t snap = v->app_fields_snapshot(*tables_);
+    if (snap.failed()) return std::unexpected(status_t::BACKPRESSURE);
+    if (snap.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     mem::bytes_t children(*tables_);  // staged on the table source (#1885)
     mem::bytes_t out(*tables_);
-    if (!emit_app_container(children, table, app_field_reader(v)) ||
+    if (!emit_app_container(children, snap.owned(), app_field_reader(v)) ||
         !wire::emit_tlv(out, type_t::SETTINGS, opt_t{.pl = true}, mem::as_span(children)))
         return std::unexpected(status_t::BACKPRESSURE);
     // `out` is non-empty by construction (the SETTINGS header at minimum); `nullopt` is
