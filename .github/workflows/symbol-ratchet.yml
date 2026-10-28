@@ -78,6 +78,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Trust the checkout for git
+        # The container runs as root over a workspace the host runner user owns, so git
+        # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       # The only inputs to the pinned symbols are the core/ sources and the bench/ targets
       # that instantiate them; the pins file itself lives under bench/. A PR outside both
       # trees cannot move a pinned size, so the gate passes it without a build.

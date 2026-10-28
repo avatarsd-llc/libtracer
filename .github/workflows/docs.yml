@@ -140,6 +140,10 @@ jobs:
           # merged onto, so HEAD^1..HEAD is exactly what the PR changes.
           fetch-depth: 2
           persist-credentials: false
+      - name: Trust the checkout for git
+        # The container runs as root over a workspace the host runner user owns, so git
+        # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Match the diff against DOCS_PATHS
         id: decide
         env:
@@ -247,6 +251,10 @@ jobs:
           # from their vX.Y.Z tags on every deploy (tools/assemble_release_docs.sh).
           fetch-depth: 0
           persist-credentials: false
+      - name: Trust the checkout for git
+        # The container runs as root over a workspace the host runner user owns, so git
+        # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

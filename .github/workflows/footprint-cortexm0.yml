@@ -89,6 +89,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Trust the checkout for git
+        # The container runs as root over a workspace the host runner user owns, so git
+        # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Install arm-none-eabi toolchain
         # The step that wedged. Measured healthy p50 0.68 min, max 1.0 off the incident

@@ -119,6 +119,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Trust the checkout for git
+        # The container runs as root over a workspace the host runner user owns, so git
+        # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Hold the component, core CMake and PlatformIO to the one core source list
         run: python3 tools/check_source_list.py
       - name: Clean this job's workspace off the host runner

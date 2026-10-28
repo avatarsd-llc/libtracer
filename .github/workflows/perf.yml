@@ -410,6 +410,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Trust the checkout for git
+        # The container runs as root over a workspace the host runner user owns, so git
+        # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       # strace is the instrument. Without it syscall_guard.py reports verdict=UNAVAILABLE,
       # and check_compose_audit.py treats that as a FAILURE rather than a pass — a guard that
       # silently downgrades to measuring nothing is the shape this leg exists to remove.
@@ -427,9 +431,12 @@ jobs:
       # The missing-arm contract, asserted rather than assumed: pointed at a build directory
       # it cannot build into, the harness must exit non-zero instead of reporting on an arm
       # that is not there. This is a live negative control on every run, not a one-off demo.
+      # The "directory" is a plain file: the job runs as root in its container, and root
+      # writes through a mode-555 directory, so a read-only dir would let the harness build
+      # the arm and turn this control vacuous (#2348). No user can configure a build in a file.
       - name: The harness must fail when the libtracer arm is missing
         run: |
-          mkdir -p /tmp/no-arm && chmod 555 /tmp/no-arm
+          rm -rf /tmp/no-arm && : > /tmp/no-arm
           if COMPOSE_AUDIT_ONLY=1 COMPOSE_WIDTHS="1" ./bench/run_compose.sh /tmp/no-arm; then
             echo "::error::run_compose.sh exited 0 with no libtracer arm — the guard is vacuous"
             exit 1
