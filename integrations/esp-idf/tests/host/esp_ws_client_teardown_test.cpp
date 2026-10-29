@@ -210,22 +210,11 @@ void test_teardown_does_not_destroy_handles_under_a_sender() {
     // under TSan). The link object itself is safe to hold — that is the contract staged.
     esp_ws_client_link_t* const under_test = link.get();
 
-    std::atomic<int> seq{0};
-    std::atomic<int> a_at{0};  // sequence position at which sender A returned
-    std::atomic<int> b_at{0};  // ... B ...
-    std::atomic<int> d_at{0};  // ... and at which the destructor returned
-
-    std::thread a([&] {
-        under_test->send(frame);
-        a_at.store(++seq, std::memory_order_release);
-    });
+    std::thread a([&] { under_test->send(frame); });
     check(wait_until([] { return fake_ws::writers_inside() >= 1; }, 2s),
           "sender A is parked INSIDE the transport, holding the send serializer");
 
-    std::thread b([&] {
-        under_test->send(frame);
-        b_at.store(++seq, std::memory_order_release);
-    });
+    std::thread b([&] { under_test->send(frame); });
     // B cannot announce itself from inside the link, so it is placed by time and then
     // pinned by what the fake did NOT see: A holds the serializer, so a B that has
     // reached the transport would show up as a second entered write. Short, because
@@ -241,19 +230,17 @@ void test_teardown_does_not_destroy_handles_under_a_sender() {
     // handles with A still inside the transport.
     const auto start = std::chrono::steady_clock::now();
     link.reset();
-    d_at.store(++seq, std::memory_order_release);
+    // The oracle is the fake's, read the moment the destructor returns. A sender stamps
+    // nothing between the tally drop that releases the drain and its return from `send()`,
+    // so a stamp it took after that return could land after the destructor's (#2338).
+    const int inside_at_return = fake_ws::writers_inside();
     const long long elapsed = ms_since(start);
     a.join();
     b.join();
 
-    const int a_pos = a_at.load(std::memory_order_acquire);
-    const int b_pos = b_at.load(std::memory_order_acquire);
-    const int d_pos = d_at.load(std::memory_order_acquire);
-    std::printf("       return order: A=%d B=%d destructor=%d, teardown %lld ms\n", a_pos, b_pos,
-                d_pos, elapsed);
-    check(a_pos != 0 && a_pos < d_pos,
+    std::printf("       teardown %lld ms\n", elapsed);
+    check(inside_at_return == 0,
           "the destructor did not return while a sender was inside the transport");
-    check(b_pos != 0 && b_pos < d_pos, "nor while one was queued on the serializer");
     check(fake_ws::handle_misuse() == 0,
           "and no operation touched a destroyed, foreign or null handle");
     check(fake_ws::writes_started() == 1,
@@ -262,6 +249,69 @@ void test_teardown_does_not_destroy_handles_under_a_sender() {
     // is one write bound, and that bound is now a quarter of a watchdog window.
     check_under_ms(elapsed, kHostWdtMs / 2,
                    "and the wait it inherited was one write bound, not an open one");
+}
+
+/**
+ * @brief The drain waits on the tally, and the LAST of several senders is what wakes it
+ *        (#2338).
+ *
+ * One sender is parked inside the transport and three more queue behind it on the send
+ * serializer, so the tally is at four when the destructor sets its waiting bit. The
+ * destructor runs on its own thread, and every oracle is the fake's, never a sender's own
+ * bookkeeping: a sender records nothing between the tally drop that releases the drain and
+ * its return from `send()`, so a stamp taken after that return could land after the
+ * destructor's for no fault of the link.
+ *
+ * - While the parked write is still inside the transport, the destructor has not returned.
+ *   The fake pins that write until the test releases it (`fake_ws::pin_writes`), so it is
+ *   still parked whatever the link's own write bound is and however slow the runner.
+ * - When the destructor returns, no write is inside the transport, and the queued three
+ *   left without one.
+ * - None of the four touches freed state. The fake counts handle misuse; a queued sender
+ *   still on the serializer when the destructor returned would lock a destroyed mutex,
+ *   which is what this suite's ASan and TSan legs report.
+ */
+void test_the_drain_wakes_on_the_last_sender_out() {
+    std::printf("the drain wakes on the last sender out:\n");
+    fake_ws::reset();
+    fake_ws::pin_writes(true);  // parked until released below, past the link's bound
+
+    auto link = dialing_link();
+    check(wait_until([&] { return link->link_up(); }, 2s), "and came up connected");
+    const std::vector<std::byte> frame = payload();
+    esp_ws_client_link_t* const under_test = link.get();  // see the headline case
+
+    constexpr int kSenders = 4;
+    std::vector<std::thread> senders;
+    senders.emplace_back([&] { under_test->send(frame); });
+    check(wait_until([] { return fake_ws::writers_inside() >= 1; }, 2s),
+          "the first sender is parked inside the transport");
+    for (int i = 1; i < kSenders; ++i) senders.emplace_back([&] { under_test->send(frame); });
+    // Placed by time, pinned by what the fake did not see (as in the headline case).
+    std::this_thread::sleep_for(50ms);
+    check(fake_ws::writes_started() == 1, "the other three are queued, not in the transport");
+
+    std::atomic<bool> returned{false};
+    std::atomic<int> inside_at_return{-1};
+    std::thread destroyer([&] {
+        link.reset();
+        inside_at_return.store(fake_ws::writers_inside(), std::memory_order_relaxed);
+        returned.store(true, std::memory_order_release);
+    });
+    // The write is pinned, so it is inside the transport for certain; the wait only gives
+    // a destructor that wrongly returns the time to do it.
+    std::this_thread::sleep_for(100ms);
+    check(fake_ws::writers_inside() == 1, "the parked write is still inside the transport");
+    check(!returned.load(std::memory_order_acquire),
+          "and the destructor has not returned under it");
+
+    fake_ws::pin_writes(false);  // the write gives up, as its bound would have
+    destroyer.join();
+    for (std::thread& t : senders) t.join();
+    check(inside_at_return.load(std::memory_order_relaxed) == 0,
+          "at the destructor's return no write was inside the transport");
+    check(fake_ws::writes_started() == 1, "the queued three left without writing");
+    check(fake_ws::handle_misuse() == 0, "and no operation touched a destroyed handle");
 }
 
 /**
@@ -1055,6 +1105,7 @@ void test_a_ping_mid_fragment_is_answered_whole() {
 int main() {
     std::printf("esp_ws_client_link bounded-blocking host suite (#952, #1058):\n");
     test_teardown_does_not_destroy_handles_under_a_sender();
+    test_the_drain_wakes_on_the_last_sender_out();
     test_teardown_does_not_wait_out_the_reconnect_backoff();
     test_a_teardown_that_lands_mid_dial_costs_no_dial_bound();
     test_an_orphaned_dial_that_succeeds_closes_and_releases_once();
