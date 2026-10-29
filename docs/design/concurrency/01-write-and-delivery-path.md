@@ -102,9 +102,11 @@ stale zero at that gate is indistinguishable from the write linearizing before t
 
 Neither near-axis pairing can be exercised by any x86-64 test: a `seq_cst` store there lowers
 to a locked `xchg`, so even a *relaxed* later load of zero is ordered in hardware and the
-anomaly cannot appear. The coverage is the weakly-ordered `ubuntu-24.04-arm` CI leg
-(core-ci `build-test-arm64`), which is the same memory model the shipped rv32 targets have;
-the host guards in `graph_test` pin the *program-order* half only, and say so.
+anomaly cannot appear. No CI leg now runs on a weakly-ordered machine, the memory model
+the shipped rv32 targets have: the arm64 leg that did was dropped 2026-10-29. The
+`kDeliverySkipOrder` assertion in `vertex.hpp` stops the order constant being weakened, but
+a call site switched to a relaxed read is caught by nothing in CI; the host guards in
+`graph_test` pin the *program-order* half only, and say so.
 
 The two-buffer split is the point. `fan_out` chooses the source the overflow buffer draws from
 by the lock-free `own_subs()` count, and makes one call either way,

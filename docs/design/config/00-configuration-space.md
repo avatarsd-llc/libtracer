@@ -273,8 +273,9 @@ RFC-0014 S5 link-liveness engine, #1470) — state whether a *module* is present
 for a lock another task holds, and the guard in `mem_pool.hpp` reads it to refuse
 `synchronized_pool_t<spin_sync_t>` where the answer is no (#1158). The memory-ordering fact
 that used to sit beside it, `kWeaklyOrdered`, was removed (#1717): the guard in `vertex.hpp`
-now refuses a `kDeliverySkipOrder` weaker than `seq_cst` on every target (#1143), with the
-`ubuntu-24.04-arm` CI leg (#1140) as the evidence half, so no build can waive it.
+now refuses a `kDeliverySkipOrder` weaker than `seq_cst` on every target (#1143), so no
+build can waive it. No CI leg now runs on a weakly-ordered machine to show the anomaly the
+guard prevents (the arm64 leg (#1140) was dropped 2026-10-29).
 
 `kInstrumentCounters` is the one knob that selects no behaviour at all: it decides whether
 `graph_t` carries the two counters that only tests and benches read (`ancestor_walks()`,
