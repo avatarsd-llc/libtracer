@@ -125,6 +125,11 @@ jobs:
           echo "LIBTRACER_MESH_CTRL=$ctrl" >> "$GITHUB_ENV"
           echo "LIBTRACER_MESH_CTRL=$ctrl"
 
+      # setup-node's npm cache fails ("Some specified paths were not resolved") when the
+      # cache directory does not exist yet, which on the host route it does not (#2348).
+      - name: Create the npm cache directory
+        run: mkdir -p "$HOME/.npm"
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
