@@ -76,7 +76,33 @@ inline constexpr std::size_t kStreamSizes[] = {16, 256, 1024, 8192, 65536};
     return v > 0 ? static_cast<std::size_t>(v) : 4000;
 }
 
+/** @brief The fewest throughput messages a size's blast sends; the whole count at 1 KiB and up. */
 inline constexpr std::size_t kThroughputMsgs = 20000;
+
+/**
+ * @brief The fewest payload bytes a size's throughput blast carries: @ref kThroughputMsgs at
+ *        1 KiB (#2199).
+ *
+ * A fixed count made the small-size phases too short to time. 20000 messages of 16 B finish
+ * in a few milliseconds, so one scheduling hiccup on either process was a large share of the
+ * window, and the receiver's MB/s at 16 B and 256 B swung by about 24% between runs of one
+ * binary while the 1 KiB and 8 KiB rows held within 1%. Every size now carries at least the
+ * bytes the 1 KiB row always has, so no row's window is shorter than the shortest stable one.
+ */
+inline constexpr std::size_t kThroughputMinBytes = kThroughputMsgs * 1024;
+
+/**
+ * @brief Throughput messages a blast of @p size-byte payloads sends: @ref kThroughputMsgs, or
+ *        more at a small size so the blast carries @ref kThroughputMinBytes (#2199).
+ * @param size the payload size in bytes, at least 1.
+ * @return 1280000 at 16 B, 80000 at 256 B, 20000 at 1 KiB and above.
+ */
+[[nodiscard]] constexpr std::size_t throughput_msgs(std::size_t size) {
+    const std::size_t by_bytes = (kThroughputMinBytes + size - 1) / size;
+    return by_bytes > kThroughputMsgs ? by_bytes : kThroughputMsgs;
+}
+static_assert(throughput_msgs(16) == 1280000 && throughput_msgs(256) == 80000 &&
+              throughput_msgs(1024) == kThroughputMsgs && throughput_msgs(8192) == kThroughputMsgs);
 inline constexpr std::uint64_t kPaceNs = 150000;  // 150 µs between latency sends
 /**
  * @brief Pause after each size's throughput blast so its backlog fully drains before the next
