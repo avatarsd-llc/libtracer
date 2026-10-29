@@ -137,6 +137,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   link or an invalid handle.
 - **`transport_can::peer_link_of`** resolves a peer handle by its node id, so a remote delivery
   to a CAN peer no longer formats the peer's name and parses it back (#2237).
+- **The path object (RFC-0030 §5, #1943).** `tr::graph::path_object_t` (`path_object.hpp`) is
+  made by `graph_t::make_path` from a canonical string, or from a canonical `PATH` payload it
+  borrows without copying (v1 §3.1.2, read-only memory). It holds the canonical bytes, the local
+  pair they last resolved to (`element0()`), and an inline chain cache (`learn`, `chain`,
+  `clear_chain`) sized at compile time by the new `default_config_t::kPathChainBytes` (default
+  40). `graph_t::read`, `write` (each also with a `field_path_t`), `subscribe` (callback form),
+  `retire` and `resolve` take one. A door dereferences the pair and, when the target was retired,
+  resolves the canonical bytes again with the same answer. The object is one block drawn from
+  the graph's table source, and `make_path` answers `BACKPRESSURE` when the source refuses. The
+  `vertex_handle_t` doors are unchanged in this release step.
+
 - **`tr::net::session_slot_index(name)`** (`pair.hpp`) — the slot index a `p<slot>[~<gen>]`
   session name spells, nullopt for any other name: the inverse of the one spelling both slot
   servers write, which the router uses to find a slot's tenancy (#2234).
