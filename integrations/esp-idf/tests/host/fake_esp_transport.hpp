@@ -205,6 +205,16 @@ void release_connects(bool succeed);
  */
 void hold_writes(bool on);
 
+/**
+ * @brief Park every `esp_transport_write` until this is called with false, IGNORING the
+ *        caller's timeout (#2338). The released write fails, as one whose bound expired.
+ *
+ * @ref hold_writes honours the link's own write bound, so a test that has to see a writer
+ * STILL parked at some later point races that bound. This holds the writer for as long as
+ * the test needs it held, so "still inside the transport" is a fact, not a timing.
+ */
+void pin_writes(bool on);
+
 /** @brief How many callers are parked inside `esp_transport_write` right now. */
 [[nodiscard]] int writers_inside();
 

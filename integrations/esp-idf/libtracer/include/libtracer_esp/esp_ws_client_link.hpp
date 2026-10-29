@@ -804,7 +804,9 @@ class esp_ws_client_link_t final : public transport_t {
     /** @brief Senders that have RAISED this tally and not yet returned from @ref send.
      *         Raised BEFORE the sender queues on `write_m_`, so the destructor's drain
      *         covers exactly the callers that could already be parked on that mutex —
-     *         and, by the same token, no earlier than the raise itself (#952). */
+     *         and, by the same token, no earlier than the raise itself (#952). The
+     *         destructor sets the top bit and waits on this word; the last sender out under
+     *         that bit wakes it, so the drain reads no clock (#2338). */
     std::atomic<std::uint32_t> senders_{0};
     /** @brief Guards the recv thread's parked wait — the reconnect backoff — which
      *         @ref shut_down has to be able to cut short, hence a condition variable rather
