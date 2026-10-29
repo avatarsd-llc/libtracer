@@ -45,6 +45,7 @@ set(LIBTRACER_SOURCES_REQUIRED
     "${_libtracer_src}/path.cpp"
     "${_libtracer_src}/graph.cpp"
     "${_libtracer_src}/graph_fields.cpp"
+    "${_libtracer_src}/path_object.cpp"
     "${_libtracer_src}/link_index.cpp"
     "${_libtracer_src}/loopback.cpp"
 )

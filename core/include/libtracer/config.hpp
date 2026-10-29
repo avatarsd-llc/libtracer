@@ -1083,6 +1083,21 @@ struct default_config_t {
     static constexpr bool kCreationHooks = false;
 
     /**
+     * @brief The chain-cache capacity of a path object, in bytes of packed chain body
+     *        (RFC-0030 §5.4): the elements beyond the first door that a matched reply teaches.
+     *
+     * The cache is inline in the object (`tr::graph::path_object_t`), so this sets every path
+     * object's size, and a learned chain larger than it is not cached: the canonical form is
+     * used instead, with the same answer. Rounded up to whole 4-byte words. `0` keeps no chain
+     * at all, leaving only the local pair (element 0), which a path object always carries.
+     *
+     * **Default 40 bytes:** room for three PAIR elements of 11 bytes each (RFC-0029 §4.2), one
+     * per node behind the first door, on every profile. Override fragment:
+     * `static constexpr std::size_t kPathChainBytes = 64;`
+     */
+    static constexpr std::size_t kPathChainBytes = 40;
+
+    /**
      * @brief Whether the graph carries the SESSION-ADMISSION seam (#1841):
      *        `graph_hooks_t::session_admission`, an embedder's per-session subscribe check and
      *        its per-session teardown event.
