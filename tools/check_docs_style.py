@@ -23,6 +23,9 @@ The spec itself is never linted: v1, the annexes v1 §3 incorporates (read from 
 the only list of them), and the RFCs under `docs/spec/rfcs/`, which are records. Format
 work leaves those pages alone; they change by erratum or amendment.
 - `avoid-phrase`: a phrase from `CONTEXT-AVOID.md`, the short list beside the glossary.
+- `annex-banner`: an annex v1 §3 lists that does not open with the one-line annex banner
+  under its title, or any other page that carries it (#2385). This is the one rule that
+  reads an annex, and the unit tests hold the real tree to zero hits of it.
 
 Code blocks and code spans are quoted text and never linted, except that `alt-text`
 reads the diagram directives themselves.
@@ -53,6 +56,9 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 BASELINE = REPO / "tools" / "docs_style_baseline.json"
 AVOID = REPO / "CONTEXT-AVOID.md"
 V1 = "docs/spec/v1.md"
+# The one-line banner every annex carries directly under its title, and no other page
+# carries (#2385, ruling 5). A page whose annex scope is narrower says so after it.
+BANNER = "> **Normative annex of [Tracer v1](../spec/v1.md#3-wire-format), per v1 §3.**"
 MAX_LINE = 100
 
 # Generated pages: the generators own their text, and the committed copies are snapshots.
@@ -121,10 +127,14 @@ def _field(lines: list[str], i: int) -> str:
 
 def lint_page(rel: str, text: str, ctx: Context) -> list[Hit]:
     """@brief Every hit on one page, in line order."""
-    if rel == V1 or rel in ctx.annexes or rel.startswith("docs/spec/rfcs/"):
+    lines = text.splitlines()
+    if rel in ctx.annexes:  # hands off, but for the banner under its title
+        first = next((ln for ln in lines[1:] if ln.strip()), "")
+        return [] if first.startswith(BANNER) else [
+            Hit(rel, 1, "annex-banner", "an annex per v1 §3 opens with the annex banner")]
+    if rel == V1 or rel.startswith("docs/spec/rfcs/"):
         return []  # hands off: the spec is changed by erratum or amendment, never by format work
     hits: list[Hit] = []
-    lines = text.splitlines()
     concept = rel.startswith("docs/concepts/")
     headings: list[tuple[int, str]] = []
     fence = None  # (marker, directive, body lines, start)
@@ -145,6 +155,8 @@ def lint_page(rel: str, text: str, ctx: Context) -> list[Hit]:
             fence = (m.group(1), m.group(2), "", n)
             continue
         prose = _strip_code_spans(line)
+        if BANNER in line:
+            hit("annex-banner", "only an annex v1 §3 lists carries the annex banner")
         if re.search(r"!\[\s*\]\(", prose):
             hit("alt-text", "image has empty alt text")
         if line.startswith("## "):

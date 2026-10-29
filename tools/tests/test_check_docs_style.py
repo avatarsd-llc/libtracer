@@ -85,14 +85,46 @@ class FixturePageTest(unittest.TestCase):
 
     def test_the_spec_is_left_alone(self):
         for rel in ("docs/reference/01-data-format.md", "docs/spec/v1.md", "docs/spec/rfcs/0001-x.md"):
-            self.assertEqual(hits_of("line-length.md", rel), [], rel)
-            self.assertEqual(hits_of("restatement.md", rel), [], rel)
+            for fixture in ("line-length.md", "restatement.md"):  # the banner rule aside
+                self.assertEqual([h for h in hits_of(fixture, rel) if h[0] != "annex-banner"], [], rel)
 
     def test_a_glossary_avoid_phrase_is_a_hit(self):
         self.assert_only("avoid-phrase.md", "docs/reference/x.md", "avoid-phrase")
 
     def test_the_hit_names_its_line(self):
         self.assertEqual(hits_of("avoid-phrase.md", "docs/reference/x.md"), [("avoid-phrase", 5)])
+
+
+class AnnexBannerTest(unittest.TestCase):
+    """Exactly the annexes v1 §3 lists carry the one-line banner (#2385, ruling 5)."""
+
+    BANNER = "> **Normative annex of [Tracer v1](../spec/v1.md#3-wire-format), per v1 §3.**\n"
+
+    def hits(self, rel, text):
+        return [(h.rule, h.line) for h in cds.lint_page(rel, text, CTX)]
+
+    def test_an_annex_with_the_banner_under_its_title_draws_no_hit(self):
+        page = "# Reference 01\n\n" + self.BANNER + "\nA receiver MUST, and a line long enough " + "x" * 90 + "\n"
+        self.assertEqual(self.hits("docs/reference/01-data-format.md", page), [])
+
+    def test_an_annex_without_the_banner_is_a_hit(self):
+        self.assertEqual(self.hits("docs/reference/01-data-format.md", "# Reference 01\n\nText.\n"),
+                         [("annex-banner", 1)])
+
+    def test_the_banner_must_sit_under_the_title_not_further_down(self):
+        page = "# Reference 01\n\nText.\n\n" + self.BANNER
+        self.assertEqual(self.hits("docs/reference/01-data-format.md", page), [("annex-banner", 1)])
+
+    def test_a_page_that_is_not_an_annex_must_not_carry_the_banner(self):
+        page = "# Reference 02\n\n" + self.BANNER
+        self.assertEqual(self.hits("docs/reference/02-graph-model.md", page), [("annex-banner", 3)])
+
+    def test_every_real_annex_carries_the_banner_and_no_other_page_does(self):
+        ctx, pages = cds.real_context()
+        hits = [h for p in sorted(set(pages) | ctx.annexes)
+                for h in cds.lint_page(p, (pathlib.Path(REPO) / p).read_text(), ctx)
+                if h.rule == "annex-banner"]
+        self.assertEqual(hits, [])
 
 
 class AnnexSetTest(unittest.TestCase):

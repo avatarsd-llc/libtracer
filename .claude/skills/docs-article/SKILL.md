@@ -23,8 +23,9 @@ normative.
 - **Hands off the annexes.** The pages v1 §3 incorporates (v1 §3 is the only list) are
   never edited by format work: no rewording, no moved content, no new diagrams.
   A contradiction you find is its own erratum, under `.github/GOVERNANCE.md`. The lint
-  does not touch them, and neither do you. The one-line "normative annex, per v1 §3"
-  banner is its own reviewed PR, not part of a page change.
+  does not touch them, and neither do you. Each annex opens with the one-line
+  "Normative annex of Tracer v1, per v1 §3" banner under its title (#2385), and no other
+  page carries it; the lint's `annex-banner` rule holds both halves.
 
 ## Pick the page type before you write
 

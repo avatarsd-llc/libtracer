@@ -1,5 +1,7 @@
 # Reference 05 — Protocol-defined TLVs
 
+> **Normative annex of [Tracer v1](../spec/v1.md#3-wire-format), per v1 §3.**
+
 > **Status**: normative, v1 (incorporated by [docs/spec/v1.md](../spec/v1.md) §3 per [RFC-0001](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0001-v01-consistency-consolidation.md) §A.2). Per-TLV byte-precise specification for every type code in the core-reserved range. The header layout, options bits, fixed-width length, and trailer (TS + CRC) are in [01-data-format.md](01-data-format.md); this document specifies what each type code's payload looks like.
 
 ---
