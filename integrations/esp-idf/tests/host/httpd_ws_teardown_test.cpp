@@ -286,6 +286,7 @@ void test_handler_barrier() {
     std::atomic<bool> handler_done{false};
     std::atomic<bool> dtor_returned{false};
     std::atomic<bool> returned_before_handler{false};
+    std::atomic<bool> hook_exited{false};
     // Fires between the handler's header pass and its payload pass — the frame is inside
     // the link and has claimed nothing yet (the exact window a bare fd snapshot misses).
     fake_httpd::instance().set_frame_hook([&] {
@@ -293,6 +294,7 @@ void test_handler_barrier() {
         while (!teardown_started.load()) std::this_thread::sleep_for(1ms);
         std::this_thread::sleep_for(50ms);  // hold the frame open across the barrier
         if (dtor_returned.load()) returned_before_handler.store(true);
+        hook_exited.store(true);
     });
     fake_httpd::instance().post([&] {
         (void)deliver(400, kBody);
@@ -305,9 +307,16 @@ void test_handler_barrier() {
     dtor_returned.store(true);
     fake_httpd::instance().set_frame_hook(nullptr);
 
-    check(handler_done.load(),
+    // The join is on the link's handler, so the proof is a mark the frame leaves while it is
+    // still INSIDE the handler. `handler_done` is not: it is stored by the posting thread after
+    // the fake's own post-handler tail, which a loaded runner can deschedule past the moment
+    // the joined destructor returns (#2364, studio-lt-8).
+    check(hook_exited.load(),
           "the destructor JOINED the in-flight handler instead of freeing under it");
     check(!returned_before_handler.load(), "and it did not return while the frame was live");
+    // The posting thread still owns references to this frame's atomics until it stores
+    // `handler_done`; it has left the link, so this ends on its own.
+    while (!handler_done.load()) std::this_thread::yield();
     // The frame claimed its session while the destructor was blocked in that join. The
     // snapshot is taken afterwards, so the late arrival is still detached — the guarantee
     // that replaces refusing the frame outright.
