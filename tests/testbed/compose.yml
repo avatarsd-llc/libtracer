@@ -34,7 +34,10 @@ networks:
   mesh:
     ipam:
       config:
-        - subnet: 172.28.0.0/24
+        # LIBTRACER_MESH_NET (the first three octets) moves the whole mesh off a range a
+        # shared host already uses; unset, it is 172.28.0 as before. The CI host job sets
+        # it outside Docker's default address pools (mesh-testbed.yml, #2348).
+        - subnet: ${LIBTRACER_MESH_NET:-172.28.0}.0/24
 
 x-node: &node
   build:
@@ -49,7 +52,7 @@ services:
     <<: *node
     networks:
       mesh:
-        ipv4_address: 172.28.0.11
+        ipv4_address: ${LIBTRACER_MESH_NET:-172.28.0}.11
     ports: ["47301:47300"]
     # Listener "c" — the naming rule: every node names every link after the node at the
     # FAR end, which is what lets a reply retrace hop by hop. c dials in here.
@@ -61,7 +64,7 @@ services:
     <<: *node
     networks:
       mesh:
-        ipv4_address: 172.28.0.12
+        ipv4_address: ${LIBTRACER_MESH_NET:-172.28.0}.12
     ports: ["47302:47300"]
     command:
       ["--name", "b", "--ctrl-port", "47300", "--listen", "a:47311",
@@ -71,7 +74,7 @@ services:
     <<: *node
     networks:
       mesh:
-        ipv4_address: 172.28.0.13
+        ipv4_address: ${LIBTRACER_MESH_NET:-172.28.0}.13
     ports: ["47303:47300"]
     command:
       ["--name", "c", "--ctrl-port", "47300", "--listen", "b:47311",
@@ -86,7 +89,7 @@ services:
     <<: *node
     networks:
       mesh:
-        ipv4_address: 172.28.0.14
+        ipv4_address: ${LIBTRACER_MESH_NET:-172.28.0}.14
     ports: ["47304:47300"]
     command:
       ["--name", "bus", "--ctrl-port", "47300", "--peer-named-listen", "mesh:47320",
