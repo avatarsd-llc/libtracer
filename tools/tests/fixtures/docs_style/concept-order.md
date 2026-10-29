@@ -14,6 +14,10 @@ Text.
 
 ## Cost
 
+### Latency
+
+Not benched.
+
 Text.
 
 ## Where the rules live

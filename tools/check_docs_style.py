@@ -11,7 +11,9 @@ page, its line and its rule:
   with empty alt text, or an `{image}`/`{figure}` without `:alt:`. Bare ```` ```mermaid ````
   fences are kept for GitHub and not linted (ruling 6).
 - `concept-sections`: a page under `docs/concepts/` that lacks a required template
-  heading, puts the template headings out of order, or adds a heading of its own.
+  heading, puts the template headings out of order, adds a heading of its own, or has a
+  `## Cost` without a `### Latency`. `docs/concepts/index.md` is navigation, not a
+  concept, and is exempt.
 - `normative-source`: a "Normative source" field that names anything but v1 or an annex.
 - `exercised-by`: an "Exercised by" field that names a vector or test that does not exist.
 - `line-length`: a prose line over 100 characters, link targets not counted.
@@ -135,8 +137,9 @@ def lint_page(rel: str, text: str, ctx: Context) -> list[Hit]:
     if rel == V1 or rel.startswith("docs/spec/rfcs/"):
         return []  # hands off: the spec is changed by erratum or amendment, never by format work
     hits: list[Hit] = []
-    concept = rel.startswith("docs/concepts/")
+    concept = rel.startswith("docs/concepts/") and rel != "docs/concepts/index.md"  # navigation
     headings: list[tuple[int, str]] = []
+    cost_parts: list[str] = []
     fence = None  # (marker, directive, body lines, start)
     for n, line in enumerate(lines, 1):
         hit = lambda rule, msg: hits.append(Hit(rel, n, rule, msg))  # noqa: E731
@@ -161,6 +164,8 @@ def lint_page(rel: str, text: str, ctx: Context) -> list[Hit]:
             hit("alt-text", "image has empty alt text")
         if line.startswith("## "):
             headings.append((n, line[3:].strip()))
+        elif line.startswith("### ") and headings and headings[-1][1] == "Cost":
+            cost_parts.append(line[4:].strip())
         field = re.match(r"\W*(Normative source|Exercised by)\s*:", prose)
         if field:
             value = _field(lines, n - 1)
@@ -193,6 +198,10 @@ def lint_page(rel: str, text: str, ctx: Context) -> list[Hit]:
                 hit("avoid-phrase", f'"{phrase}": say {instead}')
     if concept:
         hits += _concept_hits(rel, headings)
+        cost = next((n for n, h in headings if h == "Cost"), None)
+        if cost is not None and "Latency" not in cost_parts:
+            hits.append(Hit(rel, cost, "concept-sections",
+                            'Cost has no "### Latency"; say "not benched" and name the bench'))
     return sorted(hits, key=lambda h: h.line)
 
 

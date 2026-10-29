@@ -26,6 +26,10 @@ A line inside a code block is never linted, however long it runs and whatever it
 
 ## Cost
 
+### Latency
+
+One write per batch; not benched.
+
 | target | wire bytes | allocations | note that a table row is never wrapped, so it is never measured |
 | --- | --- | --- | --- |
 | NARROW | 4 + n | 0 | |
