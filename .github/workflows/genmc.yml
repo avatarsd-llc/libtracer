@@ -18,8 +18,11 @@
 # major and patch, so a warm run is the apt install plus the checks. The checker shells out to
 # clang-19 at run time, which is why the apt step runs on a cache hit too.
 #
-# RUNNER: hosted `ubuntu-24.04` on every route. It builds nothing of libtracer's, so there is
-# nothing to gain from the ci-local pool, and no fork guard or workspace-ownership step.
+# RUNNER (#2348): the ci-local runners, behind core-ci's trust guard, in the CI image
+# container inside runners-ci.slice, like every other container job; `ubuntu-24.04` only
+# when the operator sets CI_SELF_HOSTED=false. A fork PR skips it (the job's `if:`). It
+# starts with the workspace free-space check and ends with the canonical workspace cleanup,
+# both gated by tools/check_ci_workspace_cleanup.py.
 name: genmc
 
 on:

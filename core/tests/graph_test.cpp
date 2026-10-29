@@ -890,10 +890,12 @@ void test_subscribe_never_misses_a_racing_write() {
  *   `own_subs_ordered()` (seq_cst) rather than `own_subs()` (relaxed) cannot be observed on
  *   x86-64: the seq_cst LKV store lowers to a locked `xchg`, a full hardware barrier, so a
  *   later RELAXED read of zero still forces the subscriber's latch to see the new value.
- *   Swap the ordered read for the relaxed one and this test stays green on this host. The
- *   coverage for that half is the `ubuntu-24.04-arm` CI leg (core-ci `build-test-arm64`),
- *   where the store does not order the later load and the excluded interleaving is
- *   architecturally reachable — the same reason it is reachable on the shipped rv32 targets.
+ *   Swap the ordered read for the relaxed one and this test stays green on this host. No CI
+ *   leg now covers that half: none runs on a weakly-ordered machine, where the store does
+ *   not order the later load and the excluded interleaving is architecturally reachable (as
+ *   on the shipped rv32 targets); the arm64 leg that did was dropped 2026-10-29. The
+ *   `kDeliverySkipOrder` assertion in vertex.hpp stops the order constant being weakened,
+ *   but a call site switched to the relaxed `own_subs()` is caught by nothing in CI.
  *   Say which half a guard covers; #635's own guard did not, and that is how the deferred
  *   leg kept a relaxed read for as long as it did.
  *
