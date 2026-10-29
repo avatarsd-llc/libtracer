@@ -179,7 +179,8 @@ reporting `listening` says its listen socket is bound — **not** that any peer 
 transitions RFC-0014 §4 describes are implemented by the S5 engine
 (`tr::net::self_heal_link_t`, `core/include/libtracer/self_heal_link.hpp`): a kind
 registered with `transport_kind_traits_t::self_heal_dial` gets DORMANT creation (no
-socket), demand dial bounded by `connect_timeout`, self-heal with `backoff` while a
+socket), demand dial (an op on a link that is not `up` is a counted drop that starts one
+attempt, and nothing waits for it: RFC-0014 Amendment 5), self-heal with `backoff` while a
 standing binding (`acquire_link`/`release_link`) holds the link, and close-to-dormant on
 the last release. The BUILT-IN point-to-point kinds `udp`, `tcp` and `ws` are opted in
 ([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548)) — on a build that carries the
