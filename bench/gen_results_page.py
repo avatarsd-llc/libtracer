@@ -40,6 +40,13 @@ OUT = REPO / "docs" / "performance.md"
 BENCH = REPO / "bench" / "build" / "bench_libtracer"
 BENCH_ZENOH = REPO / "bench" / "build" / "bench_zenoh"
 CODEC = REPO / "bench" / "build" / "bench_codec"
+# How many rounds the comparison sweep ran. docs.yml runs ONE on a pull request (a preview,
+# so the page says so and nobody quotes it) and best-of-3 everywhere else.
+ROUNDS = (
+    "1 round (PR preview), not a measurement"
+    if os.environ.get("LIBTRACER_COMPARE_ROUNDS") == "1"
+    else "best of 3 rounds"
+)
 VECTORS = REPO / "tests" / "conformance" / "vectors" / "v1"
 CXX = os.environ.get("LIBTRACER_CXX_HARNESS") or str(REPO / "build" / "tests" / "conformance_runner")
 
@@ -153,7 +160,7 @@ SURFACES: tuple[surface_t, ...] = (
               "same topology for both engines; p50, the p99 tail and the p999 deep tail — "
               "published, never gated"),
     surface_t("compare", "Engine comparison", "libtracer and Zenoh side by side, absolute",
-              "same runner, best of 3 rounds — no ratios"),
+              f"same runner, {ROUNDS} — no ratios"),
     surface_t("codec", "Cross-core codec", "decode→encode roundtrip per implementation",
               "the same v1 vectors for every core",
               ("bindings/typescript/…/bench/perf.mjs", "bindings/rust/examples/perf.rs"),
@@ -973,7 +980,7 @@ def compare_intro() -> str:
     return f"""\
 {head("zenoh")}
 
-Both engines on **one runner, best of 3 rounds**, so the numbers are directly comparable on
+Both engines on **one runner, {ROUNDS}**, so the numbers are directly comparable on
 identical hardware: two **in-process** comparison axes — subscriber fan-out and payload size
 — and a **network latency** comparison over the real loopback kernel path, one socket and
 one paced value per transport in two processes. The charts plot **absolute** throughput,
@@ -1465,7 +1472,7 @@ an MCU allocator in hundreds — so a host reading of churn is a *lower* bound.
 
 {compare_intro()}
 
-{mprose(M, "4 · libtracer vs Zenoh (absolute, best of 3 rounds, same runner)")}
+{mprose(M, f"4 · libtracer vs Zenoh (absolute, {ROUNDS}, same runner)")}
 
 ### Designated model boundaries
 

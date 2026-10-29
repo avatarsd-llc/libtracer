@@ -122,6 +122,10 @@ jobs:
         .github/workflows/docs.yml
     outputs:
       relevant: ${{ steps.decide.outputs.relevant }}
+      # true when the released-version subtrees must be assembled: always off a pull
+      # request (the deploy path), and on a pull request only when it touches what those
+      # subtrees are built with (docs-build's assembly comment).
+      releases: ${{ steps.decide.outputs.releases }}
     defaults:
       run:
         # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
@@ -154,6 +158,7 @@ jobs:
         run: |
           set -euo pipefail
           relevant=true
+          releases=true
           if [ "$EVENT" = "pull_request" ] && git rev-parse -q --verify HEAD^2 >/dev/null; then
             changed="$RUNNER_TEMP/changed"
             git diff --name-only -z HEAD^1 HEAD > "$changed"
@@ -171,10 +176,22 @@ jobs:
               done
             done < "$changed"
             [ "$relevant" = true ] || echo "no changed path matches DOCS_PATHS; the docs build is skipped"
+            # The released-version assembly gates nothing a pull request can change (the
+            # tags are immutable and a tag that fails to build is skipped, not failed), so
+            # a PR runs it only when it changes the assembler or the docs toolchain.
+            releases=false
+            while IFS= read -r -d '' file; do
+              case "$file" in
+                tools/assemble_release_docs.sh|tools/gen_versions_json.py|docs/requirements.txt|.github/ci-image/*)
+                  echo "release assembly input changed: $file"; releases=true; break;;
+              esac
+            done < "$changed"
           else
             echo "event '$EVENT': building unconditionally"
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          echo "releases=$releases" >> "$GITHUB_OUTPUT"
+          echo "releases=$releases"
           echo "relevant=$relevant"
       - name: Clean this job's workspace off the host runner
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
@@ -253,9 +270,10 @@ jobs:
           fi
       - uses: actions/checkout@v4
         with:
-          # Full history + tags: the released-version doc subtrees are rebuilt
-          # from their vX.Y.Z tags on every deploy (tools/assemble_release_docs.sh).
-          fetch-depth: 0
+          # Full history + tags only when the released-version subtrees are assembled
+          # from their vX.Y.Z tags (tools/assemble_release_docs.sh); nothing else in this
+          # job reads history, and a full fetch costs 4-10 min on the ci-local runners.
+          fetch-depth: ${{ needs.changes.outputs.releases == 'true' && '0' || '1' }}
           persist-credentials: false
       - name: Trust the checkout for git
         # The container runs as root over a workspace the host runner user owns, so git
@@ -338,7 +356,12 @@ jobs:
           # the SAME loop the same number of times — reducing one arm over rounds while
           # the other gets one shot would be a thumb on the scale, not a measurement.
           : >"$raw"
-          for r in 1 2 3; do
+          # A pull request runs ONE round: its numbers feed only the sticky PR comment and
+          # the preview page, both labelled "1 round (PR preview), not a measurement".
+          # main, nightly and tags keep best-of-3, the published measurement.
+          rounds=3; [ "$GITHUB_EVENT_NAME" = pull_request ] && rounds=1
+          echo "LIBTRACER_COMPARE_ROUNDS=$rounds" >> "$GITHUB_ENV"
+          for r in $(seq "$rounds"); do
             { ./bench/build/bench_libtracer grid; ./bench/build/bench_zenoh grid; } >>"$raw" 2>/dev/null || true
           done
           python3 bench/best_of_rounds.py <"$raw" >"$out" || cp "$raw" "$out"
@@ -397,6 +420,7 @@ jobs:
             } catch (e) { core.warning('comparison sweep produced no data; skipping PR comment'); return; }
             const marker = '<!-- ltz-compare -->';
             const body = `${marker}\n### 📊 libtracer vs Zenoh — absolute (this run)\n\n`
+              + (process.env.LIBTRACER_COMPARE_ROUNDS === '1' ? `**1 round (PR preview), not a measurement:** do not quote these numbers; main publishes best of 3.\n\n` : '')
               + `Measured on this CI runner in the same pass. libtracer built from source at \`-O3\`; Zenoh is the upstream zenoh-c 1.9.0 prebuilt release. Absolute values, no ratios — `
               + `shared-runner variance is real, read trends not the third digit. Interactive charts land on the `
               + `[Performance page](https://libtracer.avatarsd.com/docs/performance.html) after merge.\n\n`
@@ -415,7 +439,13 @@ jobs:
       # the PR check instead of shipping as unlinked plain text. docs/conf.py records
       # the two Breathe-generated reference classes that are deliberately not nitpicked.
       - name: Build (sphinx-build, config in docs/, source = repo root)
-        run: sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html
+        run: sphinx-build -n -W --keep-going -j "$BUILD_JOBS" -b html -c docs . docs/_build/html
+      # Pull requests skip the assembly (#2348, owner ruling 2026-10-29) unless they change
+      # its inputs (the changes job's `releases`): it gates nothing a PR can change, and a
+      # PR's cache entries are visible only to that PR, so on the ci-local runners it missed
+      # and rebuilt every tag (28-34 min) on every run. A push to main and a tag still
+      # assemble every tag, and main's entries are the ones a PR restores by prefix.
+      #
       # Released-version subtree cache (#1603). Each vX.Y.Z subtree is a pure function
       # of (tag, docs toolchain, assembler script), yet rebuilding all of them was ~13 of
       # this job's ~35 minutes on every PR. Entries are keyed
@@ -443,6 +473,7 @@ jobs:
       # the marker set did not change, so a warm run adds no entry.
       # The cache lives outside the checkout, since the checkout is the Sphinx source root.
       - name: Fingerprint the released-docs toolchain
+        if: needs.changes.outputs.releases == 'true'
         id: release-docs-key
         run: |
           fp="$( { python3 --version; python -m pip freeze | grep -viE '^(certifi|charset[-_]normalizer|idna|requests|urllib3)=='; doxygen --version; sha256sum tools/assemble_release_docs.sh; } | sha256sum | cut -c1-16)"
@@ -452,6 +483,7 @@ jobs:
           echo "key=release-docs-${fp}-${tags}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
           echo "release-docs cache key: release-docs-${fp}-${tags}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
       - name: Restore the released-version subtree cache
+        if: needs.changes.outputs.releases == 'true'
         uses: actions/cache/restore@v4
         # Same reasoning as the install step's ceiling: a healthy restore takes seconds,
         # so a stalled cache download fails here and names itself.
@@ -463,6 +495,7 @@ jobs:
             ${{ steps.release-docs-key.outputs.tags-prefix }}
             ${{ steps.release-docs-key.outputs.fp-prefix }}
       - name: Record the restored subtree markers
+        if: needs.changes.outputs.releases == 'true'
         id: release-docs-before
         run: echo "markers=$(ls -d "$HOME"/.cache/libtracer-release-docs/v*/.built "$HOME"/.cache/libtracer-release-docs/v*/.failed 2>/dev/null | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       # Rebuild each released version's docs from its vX.Y.Z tag into a subtree of
@@ -471,11 +504,12 @@ jobs:
       # Tags already in the cache are copied instead of rebuilt.
       # A tag whose docs fail to build is skipped — the manifest stays honest.
       - name: Assemble released-version doc subtrees
+        if: needs.changes.outputs.releases == 'true'
         # `~` is expanded by actions/cache but not in an `env:` value, hence $HOME here.
         run: RELEASE_DOCS_CACHE="$HOME/.cache/libtracer-release-docs" bash tools/assemble_release_docs.sh docs/_build/html
       - name: Did the assembly finish a new tag
         id: release-docs-after
-        if: always() && steps.release-docs-before.outcome == 'success'
+        if: always() && needs.changes.outputs.releases == 'true' && steps.release-docs-before.outcome == 'success'
         run: echo "markers=$(ls -d "$HOME"/.cache/libtracer-release-docs/v*/.built "$HOME"/.cache/libtracer-release-docs/v*/.failed 2>/dev/null | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       - name: Save the released-version subtree cache
         if: always() && steps.release-docs-after.outputs.markers != '' && steps.release-docs-after.outputs.markers != steps.release-docs-before.outputs.markers
