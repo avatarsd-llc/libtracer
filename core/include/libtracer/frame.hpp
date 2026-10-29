@@ -318,6 +318,19 @@ inline void stamp_ts(tlv_t& tlv, std::int64_t now_ns) noexcept {
 inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, clock.now_ns()); }
 
 /**
+ * @brief Serialize @p tlv, appending the frame bytes to a core byte array (#1781) — the same
+ *        bytes and the same refusals as the vector-returning @ref encode, in one reservation.
+ *
+ * The whole frame is sized first, so a refusal (an ill-formed `PATH_REF` or an incoherent
+ * timestamp anywhere in the tree, or the source declining the reservation) appends NOTHING.
+ *
+ * @param tlv The TLV tree to serialize.
+ * @param out Appended to; unchanged on a false return.
+ * @retval false @p tlv is refused (see the vector form), or the source refused the bytes.
+ */
+[[nodiscard]] bool encode(const tlv_t& tlv, mem::bytes_t& out) noexcept;
+
+/**
  * @brief Encode a TLV to its wire bytes (recomputing the trailer CRC when `opt.cr` is set).
  *
  * The length width is not taken from @p tlv verbatim: a body larger than 0xFFFF widens to the
@@ -345,29 +358,14 @@ inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, c
  *         unambiguous: a serialized TLV always carries at least its 4-byte header, so no
  *         well-formed @p tlv encodes to nothing.
  */
-[[nodiscard]] inline std::vector<std::byte> encode(const tlv_t& tlv);
-
-/**
- * @brief Serialize @p tlv, appending the frame bytes to a core byte array (#1781) — the same
- *        bytes and the same refusals as the vector-returning @ref encode, in one reservation.
- *
- * The whole frame is sized first, so a refusal (an ill-formed `PATH_REF` or an incoherent
- * timestamp anywhere in the tree, or the source declining the reservation) appends NOTHING.
- *
- * @param tlv The TLV tree to serialize.
- * @param out Appended to; unchanged on a false return.
- * @retval false @p tlv is refused (see the vector form), or the source refused the bytes.
- */
-[[nodiscard]] bool encode(const tlv_t& tlv, mem::bytes_t& out) noexcept;
-
-// The vector door is the core-array door plus one copy (#1781): ONE encoder, so the two cannot
-// disagree on a refusal, and an empty vector is the refusal, as it always was. Inline, so the
-// archive itself never names the heap a `std::vector` draws from (#2288): a caller that wants
-// the vector pays for it in its own translation unit.
-inline std::vector<std::byte> encode(const tlv_t& tlv) {
+[[nodiscard]] inline std::vector<std::byte> encode(const tlv_t& tlv) {
+    // The core-array door plus one copy (#1781): ONE encoder, so the two cannot disagree on a
+    // refusal, and an empty result is the refusal, as it always was. Inline, so the archive
+    // itself never names the heap the returned vector draws from (#2288): a caller that wants
+    // it pays in its own translation unit.
     mem::bytes_t out(mem::heap_source());
     if (!encode(tlv, out)) return {};
-    return std::vector<std::byte>(out.begin(), out.end());
+    return {out.begin(), out.end()};
 }
 
 /**
