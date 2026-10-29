@@ -139,16 +139,16 @@
 # no such flag: the slice exists only on these machines.
 #
 # BUILD_JOBS on the self-hosted route is ADAPTIVE (#2348): the slice gives ALL runners and
-# containers 11 cores / 24 GB, and five runners take `ci-local` jobs (studio-ci-1,
-# studio-lt-7 and studio-lt-8 for this repository, studio-ci-2 and studio-ci-3 for the
-# organisation). The "Set build parallelism" step counts the CI containers running in
+# containers 11 cores / 24 GB, and three runners take this repository's `ci-local` jobs
+# (studio-ci-1, studio-lt-7 and studio-lt-8); other projects' runners share the slice. The "Set build parallelism" step counts the CI containers running in
 # runners-ci.slice, which the trusted route mounts read-only at `/ci-slice` (the cgroup
 # directory, not the docker socket, which a job container never sees). At most 3 of
 # them, this one included: 4 compilers each, 3 x 4 = 12, ~one per core with a little
-# slack for link/IO stalls. More than 3, or a count that reads 0 (no mount, unreadable):
-# 2 each, so five busy runners ask for 10 rather than 20. Memory is not the binding
-# limit — the heaviest TUs peak at ~0.55 GB RSS (graph.cpp, measured RelWithDebInfo), so
-# even 5 jobs x 4 compilers would stay near 11 GB, under the 24 GB slice. Hosted runs keep
+# slack for link/IO stalls. More than 3 (possible only when other projects' containers
+# share the slice), or a count that reads 0 (no mount, unreadable): 2 each. Memory is not
+# the binding limit — the heaviest TUs peak at ~0.55 GB RSS (graph.cpp, measured
+# RelWithDebInfo), so even 5 jobs x 4 compilers would stay near 11 GB, under the 24 GB
+# slice. Hosted runs keep
 # `nproc`.
 #
 # ── TIMEOUT CEILINGS (the tree-wide policy; the fuller explanation lives here) ──────
@@ -200,17 +200,20 @@ name: core-ci
 # from the one derived list, so there is no hand-kept complement that could drift into
 # a green check on a diff that should have been built.
 #
-# PUSH TO MAIN RUNS THE SMOKE SET (#2348). A train merge lands a tree equal to the PR
-# head that already passed the full matrix, so a branch push to main runs only
-# `changes`, `build-test` (the default leg; its four other configurations are the
-# separate `build-test-variants` job), `ci-paths`, `format` and the
+# QUICK SET (#2348; owner rulings 2026-10-29). A pull request push and a branch push to
+# main run only `changes`, `build-test` (the default leg; its four other configurations
+# are the separate `build-test-variants` job), `ci-paths`, `format` and the
 # `build-test-required` verdict; every other core-ci job, `build-test-variants`
-# included, is skipped and the verdict requires it to be. The full matrix runs on pull requests, nightly at 00:00 UTC (02:00
-# Kyiv winter time, clear of the HIL and perf-local bench windows), on every release tag
-# and on a manual dispatch. `changes` exports the choice as `full`. Outside core-ci the
-# smoke set is no-binaries and doc-citations; the push-only jobs (docs deploy, perf
-# ratchet and history, ci-image publish, perf-local) are unchanged, and every other
-# PR-gated workflow runs nightly and on tags instead of per main push.
+# included, is skipped (it still reports, as skipped) and the verdict requires it to be.
+# A train merge lands a tree equal to a head that already passed the full matrix, and
+# seven PRs each running the ~300-job matrix on three runners queued jobs for hours. The FULL
+# matrix runs on a pull request whose head branch starts with `batch/` (the train's batch
+# PRs, and `batch/serial-<N>` for a PR it lands alone), nightly at 00:00 UTC (02:00 Kyiv
+# winter time, clear of the HIL and perf-local bench windows), on every release tag and
+# on a manual dispatch. `changes` exports the choice as `full`. The other workflows gate
+# their full-only jobs the same way, on `github.event_name != 'pull_request' ||
+# startsWith(github.head_ref, 'batch/')`; their lint and docs checks run on every PR
+# whose paths they match.
 #
 # DOCS-ONLY PULL REQUESTS (#2348). A changed `*.md` file never makes core-ci relevant
 # (nothing core-ci builds reads one), so a PR of docs/ and Markdown alone skips every
@@ -253,8 +256,9 @@ jobs:
         .github/workflows/core-ci.yml
     outputs:
       relevant: ${{ steps.decide.outputs.relevant }}
-      # false on a branch push (main): run the smoke set only (header, PUSH TO MAIN).
-      full: ${{ github.event_name == 'push' && github.ref_type == 'branch' && 'false' || 'true' }}
+      # false on a branch push (main) and on a pull request whose head is not `batch/*`:
+      # run the quick set only (header, QUICK SET).
+      full: ${{ ((github.event_name == 'push' && github.ref_type == 'branch') || (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'batch/'))) && 'false' || 'true' }}
     defaults:
       run:
         # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
@@ -438,9 +442,9 @@ jobs:
         run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # THE NON-DEFAULT build-test LEGS. The same steps as build-test above, for the four other
-  # configurations its comment names. A separate job only so that a branch push (the smoke
-  # set, header PUSH TO MAIN) runs the default leg alone and the build-test verdict can
-  # require these skipped there; on a PR, nightly or tag run they run like any leg.
+  # configurations its comment names. A separate job only so that the quick set (a branch
+  # push or a non-batch PR, header QUICK SET) runs the default leg alone and the build-test
+  # verdict can require these skipped there; on a batch PR, nightly or tag run they run.
   build-test-variants:
     needs: changes
     if: >-
@@ -1866,7 +1870,7 @@ jobs:
               print(f"::error::the changes job ended '{changes}'; there is no decision to report")
               sys.exit(1)
           want = "success" if os.environ["RELEVANT"] == "true" else "skipped"
-          # On a branch push only the smoke set runs (header, PUSH TO MAIN); the rest
+          # On a branch push or a non-batch PR only the quick set runs (header, QUICK SET); the rest
           # must be skipped, so a smoke run can never pass on a job it silently ran.
           rest = want if os.environ["FULL"] == "true" else "skipped"
           print(f"relevant={os.environ['RELEVANT']} full={os.environ['FULL']}: "
@@ -1891,7 +1895,7 @@ jobs:
         run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
 # One group per PR and ONE group for all main pushes, both cancelling (owner ruling
-# 2026-10-29): a main push runs only the smoke set (core-ci.yml's header, PUSH TO MAIN),
+# 2026-10-29): a main push runs only the smoke set (core-ci.yml's header, QUICK SET),
 # so a newer merge superseding an older smoke run loses nothing; the full matrix runs
 # nightly and on tags, which key on the sha and never cancel.
 concurrency:

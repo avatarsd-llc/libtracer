@@ -431,8 +431,10 @@ that breaks one of them is a finding; cite the rule.
   container.
 - **Container jobs run in `runners-ci.slice`** (`--cgroup-parent`), so the slice's
   CPU and memory limits bound them.
-- **`BUILD_JOBS` is adaptive:** 4 while three or fewer libtracer CI containers are
-  running in that slice, this one included, otherwise 2.
+- **Three runners take libtracer's `ci-local` jobs** (studio-ci-1, studio-lt-7,
+  studio-lt-8). **`BUILD_JOBS` is adaptive:** 4 while three or fewer CI containers
+  are running in that slice, this one included, otherwise 2 (more than three happens
+  only when other projects' containers share the slice).
 - **`cancel-in-progress` per PR ref.** A new push to a pull request cancels that
   PR's older run. The smoke-set workflows (core-ci, no-binaries, doc-citations)
   also share one cancelling group for all `main` pushes, so a newer merge supersedes
@@ -442,12 +444,19 @@ that breaks one of them is a finding; cite the rule.
 - **Batch independent PRs into one CI run.** PRs that do not touch each other are
   verified together in one run. A PR that touches the no-heap baseline
   (`tools/no_heap_baseline.json`) goes through on its own.
-- **A push to `main` runs a smoke set only.** A train merge lands a tree equal to
-  the PR head that already passed, so `main` runs core-ci's `build-test` default
-  leg alone (the other legs are the `build-test-variants` job, skipped there),
-  `ci-paths` and `format`, plus `no-binaries` and `doc-citations`. Push-only
-  publishing jobs (docs deploy, perf ratchet and history, image publish) are
-  unchanged. The full matrix runs nightly at 00:00 UTC and on every release tag.
+- **A PR push runs a quick set; the full matrix runs on batches.** A push to a
+  pull request, like a push to `main`, runs only the quick set: core-ci's
+  `build-test` default leg (the other legs are the `build-test-variants` job),
+  `ci-paths` and `format`, plus the lint and docs checks whose paths the diff
+  touches (`no-binaries`, `doc-citations`, docs, mermaid-lint, complexity,
+  version-consistency, capability-matrix, internet-draft). Every other job is
+  gated by `if:` and reports as skipped, never as missing. The full matrix runs on
+  a pull request whose head branch starts with `batch/`, nightly at 00:00 UTC, on
+  every release tag, and on a serial landing, which the train runs as a batch of
+  one (`batch/serial-<N>`). At most ONE batch or serial PR is in CI at a time. No
+  one pushes to a branch already queued for the train, except the
+  rebase-for-landing. Push-only publishing jobs (docs deploy, perf ratchet and
+  history, image publish) are unchanged.
 - **Docs-only PRs skip the C++ workflows.** A PR of `docs/` and Markdown alone
   skips core-ci and the other C++ workflows. Required checks still report: a
   skipped job, or a verdict job over skipped jobs, reads as success. doc-citations,
