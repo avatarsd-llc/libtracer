@@ -47,12 +47,6 @@
  *   egress-gather  `transport_t::send(iov)` through the BASE default a link inherits when it
  *                  does not override the scatter-gather entry: one block, one whole-frame
  *                  copy per frame (copy ⑨ of the same doc, host form).
- *   egress-queued  the tx_handoff_t queue a link drains from (RFC-0028 §4.7), as it runs
- *                  with a writer in flight: admit a RETAINED record (the fill copies a short
- *                  head, the slot keeps one reference to the value) and hand it to the writer.
- *                  The payload is not copied (RFC-0028 §6.9, slice 9).
- *   egress-queued-copy  the same queue with the pre-slice-9 fill: the whole frame copied into
- *                  the slot. The row slice 9 retires, kept for scale.
  *   ingress-copy   a FWD{WRITE} frame resolved through the terminus (view tier) whose value
  *                  the build's block source COPIES for a default-hint vertex (RFC-0022
  *                  Amendment 3: on the slab pool, a receive block of a larger class than the
@@ -147,7 +141,6 @@ void operator delete[](void* p, const std::nothrow_t&) noexcept { counted_free(p
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tlv_view.hpp"
 #include "libtracer/tracer.hpp"
-#include "libtracer/tx_handoff.hpp"
 
 namespace {
 
@@ -319,40 +312,6 @@ void run_egress_gather(std::size_t size) {
     if (link.bytes != (kWarm + kOps) * size) std::fprintf(stderr, "egress-gather: short send\n");
 }
 
-/** @brief The retained record the queue rows admit: the short head a delivery carries. */
-constexpr std::size_t kQueuedHead = 24;
-
-void run_egress_queued(std::size_t size, bool retained) {
-    tr::net::tx_handoff_t q(4, tr::mem::heap_source());
-    const tr::graph::value_ref_t v = tr::graph::value_ref_t::adopt(tr::graph::value_t::make_copy(
-        std::vector<std::byte>(size, std::byte{0xAB}), tr::mem::heap_source()));
-    const std::array<std::byte, kQueuedHead> head{};
-    std::uint64_t bytes = 0;
-    // A writer in flight: every admit below queues, and each op hands the writer one record.
-    (void)q.admit([](tr::mem::block_array_t<std::byte>&) -> std::size_t { return 1; });
-    const auto fill_head = [&](tr::mem::block_array_t<std::byte>& slot) -> std::size_t {
-        if (!slot.reserve(head.size())) return 0;
-        std::memcpy(slot.data(), head.data(), head.size());
-        return head.size();
-    };
-    const auto fill_whole = [&](tr::mem::block_array_t<std::byte>& slot) -> std::size_t {
-        const std::size_t n = head.size() + size;
-        if (!slot.reserve(n)) return 0;
-        std::memcpy(slot.data(), head.data(), head.size());
-        std::memcpy(slot.data() + head.size(), v->links()[0].bytes().data(), size);
-        return n;
-    };
-    measure(retained ? "egress-queued" : "egress-queued-copy", size, 1, retained ? 0 : 1, [&] {
-        const auto a = retained ? q.admit(fill_head, v.get()) : q.admit(fill_whole);
-        if (a != tr::net::tx_handoff_t::admit_t::QUEUED) std::fprintf(stderr, "queue refused\n");
-        bytes += q.next().size();
-    });
-    while (q.next()) {
-    }
-    if (bytes != (kWarm + kOps) * (kQueuedHead + size))
-        std::fprintf(stderr, "egress-queued: short record\n");
-}
-
 /** @brief One receive block holding @p n frame bytes, minted as the transport mints it. */
 view_t mint_rx(std::span<const std::byte> frame) {
     tr::view::rx_block_t blk = tr::view::alloc_rx(tr::mem::heap_backend(), frame.size());
@@ -481,8 +440,6 @@ int main() {
         for (const std::size_t k : kFans) run_local_handler(size, k);
         run_producer_own(size);
         run_egress_gather(size);
-        run_egress_queued(size, true);
-        run_egress_queued(size, false);
         run_ingress(size, true);
         run_ingress(size, false);
         for (const std::size_t k : kFans) run_proto(size, k);

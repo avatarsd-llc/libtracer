@@ -153,21 +153,6 @@ constexpr int kPollMs = 200;
 #endif
 
 /**
- * @brief Frames a sender may queue behind the write in flight (RFC 0028 §4.7, #1619).
- *
- * Kconfig (`CONFIG_LIBTRACER_WS_CLIENT_TX_QUEUE_DEPTH`) because it is RAM traded against
- * loss: each slot grows to the largest frame queued in it (at most `tx_bytes`) the first
- * time two tasks send at once, and keeps that block for the link's life. `0` is the
- * zero-RAM form — a sender that finds a write in flight drops and counts instead of
- * queueing. It never makes a sender wait: past the depth the frame is dropped.
- */
-#ifdef CONFIG_LIBTRACER_WS_CLIENT_TX_QUEUE_DEPTH
-constexpr std::size_t kTxQueueDepth = CONFIG_LIBTRACER_WS_CLIENT_TX_QUEUE_DEPTH;
-#else
-constexpr std::size_t kTxQueueDepth = 2;
-#endif
-
-/**
  * @brief Backoff before re-dialing after a failed/lost connection (ms) — an upper
  *        bound only: the wait is on a condition variable the destructor signals.
  *
@@ -338,7 +323,7 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string_view host, std::uint16_t 
     : dial_(mem::make_in<dial_t>(config.memory.state_or_default(), config.memory.state_or_default(),
                                  host, port, config.ws_path, config.handshake_headers)),
       rx_backend_(config.memory.rx),
-      // The send side's store (#1661): each send's frame, the queue's slots and the base
+      // The send side's store (#1661): each send's frame, the egress rings and the base
       // class's gather temporary draw from the application's `memory.io`, and a null `io`
       // resolves to the net sub-pool (the static arena on this target) as on every other
       // link (#2265). The host client (`ws_client_transport_t`) resolves it the same way.
@@ -346,7 +331,8 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string_view host, std::uint16_t 
       rx_bytes_(config.rx_bytes),
       tx_bytes_(config.tx_bytes),
       recv_stack_(config.recv_stack),
-      tx_(kTxQueueDepth, *tx_src_) {
+      held_(*tx_src_, tx_bytes_),
+      egress_(*tx_src_) {
     // The dial slot is drawn at setup, so a store that cannot hold it is a sizing bug, never
     // a runtime condition (ADR-0083): the constructor stops here, before the recv thread
     // that would read it exists. The read scratch is NOT drawn here (#1606): a link that never
@@ -355,6 +341,7 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string_view host, std::uint16_t 
     if (dial_ == nullptr || !dial_->copied)
         mem::exhausted_at_init(state, "esp_ws_client_link_t dial slot");
     if (config.memory.io != nullptr) set_egress_source(*config.memory.io);
+    egress_.open(peer_);  // one peer for the link's life: a re-dial is the same peer
     // Every member the recv thread reads is initialized ABOVE this line, which is the
     // whole of #959: the thread start_receiving() spawns dials at once, so a knob delivered
     // after the spawn is a data race, and for a handshake token it also leaves it undefined whether
@@ -470,6 +457,9 @@ esp_ws_client_link_t::~esp_ws_client_link_t() {
     // embedder-owned lifetime residual, not something this loop can widen its way into.
     while (senders_.load(std::memory_order_acquire) != 0)
         std::this_thread::sleep_for(std::chrono::milliseconds(kDrainSliceMs));
+    // Every sender has left, so no writer holds the role: the close only returns what is
+    // left in the rings to `tx_src_` before that store can go.
+    egress_.close(peer_);
 }
 
 esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
@@ -755,6 +745,28 @@ void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
 }
 
 void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> iov) {
+    send_on(iov, graph::delivery_lane_t{});  // no vertex: the control lane
+}
+
+void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> head,
+                                const graph::value_t& value, const graph::delivery_lane_t& lane) {
+    // The base lowering's stack table (#1620 (c)), kept here only to carry the lane through.
+    std::array<std::span<const std::byte>, 8> inline_iov;
+    iov_table_t<std::span<const std::byte>> table(inline_iov, egress_source());
+    const std::size_t n = head.size() + value.link_count();
+    std::span<const std::byte>* const iov = table.acquire(n);
+    if (iov == nullptr) {
+        tx_drops_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    std::copy(head.begin(), head.end(), iov);
+    std::transform(value.links().begin(), value.links().end(), iov + head.size(),
+                   [](const view::view_t& l) { return l.bytes(); });
+    send_on(std::span<const std::span<const std::byte>>(iov, n), lane);
+}
+
+void esp_ws_client_link_t::send_on(std::span<const std::span<const std::byte>> iov,
+                                   const graph::delivery_lane_t& lane) {
     std::size_t total = 0;
     for (const std::span<const std::byte>& part : iov) total += part.size();
     // A drop is a relaxed atomic bump, never a lock: write_m_ is held across the transport
@@ -788,48 +800,48 @@ void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> iov)
     // writes for other publishers are covered too.
     senders_.fetch_add(1, std::memory_order_relaxed);
     const sender_exit_t leaving(senders_);
-    // Enqueue-then-write (RFC 0028 §4.7, #1619). Only ONE sender writes at a time; one that
-    // arrives while a write is in flight copies its frame into a queue slot and returns at
-    // once rather than queueing on write_m_ for the rest of that write — up to a whole write
-    // budget on a peer whose window has closed. Delivery is in-call, so that sender is
-    // whatever unrelated task published; it must not pay for this peer's socket. A sender
-    // that finds every slot taken drops the frame and counts it, as the async server link
-    // does on an empty tx pool.
-    // The queued copy is the whole masked FRAME, gathered and masked straight from the
-    // caller's spans in one pass (#2265), so the writer that drains it writes the slot as it
-    // stands. A rope reply or a delivery's head + value arrives here as several spans, and
-    // the base default used to flatten them into an egress temporary first (#1620 (a)).
-    switch (tx_.admit([&](tr::mem::block_array_t<std::byte>& slot) -> std::size_t {
-        if (!slot.reserve(ws::detail::client_frame_bytes(total))) return 0;
-        return frame_into(slot.data(), iov, total);
-    })) {
-        case tr::net::tx_handoff_t::admit_t::REFUSED:
-            tx_drops_.fetch_add(1, std::memory_order_relaxed);
-            return;
-        case tr::net::tx_handoff_t::admit_t::QUEUED:
-            return;
-        case tr::net::tx_handoff_t::admit_t::WRITE:
-            break;
-    }
-    // This thread is the writer. Its own frame is drawn for this send from `memory.io` and
-    // built there, outside the write lock: the header, then the payload gathered and masked
-    // in the same pass (RFC 6455 client rule, #2265). A delivered frame may be shared with
-    // the concurrent server link reading the same bytes, so the caller's bytes are only ever
-    // read; the masked copy is the ONE pass a frame costs, where it used to be a copy, a mask
-    // in place and an unmask back inside IDF's `_ws_write`. The block holds this frame only
-    // and goes back when the send returns, so no buffer outlives a send. A queued frame is
-    // already masked in its slot, so it is written as it stands. This link never queues a
-    // RETAINED record (it does not override the retained send: a masked frame cannot be
-    // written from a shared block), so every record here is a copy. A refused draw drops
-    // this frame, counted, and the writer still drains what others queued.
-    fixed_array_t<std::byte> own;
-    if (own.assign(*tx_src_, ws::detail::client_frame_bytes(total))) {
-        write_locked(std::span<const std::byte>(own.data(), frame_into(own.data(), iov, total)));
-    } else {
-        tx_drops_.fetch_add(1, std::memory_order_relaxed);
-    }
-    for (tr::net::tx_handoff_t::record_t rec = tx_.next(); rec; rec = tx_.next())
-        write_locked(rec.bytes);
+    // The shared egress module (ADR-0087 §2, #1619). Only ONE sender writes at a time; one
+    // that arrives while a write is in flight leaves its frame in its lane's ring and returns
+    // at once rather than queueing on write_m_ for the rest of that write — up to a whole
+    // write budget on a peer whose window has closed. Delivery is in-call, so that sender is
+    // whatever unrelated task published; it must not pay for this peer's socket. A full ring
+    // sheds by its lane's arm, counted.
+    //
+    // The frame is built ONCE, drawn from `memory.io`: the header, then the payload gathered
+    // and masked in the same pass (RFC 6455 client rule, #2265). A delivered frame may be
+    // shared with the concurrent server link reading the same bytes, so the caller's bytes
+    // are only ever read; the masked copy is the ONE pass a frame costs. The writer that
+    // takes a waiting frame writes it as it stands, and the block goes back when its last
+    // reference does, so no buffer outlives the frame. A refused draw drops the frame,
+    // counted, and the writer still drains what others left waiting.
+    // Only a frame that WAITS is charged to the `tx_bytes` budget (#2277): the one the direct
+    // arm builds is the write in flight. A waiting frame the budget refuses is shed, counted.
+    bool direct = false;
+    tr::net::egress_once_t once([&] {
+        return tr::net::egress_frame_t::make(
+            direct ? *tx_src_ : static_cast<mem::block_source_t&>(held_),
+            ws::detail::client_frame_bytes(total),
+            [&](std::span<std::byte> out) { return frame_into(out.data(), iov, total); });
+    });
+    // Every step reports its frame moved: write_locked counts a failed or short write itself
+    // and tears the connection down for the recv loop to re-dial, so the egress has no
+    // strike or condemn of its own to make.
+    const auto wrote = [this](std::span<const std::byte> wire) {
+        write_locked(wire);
+        return tr::net::egress_step_t{wire.size(), false, false};
+    };
+    const tr::net::egress_result_t r = egress_.send(
+        peer_, lane, once,
+        [&] {
+            direct = true;
+            const tr::net::egress_frame_t* const f = once();
+            return f != nullptr ? wrote(f->head()) : tr::net::egress_step_t{0, false, true};
+        },
+        [&](const tr::net::egress_frame_t& f, std::size_t off) {
+            return wrote(f.head().subspan(off));
+        },
+        [] {});
+    if (r.shed != 0) tx_drops_.fetch_add(r.shed, std::memory_order_relaxed);
 }
 
 std::size_t esp_ws_client_link_t::frame_into(std::byte* dst,

@@ -1917,12 +1917,14 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(fwd_flatten_backend_test)
     add_test(NAME fwd_flatten_backend COMMAND fwd_flatten_backend_test)
 
-    # #1648 review: the in-place ingress reads (observer, bus-name rejection) spill a deep walk
+    # #1648 review: the in-place ingress read on a bus-name rejection spills a deep walk
     # into the receiving link's own source, never the process heap (receiver pays).
     add_executable(fwd_ingress_walk_source_test fwd_ingress_walk_source_test.cpp)
     target_link_libraries(fwd_ingress_walk_source_test PRIVATE libtracer)
     libtracer_test_warnings(fwd_ingress_walk_source_test)
     add_test(NAME fwd_ingress_walk_source COMMAND fwd_ingress_walk_source_test)
+    # Its one case is the bus-NAME rejection; a bus-closed build answers a skip (exit 77).
+    set_tests_properties(fwd_ingress_walk_source PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 if(LIBTRACER_NET_PLANE)
@@ -2076,8 +2078,8 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
 endif()
 
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
-    # RFC-0028 slice 9 (#1620): the retained send. tx_handoff_t keeps a queued record's value,
-    # the base lowering is head ++ links byte-exact, and two senders race retained frames onto
+    # RFC-0028 slice 9 (#1620): the retained send. The base lowering is head ++ links
+    # byte-exact, and two senders race retained frames onto
     # one TCP dial link (whole, ordered, accounted, every value released once drained).
     add_executable(retained_send_test retained_send_test.cpp)
     target_link_libraries(retained_send_test PRIVATE libtracer)

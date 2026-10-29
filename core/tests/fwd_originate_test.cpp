@@ -152,22 +152,14 @@ struct pair_t {
         (void)gb.write(hum, make_value(b_value_u32(55)));
         a.on_reply([](void* c, const tr::view::rope_t&) { ++static_cast<pair_t*>(c)->stray; },
                    this);
-        b.on_inbound(
-            [](void* c, std::string_view, const tr::wire::tlv_node_t& fwd) {
-                std::size_t i = 0;
-                for (const tr::wire::tlv_node_t n : fwd.children())
-                    if (i++ == 2) {
-                        static_cast<pair_t*>(c)->src.assign(n.wire().begin(), n.wire().end());
-                        return;
-                    }
-            },
-            this);
     }
-    /** @brief Deliver A's queued frames to B. */
+    /** @brief Deliver A's queued frames to B, noting each one's `src` on the way. */
     void to_b() {
         while (!a_to_b.q_.empty()) {
             auto f = std::move(a_to_b.q_.front());
             a_to_b.q_.pop_front();
+            if (const auto dec = tr::wire::decode(f); dec && dec->children.size() > 2)
+                src = tr::wire::encode(dec->children[2]);
             b.on_frame("net/mem/a", f);
         }
     }

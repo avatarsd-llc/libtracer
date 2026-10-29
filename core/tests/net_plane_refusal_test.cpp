@@ -36,7 +36,6 @@
 #include <vector>
 
 #include "libtracer/tracer.hpp"
-#include "libtracer/tx_handoff.hpp"
 #include "test_support.hpp"
 
 namespace {
@@ -134,34 +133,6 @@ int sweep_add_child(const char* what, tr::net::link_kind_t kind) {
     return refusals;
 }
 
-/** @brief A tx-handoff ring the source refuses is a ring of NO slots — drop-and-count. */
-void test_tx_handoff_refused_ring() {
-    std::printf("tx_handoff_t over a refusing source\n");
-    refuse_nth_source_t src(1);
-    {
-        tr::net::tx_handoff_t q(4, src, 64);
-        check(q.capacity() == 0, "the refused ring has no slots");
-        const auto fill = [](tr::mem::block_array_t<std::byte>& buf) -> std::size_t {
-            const std::byte b{1};
-            return buf.append(&b, 1) ? 1 : 0;
-        };
-        check(q.admit(fill) == tr::net::tx_handoff_t::admit_t::WRITE,
-              "the first sender still becomes the writer");
-        check(q.admit(fill) == tr::net::tx_handoff_t::admit_t::REFUSED,
-              "a record that meets the write in flight is refused, not queued");
-        check(q.refused() == 1, "…and counted");
-        check(!q.next(), "the writer finds nothing queued");
-    }
-    check(src.blocks_out_ == 0, "nothing was left out");
-
-    refuse_nth_source_t open(0);
-    {
-        tr::net::tx_handoff_t q(4, open, 64);
-        check(q.capacity() == 4, "an open source gives the ring all its slots");
-    }
-    check(open.blocks_out_ == 0, "the ring and its slots go back on destruction");
-}
-
 /** @brief An anchor id that cannot be one key record comes back EMPTY, never truncated. */
 void test_session_anchor_id_bound() {
     std::printf("session_anchor_id is bounded by one key record\n");
@@ -206,7 +177,6 @@ int main() {
                                           {}) >= 4,
               "…and so is a bus mount's per-peer token cache");
     }
-    test_tx_handoff_refused_ring();
     test_session_anchor_id_bound();
     test_store_path_segment_matches_emit();
     return tr::testing::summary("net_plane_refusal");

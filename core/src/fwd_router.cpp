@@ -517,13 +517,12 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     if (!dec) return;  // malformed ⇒ drop by value
     // A one-byte op, or nowhere trustworthy to reply to ⇒ drop by value.
     if (pre.op_body_len != 1) return;
-    // The `dst` is child 1 in either routable form (RFC-0024 §4): a canonical `PATH`, or the
-    // BOUND `PATH_REF` a reverse-list delivery is addressed by (§7.1 amendment 1) — the
-    // refusal of a bound delivery echoes the refused `PATH_REF` exactly as the canonical
-    // reject echoes the refused route, and the producer's step-5 reclaim correlates either
-    // (`evict_route_edges` classifies the echo's type byte). The `src` is the first `PATH`
-    // after it, and `PATH` only (`05-protocol-tlvs.md` hop rules). The scan stops at `src`, so
-    // a subscribe request's TRAILING reverse list (which sits after `src`, typed
+    // The `dst` is child 1, echoed as the refused route whatever its type, and the producer's
+    // step-5 reclaim correlates the echo (`evict_route_edges` classifies its type byte). Every
+    // route is a `PATH` of NAME and PAIR elements (RFC-0029 §5); a `PATH_REF` one is refused as
+    // a `dst` (§5.3), so nothing the library sends is addressed by one. The `src` is the first
+    // `PATH` after it, and `PATH` only (`05-protocol-tlvs.md` hop rules). The scan stops at `src`,
+    // so a subscribe request's TRAILING reverse list (which sits after `src`, typed
     // `PATH_REF_REVERSE`) can never be mistaken for either route.
     std::optional<wire::tlv_node_t> src;
     std::size_t child = 0;
@@ -1210,23 +1209,13 @@ sink_slot_t<fwd_router_t::reply_fn_t>::snapshot_t fwd_router_t::reply_target(con
     return reply_.get();
 }
 
-// The five sink setters. `sink_m_` serializes SETTERS against each other — the slot
+// The reply-sink setter. `sink_m_` serializes SETTERS against each other — the slot
 // publishes for racing readers but does not arbitrate two concurrent publishes (#914).
 // No reader ever takes it, so the frame path stays lock-free.
 
 void fwd_router_t::on_reply(reply_fn_t fn, void* ctx) noexcept {
     const std::lock_guard lock(sink_m_);
     reply_.set(fn, ctx);
-}
-
-void fwd_router_t::on_inbound(inbound_fn_t fn, void* ctx) noexcept {
-    const std::lock_guard lock(sink_m_);
-    inbound_.set(fn, ctx);
-}
-
-void fwd_router_t::on_raw(raw_fn_t fn, void* ctx) noexcept {
-    const std::lock_guard lock(sink_m_);
-    raw_.set(fn, ctx);
 }
 
 /**
@@ -1536,9 +1525,9 @@ std::optional<wire::path_ref_element_t> fwd_router_t::hop_mint(
 std::optional<wire::path_ref_element_t> fwd_router_t::reverse_hop_ref(
     std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx, bool from_peer) const {
     /*
-     * This hop's REVERSE-direction element (RFC-0024 §7.1 amendment 1): a reference for the
+     * This hop's REVERSE-direction element (RFC-0029 §7.1): a reference for the
      * identity the request ARRIVED on. Point-to-point, that is the same connection vertex
-     * the reply-direction mint answers with — one identity, two directions, one supplier.
+     * the reply direction answers with — one identity, two directions, one supplier.
      */
     if (!from_peer) return hop_mint(inbound_name, inbound_ctx);
     /*
@@ -1955,10 +1944,10 @@ bool fwd_router_t::door_allows(const child_registry_t::child_t* door, std::strin
 // the freed budget went elsewhere and the span instance fell out of `on_frame_impl` as an
 // 8 KB function of its own, one more call on every received frame. The attribute keeps the
 // receive path's shape off that budget.
-template <class Cursor, class Observe, class Reject, class Terminus, class Reply>
+template <class Cursor, class Reject, class Terminus, class Reply>
 [[gnu::always_inline]] inline bool fwd_router_t::route_fwd_ingress(
     std::string_view inbound_name, const Cursor& cur, const child_rx_ctx_t* inbound_ctx,
-    bool from_peer, Observe&& observe, Reject&& reject, Terminus&& terminus, Reply&& reply) {
+    bool from_peer, Reject&& reject, Terminus&& terminus, Reply&& reply) {
     // The classification gate is the frame's own TYPE byte, and that is the whole of it: a
     // FWD frame is data-plane, and no peek failure below can turn it back into a control
     // frame. The rope arm used to gate on `peek_fwd_dst_any` and then on `peek_fwd_op`
@@ -1981,9 +1970,6 @@ template <class Cursor, class Observe, class Reject, class Terminus, class Reply
     if (inbound_ctx != nullptr ? inbound_ctx->retired.load(std::memory_order_acquire)
                                : registry_.tombstoned(inbound_name))
         return true;
-    // Read-only observer (tests/ACL seam) — wants the tree. Span-only: no rope caller has
-    // a contiguous frame to decode here, so its instantiation of this driver passes a no-op.
-    observe();
     // ONE peek classifies the `dst` and opens its window: canonical PATH, bound PATH_REF, or
     // neither. Its verdict is kept, because `resolve_mount_at` overwrites `pre.valid` to mean
     // something else entirely once the descent has run ("nothing to hand the rebuild"), and
@@ -2100,7 +2086,6 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
         // counted and answered (`refuse_unserved_type`), never dropped in silence (#1951).
         if (!route_fwd_ingress(
                 inbound_name, cur, inbound_ctx, from_peer,
-                /* observe */ [] {},
                 /* reject */
                 [&](graph::status_t status, const fwd_pre_t& pre) {
                     // The rejection reply needs a contiguous decode; this is a COLD error
@@ -2161,28 +2146,15 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
 void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
                                  const view_t* frame_view, const child_rx_ctx_t* inbound_ctx,
                                  bool from_peer, peer_handle_t peer) {
-    if (const auto sink = raw_.get(); sink.fn != nullptr) sink.fn(sink.ctx, inbound_name, frame);
     if (frame.size() < 4) return;
 
     // The FWD plane never builds a tlv_t (ADR-0038 inv. #1 / ADR-0041 §5): the
     // forward-vs-terminus split and the op discriminant are read by OFFSET; a
     // forward hop scatter-gathers with zero heap; a terminus request decodes into
-    // the pmr arena; the inbound observer and a refused hop read the frame in place
-    // (`wire::tlv_node_t`, #1648).
+    // the pmr arena; a refused hop reads the frame in place (`wire::tlv_node_t`, #1648).
     const wire::grammar::span_cursor cur{frame};
     const bool routed = route_fwd_ingress(
         inbound_name, cur, inbound_ctx, from_peer,
-        /* observe */
-        [&] {
-            if (const auto sink = inbound_.get(); sink.fn != nullptr) {
-                // Read in place (#1648): validated once by `over`, nothing built. A
-                // frame deeper than the walk's inline slots spills into the receiving
-                // link's own source, never the process heap (receiver pays).
-                if (const auto dec = wire::tlv_node_t::over(frame, rx_for(inbound_ctx));
-                    dec && dec->opt().pl)
-                    sink.fn(sink.ctx, inbound_name, *dec);
-            }
-        },
         /* reject */
         // Always inlined (#1859): out of line, this by-reference closure forces `frame` onto
         // the stack and the cursor's 16-byte copy of it stalls store-to-load forwarding on
