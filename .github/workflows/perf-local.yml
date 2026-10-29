@@ -269,15 +269,15 @@ jobs:
       # its own step sequence — runner service restart, `docker kill`, an OOM — never gets
       # to. The symptom is `actions/checkout` below dying in its clean step, which reads as
       # a bench breakage and is not: it took this leg red on 2026-08-23 over 129 root-owned
-      # paths under `core/build-minimal`, and cost a manual repair. `github-runner` has
-      # passwordless sudo on the studio host (verified 2026-08-23), so the leg repairs its
-      # own workspace instead of waiting for a human.
+      # paths under `core/build-minimal`, and cost a manual repair. So the leg repairs its
+      # own workspace instead of waiting for a human, without sudo (#2348): the runner user
+      # can start containers, and a throwaway one, root inside, chowns the tree back to it.
       #
       # `|| true` deliberately: a workspace this cannot repair must not be reported HERE as
       # a measurement failure. Checkout is the step that should name it, with its own
       # diagnostics, exactly as it did before.
       - name: Reclaim any root-owned leftovers from a container job
-        run: sudo -n chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" || true
+        run: '[ "$RUNNER_ENVIRONMENT" != self-hosted ] || docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || echo "::warning::could not hand root-owned workspace files back to the runner user; checkout may fail to clean them"'
 
       - uses: actions/checkout@v4
 
@@ -873,8 +873,9 @@ jobs:
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
         # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
-        # container job and with sudo where the host grants it, so root-owned files go too.
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
