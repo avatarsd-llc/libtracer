@@ -83,7 +83,7 @@ jobs:
       (github.event_name != 'workflow_run' || ( github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event.workflow_run.event)))
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
-      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
@@ -180,11 +180,12 @@ jobs:
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
         # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
-        # container job and with sudo where the host grants it, so root-owned files go too.
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   docs-build:
     needs: changes
@@ -193,7 +194,7 @@ jobs:
       (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
-      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
@@ -272,13 +273,10 @@ jobs:
       - name: Install dependencies
         # The step that wedged (see the job-level note). Ten minutes is ~4x its healthy
         # runtime, so a genuine slow mirror still passes while a wedge fails fast and
-        # names itself, instead of being read as "still running" for hours.
+        # names itself, instead of being read as "still running" for hours. doxygen, unzip
+        # and curl are baked into the CI image, so only pip runs here (#2348).
         timeout-minutes: 10
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends doxygen unzip curl
-          python -m pip install -r docs/requirements.txt
+        run: python -m pip install -r docs/requirements.txt
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -528,11 +526,12 @@ jobs:
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
         # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
-        # container job and with sudo where the host grants it, so root-owned files go too.
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # THE REQUIRED CHECK `build` (#1614). Always runs: green when `docs-build` passed, or
   # when `changes` decided it had nothing to build and it was skipped; red otherwise
@@ -547,7 +546,7 @@ jobs:
     needs: [changes, docs-build]
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
-      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
@@ -586,11 +585,12 @@ jobs:
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
         # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
-        # container job and with sudo where the host grants it, so root-owned files go too.
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   deploy:
     needs: docs-build

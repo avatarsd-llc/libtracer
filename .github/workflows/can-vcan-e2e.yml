@@ -2,12 +2,19 @@
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
 # Dedicated end-to-end job for the transport_can SocketCAN binding (#55, increment
-# 2): set up a kernel `vcan0` virtual CAN device and run the real-socket smoke test
-# (transport_can_vcan_test) over it. This is SEPARATE from core-ci on purpose — the
-# required core gates (build-test / sanitizers / tsan / format / doxygen) must never
-# depend on kernel CAN, which an unprivileged container cannot load. If vcan cannot
-# be set up on the runner the test self-skips (clean exit), so this job stays green;
-# when vcan IS present it genuinely exercises the PF_CAN / SOCK_RAW path.
+# 2): run the real-socket smoke test (transport_can_vcan_test) over the kernel `vcan0`
+# virtual CAN device. This is SEPARATE from core-ci on purpose — the required core
+# gates (build-test / sanitizers / tsan / format / doxygen) must never depend on kernel
+# CAN, which an unprivileged container cannot load.
+#
+# WHERE vcan0 COMES FROM (#2348). The job never creates it: no modprobe, no `ip link
+# add`, nothing that needs root. The self-hosted host creates and raises vcan0 at boot,
+# so on the trusted route this job only checks it is there and FAILS, named, when it is
+# not: a missing vcan0 is broken infra, not a skip. The job runs on the host itself, not
+# in a container, because a job container sits in its own network namespace and cannot
+# see the host's vcan0. On the hosted fallback (CI_SELF_HOSTED=false; a fork PR runs no
+# job at all) there is no vcan0 and no one to create it, so the job says so and skips the
+# build and test.
 name: can-vcan-e2e
 
 on:
@@ -32,40 +39,64 @@ on:
 jobs:
   vcan-e2e:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
-    runs-on: ubuntu-24.04
+    # core-ci's trust guard (its header): a fork PR skips the job, it never reaches the host.
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     # Measured max 4.22 min, p50 3.50, min 2.65 over 40 runs, none of them on the
     # incident day — a tight, honest distribution. 15 = ~3.6x the observed max.
     timeout-minutes: 15
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
+      - name: vcan0 is up (created by the host at boot, never by this job)
+        id: vcan
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if ip -details -br link show vcan0 2>/dev/null | grep -q 'UP'; then
+            echo "up=true" >> "$GITHUB_OUTPUT"
+          elif [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            echo "::error::vcan0 is missing or down on this runner host. The host creates it at boot (modprobe vcan; ip link add dev vcan0 type vcan; ip link set up vcan0); this job never does (#2348). Fix the host, this is not a test failure."
+            exit 1
+          else
+            echo "::notice::hosted fallback runner: no vcan0 here, so the build and the vcan E2E test are skipped"
+          fi
+      # Build parallelism (#1637): 2 on the self-hosted host (a host job, outside
+      # runners-ci.slice, so it takes core-ci's floor), `nproc` on hosted runners.
+      - name: Set build parallelism (BUILD_JOBS)
+        if: steps.vcan.outputs.up == 'true'
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=2; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
-
-      - name: Set up vcan0 (best-effort; the test self-skips if it fails)
-        run: |
-          sudo modprobe vcan || echo "::warning::could not load the vcan kernel module"
-          sudo ip link add dev vcan0 type vcan || echo "::warning::could not add vcan0"
-          sudo ip link set up vcan0 || echo "::warning::could not bring vcan0 up"
-          ip -details -br link show vcan0 || echo "::warning::vcan0 not present — the E2E test will SKIP"
+        if: steps.vcan.outputs.up == 'true'
+        with:
+          persist-credentials: false
 
       - name: Build core (C++23)
+        if: steps.vcan.outputs.up == 'true'
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          # Bounded by BUILD_JOBS (#1637), as every build here is. This is an all-targets
-          # build: with unbounded parallelism a 4-core / 16 GB runner OOMs (SIGTERM, exit
-          # 143, ~70% through, no compile error) as soon as a branch adds a heavy TU.
-          cmake --build core/build --parallel "$BUILD_JOBS"
+          # Bounded by BUILD_JOBS (#1637), as every build here is. Only the one test
+          # target this job runs (#2348): on the host there is no compiler cache, and an
+          # all-targets build at 2 jobs ran past the 15-minute ceiling.
+          cmake --build core/build --target transport_can_vcan_test --parallel "$BUILD_JOBS"
 
       - name: Run the real-vcan transport_can E2E smoke test
+        if: steps.vcan.outputs.up == 'true'
         run: |
           ctest --test-dir core/build --output-on-failure -R '^transport_can_vcan$'
+
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
 concurrency:
   group: can-vcan-e2e-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
