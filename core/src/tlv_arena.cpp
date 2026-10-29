@@ -6,7 +6,9 @@
 #include "libtracer/tlv_arena.hpp"
 
 #include <array>
+#include <cstdint>
 #include <optional>
+#include <utility>
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/grammar.hpp"
@@ -32,10 +34,16 @@ namespace {
  */
 struct arena_sink {
     mem::block_array_t<arena_tlv_t>& nodes_;
-    struct open_t {
-        std::uint32_t index = 0; /**< @brief Index of the open node in `nodes_`. */
-    };
-    mem::block_array_t<open_t> open_;
+    /**
+     * @brief The innermost open node's index, or @ref kNone (#2264).
+     *
+     * The open-node stack is threaded through the nodes themselves: while a node is open its
+     * `end` holds the index of the node that was open around it, and its close restores this
+     * from there before writing the real `end`. No stack of its own, so no draw and no depth
+     * bound beyond the nodes the frame already costs.
+     */
+    std::uint32_t open_ = kNone;
+    static constexpr std::uint32_t kNone = UINT32_MAX; /**< @brief No node is open. */
     /**
      * @brief Set by the first draw the source refused (#588).
      *
@@ -48,13 +56,8 @@ struct arena_sink {
     /** @brief Where the root node's trailer stamp is written, if the frame carries one (#1109). */
     std::optional<timestamp_t>* root_ts_ = nullptr;
 
-    arena_sink(mem::block_array_t<arena_tlv_t>& nodes, mem::block_source_t& src,
-               std::optional<timestamp_t>* root_ts)
-        : nodes_(nodes), open_(src), root_ts_(root_ts) {
-        // Typical FWD nesting; deeper frames grow (bounded by `src`). A refusal here is
-        // latched like any other — the frame is rejected, not aborted.
-        if (!open_.reserve(8)) exhausted_ = true;
-    }
+    arena_sink(mem::block_array_t<arena_tlv_t>& nodes, std::optional<timestamp_t>* root_ts)
+        : nodes_(nodes), root_ts_(root_ts) {}
 
     void push(const grammar::header_t& h, std::span<const std::byte> bytes) {
         // The ROOT node's trailer stamp, captured before its bytes go out of reach (#1109):
@@ -92,18 +95,15 @@ struct arena_sink {
     void on_open(const grammar::header_t& h, const grammar::span_cursor& node) {
         const auto index = static_cast<std::uint32_t>(nodes_.size());
         push(h, node.buf);
-        if (!open_.push_back(open_t{.index = index})) exhausted_ = true;
+        if (exhausted_) return;
+        nodes_[index].end = std::exchange(open_, index);  // the enclosing open node, until close
     }
     void on_close() {
-        // One branch, not three: `on_open` latches `exhausted_` if EITHER of its two
-        // pushes was refused, so `!exhausted_` already implies both stacks hold the entry
-        // this close expects. Checking `open_.empty()` and the index bound as well costs
-        // two more loads per structured node on the terminus path and proves nothing the
-        // flag does not.
+        // One branch: `on_open` latches `exhausted_` when its push was refused, so
+        // `!exhausted_` already implies the node this close expects is open.
         if (exhausted_) return;
-        arena_tlv_t& node = nodes_[open_.back().index];
-        node.end = static_cast<std::uint32_t>(nodes_.size());
-        open_.pop_back();
+        arena_tlv_t& node = nodes_[open_];
+        open_ = std::exchange(node.end, static_cast<std::uint32_t>(nodes_.size()));
     }
 };
 
@@ -113,24 +113,23 @@ std::expected<tlv_arena_t, err_t> decode_into(std::span<const std::byte> input,
                                               mem::block_source_t& src) {
     // The one structural descent lives in grammar::walk (ADR-0048 §1); this sink
     // appends the pre-order arena nodes. The walk stack spills to `src` past its
-    // inline slots, and the sink's open-node stack draws from `src` too, so a
-    // slab-bound terminus decode stays heap-free (ADR-0041 terminus-arena span
-    // contract) and the caller's source is the nesting-depth bound (RFC-0006).
+    // inline slots, and the sink's open-node stack is threaded through the nodes
+    // (#2264), so a slab-bound terminus decode stays heap-free (ADR-0041
+    // terminus-arena span contract) and the caller's source is the nesting-depth
+    // bound (RFC-0006).
     //
-    // Every one of those three draws is NOTHROW and guarded (#588): this runs on the
+    // Both of those draws are NOTHROW and guarded (#588): this runs on the
     // wire RX path behind no ACL, and a peer chooses both the nesting depth and the
     // node count. Exhaustion is TLV_NESTING_TOO_DEEP — the status RFC-0006 already
     // specifies for "exceeds this receiver's decode resources" — not an abort.
     tlv_arena_t arena(src);
-    // Pre-size the node vector, as the sink already does for its open-node stack just below.
-    // Without this a 7-node FWD request walked 1->2->4->8, i.e. THREE realloc-and-copy passes
-    // to reach a capacity it could have started at — 720 of the terminus decode's 784 bytes
-    // were that growth curve rather than the nodes themselves. A capacity hint, not a bound:
-    // a deeper frame still grows, bounded only by `mr` (RFC-0006/0007, ADR-0051). The 8 is the
-    // same typical-FWD-nesting figure already used twice in this function, so it introduces no
-    // new number to keep in sync.
+    // Pre-size the node vector. Without this a 7-node FWD request walked 1->2->4->8, i.e. THREE
+    // realloc-and-copy passes to reach a capacity it could have started at — 720 of the terminus
+    // decode's 784 bytes were that growth curve rather than the nodes themselves. A capacity hint,
+    // not a bound: a deeper frame still grows, bounded only by `mr` (RFC-0006/0007, ADR-0051). The
+    // 8 is the same typical-FWD-nesting figure the walk stack's inline slots use just below.
     if (!arena.nodes_.reserve(8)) return std::unexpected(err_t::TLV_NESTING_TOO_DEEP);
-    arena_sink sink(arena.nodes_, src, &arena.root_ts_);
+    arena_sink sink(arena.nodes_, &arena.root_ts_);
     std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;
     grammar::walk_stack_t<grammar::span_cursor> stack(slots, &src);
     const auto r = grammar::walk(grammar::span_cursor{input}, sink, stack);
