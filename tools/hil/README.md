@@ -120,8 +120,9 @@ The workflow repairs its workspace before checkout, and every host job's last st
 does the same, with no sudo (#2348):
 
 ```sh
-docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ubuntu:24.04 \
-    chown -R "$(id -u):$(id -g)" /w /t || true
+docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" \
+    ghcr.io/avatarsd-llc/libtracer-ci:<pinned tag> chown -R "$(id -u):$(id -g)" /w /t \
+    || echo "::warning::could not hand root-owned workspace files back to the runner user; ..."
 ```
 
 It reclaims root-owned files a **container** job left in the shared `_work` tree.

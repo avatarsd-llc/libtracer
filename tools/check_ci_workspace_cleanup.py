@@ -67,6 +67,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from check_ci_image_tag import DOCKERFILE, IMAGE, expected_tag
+
 WORKFLOW_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
 SPACE_NAME = "Check the runner workspace has room"
@@ -91,13 +93,17 @@ actions: that dies in "Set up job" before any step, and is what the cleanup
 below prevents.
 """
 
+CI_IMAGE = f"{IMAGE}:{expected_tag((Path(__file__).resolve().parent.parent / DOCKERFILE).read_bytes())}"
+"""The pinned CI image the host cleanup runs its chown in: the tag check_ci_image_tag
+requires, so the cleanup never pulls a floating image and follows every image bump."""
+
 STEP_NAME = "Clean this job's workspace off the host runner"
 """The canonical last step's name. Also what the failure message tells an author to add."""
 
 STEP_RUN = (
     'w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; '
     'if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then '
-    'docker run --rm -v "$w/..:/w" -v "$t:/t" ubuntu:24.04 chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; '
+    f'docker run --rm -v "$w/..:/w" -v "$t:/t" {CI_IMAGE} chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; '
     'find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; '
     'find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; '
     "find \"$t\" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; "
@@ -109,7 +115,7 @@ STEP_RUN = (
 
 No `sudo` (#2348): the runner user holds no sudo grant. Inside a container the
 step is already root. On a host self-hosted job, which runs as the runner user,
-a throwaway `ubuntu:24.04` container first hands every file under the workspace's
+a throwaway container of the pinned CI image first hands every file under the workspace's
 parent and `$RUNNER_TEMP` back to that user, so the root-owned leftovers of a
 container job that died before its own cleanup can be deleted. On the hosted
 fallback there is nothing root-owned to remove, so that container is skipped. The `:?` guards make an unset variable abort the step
