@@ -123,11 +123,11 @@ class tlv_node_t {
      * @return The root node (borrowing @p input), or the grammar's `err_t`.
      */
     [[nodiscard]] static std::expected<tlv_node_t, err_t> over(
-        std::span<const std::byte> input, mem::block_source_t& spill = mem::heap_source());
+        std::span<const std::byte> input, mem::block_source_t& spill = mem::default_root());
 
     /** @brief The L1↔L2 cast in non-owning form: @ref over on @p v's bytes. */
     [[nodiscard]] static std::expected<tlv_node_t, err_t> over(
-        const view::view_t& v, mem::block_source_t& spill = mem::heap_source()) {
+        const view::view_t& v, mem::block_source_t& spill = mem::default_root()) {
         return over(v.bytes(), spill);
     }
 
@@ -318,6 +318,19 @@ inline void stamp_ts(tlv_t& tlv, std::int64_t now_ns) noexcept {
 inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, clock.now_ns()); }
 
 /**
+ * @brief Serialize @p tlv, appending the frame bytes to a core byte array (#1781) — the same
+ *        bytes and the same refusals as the vector-returning @ref encode, in one reservation.
+ *
+ * The whole frame is sized first, so a refusal (an ill-formed `PATH_REF` or an incoherent
+ * timestamp anywhere in the tree, or the source declining the reservation) appends NOTHING.
+ *
+ * @param tlv The TLV tree to serialize.
+ * @param out Appended to; unchanged on a false return.
+ * @retval false @p tlv is refused (see the vector form), or the source refused the bytes.
+ */
+[[nodiscard]] bool encode(const tlv_t& tlv, mem::bytes_t& out) noexcept;
+
+/**
  * @brief Encode a TLV to its wire bytes (recomputing the trailer CRC when `opt.cr` is set).
  *
  * The length width is not taken from @p tlv verbatim: a body larger than 0xFFFF widens to the
@@ -345,20 +358,15 @@ inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, c
  *         unambiguous: a serialized TLV always carries at least its 4-byte header, so no
  *         well-formed @p tlv encodes to nothing.
  */
-[[nodiscard]] std::vector<std::byte> encode(const tlv_t& tlv);
-
-/**
- * @brief Serialize @p tlv, appending the frame bytes to a core byte array (#1781) — the same
- *        bytes and the same refusals as the vector-returning @ref encode, in one reservation.
- *
- * The whole frame is sized first, so a refusal (an ill-formed `PATH_REF` or an incoherent
- * timestamp anywhere in the tree, or the source declining the reservation) appends NOTHING.
- *
- * @param tlv The TLV tree to serialize.
- * @param out Appended to; unchanged on a false return.
- * @retval false @p tlv is refused (see the vector form), or the source refused the bytes.
- */
-[[nodiscard]] bool encode(const tlv_t& tlv, mem::bytes_t& out) noexcept;
+[[nodiscard]] inline std::vector<std::byte> encode(const tlv_t& tlv) {
+    // The core-array door plus one copy (#1781): ONE encoder, so the two cannot disagree on a
+    // refusal, and an empty result is the refusal, as it always was. Inline, so the archive
+    // itself never names the heap the returned vector draws from (#2288): a caller that wants
+    // it pays in its own translation unit.
+    mem::bytes_t out(mem::heap_source());
+    if (!encode(tlv, out)) return {};
+    return {out.begin(), out.end()};
+}
 
 /**
  * @brief The canonical PATH-payload key of a validated PATH node — the graph vertex-map key.

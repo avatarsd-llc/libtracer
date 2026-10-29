@@ -33,6 +33,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `quic_transport_t` and `webtransport_transport_t` tells a failed dial from a pending one.
   `webtransport_transport_t::link_up()` is now true only while the session is up, so a link
   seen up has its frame channel.
+- **The arena-rooted MCU archive names no platform heap outside the rope and app-field paths
+  ([#2288](https://github.com/avatarsd-llc/libtracer/issues/2288), part A).** On cortex-m0 the
+  required-module `libtracer.a` now reaches no heap at all, and esp32c6 loses its five
+  pins that were not rope or app-field rows.
+  - `tr::mem::heap_source()` and the vector-returning `tr::wire::encode(const tlv_t&)` are now
+    inline in their headers. They keep their signatures and behaviour, but are emitted only in
+    a translation unit that names them, so an application that hands the heap to a graph pays
+    for it in its own code.
+  - The defaults that named the platform heap now name the build's default root
+    (`tr::mem::default_root()`, declared in `mem_source.hpp` as well): the `spill` parameter
+    of `tr::wire::tlv_node_t::over` and `tr::wire::validate_rope`, and the `upstream` of
+    `tr::mem::bump_source_t`. On the host that is the slab-pooled root and on an MCU the static
+    arena, so a deep frame's walk stack or a spent bump buffer no longer reaches the heap of
+    an arena build. Pass `tr::mem::heap_source()` explicitly to keep the old draw.
+  - On a build without the slab pool, the hazard domain's node class draws its slabs from the
+    build's value draw (the arena), not the platform heap.
 - **A PAIR chain is learned with no flag (RFC-0029 §6.2/§7.1, #2245) — BREAKING (wire).** A
   successful terminus reply seeds its `src` with `PATH{<target PAIR>}`, and every relaying hop
   prepends its PAIR (else its NAME run), so the origin receives its whole chain in `src`. Every

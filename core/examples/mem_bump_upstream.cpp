@@ -11,8 +11,8 @@
  * that changes what the source MEANS. Once the caller's buffer cannot fit a request, the
  * bump draws from its upstream instead:
  *
- * - the default upstream is `heap_source()`, so the buffer is a fast path and an oversize
- *   request quietly succeeds off the process heap;
+ * - the default upstream is `default_root()`, so the buffer is a fast path and an oversize
+ *   request quietly succeeds off the build's default root;
  * - `null_source()` serves nothing, so the buffer IS the ceiling and an oversize request is
  *   refused by value.
  *
@@ -48,7 +48,7 @@ int main() {
     // Same buffer size, same request, two upstreams — and two different node behaviours.
     alignas(std::max_align_t) std::array<std::byte, 128> soft_buf{};
     alignas(std::max_align_t) std::array<std::byte, 128> hard_buf{};
-    tr::mem::bump_source_t soft{soft_buf};                          // upstream: heap_source()
+    tr::mem::bump_source_t soft{soft_buf};                          // upstream: default_root()
     tr::mem::bump_source_t hard{hard_buf, tr::mem::null_source()};  // upstream: nothing
 
     void* const from_buffer = hard.try_alloc(64, 8);
@@ -56,7 +56,7 @@ int main() {
     check(ok, hard.used() == 64, "and only that is counted against the buffer");
 
     void* const spilled = soft.try_alloc(kOversize, 8);
-    check(ok, spilled != nullptr, "with a heap upstream, an oversize request still succeeds");
+    check(ok, spilled != nullptr, "with the default upstream, an oversize request still succeeds");
     check(ok, soft.used() == 0,
           "but used() stays 0 — the block came from the UPSTREAM, not the caller's buffer");
     std::printf("default upstream: %zu-byte request served, %zu buffer bytes used\n", kOversize,

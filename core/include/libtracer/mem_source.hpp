@@ -336,13 +336,28 @@ class heap_source_t final : public block_source_t {
     }
 };
 
+namespace detail {
+/** @brief The one platform-heap source of the process, behind @ref heap_source. */
+inline constinit heap_source_t g_heap_source{};
+}  // namespace detail
+
 /**
- * @brief The process-wide default @ref block_source_t (the platform heap).
+ * @brief The process-wide platform-heap @ref block_source_t.
  *
  * A namespace-scope `constinit` object behind a function, NOT a function-local static:
  * the latter costs a `__cxa_guard` word in `.bss` and an acquire fence on every call.
+ * Inline (#2288): the object, and the heap entry points its virtual arms name, are emitted
+ * only where something names it. An arena-rooted MCU archive names it nowhere, so its
+ * `libtracer.a` reaches no heap; an application that hands this source to a graph pays for
+ * the heap in its own code.
  */
-[[nodiscard]] block_source_t& heap_source() noexcept;
+[[nodiscard]] inline block_source_t& heap_source() noexcept { return detail::g_heap_source; }
+
+/**
+ * @brief The build's default root source, declared here for the defaults below; documented
+ *        and defined with the sub-pools in `%mem_heap.hpp`.
+ */
+[[nodiscard]] block_source_t& default_root() noexcept;
 
 /**
  * @brief The source that serves nothing — every request is exhaustion.
@@ -405,7 +420,7 @@ class bump_source_t final : public block_source_t {
    public:
     /** @brief Carve from @p buffer; once it cannot serve a request, draw from @p upstream. */
     explicit bump_source_t(std::span<std::byte> buffer,
-                           block_source_t& upstream = heap_source()) noexcept
+                           block_source_t& upstream = default_root()) noexcept
         : block_source_t("bump"), buf_(buffer), upstream_(&upstream) {}
 
     /** @brief Bump-allocate, aligned; falls back to the upstream when the buffer cannot fit. */

@@ -17,8 +17,10 @@
 #include <cstddef>
 #include <new>
 #include <span>
+#include <type_traits>
 
 #include "libtracer/lkv_slot.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_slab_pool.hpp"
 #include "libtracer/placement.hpp"
 
@@ -38,10 +40,33 @@ constexpr std::size_t kNodeSlabBytes = 4096;
 /** @brief The node class: one row, its lock the build's guard. */
 using node_pool_t = mem::slab_pool_t<guard_t, 1>;
 
-/** @brief The node class and the platform heap its slabs come from, as one object. */
+/**
+ * @brief Where an MCU build's node slabs come from (#2288): the build's own value draw, the
+ *        static arena (or, on the heap-rooted build that asked for it, the platform heap).
+ *        Constant-initializable, so the node class stays `constinit`.
+ */
+class mcu_slab_source_t final : public mem::block_source_t {
+   public:
+    /** @brief Names the source for `:stats`. */
+    constexpr mcu_slab_source_t() noexcept : block_source_t("lkv_nodes") {}
+    /** @brief One slab from the build's value draw; `nullptr` when it is spent. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        return mem::detail::mcu_value_alloc(bytes, align);
+    }
+    /** @brief Return a slab @ref try_alloc handed out. */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        mem::detail::mcu_value_release(p, bytes, align);
+    }
+};
+
+/** @brief The slab source: the platform heap where the build pools on the host, as the host
+ *         root's own slabs do; the build's value draw on an MCU, which names no heap. */
+using slab_source_t = std::conditional_t<mem::kSlabPool, mem::heap_source_t, mcu_slab_source_t>;
+
+/** @brief The node class and the source its slabs come from, as one object. */
 struct node_class_t {
-    mem::heap_source_t heap; /**< @brief Serves whole slabs, never a node. */
-    node_pool_t pool;        /**< @brief The node class, drawing its slabs from @ref heap. */
+    slab_source_t heap; /**< @brief Serves whole slabs, never a node. */
+    node_pool_t pool;   /**< @brief The node class, drawing its slabs from @ref heap. */
     /** @brief Constant-initializes the class over @ref heap. */
     constexpr node_class_t() noexcept
         : heap(),

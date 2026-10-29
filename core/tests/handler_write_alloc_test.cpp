@@ -146,9 +146,9 @@ struct fixture_t {
     }
 
     /** @brief A fresh borrowed-view rope of `buffers.size()` links. Its spill block comes
-     *         from the raw heap source, as the graph's does: a rope with no source spills into
-     *         `table_source()`, which on this build is a slab pool the counter cannot see per
-     *         write (#2284). */
+     *         from the raw heap source, as the graph's own ropes do here: the graph draws each
+     *         from its table source (`*tables_`, #2288), and this test hands it the raw heap,
+     *         so the counter sees every block. */
     [[nodiscard]] rope_t make() const {
         rope_t r{tr::mem::heap_source()};
         (void)r.try_reserve(buffers.size());

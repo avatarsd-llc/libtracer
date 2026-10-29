@@ -7,7 +7,7 @@ ceiling, depending on one word at the construction site.
 
 | upstream | an oversize request | what the buffer is |
 | --- | --- | --- |
-| `heap_source()` (the default) | succeeds, off the process heap | a fast path |
+| `default_root()` (the default) | succeeds, off the build's default root (the host slab pool, an MCU's arena) | a fast path |
 | `null_source()` | `nullptr` | the bound |
 
 ## What to notice

@@ -121,14 +121,6 @@ std::optional<trailer_t> tlv_node_t::trailer() const noexcept {
     return read_trailer(opt_, bytes_, header_ + length_);
 }
 
-std::vector<std::byte> encode(const tlv_t& tlv) {
-    // The vector door is the core-array door plus one copy (#1781): ONE encoder, so the two
-    // cannot disagree on a refusal, and an empty vector is the refusal, as it always was.
-    mem::bytes_t out(mem::heap_source());
-    if (!encode(tlv, out)) return {};
-    return std::vector<std::byte>(out.begin(), out.end());
-}
-
 std::optional<std::span<const std::byte>> path_key(const tlv_node_t& path) {
     // The canonical PATH-payload key IS the PATH body (RFC-0018): a packed sequence of
     // `[u8 len][bytes]` records with `opt.PL = 0`, so a PATH node carries it in
