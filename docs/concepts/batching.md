@@ -73,8 +73,7 @@ its offset. The descriptor, not the record, says which shape the bytes are.
 :class: warning
 
 How a FOLD subscriber knows that a branch-write node's `VALUE` is a batch, and reads it back,
-waits on a maintainer ruling (the FOLD-seat reader question raised with #2377, the compiled
-batch example). Until it is ruled, this page shows only the standalone read-back.
+waits on a maintainer ruling: #2394 (can a FOLD subscriber read a folded batch). Until it is ruled, this page shows only the standalone read-back.
 ```
 
 ## Worked example
