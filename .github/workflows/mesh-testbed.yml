@@ -104,15 +104,22 @@ jobs:
       # no healthcheck, deliberately — see compose.yml). The real readiness gate is the
       # driver's ctrl-connect retry loop: a node binds its link listeners BEFORE its
       # ctrl listener, so ctrl-reachable implies every listener is bound.
+      # The host is shared and the subnet fixed: a network or container a cancelled run
+      # left behind would make this run's `up` fail on it, so clear it first.
+      - name: Remove a previous run's mesh leftovers (host route)
+        if: runner.environment == 'self-hosted'
+        run: docker compose down -v --remove-orphans
+
       - name: Build the node image and bring the four-node mesh up
         run: docker compose up -d --build --wait
 
       - name: Read back each node's published ctrl port
         run: |
+          set -o pipefail
           ctrl=""
           for svc in a b c bus; do
-            p=$(docker compose port "$svc" 47300 | sed 's/^0\.0\.0\.0:/127.0.0.1:/')
-            [ -n "$p" ] || { echo "::error::no published ctrl port for mesh node $svc"; exit 1; }
+            p=$(docker compose port "$svc" 47300 | sed -e 's/^0\.0\.0\.0:/127.0.0.1:/' -e 's/^\[::\]:/127.0.0.1:/')
+            [[ "$p" =~ ^127\.0\.0\.1:[1-9][0-9]*$ ]] || { echo "::error::mesh node $svc has no usable published ctrl port (got '$p')"; exit 1; }
             ctrl="${ctrl:+$ctrl,}$svc=$p"
           done
           echo "LIBTRACER_MESH_CTRL=$ctrl" >> "$GITHUB_ENV"
@@ -156,7 +163,7 @@ jobs:
 
       - name: Tear the testbed down
         if: always()
-        run: docker compose down -v
+        run: docker compose down -v --remove-orphans
       - name: Clean this job's workspace off the host runner
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
