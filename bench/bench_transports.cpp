@@ -112,7 +112,7 @@ void run_pub(std::string_view proto, std::uint16_t port) {
             while (Clock::now() < until) { /* pace so latency sends don't queue */
             }
         }
-        for (std::size_t i = 0; i < net::kThroughputMsgs; ++i) send(S, net::kThroughput);
+        for (std::size_t i = 0; i < net::throughput_msgs(S); ++i) send(S, net::kThroughput);
         for (int i = 0; i < 8; ++i) send(16, net::kEof);
         std::this_thread::sleep_for(std::chrono::milliseconds(net::kDrainMs));
     }
