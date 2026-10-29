@@ -18,7 +18,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Instrument** | **Amendment.** It adds an optional normative link binding: a datagram layout, a handshake, and MUSTs that a peer can observe on the wire. It also adds nouns to the `:stats.link.<child>` block of [reference/05](../../reference/05-protocol-tlvs.md), a normative annex. GOVERNANCE.md reserves both for an amendment. It changes no existing wire byte: a link that does not use the binding is unaffected. |
 | **Tracking issue** | [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063). It is a narrow slice pulled forward from [#1993](https://github.com/avatarsd-llc/libtracer/issues/1993) (an opaque credential member in `:identity` and the "Tracer over Noise" binding, v1.0.0). |
 | **Target spec version** | v1 itself. `docs/spec/v1.md` still reads "(DRAFT)". |
-| **Amends** | [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §4 as amended (Amendment 1), **for a Noise link only**: an operation on a dormant link fails at once instead of waiting one `connect_timeout` (§5.1), and an attempt an operation started stops at its attempt deadline (§5.7). [ADR-0086](../../adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md) Decision 8's pattern list (§10.4; the dated note lands in this RFC's pull request). [reference/05](../../reference/05-protocol-tlvs.md) §The seam census record and §Invalidation (§10.2, written in slice S1). |
+| **Amends** | [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §4 as amended (Amendment 1), **for a Noise link only**: an operation on a dormant link fails at once instead of waiting one `connect_timeout` (§5.1), and an attempt an operation started stops at its attempt deadline (§5.7). RFC-0014 Amendment 5 (#2303) later generalised the fail-at-once rule to every `DIAL` link. [ADR-0086](../../adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md) Decision 8's pattern list (§10.4; the dated note lands in this RFC's pull request). [reference/05](../../reference/05-protocol-tlvs.md) §The seam census record and §Invalidation (§10.2, written in slice S1). |
 | **Builds on** | [ADR-0045](../../adr/0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md) Decision 4 (link confidentiality is the link's job, by a Noise channel) and Decision 5 (trust is per hop); [ADR-0086](../../adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md) Decision 8 ("Tracer over Noise" is an optional normative link binding); [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) (link liveness); [RFC-0010](0010-owner-app-fields-and-schema.md) Amendment 2 (the `:stats.link.<child>` census); [RFC-0029](0029-one-path-primitive.md) §8.2 (a session boundary advances the generation). |
 | **Leaves to #1993** | The `:identity` credential member, the static-key patterns (IK, XX, KK) over the ed25519 node key, and the credential in the handshake payload. §7 says how they attach to this binding. |
 | **Relates to** | [#1649](https://github.com/avatarsd-llc/libtracer/issues/1649) (an ESP-IDF UDP link with Noise), which should be built against this binding (§10.3). |
@@ -183,14 +183,17 @@ follow this section. A link that does not follow it is not a conforming Tracer N
 - A Noise link **MUST NOT send any Tracer frame in clear**, and MUST NOT fall back to the plain
   carrier when it has no session. A send without a session fails as a send on a down link does
   (RFC-0014 §4: "ops on a down link fail fast").
-- **An operation on a `dormant` Noise link fails at once.** RFC-0014 §4 lets an operation on a
-  dormant DIAL link wait for one connect attempt, bounded by `connect_timeout`. A Noise link has no
-  clock to bound that wait and no buffer to hold the frame in. So the operation fails at once with
-  link-down, and it **starts** an attempt (it is a demand). A caller that wants to send as soon as
+- **An operation on a `dormant` Noise link fails at once.** RFC-0014 Amendment 5 makes this the
+  rule for every `DIAL` link: an operation on a link that is not `up` fails at once with link-down,
+  its frame is a counted drop, and on a `dormant` link it **starts** an attempt (it is a demand).
+  Nothing waits for a dial. A caller that wants to send as soon as
   the session exists awaits the connection vertex's value reaching `up`, an ordinary `await` whose
   deadline the requester owns (RFC-0004 Amendment 3), and then sends. This is how the recovery
-  case makes its first write. `connect_timeout` becomes the attempt deadline of §5.7, checked
-  against `now`. Nothing is queued in either case.
+  case makes its first write. The §5.7 attempt deadline is the link's own attempt span, checked
+  against the application's `now`; `connect_timeout` stays a config key, parsed and handed to the
+  factory; binding it to the application's `now` is
+  [#2304](https://github.com/avatarsd-llc/libtracer/issues/2304)'s.
+  Nothing is queued in either case.
 - The binding is **per hop**. A frame forwarded beyond the far node leaves this session there.
   Nothing here gives end-to-end protection, as ADR-0045 Decision 5 says.
 
@@ -871,7 +874,9 @@ session is discarded, so it carries no per-boot epoch. A routine rekey is not a 
   and starts the attempt, and the caller awaits `up` (§5.1). The wait needs a clock and a held
   frame, and the binding has neither. An attempt an operation started on an unheld link stops at
   its attempt deadline (§5.7), which is RFC-0014 Amendment 1's no-background-retry rule. RFC-0014's
-  status key and an amendment pointer are updated in slice S1.
+  status key and an amendment pointer are updated in slice S1. RFC-0014 Amendment 5 (#2303) later
+  removed the dormant-link wait for every `DIAL` link, so the fail-at-once rule is no longer
+  Noise-specific: on any link that is not `up`, an operation's frame is a counted drop.
 
 ## 11. Breaking surface
 
