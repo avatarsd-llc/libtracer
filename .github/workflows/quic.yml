@@ -10,15 +10,12 @@
 # and runs the FULL ctest suite (quic + webtransport included) plus ASan+UBSan
 # and TSan variants.
 #
-# RUNNER ROUTING: these legs stay on `ubuntu-24.04` — they were audited for the
-# `ci-local` self-hosted routing that core-ci.yml and doc-citations.yml now use, and
-# they do NOT qualify (phase 2). All three run `setarch -R`, i.e.
-# `personality(ADDR_NO_RANDOMIZE)`, which Docker's default seccomp profile denies with
-# EPERM — verified — so the `container: ubuntu:24.04` route that makes the other
-# migrations hermetic cannot run them at all. Routing them direct-on-host instead would
-# put an msquic source build (and its cached `~/msquic-install` prefix) on a machine
-# whose toolchain is not asserted, for the workflow with the heaviest dependency in the
-# repo. Revisit only after a runner-side `--security-opt seccomp=unconfined` decision.
+# RUNNER ROUTING (#2348): host jobs on the `ci-local` runners. All three legs run
+# `setarch -R`, i.e. `personality(ADDR_NO_RANDOMIZE)`, which Docker's default seccomp
+# profile denies with EPERM, so they cannot run in a job container. They run on the host
+# as the runner user (core-ci.yml's header, HOST JOBS), print the host toolchain first,
+# and keep the msquic prefix inside the workspace rather than under the home directory
+# the host's runners share.
 name: quic
 
 on:
@@ -82,7 +79,10 @@ env:
 jobs:
   quic-build-test:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
-    runs-on: ubuntu-24.04
+    # A HOST job on the ci-local runners (#2348), not a container: Docker's default seccomp
+    # profile denies the personality(ADDR_NO_RANDOMIZE) that `setarch -R` needs, and the
+    # host allows it. core-ci's trust guard: a fork PR skips the job.
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     # Measured on the msquic cache-HIT path only: quic-tsan max 9.95 min (healthy 9.30,
     # p50 6.58), quic-asan 8.92, quic-release 6.22. 3x would be ~30 — but across 500
     # sampled successful runs of this workflow and wt-interop.yml the
@@ -91,7 +91,7 @@ jobs:
     # cache eviction and is a full from-source msquic build. 45 covers the measured
     # 10-min hit path at 4.5x AND leaves ~35 min for a cold build. This number is
     # measurement PLUS declared headroom — re-measure it after the first real cache miss.
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -108,22 +108,57 @@ jobs:
               -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
     name: quic-${{ matrix.name }}
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
+      # Build parallelism (#1637) and the host compiler cache (#2348). A host job runs in
+      # its runner's own unit under runners.slice, not in runners-ci.slice: moving a
+      # process into another system slice needs privilege the runner user does not hold.
+      # It counts the libtracer CI containers in runners-ci.slice plus itself, and takes
+      # core-ci's adaptive rule: 4 with three or fewer running, otherwise 2, and 2 when
+      # the slice cannot be read. The shared /ccache is the containers' (root-owned
+      # entries), so a host job keeps its own cache under the runner user's home.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            slice=/sys/fs/cgroup/runners.slice/runners-ci.slice
+            if [ -d "$slice" ]; then
+              n=$(( $(ls -d "$slice"/docker-*.scope 2>/dev/null | wc -l) + 1 ))
+              echo "libtracer CI jobs running (containers in runners-ci.slice + this host job): $n"
+              if [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
+            else jobs=2; fi
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=$HOME/ccache-host"
+              echo "CCACHE_MAXSIZE=10G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON ($HOME/ccache-host)"
+          else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+      - name: Host toolchain (asserted, not assumed)
+        # A host job builds with what the host carries (core-ci.yml's header, HOST JOBS);
+        # a missing tool fails here, named, instead of halfway through the build.
+        run: |
+          g++ --version | head -1
+          cmake --version | head -1
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then ccache --version | head -1; fi
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Cache the msquic install prefix
         id: msquic-cache
         uses: actions/cache@v4
         with:
-          path: ~/msquic-install
+          # Workspace-relative, not under ~ (#2348): on the ci-local host the runners share
+          # one home directory, and concurrent legs must not unpack or build into the
+          # same prefix. A relative path also keys the same on every runner.
+          path: msquic-install
           key: msquic-${{ env.MSQUIC_TAG }}-${{ runner.os }}-ubuntu24
 
       - name: Build msquic from source (cache miss only)
@@ -134,22 +169,22 @@ jobs:
         timeout-minutes: 30
         run: |
           git clone --depth 1 --branch "$MSQUIC_TAG" --recurse-submodules --shallow-submodules \
-            https://github.com/microsoft/msquic.git ~/msquic-src
-          cmake -S ~/msquic-src -B ~/msquic-src/build -DCMAKE_BUILD_TYPE=Release \
+            https://github.com/microsoft/msquic.git "$RUNNER_TEMP/msquic-src"
+          cmake -S "$RUNNER_TEMP/msquic-src" -B "$RUNNER_TEMP/msquic-src"/build -DCMAKE_BUILD_TYPE=Release \
             -DQUIC_BUILD_TOOLS=OFF -DQUIC_BUILD_TEST=OFF -DQUIC_BUILD_PERF=OFF \
-            -DQUIC_ENABLE_LOGGING=OFF -DCMAKE_INSTALL_PREFIX="$HOME/msquic-install"
-          cmake --build ~/msquic-src/build --parallel "$BUILD_JOBS"
-          cmake --install ~/msquic-src/build
+            -DQUIC_ENABLE_LOGGING=OFF -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/msquic-install"
+          cmake --build "$RUNNER_TEMP/msquic-src"/build --parallel "$BUILD_JOBS"
+          cmake --install "$RUNNER_TEMP/msquic-src"/build
 
       - name: Configure + build (LIBTRACER_WITH_QUIC=ON) + full ctest
         run: |
           cmake -S core -B core/build-quic-${{ matrix.name }} -DBUILD_TESTING=ON \
-            -DLIBTRACER_WITH_QUIC=ON -DCMAKE_PREFIX_PATH="$HOME/msquic-install" \
+            -DLIBTRACER_WITH_QUIC=ON -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/msquic-install" \
             ${{ matrix.cmake_flags }}
           cmake --build core/build-quic-${{ matrix.name }} --parallel "$BUILD_JOBS"
           # ASLR can make ASan/TSan abort in this runner; pin it off (harmless
           # for the release leg). LD_LIBRARY_PATH covers the msquic shared lib.
-          export LD_LIBRARY_PATH="$HOME/msquic-install/lib:${LD_LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/msquic-install/lib:${LD_LIBRARY_PATH:-}"
           setarch "$(uname -m)" -R ctest --test-dir core/build-quic-${{ matrix.name }} \
             --output-on-failure
 
@@ -160,14 +195,24 @@ jobs:
         if: matrix.name == 'release'
         run: |
           cmake -S core -B core/build-quic-insecure-tls -DBUILD_TESTING=ON \
-            -DLIBTRACER_WITH_QUIC=ON -DCMAKE_PREFIX_PATH="$HOME/msquic-install" \
+            -DLIBTRACER_WITH_QUIC=ON -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/msquic-install" \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_FLAGS="-I$PWD/core/tests/insecure-tls"
           cmake --build core/build-quic-insecure-tls --parallel "$BUILD_JOBS" \
             --target quic_test webtransport_test
-          export LD_LIBRARY_PATH="$HOME/msquic-install/lib:${LD_LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/msquic-install/lib:${LD_LIBRARY_PATH:-}"
           setarch "$(uname -m)" -R ctest --test-dir core/build-quic-insecure-tls \
             -R '^(quic|webtransport)$' --output-on-failure
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
 concurrency:
   group: quic-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
