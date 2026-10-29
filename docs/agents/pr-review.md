@@ -434,7 +434,11 @@ that breaks one of them is a finding; cite the rule.
 - **`BUILD_JOBS` is adaptive:** 4 while three or fewer libtracer CI containers are
   running in that slice, this one included, otherwise 2.
 - **`cancel-in-progress` per PR ref.** A new push to a pull request cancels that
-  PR's older run. Pushes to `main`, tags and releases are never cancelled.
+  PR's older run. The smoke-set workflows (core-ci, no-binaries, doc-citations)
+  also share one cancelling group for all `main` pushes, so a newer merge supersedes
+  an older smoke run. Nightly, tag and release runs are never cancelled, and the
+  publishing jobs (docs build and deploy, the CI image publish, the perf ratchet and
+  history, the release) keep their own groups, which a newer `main` push does not cancel.
 - **Batch independent PRs into one CI run.** PRs that do not touch each other are
   verified together in one run. A PR that touches the no-heap baseline
   (`tools/no_heap_baseline.json`) goes through on its own.

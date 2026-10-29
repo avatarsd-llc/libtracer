@@ -33,9 +33,13 @@ on:
 permissions:
   contents: read
 
+# One group per PR and ONE group for all main pushes, both cancelling (owner ruling
+# 2026-10-29): a main push runs only the smoke set (core-ci.yml's header, PUSH TO MAIN),
+# so a newer merge superseding an older smoke run loses nothing; the full matrix runs
+# nightly and on tags, which key on the sha and never cancel.
 concurrency:
-  group: no-binaries-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: no-binaries-${{ github.event_name == 'pull_request' && github.event.pull_request.number || (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'main' || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 jobs:
   check:
