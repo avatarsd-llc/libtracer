@@ -158,8 +158,8 @@
  * strike cap is a brokenness DETECTOR, not a tunable — it is what keeps one silently
  * stalled peer from parking the httpd task, and it is a divisor of the send bound; the
  * frame ceiling bounds an ABUSE case and costs no RAM; the socket slack and the assumed
- * peer cap are already reachable through `max_peers`; and the teardown drain is a
- * teardown-only bound whose both outcomes are safe and logged.
+ * peer cap are already reachable through `max_peers`. The teardown has no drain bound
+ * at all: it hands the session detach to the server task and does not wait (#2339).
  */
 #pragma once
 
@@ -443,10 +443,11 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * handler gate is shut and the in-flight handler frame joined (@ref close_gate), so
      * nothing can dispatch into the link again; the URI is unregistered so no further
      * session can latch it; every session's close callback is retired (@ref
-     * detach_sessions); the in-flight TX slots are drained. It blocks for all of that —
-     * the drains are bounded and leak rather than free on expiry, so a wedged server task
-     * costs memory, never a use-after-free; the handler join is unbounded because there
-     * is no safe way to free the link out from under a handler that is reading it.
+     * detach_sessions). The detach is queued to the server task and not waited for: the
+     * work item owns the armed session slots and frees them when it runs, so a wedged
+     * server task costs memory, never a use-after-free (#2339). The one wait is the handler
+     * join, unbounded because there is no safe way to free the link out from under a
+     * handler that is reading it.
      */
     ~httpd_ws_link_t();
 
@@ -1920,10 +1921,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * `user_ctx` is what makes the pointer survivable — after this call the gate holds
      * no link, so a later dispatch is refused (httpd closes that socket) and a later
      * `free_ctx` is inert. The wait for an in-flight handler frame is deliberately
-     * unbounded: unlike the two drains there is no leak-instead-of-free fallback for
-     * the link itself. A destructor running ON the server's task IS that frame and
-     * skips the wait — the #814 case, and equally the proof that no other frame can be
-     * in flight, since `esp_http_server` dispatches from one task.
+     * unbounded: unlike the session detach, which leaves the slots to its work item,
+     * there is no hand-off for the link itself. A destructor running ON the server's task IS that
+     * frame and skips the wait — the #814 case, and equally the proof that no other frame can be in
+     * flight, since `esp_http_server` dispatches from one task.
      */
     void close_gate();
 
@@ -1937,9 +1938,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * `httpd_stop`). This clears each session's ctx AND free_ctx *from the server's own
      * task* — the only context in which the session table may be touched — via
      * @ref detach_work, then closes the sessions so their latched WS route goes with
-     * them. Returns only once that work has run; if it cannot run (the destructor IS
-     * the server task) it runs inline, and if it never runs within the teardown bound
-     * the sessions are neutralised instead (@ref abandon_sessions). The one session it
+     * them. It does not wait for that work (#2339): the armed slots move into the work
+     * item, which frees them once it has detached them, and the item is freed by whichever
+     * of it and this call finishes last. Run from the server task itself, it runs the work
+     * inline instead. A queue refusal leaks the item's slots, neutralised. The one session it
      * can never detach is the request an in-flight handler is servicing — for that fd
      * `httpd_sess_set_ctx` edits the request, not the socket table, and the callback
      * runs after the destructor has returned — so that slot is neutralised too
@@ -1947,24 +1949,19 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * session synchronously, before any member dies.
      *
      * The same item carries the handler gate and frees it on the server's task when the
-     * server lists no WebSocket client (#2202). With no slot armed it is only queued: the
-     * destructor does not wait for it.
+     * server lists no WebSocket client (#2202).
      */
     void detach_sessions();
 
     /**
      * @brief Adopted-mode teardown fallback: neutralise, never free, EVERY session slot.
      *
-     * Reached only when @ref detach_sessions could not get its work onto the server
-     * task (queue refused, allocation refused, or the bound expired with the task
-     * wedged), i.e. exactly when the server may still hold slots as session contexts
-     * AND a detach item may still drain later. Every slot is @ref neutralise d and then
-     * LEAKED — including already-closed ones, because the detach item identifies our
-     * sessions by comparing ctx POINTERS and a freed shell's address could be reissued
-     * to something else. The late callback therefore lands on valid, inert memory
-     * instead of a freed slot. Bounded (one shell per slot ever opened), teardown-only,
-     * and loudly logged: the #815 precedent that a drain expiry must leak rather than
-     * free under a live callback.
+     * Reached only when @ref detach_sessions could not draw its work item, i.e. when the
+     * server still holds the armed slots as session contexts and nothing will detach
+     * them. Every slot is @ref neutralise d and then LEAKED, so the late callback lands
+     * on valid, inert memory instead of a freed slot. Bounded (one shell per slot ever
+     * opened), teardown-only, and loudly logged: the #815 precedent that a teardown must
+     * leak rather than free under a live callback.
      */
     void abandon_sessions();
 

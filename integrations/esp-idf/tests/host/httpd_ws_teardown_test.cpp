@@ -14,15 +14,17 @@
  *
  * The states of the teardown, each pinned here:
  *   1. the ordinary case — the destroyer is some other task, the server task is live:
- *      the detach is queued, runs there, and the destructor does not return until every
- *      session's ctx/free_ctx is retired. Closing the sessions afterwards (the peer
- *      hanging up, or the adopting server stopping) then calls NOTHING;
- *   2. the destructor runs ON the server task from a work item: waiting for queued work
- *      would deadlock by construction, so the detach happens inline and is complete;
- *   3. the wedged case — the server task never drains the queue: the destructor gives
- *      up on its bound and neutralises the sessions instead of freeing them, so the
- *      late `free_ctx` (delivered here, after the link is gone) is inert. Under ASan
- *      this test IS the use-after-free detector;
+ *      the detach is queued and the destructor returns without waiting for it (#2339).
+ *      The item runs there, retires every session's ctx/free_ctx and frees the slots.
+ *      Closing the sessions afterwards (the peer hanging up, or the adopting server
+ *      stopping) then calls NOTHING;
+ *   2. the destructor runs ON the server task from a work item: queued work could only
+ *      run after it returns, so the detach happens inline and is complete;
+ *   3. the two orders of the ownership hand-off (#2339): the destructor finishing first
+ *      (the server task wedged, the item run late with the link long gone) and the item
+ *      finishing first (a server task that preempts the poster). Either way the item and
+ *      the slots go back to `memory.state` exactly once. Under ASan this IS the
+ *      use-after-free and double-free detector;
  *   4. the handler barrier — a frame already INSIDE the handler when teardown starts:
  *      the destructor must join it before freeing anything, and the session that frame
  *      arms behind the destructor's back must still be detached;
@@ -48,6 +50,7 @@
 #include <utility>
 
 #include "fake_httpd.hpp"
+#include "gated_source.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
@@ -149,16 +152,13 @@ void test_queued_detach() {
           "an admitted peer arms a session ctx (the callback #816 is about)");
 
     const std::size_t before = fake_httpd::instance().free_ctx_calls();
-    const auto t0 = std::chrono::steady_clock::now();
     link.reset();
-    const auto elapsed = std::chrono::steady_clock::now() - t0;
-
-    check(elapsed < 900ms, "the destructor does not sit out the drain bound");
+    task.run_on_task([] {});  // the queued detach has run
     check(fake_httpd::instance().session_ctx(100) == nullptr &&
               fake_httpd::instance().session_ctx(101) == nullptr,
-          "every session's ctx is cleared BEFORE the destructor returns");
+          "every session's ctx is cleared by the queued detach");
     check(fake_httpd::instance().free_ctx_calls() == before + 2,
-          "each session's free_ctx ran exactly once, while the link was still alive");
+          "each session's free_ctx ran exactly once, inert behind the shut gate");
 
     // The peers now hang up (or the adopting server stops): with ctx/free_ctx retired,
     // this must reach no code at all. Under ASan a missed detach faults here.
@@ -201,32 +201,72 @@ void test_dtor_on_server_task() {
 }
 
 // ---------------------------------------------------------------------------
-// State 3 — the server task never drains: expiry must leave memory VALID.
+// State 3 — the two orders of the hand-off between the destructor and the item.
 // ---------------------------------------------------------------------------
-void test_wedged_server_task() {
-    std::printf("adopted dtor, server task wedged:\n");
+/**
+ * @brief The destructor finishes first: the server task is wedged, so the link is gone
+ *        long before its detach item runs, and the item then frees itself and the slots.
+ */
+void test_closer_finishes_first() {
+    std::printf("adopted dtor finishes before its detach runs (server task wedged):\n");
     server_task_t task;
-    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
-                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    gated_source_t state;
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
+        tr::net::httpd_ws_config_t{.peer_named = true, .memory = {.state = &state}});
     claim_session(task, 300);
+    claim_session(task, 301);
 
-    task.park();  // the queue stops being drained: the detach can never run
-    const auto t0 = std::chrono::steady_clock::now();
+    task.park();  // the queue stops being drained: the detach cannot run yet
     link.reset();
-    const auto elapsed = std::chrono::steady_clock::now() - t0;
-
-    check(elapsed >= 900ms, "the destructor spent its bound waiting for the wedged task");
     check(fake_httpd::instance().session_ctx(300) != nullptr,
-          "the session is still armed — this IS the abandoned case");
+          "the destructor returned without waiting: the session is still armed");
+    const std::ptrdiff_t held = state.live.load();
+    check(held > 1, "the item holds the slots, not the destroyed link");
 
-    // Now let the server task run again: the queued detach work executes with the link
-    // long gone (it must touch only the server handle), and the peer then hangs up,
-    // firing the free_ctx the teardown could not retire. Both must be inert; under ASan
-    // a link-touching work item or a freed session slot faults here.
+    // Now let the server task run again: the queued detach executes with the link long
+    // gone (it must touch only the server handle and what it owns), and the peers then
+    // hang up. Both must be inert; under ASan a link-touching work item or a freed slot
+    // faults here.
     task.unpark();
+    task.run_on_task([] {});
+    check(fake_httpd::instance().session_ctx(300) == nullptr &&
+              fake_httpd::instance().session_ctx(301) == nullptr,
+          "the late detach still retired every session's ctx");
+    check(state.live.load() == 1, "the item and both slots went back: only the gate is kept");
+    const std::size_t after = fake_httpd::instance().free_ctx_calls();
     task.run_on_task([] { fake_httpd::instance().close_all(); });
-    check(!fake_httpd::instance().has_session(300),
-          "the late close ran to completion on the leaked, inert session shell");
+    check(fake_httpd::instance().free_ctx_calls() == after,
+          "a disconnect after the late detach calls back into NOTHING");
+}
+
+/**
+ * @brief The item finishes first: a server task that preempts the poster runs the detach
+ *        before `httpd_queue_work` returns, and the destructor then frees the item.
+ */
+void test_detach_finishes_first() {
+    std::printf("adopted dtor, its detach runs before the queue call returns:\n");
+    server_task_t task;
+    gated_source_t state;
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
+        tr::net::httpd_ws_config_t{.peer_named = true, .memory = {.state = &state}});
+    claim_session(task, 310);
+    claim_session(task, 311);
+
+    const std::size_t before = fake_httpd::instance().free_ctx_calls();
+    task.park();  // only the preempting post runs the item, so the order is fixed
+    fake_httpd::instance().set_preempting(true);
+    link.reset();
+    fake_httpd::instance().set_preempting(false);
+    task.unpark();
+    check(fake_httpd::instance().session_ctx(310) == nullptr &&
+              fake_httpd::instance().session_ctx(311) == nullptr,
+          "the detach had run by the time the destructor returned");
+    check(fake_httpd::instance().free_ctx_calls() == before + 2,
+          "each session's free_ctx ran exactly once");
+    check(state.live.load() == 1, "the item and both slots went back: only the gate is kept");
+    task.run_on_task([] { fake_httpd::instance().close_all(); });
 }
 
 // ---------------------------------------------------------------------------
@@ -351,8 +391,8 @@ void test_fd_reuse_before_detach() {
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     claim_session(task, 700);
 
-    // Wedge the server task so the destructor abandons its detach with the work item
-    // still queued — state 3, which is precisely when the item drains arbitrarily late.
+    // Wedge the server task so the destructor returns with the work item still queued:
+    // state 3's first order, which is precisely when the item drains arbitrarily late.
     task.park();
     link.reset();
     check(fake_httpd::instance().session_ctx(700) != nullptr, "the detach item is still queued");
@@ -364,7 +404,7 @@ void test_fd_reuse_before_detach() {
     fake_httpd::instance().open_session(700, &stranger, &free_co_tenant);
 
     task.unpark();
-    task.run_on_task([] {});  // drain the abandoned detach against the reused descriptor
+    task.run_on_task([] {});  // drain the late detach against the reused descriptor
 
     check(!stranger.freed, "the co-tenant's free_ctx was NOT run by our detach");
     check(fake_httpd::instance().session_ctx(700) == &stranger,
@@ -379,7 +419,8 @@ int main() {
     std::printf("httpd_ws_link adopted-mode teardown host suite (#816):\n");
     test_queued_detach();
     test_dtor_on_server_task();
-    test_wedged_server_task();
+    test_closer_finishes_first();
+    test_detach_finishes_first();
     test_handler_barrier();
     test_dispatch_after_teardown();
     test_teardown_inside_handler();
