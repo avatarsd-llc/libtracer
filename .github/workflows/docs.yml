@@ -261,15 +261,14 @@ jobs:
         # The container runs as root over a workspace the host runner user owns, so git
         # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - name: lsb_release for setup-python's pip cache key
-        # setup-python's `cache: pip` reads the OS version through lsb_release, which the
-        # bare CI image does not carry (#2348).
-        run: command -v lsb_release >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends lsb-release; }
+      # No `cache: pip` (#2348): in the job container it runs the tool cache's `pip`
+      # script, whose shebang names the host path the interpreter was unpacked to (the
+      # same breakage pio-esp32-can avoids with `python -m pip`), and it needs
+      # lsb_release, which the CI image does not carry. Installs go through
+      # `python -m pip` below.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: docs/requirements.txt
       - name: Install dependencies
         # The step that wedged (see the job-level note). Ten minutes is ~4x its healthy
         # runtime, so a genuine slow mirror still passes while a wedge fails fast and
