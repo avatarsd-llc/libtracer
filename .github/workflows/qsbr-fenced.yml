@@ -28,7 +28,7 @@ name: qsbr-fenced
 on:
   # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
   # this workflow already passed, so a push to main runs only core-ci's smoke set
-  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (core-ci.yml's header, QUICK SET). This workflow runs nightly at 00:00 UTC
   # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
   # every release tag.
   push:
@@ -60,7 +60,7 @@ concurrency:
 
 jobs:
   tsan-qsbr-fenced:
-    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
     name: tsan qsbr (membarrier refused, fenced entry)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
