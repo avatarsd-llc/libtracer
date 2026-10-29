@@ -162,8 +162,9 @@ static_assert(config_t::kSpinWaitSafe || !lkv_slot_t::may_spin,
  * It is `constexpr` and it is asserted below because relaxing it is UNTESTABLE where CI
  * mostly runs: on x86-64 the `seq_cst` LKV store lowers to a locked `xchg`, so even a relaxed
  * load of zero cannot observe the pre-store world and the suite stays green through the
- * ablation. The `ubuntu-24.04-arm` leg (#1140) is the coverage half of that answer; this
- * constant and the assertion below are the refusal half.
+ * ablation. No CI leg now runs on a weakly-ordered machine (the arm64 leg (#1140) was
+ * dropped 2026-10-29), so this constant and the assertion below are the only guard: they
+ * refuse the weakening rather than detect it.
  */
 inline constexpr std::memory_order kDeliverySkipOrder = std::memory_order_seq_cst;
 
