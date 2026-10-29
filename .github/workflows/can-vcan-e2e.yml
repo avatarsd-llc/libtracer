@@ -77,10 +77,10 @@ jobs:
         if: steps.vcan.outputs.up == 'true'
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          # Bounded by BUILD_JOBS (#1637), as every build here is. This is an all-targets
-          # build: with unbounded parallelism a 4-core / 16 GB runner OOMs (SIGTERM, exit
-          # 143, ~70% through, no compile error) as soon as a branch adds a heavy TU.
-          cmake --build core/build --parallel "$BUILD_JOBS"
+          # Bounded by BUILD_JOBS (#1637), as every build here is. Only the one test
+          # target this job runs (#2348): on the host there is no compiler cache, and an
+          # all-targets build at 2 jobs ran past the 15-minute ceiling.
+          cmake --build core/build --target transport_can_vcan_test --parallel "$BUILD_JOBS"
 
       - name: Run the real-vcan transport_can E2E smoke test
         if: steps.vcan.outputs.up == 'true'
