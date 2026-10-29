@@ -102,7 +102,7 @@ endif()
 # doc-citation gate pins `core/examples/CMakeLists.txt:59,74,87,92`, so anything inserted
 # above line 97 moves an anchored citation on `docs/examples/index.md`.
 #
-# None of these needs the FWD net plane (they are pure in-process graph), so all eight are
+# None of these needs the FWD net plane (they are pure in-process graph), so all nine are
 # unconditional; none needs Threads except `graph_await`, which parks a waiter thread.
 set(LIBTRACER_GRAPH_EXAMPLES
     graph_register
@@ -112,7 +112,8 @@ set(LIBTRACER_GRAPH_EXAMPLES
     graph_children
     graph_retire
     graph_handler_vertex
-    graph_stream)
+    graph_stream
+    graph_batch)
 
 foreach(example IN LISTS LIBTRACER_GRAPH_EXAMPLES)
     add_executable(${example} ${example}.cpp)
@@ -126,6 +127,10 @@ endforeach()
 
 find_package(Threads REQUIRED)
 target_link_libraries(graph_await PRIVATE Threads::Threads)
+
+# graph_batch checks its framed and folded bytes against the published conformance vectors.
+target_compile_definitions(graph_batch PRIVATE
+    LIBTRACER_VECTORS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../tests/conformance/vectors/v1")
 
 # Spelled through a local alias rather than a second bare test-guard condition: the
 # doc-citation gate pins the guard at line 87 by its TEXT, and a second occurrence of that
