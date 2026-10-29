@@ -125,16 +125,12 @@ jobs:
           echo "LIBTRACER_MESH_CTRL=$ctrl" >> "$GITHUB_ENV"
           echo "LIBTRACER_MESH_CTRL=$ctrl"
 
-      # setup-node's npm cache fails ("Some specified paths were not resolved") when the
-      # cache directory does not exist yet, which on the host route it does not (#2348).
-      - name: Create the npm cache directory
-        run: mkdir -p "$HOME/.npm"
-
+      # No npm cache: on the host route setup-node's cache step fails ("Some specified paths
+      # were not resolved") even with ~/.npm present, and `npm ci` below costs 0.02-0.13 min
+      # without it (#2348).
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: npm
-          cache-dependency-path: bindings/typescript/package-lock.json
 
       - name: Install + build the TypeScript workspace
         working-directory: bindings/typescript
