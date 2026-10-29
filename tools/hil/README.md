@@ -47,7 +47,6 @@ on a self-proof that failed a named leg.
 | file | what it is |
 | --- | --- |
 | `99-libtracer-hil.rules` | udev rule: a stable `/dev/hil-esp32c6` owned by the runner user, so no CI step needs root |
-| `sudoers-libtracer-hil.in` | sudoers drop-in template: passwordless `chown -R` for the runner user, inside its own `_work` tree and nowhere else — what makes the workflow's self-heal steps do anything |
 | `register_hil_runner.sh` | installs the rule and the drop-in, downloads and registers the runner as a systemd service, and proves the self-heal grant |
 | `hil_flash.py` | `stage` packages a build's flashable image; `flash` drives esptool from the build's own manifest |
 | `hil_monitor.py` | captures the console, renders the verdict, exits non-zero with the reason |
@@ -101,9 +100,9 @@ A separate runner rather than a label on the bench runner, deliberately: the ben
 runner's validity rests on the host being quiet (`perf-local.yml`'s quiescence
 guard), and minutes of USB traffic inside a bench window is a contaminated sample.
 
-It also installs `/etc/sudoers.d/libtracer-hil` and then **proves** it — see the
-next section. A host that cannot run the self-heal command fails registration
-loudly, with the fix in the error, rather than deferring the discovery.
+It also gives the runner user Docker access and then **proves** it — see the next
+section. A host that cannot run the self-heal command fails registration loudly,
+with the fix in the error, rather than deferring the discovery.
 
 Then arm the plane:
 
@@ -115,12 +114,14 @@ gh workflow run hil-esp32c6.yml --repo avatarsd-llc/libtracer     # smoke it
 To disarm — device unplugged, host rebuilt, board wedged — set `HIL_ENABLED` to
 anything else. Everything goes back to a green no-op.
 
-## The self-heal grant, and why registration insists on it
+## The self-heal step, and why registration insists on Docker access
 
-The workflow opens and closes with the same line `perf-local.yml` carries:
+The workflow repairs its workspace before checkout, and every host job's last step
+does the same, with no sudo (#2348):
 
 ```sh
-sudo -n chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" || true
+docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ubuntu:24.04 \
+    chown -R "$(id -u):$(id -g)" /w /t || true
 ```
 
 It reclaims root-owned files a **container** job left in the shared `_work` tree.
@@ -128,29 +129,19 @@ That is #1538's failure mode: the next `actions/checkout` dies in its clean step
 and it reads as a breakage of whatever job happened to run next rather than of the
 container job that caused it.
 
-`sudo -n` never prompts and `|| true` swallows the refusal, so on a host with no
-rule for this the repair is a **silent no-op** and the leftovers resurface hours
-later somewhere unrelated (#1586). `register_hil_runner.sh` therefore installs
-`sudoers-libtracer-hil.in` as `/etc/sudoers.d/libtracer-hil`, filling in the runner
-user, its group and its `_work` root, and validates the result with `visudo -cf`
-**before** putting it in place — a syntax error there breaks `sudo` for the whole
-host.
+`|| true` swallows a failure, so a runner user without Docker access runs the
+repair as a **silent no-op** and the leftovers resurface hours later somewhere
+unrelated (#1586). `register_hil_runner.sh` therefore adds the runner user to the
+`docker` group, restarts the service so it picks the group up, and **proves** the
+step by running the workflow's own command against the workflow's own paths. It
+dies with the fix in the message if that fails. Pass `--skip-docker-group` if the
+host grants Docker access some other way; the proof still runs.
 
-It is scoped on purpose: one command, one recursive flag, one ownership pair, and
-only under this runner's own `_work` tree. That is a floor rather than a sandbox —
-sudoers does not canonicalise argument paths — and what makes the looseness
-uninteresting is that the runner user already owns the tree and runs arbitrary job
-steps as itself. The point is that the drop-in does not quietly become a general
-root grant.
-
-Registration then **proves** the grant by running the workflow's own command
-against the workflow's own paths, and dies with the fix in the message if it is
-refused. Pass `--skip-sudoers` if the host grants the equivalent some other way
-(the studio host's `/etc/sudoers.d/github-runner` already carries a blanket
-`NOPASSWD:ALL` for the runner user, so the drop-in changes nothing there) — the
-proof still runs, and still fails loudly.
-
-To undo it: `sudo rm /etc/sudoers.d/libtracer-hil`.
+Docker access is root-equivalent on the host, the same trust the `ci-local`
+runners hold. It is acceptable because no fork code reaches this runner: every HIL
+job carries the trusted-event guard, and the `guard` job refuses a fork PR first.
+An older registration's `/etc/sudoers.d/libtracer-hil` is no longer used and can
+be removed with `sudo rm /etc/sudoers.d/libtracer-hil`.
 
 ## Running it against a PR
 
