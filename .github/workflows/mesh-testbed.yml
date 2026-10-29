@@ -29,8 +29,9 @@
 # the host's runner user can reach the host daemon without sudo. The mesh nodes join
 # runners-ci.slice through a generated compose override (`cgroup_parent`), so the slice's
 # limits bound them like any CI container. On the host the mesh subnet moves to
-# 10.228.47.0/24 (LIBTRACER_MESH_NET), outside Docker's shared default pools. The compose
-# project name, its subnet and its fixed host ports (47301-47304) are host-wide, so the job also
+# 10.228.47.0/24 (LIBTRACER_MESH_NET), outside Docker's shared default pools, and its
+# ctrl ports are free loopback ports Docker picks. The compose project name and the
+# subnet are still host-wide, so the job also
 # holds one host-wide lock (`mesh-testbed-host`): two PRs' meshes never run at once. A
 # newer queued run replaces an older queued one in that lock, which GitHub reports as
 # cancelled; the newer run tests the newer head. The hosted fallback (CI_SELF_HOSTED=false)
@@ -84,7 +85,11 @@ jobs:
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
             o="$RUNNER_TEMP/compose.ci-slice.yml"
             printf 'services:\n' > "$o"
-            for svc in a b c bus; do printf '  %s:\n    cgroup_parent: runners-ci.slice\n' "$svc" >> "$o"; done
+            # Host ports: the fixed 47301-47304 sit inside Linux's ephemeral range
+            # (32768-60999), so on a busy shared host any outgoing connection can hold
+            # one ("address already in use"). Docker picks a free loopback port instead;
+            # the step after `up` reads the choice back.
+            for svc in a b c bus; do printf '  %s:\n    cgroup_parent: runners-ci.slice\n    ports: !override ["127.0.0.1::47300"]\n' "$svc" >> "$o"; done
             files="$files:$o"
             # The host's 172.16.0.0/12 and 192.168.0.0/16 are Docker's default address
             # pools, shared with every other project and job network on the machine, and
@@ -101,6 +106,17 @@ jobs:
       # ctrl listener, so ctrl-reachable implies every listener is bound.
       - name: Build the node image and bring the four-node mesh up
         run: docker compose up -d --build --wait
+
+      - name: Read back each node's published ctrl port
+        run: |
+          ctrl=""
+          for svc in a b c bus; do
+            p=$(docker compose port "$svc" 47300 | sed 's/^0\.0\.0\.0:/127.0.0.1:/')
+            [ -n "$p" ] || { echo "::error::no published ctrl port for mesh node $svc"; exit 1; }
+            ctrl="${ctrl:+$ctrl,}$svc=$p"
+          done
+          echo "LIBTRACER_MESH_CTRL=$ctrl" >> "$GITHUB_ENV"
+          echo "LIBTRACER_MESH_CTRL=$ctrl"
 
       - uses: actions/setup-node@v4
         with:
@@ -121,8 +137,6 @@ jobs:
       # because the built-in factories are inet_pton-only (no DNS).
       - name: Drive the mesh from the TS client SDK and assert multi-hop routing
         working-directory: bindings/typescript/packages/client
-        env:
-          LIBTRACER_MESH_CTRL: "a=127.0.0.1:47301,b=127.0.0.1:47302,c=127.0.0.1:47303,bus=127.0.0.1:47304"
         run: |
           m="${LIBTRACER_MESH_NET:-172.28.0}"
           export LIBTRACER_MESH_PEERS="a=$m.11:47311,b=$m.12:47311,c=$m.13:47311,bus=$m.14:47320"
@@ -134,8 +148,6 @@ jobs:
       # and exactly 4 with one.
       - name: Project the formed mesh with the topology walk (#409)
         working-directory: bindings/typescript/packages/client
-        env:
-          LIBTRACER_MESH_CTRL: "a=127.0.0.1:47301,b=127.0.0.1:47302,c=127.0.0.1:47303,bus=127.0.0.1:47304"
         run: node --test test/topology.test.mjs
 
       - name: Dump every node's log on failure
