@@ -151,7 +151,9 @@ jobs:
   # the one machine the series is measured on, and a daily job that touched the bench
   # host would be a daily contamination window.
   density:
-    if: github.repository == 'avatarsd-llc/libtracer'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.repository == 'avatarsd-llc/libtracer')
     runs-on: ubuntu-latest
     # Measured healthy max 0.70 min, p50 0.67; the 4.40 max is a slow actions/checkout on
     # the 2026-08-19 incident day. 20 = ~4.5x the worst observed. Hosted runner, pure
@@ -232,11 +234,8 @@ jobs:
     # a backfill whose commit the density job could not resolve measures nothing rather
     # than silently measuring the ref.
     if: >-
-      always() &&
-      github.repository == 'avatarsd-llc/libtracer' &&
-      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
-      (inputs.commit == '' || inputs.commit == null || needs.density.outputs.commit != '') &&
-      needs.density.outputs.measure != 'false'
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (always() && github.repository == 'avatarsd-llc/libtracer' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.commit == '' || inputs.commit == null || needs.density.outputs.commit != '') && needs.density.outputs.measure != 'false')
     runs-on: [self-hosted, bench-local]
     # The loosest ceiling in the repo, deliberately. Measured max 18.15 min, p50 6.62,
     # min 3.23 over 37 runs — an enormous LEGITIMATE spread, because the

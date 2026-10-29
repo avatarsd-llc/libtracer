@@ -11,14 +11,15 @@
 name: can-vcan-e2e
 
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
-    paths:
-      - "core/src/transport_can.cpp"
-      - "core/include/libtracer/transport_can.hpp"
-      - "core/include/libtracer/can.hpp"
-      - "core/tests/transport_can_vcan_test.cpp"
-      - ".github/workflows/can-vcan-e2e.yml"
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
   pull_request:
     paths:
       - "core/src/transport_can.cpp"
@@ -30,6 +31,7 @@ on:
 
 jobs:
   vcan-e2e:
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     # Measured max 4.22 min, p50 3.50, min 2.65 over 40 runs, none of them on the
     # incident day — a tight, honest distribution. 15 = ~3.6x the observed max.

@@ -11,17 +11,15 @@
 name: capability-matrix
 
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
-    paths:
-      - docs/capability-matrix.md
-      - tools/gen_capability_matrix.py
-      - .github/workflows/capability-matrix.yml
-      - core/src/**
-      - core/tests/**
-      - tests/conformance/vectors/**
-      - bindings/**
-      - integrations/esp-idf/**
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
   pull_request:
     paths:
       - docs/capability-matrix.md
@@ -39,15 +37,46 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-24.04
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container:
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      # The ci-local runners are bare machines, so the job runs in a container on BOTH
+      # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
+      # 10g is the per-job memory budget.
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # Measured max 0.20 min (12 seconds), p50 0.08 — checkout plus a python script, no
     # package install at all. 10 = the short-job floor (~50x observed); 3x would be 36
     # seconds and any transient runner stall would breach it.
     timeout-minutes: 10
+    defaults:
+      run:
+        # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
+        # to `sh` (dash), and these steps were written for the hosted bash (#2348).
+        shell: bash -e {0}
     steps:
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Trust the checkout for git
+        # The container runs as root over a workspace the host runner user owns, so git
+        # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Capability matrix matches real test evidence
         run: python3 tools/gen_capability_matrix.py --check
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job and with sudo where the host grants it, so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
 concurrency:
   group: capability-matrix-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}

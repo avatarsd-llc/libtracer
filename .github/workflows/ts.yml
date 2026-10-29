@@ -23,11 +23,15 @@
 name: ts
 
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
-    paths:
-      - "bindings/typescript/**"
-      - ".github/workflows/ts.yml"
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
   pull_request:
     paths:
       - "bindings/typescript/**"
@@ -36,16 +40,35 @@ on:
 
 jobs:
   ts-build-test:
-    runs-on: ubuntu-24.04
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container:
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      # The ci-local runners are bare machines, so the job runs in a container on BOTH
+      # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
+      # 10g is the per-job memory budget.
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # Measured max 0.50 min, p50 0.40. 15 = the short-job floor (30x observed): the job
     # runs `npm ci` TWICE — the workspace install plus a clean throwaway install in the
     # published-package smoke — so both registry round-trips sit under this ceiling.
     timeout-minutes: 15
     defaults:
       run:
-        working-directory: bindings/typescript
+        # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
+        # to `sh` (dash), and these steps were written for the hosted bash (#2348).
+        shell: bash -e {0}
     steps:
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Trust the checkout for git
+        # The container runs as root over a workspace the host runner user owns, so git
+        # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - uses: actions/setup-node@v4
         with:
@@ -56,18 +79,22 @@ jobs:
       - name: Install (clean, from the committed lockfile)
         # Registry round-trip, measured well under a minute. 8 = the install-step floor.
         timeout-minutes: 8
+        working-directory: bindings/typescript
         run: npm ci
 
       - name: Build the workspace (tsc)
+        working-directory: bindings/typescript
         run: npm run build
 
       - name: Run the package test suites (core conformance TAP + transport-ws)
+        working-directory: bindings/typescript
         run: npm test
 
       # The five one-concept binding examples (docs/examples/ts-*.md, #1785). Each asserts
       # what it prints, so a mismatch fails here; the list is explicit in package.json's
       # `examples` script and its count is recorded in docs/examples/index.md.
       - name: Run the binding examples (one concept each)
+        working-directory: bindings/typescript
         run: npm run examples
 
       # Published-package smoke: pack the core tarball exactly as `npm publish`
@@ -80,6 +107,7 @@ jobs:
         # The install is INLINE here (`npm install` on a packed tarball), so it is easy to
         # miss when grepping for install steps. Same 8-minute registry floor.
         timeout-minutes: 8
+        working-directory: bindings/typescript
         run: |
           set -euo pipefail
           tmp="$(mktemp -d)"
@@ -96,7 +124,17 @@ jobs:
       # analogue of the C++ Doxygen WARN_AS_ERROR gate and the Rust
       # deny(missing_docs). The rendered ./docs-api output is gitignored.
       - name: Docs coverage gate (TypeDoc)
+        working-directory: bindings/typescript
         run: npm run docs
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job and with sudo where the host grants it, so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
 concurrency:
   group: ts-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}

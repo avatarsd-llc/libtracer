@@ -37,6 +37,23 @@ We use DCO rather than a CLA to keep the contribution barrier low. The maintaine
 
 Cutting a release (version bump, tag, registry publishes) follows [RELEASING.md](RELEASING.md).
 
+How CI is run (self-hosted runners only, no CI on fork PRs, a smoke set on `main`
+with the full matrix nightly, docs-only PRs skipping the C++ workflows) is set out in
+[`docs/agents/pr-review.md` § How CI runs](../docs/agents/pr-review.md#how-ci-runs-the-standing-rules).
+
+### Pull requests from a fork
+
+CI does not run fork code. Every job on a pull request from a fork is skipped, on
+every runner: there is no hosted fallback and no label that turns it on. A fork
+PR's checks therefore all read "skipped", and that says nothing about the change.
+
+To test a fork, the maintainer reviews it and pushes its head to a `ci/fork-<N>`
+branch in this repository (`<N>` is the PR number), then opens a pull request
+from that branch. That pull request is same-repo, so every check runs as trusted
+code. **A fork PR is never merged on its own checks**: it merges once the
+`ci/fork-<N>` pull request at the same head is green. A push to the fork after
+that is reviewed and pushed again before it counts.
+
 ### What happens to your PR automatically
 
 Once every check run on your PR's current head has concluded without failing, a

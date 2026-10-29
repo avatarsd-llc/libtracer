@@ -22,12 +22,15 @@
 name: quic
 
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
-    paths:
-      - "core/**"
-      - "tools/gen-dev-cert.sh"
-      - ".github/workflows/quic.yml"
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
   pull_request:
     paths:
       - "core/src/transport_quic.cpp"
@@ -51,6 +54,7 @@ on:
       - "core/tests/webtransport_test.cpp"
       - "core/tests/wt_interop_server.cpp"
       - "core/tests/tsan-msquic.supp"
+      - "!**/*.md" # Markdown is never an input here (core-ci.yml, DOCS-ONLY PULL REQUESTS)
       # #934 — the tight-heap gate and its out-of-process peer. Without these four entries a
       # PR that only touches the gate (or the driver, or the shared raw client they both take
       # their peer from) never runs this job at all, so the one test that proves a pre-auth
@@ -77,6 +81,7 @@ env:
 
 jobs:
   quic-build-test:
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     # Measured on the msquic cache-HIT path only: quic-tsan max 9.95 min (healthy 9.30,
     # p50 6.58), quic-asan 8.92, quic-release 6.22. 3x would be ~30 — but across 500

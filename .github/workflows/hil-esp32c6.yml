@@ -20,9 +20,9 @@
 #
 # ── DORMANCY ────────────────────────────────────────────────────────────────
 # This file lands BEFORE the hardware exists and must cost nothing until it does.
-# The `guard` job runs on a HOSTED runner and decides; every job that touches the
-# device is `needs: guard` and skips cleanly when the answer is no. Three gates,
-# in order, and each answers a different way of not being ready:
+# The `guard` job runs on the `ci-local` pool (a fork PR skips every job) and decides;
+# every job that touches the device is `needs: guard` and skips cleanly when the answer
+# is no. Three gates, in order, and each answers a different way of not being ready:
 #
 #   1. `vars.HIL_ENABLED == 'true'` — a repository VARIABLE, set by a human as the
 #      last act of registering the runner. This is the primary switch precisely
@@ -98,13 +98,36 @@ jobs:
     # label that summons a hardware run is a reason to re-decide; any other label
     # changes nothing the guard reads, since opened/synchronize/reopened already
     # evaluated this head. The skip happens before a runner is allocated.
-    if: github.event.action != 'labeled' || github.event.label.name == 'hil'
-    runs-on: ubuntu-24.04
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'hil')
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container:
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      # The ci-local runners are bare machines, so the job runs in a container on BOTH
+      # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
+      # 10g is the per-job memory budget.
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # Two `gh api` calls at worst. 10 = the short-job floor used across this repo.
     timeout-minutes: 10
     outputs:
       ready: ${{ steps.decide.outputs.ready }}
+    defaults:
+      run:
+        # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
+        # to `sh` (dash), and these steps were written for the hosted bash (#2348).
+        shell: bash -e {0}
     steps:
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
+      - name: Install gh (the runner probe below calls the API with it)
+        # The CI base image carries no gh; the hosted image did.
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends gh
       - name: Is the HIL plane armed, labelled, and attended by an online runner?
         id: decide
         env:
@@ -162,6 +185,15 @@ jobs:
           fi
 
           echo "ready=true" >> "$GITHUB_OUTPUT"
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job and with sudo where the host grants it, so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # Builds and STAGES the image on a hosted container runner. The device host never
   # installs ESP-IDF — see tools/hil/hil_flash.py's header for why the two halves are
@@ -169,14 +201,27 @@ jobs:
   # build here is not new coverage; the artifact is the point.
   build-image:
     needs: guard
-    if: needs.guard.outputs.ready == 'true'
-    runs-on: ubuntu-24.04
-    container: espressif/idf:release-v6.0
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.guard.outputs.ready == 'true')
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container:
+      image: espressif/idf:release-v6.0
+      # The ci-local runners are bare machines, so the job runs in a container on BOTH
+      # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
+      # 10g is the per-job memory budget.
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
     # esp-idf.yml measures this example at 3.90-4.15 min per target; 25 keeps the
     # image pull inside one reviewable number with the same ~5x headroom.
     timeout-minutes: 25
     steps:
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Build full_node for esp32c6
         shell: bash
@@ -202,13 +247,24 @@ jobs:
           path: integrations/esp-idf/examples/full_node/hil-image
           if-no-files-found: error
           retention-days: 14
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job and with sudo where the host grants it, so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # The device job. Self-hosted, NOT containerised: a container would have to be
   # handed the USB device node AND would write the workspace as root, and the whole
   # dependency here is `esptool` from pip.
   flash-and-boot:
     needs: [guard, build-image]
-    if: needs.guard.outputs.ready == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.guard.outputs.ready == 'true')
     runs-on: [self-hosted, hil-esp32c6]
     # Flash is ~10 s, the console watch is bounded by --timeout (90 s default), the
     # pip install dominates a cold run. 25 leaves room for a slow index and still

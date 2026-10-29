@@ -230,6 +230,11 @@ name inside `tr::mem`.
 
 - **Green CI means it compiles and the suites pass. Nothing more.** It is not
   evidence about footprint, throughput, allocation behaviour or interoperability.
+- **On a fork PR, CI ran nothing.** Every job skips for a pull request from a
+  fork, so its checks are "skipped", not passed. To test a fork, the maintainer
+  reviews it and pushes its head to `ci/fork-<N>` and opens a pull request from
+  that branch, where it runs as trusted code. A fork PR is never merged on its own
+  checks; for one, cite the `ci/fork-<N>` run at the same head or say it is missing.
 - **A claim with no number is not a claim.** "Faster", "smaller", "less
   allocation" without a before and an after **from the same build
   configuration** is unreviewed. The standing referees are named in
@@ -405,6 +410,50 @@ research notes keep theirs, unchecked, as the record of the tree they described.
 (`acl_policy_t`, `lkv_slot_t`, bound by the `core/tests/presets/` fragments), a minimal module set, a
 reclaim-strict binding, and a bus-closed build. A change that passes the default
 and breaks a matrix cell is still broken; name the cell.
+
+### How CI runs: the standing rules
+
+These are maintainer rulings about the CI itself. A diff to `.github/workflows/`
+that breaks one of them is a finding; cite the rule.
+
+- **Self-hosted local runners only.** CI runs on the project's self-hosted
+  `ci-local` runners, never on GitHub-hosted ones. The jobs that still run hosted
+  are the open exceptions, each named with its reason in core-ci.yml's header
+  (arm64; the `setarch -R` sanitizer, TSan, QSBR and QUIC legs; `mesh-testbed`).
+  A new job never adds to that list. `CI_SELF_HOSTED=false` is the operator's
+  switch for an outage, not a route a workflow is designed around.
+- **Fork PRs never run CI.** Every job skips for a pull request from a fork.
+  To test one, a maintainer reviews it, pushes its head to `ci/fork-<N>` and opens
+  a pull request from that branch, where it runs as trusted code. A fork PR is never
+  merged on its own checks.
+- **No `sudo` in any workflow.** Container jobs are root inside their container. A
+  host job that has to reclaim root-owned files does it through a throwaway
+  container.
+- **Container jobs run in `runners-ci.slice`** (`--cgroup-parent`), so the slice's
+  CPU and memory limits bound them.
+- **`BUILD_JOBS` is adaptive:** 4 while three or fewer libtracer CI containers are
+  running in that slice, this one included, otherwise 2.
+- **`cancel-in-progress` per PR ref.** A new push to a pull request cancels that
+  PR's older run. The smoke-set workflows (core-ci, no-binaries, doc-citations)
+  also share one cancelling group for all `main` pushes, so a newer merge supersedes
+  an older smoke run. Nightly, tag and release runs are never cancelled, and the
+  publishing jobs (docs build and deploy, the CI image publish, the perf ratchet and
+  history, the release) keep their own groups, which a newer `main` push does not cancel.
+- **Batch independent PRs into one CI run.** PRs that do not touch each other are
+  verified together in one run. A PR that touches the no-heap baseline
+  (`tools/no_heap_baseline.json`) goes through on its own.
+- **A push to `main` runs a smoke set only.** A train merge lands a tree equal to
+  the PR head that already passed, so `main` runs core-ci's `build-test` default
+  leg alone (the other legs are the `build-test-variants` job, skipped there),
+  `ci-paths` and `format`, plus `no-binaries` and `doc-citations`. Push-only
+  publishing jobs (docs deploy, perf ratchet and history, image publish) are
+  unchanged. The full matrix runs nightly at 00:00 UTC and on every release tag.
+- **Docs-only PRs skip the C++ workflows.** A PR of `docs/` and Markdown alone
+  skips core-ci and the other C++ workflows. Required checks still report: a
+  skipped job, or a verdict job over skipped jobs, reads as success. doc-citations,
+  docs and mermaid-lint still run.
+- **Benches run only in quiet windows,** judged best-of-rounds, with an A/A row
+  beside every A/B so the noise floor is on the page.
 
 **Before you push**, run what your diff can break:
 

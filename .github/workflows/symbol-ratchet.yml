@@ -24,30 +24,79 @@
 name: symbol-ratchet
 
 on:
+  # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
+  # this workflow already passed, so a push to main runs only core-ci's smoke set
+  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
+  # every release tag.
   push:
-    branches: [main]
+    tags: ["v*"]
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
   pull_request:
 
 jobs:
   symbol-ratchet:
-    runs-on: ubuntu-24.04
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container:
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      # The ci-local runners are bare machines, so the job runs in a container on BOTH
+      # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
+      # 10g is the per-job memory budget.
+      # The trusted route also mounts the persistent compiler cache (core-ci.yml's
+      # COMPILER CACHE header); the guard is the `runs-on` one verbatim.
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
     # Measured max 0.85 min, p50 0.70, min 0.53 — the tightest distribution in the repo
     # (it only builds the pinned-symbol bench targets). 15 = the short-job floor rather
     # than 3x, which would be 2.5 min and would red on any transient runner stall.
     timeout-minutes: 15
+    defaults:
+      run:
+        # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
+        # to `sh` (dash), and these steps were written for the hosted bash (#2348).
+        shell: bash -e {0}
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
+      # Build parallelism (#1637, #1691, #2348): on the self-hosted runners, 4 while at most 3
+      # CI containers share the 11-core slice and 2 above that or when the count is
+      # unreadable (see BUILD_JOBS in core-ci.yml's header); `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (core-ci.yml's COMPILER CACHE header).
+      # POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice (this one included): $n"
+            if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
+          else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+          fi
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
+      - name: Trust the checkout for git
+        # The container runs as root over a workspace the host runner user owns, so git
+        # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       # The only inputs to the pinned symbols are the core/ sources and the bench/ targets
       # that instantiate them; the pins file itself lives under bench/. A PR outside both
       # trees cannot move a pinned size, so the gate passes it without a build.
@@ -60,7 +109,7 @@ jobs:
              || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"; echo "no usable base; gating"; exit 0
           fi
-          if git diff --name-only "$BASE" HEAD | grep -qE '^(core|bench)/|^\.github/workflows/symbol-ratchet\.yml$'; then
+          if git diff --name-only "$BASE" HEAD | grep -v '\.md$' | grep -qE '^(core|bench)/|^\.github/workflows/symbol-ratchet\.yml$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"; echo "core/ or bench/ changed; gating"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"; echo "nothing under core/ or bench/ changed; no pinned symbol can move"
@@ -83,6 +132,20 @@ jobs:
       - name: Symbol-size ratchet
         if: steps.scope.outputs.run == 'true'
         run: python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job and with sudo where the host grants it, so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
 concurrency:
   group: symbol-ratchet-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
