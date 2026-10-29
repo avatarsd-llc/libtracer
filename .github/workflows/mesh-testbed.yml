@@ -24,10 +24,16 @@
 # path-filtered, so a PR that touches neither core/ nor the TS workspace would never
 # report it, and a required-but-never-reported context blocks a merge forever.
 #
-# RUNNER: ubuntu-24.04, the house default (32 of 35 jobs). There are no self-hosted
-# runners on this repo (`actions/runners` -> total_count: 0), and none are needed:
-# libtracer is public, so GitHub-hosted minutes are free, and the image ships Docker
-# Engine + compose v2 preinstalled.
+# RUNNER (#2348): a HOST job on the ci-local runners, behind core-ci's trust guard (a
+# fork PR skips it). It needs a Docker daemon, which a job container does not have, and
+# the host's runner user can reach the host daemon without sudo. The mesh nodes join
+# runners-ci.slice through a generated compose override (`cgroup_parent`), so the slice's
+# limits bound them like any CI container. The compose project name, its fixed subnet
+# (172.28.0.0/24) and its fixed host ports (47301-47304) are host-wide, so the job also
+# holds one host-wide lock (`mesh-testbed-host`): two PRs' meshes never run at once. A
+# newer queued run replaces an older queued one in that lock, which GitHub reports as
+# cancelled; the newer run tests the newer head. The hosted fallback (CI_SELF_HOSTED=false)
+# runs the same steps on the image's preinstalled Docker Engine and compose v2.
 name: mesh-testbed
 
 on:
@@ -52,19 +58,43 @@ on:
 jobs:
   mesh-testbed:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
-    runs-on: ubuntu-24.04
+    # Host job, not a container (header, RUNNER).
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    concurrency:
+      group: mesh-testbed-host
+      cancel-in-progress: false
     # Measured max 1.65 min, p50 1.47, min 1.27. 15 = the short-job floor (~9x observed);
     # it exists for the `npm ci` below. See core-ci.yml's header for the policy.
     timeout-minutes: 15
     steps:
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # On the host the nodes join runners-ci.slice, as every CI container does (#2348).
+      # COMPOSE_FILE carries the override into every compose call below, the teardown
+      # and the log dump included.
+      - name: Place the mesh nodes in runners-ci.slice (host route)
+        run: |
+          files=tests/testbed/compose.yml
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            o="$RUNNER_TEMP/compose.ci-slice.yml"
+            printf 'services:\n' > "$o"
+            for svc in a b c bus; do printf '  %s:\n    cgroup_parent: runners-ci.slice\n' "$svc" >> "$o"; done
+            files="$files:$o"
+          fi
+          echo "COMPOSE_FILE=$files" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE=$files"
 
       # `--wait` here only waits for the containers to be RUNNING (the services declare
       # no healthcheck, deliberately — see compose.yml). The real readiness gate is the
       # driver's ctrl-connect retry loop: a node binds its link listeners BEFORE its
       # ctrl listener, so ctrl-reachable implies every listener is bound.
       - name: Build the node image and bring the four-node mesh up
-        run: docker compose -f tests/testbed/compose.yml up -d --build --wait
+        run: docker compose up -d --build --wait
 
       - uses: actions/setup-node@v4
         with:
@@ -102,11 +132,21 @@ jobs:
 
       - name: Dump every node's log on failure
         if: failure()
-        run: docker compose -f tests/testbed/compose.yml logs --no-color
+        run: docker compose logs --no-color
 
       - name: Tear the testbed down
         if: always()
-        run: docker compose -f tests/testbed/compose.yml down -v
+        run: docker compose down -v
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
 concurrency:
   group: mesh-testbed-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
