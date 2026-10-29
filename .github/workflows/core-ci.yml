@@ -1743,28 +1743,30 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
           RELEVANT: ${{ needs.changes.outputs.relevant }}
           FULL: ${{ needs.changes.outputs.full }}
+        # Python, not jq: the CI image carries python3 and no jq (#2348).
         run: |
-          set -euo pipefail
-          changes="$(jq -r '.changes.result' <<< "$NEEDS")"
-          if [ "$changes" != "success" ]; then
-            echo "::error::the changes job ended '$changes'; there is no decision to report"
-            exit 1
-          fi
-          if [ "$RELEVANT" = "true" ]; then want=success; else want=skipped; fi
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          changes = needs["changes"]["result"]
+          if changes != "success":
+              print(f"::error::the changes job ended '{changes}'; there is no decision to report")
+              sys.exit(1)
+          want = "success" if os.environ["RELEVANT"] == "true" else "skipped"
           # On a branch push only the smoke set runs (header, PUSH TO MAIN); the rest
           # must be skipped, so a smoke run can never pass on a job it silently ran.
-          if [ "$FULL" = "true" ]; then rest="$want"; else rest=skipped; fi
-          echo "relevant=$RELEVANT full=$FULL: smoke jobs must be '$want', the rest '$rest'"
-          bad="$(jq -r --arg want "$want" --arg rest "$rest" '
-            ["build-test","ci-paths","format"] as $smoke
-            | to_entries[] | select(.key != "changes")
-            | (if (.key | IN($smoke[])) then $want else $rest end) as $w
-            | select(.value.result != $w) | "\(.key)=\(.value.result) (want \($w))"' <<< "$NEEDS")"
-          if [ -n "$bad" ]; then
-            echo "::error::core-ci jobs not as required: $(tr '\n' ' ' <<< "$bad")"
-            exit 1
-          fi
-          echo "ok"
+          rest = want if os.environ["FULL"] == "true" else "skipped"
+          print(f"relevant={os.environ['RELEVANT']} full={os.environ['FULL']}: "
+                f"smoke jobs must be '{want}', the rest '{rest}'")
+          smoke = {"build-test", "ci-paths", "format"}
+          bad = [f"{k}={v['result']} (want {want if k in smoke else rest})"
+                 for k, v in needs.items()
+                 if k != "changes" and v["result"] != (want if k in smoke else rest)]
+          if bad:
+              print("::error::core-ci jobs not as required: " + " ".join(bad))
+              sys.exit(1)
+          print("ok")
+          PY
       - name: Clean this job's workspace off the host runner
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
