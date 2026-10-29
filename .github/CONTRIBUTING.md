@@ -11,7 +11,7 @@ Thanks for your interest. There are several distinct ways to contribute, and the
 | Add a new transport binding or integration    | "New integrations" below                        |
 | Register an independent implementation        | [docs/implementations.md](../docs/implementations.md)   |
 | Build a bridge to a closed protocol           | "Bridges" below                                 |
-| Improve docs                                  | Just open a PR                                  |
+| Improve docs                                  | Just open a PR; write the page per [the docs-article skill](../.claude/skills/docs-article/SKILL.md) |
 
 ## Developer Certificate of Origin
 

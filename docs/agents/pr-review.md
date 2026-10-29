@@ -302,6 +302,12 @@ by name:
   `tr::<concept>::<error>`; a flat byte registry and a module-keyed namespace are
   both near-misses with named costs.
 
+A docs page is judged against the unified format (#2374), written down once in
+[the docs-article skill](../../.claude/skills/docs-article/SKILL.md): its page type, the
+concept template, the diagram vocabulary, and the rule that a guide links the spec instead
+of restating it. `tools/check_docs_style.py` reports the mechanical part (report-only
+until #2373), so a review names only the hits marked `NEW` and what the lint cannot see.
+
 ### 2f. Mechanical conventions
 
 Check these, but only where CI does not already: the `Doxyfile`, `clang-format`

@@ -1,0 +1,633 @@
+{
+ "docs/adr-rfc-index.md": {
+  "avoid-phrase": 2,
+  "line-length": 4
+ },
+ "docs/adr/0001-extraction-from-production-firmware.md": {
+  "line-length": 3
+ },
+ "docs/adr/0002-versioning-protocol-vs-release-no-per-frame-version.md": {
+  "line-length": 6,
+  "restatement": 1
+ },
+ "docs/adr/0003-retire-list-type-code-0x05.md": {
+  "line-length": 3,
+  "restatement": 1
+ },
+ "docs/adr/0004-crc-in-optional-trailer.md": {
+  "avoid-phrase": 2,
+  "line-length": 5
+ },
+ "docs/adr/0005-fixed-width-length-opt-ll.md": {
+  "avoid-phrase": 1,
+  "line-length": 5
+ },
+ "docs/adr/0006-read-write-await-api-no-connect.md": {
+  "line-length": 5
+ },
+ "docs/adr/0007-normative-wire-format-by-incorporation.md": {
+  "line-length": 4
+ },
+ "docs/adr/0008-schema-driven-array-indexing.md": {
+  "line-length": 7,
+  "restatement": 1
+ },
+ "docs/adr/0009-built-in-error-model-tr-concept-namespace.md": {
+  "line-length": 10
+ },
+ "docs/adr/0010-closed-protocol-error-boundary.md": {
+  "line-length": 7
+ },
+ "docs/adr/0011-address-shift-totality-opt-in.md": {
+  "line-length": 7,
+  "restatement": 1
+ },
+ "docs/adr/0012-modular-memory-binding-transparent-router.md": {
+  "line-length": 7,
+  "restatement": 1
+ },
+ "docs/adr/0013-v1-scope-boundaries.md": {
+  "line-length": 10,
+  "restatement": 1
+ },
+ "docs/adr/0014-router-cycle-termination-hop-count.md": {
+  "line-length": 9,
+  "restatement": 4
+ },
+ "docs/adr/0015-graph-runtime-concurrency-and-in-process-cycle-cap.md": {
+  "line-length": 13
+ },
+ "docs/adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md": {
+  "line-length": 27
+ },
+ "docs/adr/0017-in-band-vertex-creation-controller-orchestration.md": {
+  "line-length": 16
+ },
+ "docs/adr/0018-access-control-authorization-pluggable-subject-token.md": {
+  "line-length": 14
+ },
+ "docs/adr/0019-per-producer-monotonic-origin-timestamp.md": {
+  "line-length": 13
+ },
+ "docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md": {
+  "line-length": 17
+ },
+ "docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md": {
+  "line-length": 14
+ },
+ "docs/adr/0022-transport-framing-modes-elided-full-tlv-advertise.md": {
+  "line-length": 17
+ },
+ "docs/adr/0023-ros2-binding-via-rmw-tracer.md": {
+  "line-length": 20,
+  "restatement": 1
+ },
+ "docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md": {
+  "line-length": 17
+ },
+ "docs/adr/0025-rmw-tracer-end-to-end-zero-copy-rcl-over-rdma.md": {
+  "line-length": 16
+ },
+ "docs/adr/0026-consumer-initiated-subscription-client-write.md": {
+  "line-length": 14
+ },
+ "docs/adr/0027-transport-and-connections-are-vertices.md": {
+  "line-length": 19
+ },
+ "docs/adr/0028-native-cores-kept-consistent-by-conformance-vectors.md": {
+  "line-length": 14
+ },
+ "docs/adr/0029-websocket-first-transport-quic-deferred-per-link.md": {
+  "line-length": 13
+ },
+ "docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md": {
+  "line-length": 12
+ },
+ "docs/adr/0031-direct-browser-to-robot-binding-and-webtransport.md": {
+  "line-length": 3
+ },
+ "docs/adr/0032-continuous-cross-core-perf-conformance-matrix.md": {
+  "line-length": 3
+ },
+ "docs/adr/0033-npm-subpackage-monorepo.md": {
+  "line-length": 4
+ },
+ "docs/adr/0034-typescript-client-sdk.md": {
+  "line-length": 35,
+  "restatement": 2
+ },
+ "docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md": {
+  "line-length": 27,
+  "restatement": 1
+ },
+ "docs/adr/0036-bridge-dissolves-into-connection-vertex.md": {
+  "line-length": 16
+ },
+ "docs/adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md": {
+  "line-length": 31
+ },
+ "docs/adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md": {
+  "line-length": 40,
+  "restatement": 1
+ },
+ "docs/adr/0039-pmr-memory-model-host-aligned-allocation.md": {
+  "line-length": 36,
+  "restatement": 1
+ },
+ "docs/adr/0040-net-plane-is-explicit-source-routed-only.md": {
+  "line-length": 29
+ },
+ "docs/adr/0041-terminus-arena-decode-span-contract.md": {
+  "line-length": 29
+ },
+ "docs/adr/0042-refcounted-receiver-seam-view-delivery.md": {
+  "line-length": 18,
+  "restatement": 1
+ },
+ "docs/adr/0043-quic-webtransport-optional-module-msquic.md": {
+  "line-length": 18
+ },
+ "docs/adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md": {
+  "line-length": 44
+ },
+ "docs/adr/0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md": {
+  "line-length": 22
+ },
+ "docs/adr/0046-bulk-transfer-is-ordinary-auth-gated-writes.md": {
+  "line-length": 20
+ },
+ "docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md": {
+  "line-length": 33
+ },
+ "docs/adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md": {
+  "line-length": 19,
+  "restatement": 1
+ },
+ "docs/adr/0049-field-write-single-subscriber-admission-door.md": {
+  "line-length": 15
+ },
+ "docs/adr/0050-acl-pure-policy-cached-effective-ace-merge.md": {
+  "line-length": 16
+ },
+ "docs/adr/0051-delivery-terminates-at-target-no-dispatch-limits.md": {
+  "line-length": 17
+ },
+ "docs/adr/0052-rope-aware-decode-sink-node-type.md": {
+  "line-length": 17
+ },
+ "docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md": {
+  "line-length": 27
+ },
+ "docs/adr/0054-path-t-parse-once-constructor.md": {
+  "line-length": 1
+ },
+ "docs/adr/0055-rope-native-reply-and-control-egress-sinks.md": {
+  "line-length": 2
+ },
+ "docs/adr/0056-vertex-handle-infallible-register.md": {
+  "line-length": 8
+ },
+ "docs/adr/0057-graph-composite-vertex-tree.md": {
+  "line-length": 1
+ },
+ "docs/adr/0058-vertex-ext-storage-classes-borrowed-declarations-and-group-split.md": {
+  "line-length": 34
+ },
+ "docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md": {
+  "line-length": 18
+ },
+ "docs/adr/0060-lkv-copy-store-injected-value-backend.md": {
+  "line-length": 18,
+  "restatement": 1
+ },
+ "docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md": {
+  "avoid-phrase": 1,
+  "line-length": 35,
+  "restatement": 1
+ },
+ "docs/adr/0062-resolve-once-label-bindings-hold-resolutions-not-names.md": {
+  "line-length": 35,
+  "restatement": 1
+ },
+ "docs/adr/0063-connection-table-lock-free-reads-trait-serialized-writes.md": {
+  "line-length": 25
+ },
+ "docs/adr/0064-lkv-publish-is-waiterless-and-the-slot-becomes-lock-free.md": {
+  "line-length": 57
+ },
+ "docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md": {
+  "line-length": 36
+ },
+ "docs/adr/0066-element-write-is-a-single-attempt-cas.md": {
+  "line-length": 22
+ },
+ "docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md": {
+  "line-length": 34
+ },
+ "docs/adr/0068-build-configuration-is-plain-cpp-config-header.md": {
+  "line-length": 41
+ },
+ "docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md": {
+  "line-length": 58
+ },
+ "docs/adr/0070-configuration-is-a-named-traits-type.md": {
+  "line-length": 26
+ },
+ "docs/adr/0071-host-transport-is-a-separate-tu-with-shared-nothing-epoll.md": {
+  "line-length": 37
+ },
+ "docs/adr/0072-one-reclamation-domain-graph-owned-and-backend-injected.md": {
+  "line-length": 36
+ },
+ "docs/adr/0073-naming-authority-the-application-mints-one-predicate-gates.md": {
+  "line-length": 28,
+  "restatement": 2
+ },
+ "docs/adr/0074-terminus-reply-egress-is-its-own-injected-backend.md": {
+  "line-length": 16,
+  "restatement": 1
+ },
+ "docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md": {
+  "line-length": 36
+ },
+ "docs/adr/0076-external-subscription-mutations-are-observable-at-the-admission-door.md": {
+  "line-length": 25
+ },
+ "docs/adr/0077-can-advertise-carries-a-producer-generation-keying-reassembly.md": {
+  "line-length": 29
+ },
+ "docs/adr/0078-acl-cache-coherence-is-a-published-generation-stamp-not-a-dirty-flag.md": {
+  "line-length": 34
+ },
+ "docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md": {
+  "line-length": 45
+ },
+ "docs/adr/0080-reclamation-policy-is-a-build-time-closed-per-target-seam.md": {
+  "line-length": 69
+ },
+ "docs/adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md": {
+  "line-length": 25
+ },
+ "docs/adr/0082-auth-subject-and-peer-named-are-decoupled-claims-default-stays-false.md": {
+  "line-length": 39
+ },
+ "docs/adr/0083-one-allocation-seam.md": {
+  "line-length": 40
+ },
+ "docs/adr/0084-remote-await-completes-from-a-receiver-side-waiter.md": {
+  "line-length": 24,
+  "restatement": 1
+ },
+ "docs/adr/0085-ingress-drain-budget-waits-for-the-idle-task-not-a-clock.md": {
+  "line-length": 41
+ },
+ "docs/adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md": {
+  "line-length": 34,
+  "restatement": 1
+ },
+ "docs/adr/0087-the-peer-path-is-one-frame-ingress-one-shared-egress-frame-one-wait-module-per-node.md": {
+  "line-length": 50
+ },
+ "docs/agents/pr-review.md": {
+  "avoid-phrase": 1,
+  "line-length": 3,
+  "restatement": 3
+ },
+ "docs/capability-matrix.md": {
+  "own-site-link": 1
+ },
+ "docs/design/README.md": {
+  "own-site-link": 1
+ },
+ "docs/design/allocation-and-backpressure.md": {
+  "avoid-phrase": 1,
+  "line-length": 29,
+  "own-site-link": 5,
+  "restatement": 1
+ },
+ "docs/design/concurrency/00-scaling-and-serialization.md": {
+  "avoid-phrase": 1,
+  "line-length": 12
+ },
+ "docs/design/concurrency/01-write-and-delivery-path.md": {
+  "line-length": 30,
+  "own-site-link": 1
+ },
+ "docs/design/concurrency/README.md": {
+  "line-length": 2
+ },
+ "docs/design/config/00-configuration-space.md": {
+  "line-length": 21,
+  "own-site-link": 2
+ },
+ "docs/design/zero-copy-and-flatten.md": {
+  "line-length": 42
+ },
+ "docs/examples/acl-expiry.md": {
+  "own-site-link": 1
+ },
+ "docs/examples/acl-subject-resolver.md": {
+  "line-length": 1
+ },
+ "docs/examples/graph-await.md": {
+  "own-site-link": 1
+ },
+ "docs/examples/graph-creation-hook.md": {
+  "own-site-link": 1
+ },
+ "docs/examples/graph-read-write.md": {
+  "own-site-link": 2
+ },
+ "docs/examples/graph-retire.md": {
+  "own-site-link": 1
+ },
+ "docs/examples/graph-stream.md": {
+  "line-length": 1,
+  "own-site-link": 2
+ },
+ "docs/examples/net-multi-peer-listener.md": {
+  "line-length": 1
+ },
+ "docs/examples/net-udp-datagram.md": {
+  "line-length": 1
+ },
+ "docs/examples/route-dst-is-source-route.md": {
+  "own-site-link": 2
+ },
+ "docs/examples/route-multi-hop.md": {
+  "line-length": 1
+ },
+ "docs/examples/route-qualified-mount.md": {
+  "own-site-link": 1
+ },
+ "docs/examples/route-reply-home.md": {
+  "own-site-link": 1
+ },
+ "docs/examples/route-terminus-or-forward.md": {
+  "own-site-link": 2
+ },
+ "docs/examples/sub-durability-latch.md": {
+  "own-site-link": 1
+ },
+ "docs/examples/sub-retire.md": {
+  "own-site-link": 1
+ },
+ "docs/examples/sub-subtree.md": {
+  "own-site-link": 2
+ },
+ "docs/examples/sub-terminal-delivery.md": {
+  "own-site-link": 1
+ },
+ "docs/examples/tree-of-ropes.md": {
+  "line-length": 1,
+  "own-site-link": 1
+ },
+ "docs/examples/view-subview.md": {
+  "line-length": 1
+ },
+ "docs/examples/wire-codec.md": {
+  "line-length": 3
+ },
+ "docs/examples/wire-decode-refusals.md": {
+  "line-length": 2,
+  "own-site-link": 1,
+  "restatement": 1
+ },
+ "docs/examples/wire-packed-path.md": {
+  "line-length": 1,
+  "own-site-link": 1
+ },
+ "docs/examples/wire-path-escape.md": {
+  "own-site-link": 2
+ },
+ "docs/examples/wire-tlv-header.md": {
+  "restatement": 1
+ },
+ "docs/getting-started.md": {
+  "alt-text": 2,
+  "line-length": 4,
+  "own-site-link": 1
+ },
+ "docs/ietf/wire-audit.md": {
+  "avoid-phrase": 1,
+  "own-site-link": 1,
+  "restatement": 6
+ },
+ "docs/implementations.md": {
+  "avoid-phrase": 1,
+  "line-length": 5
+ },
+ "docs/interop/custom-device.md": {
+  "line-length": 2,
+  "own-site-link": 4,
+  "restatement": 4
+ },
+ "docs/interop/esp32-production-node.md": {
+  "avoid-phrase": 1,
+  "line-length": 14,
+  "own-site-link": 2
+ },
+ "docs/interoperability.md": {
+  "line-length": 1,
+  "own-site-link": 4
+ },
+ "docs/methodology.md": {
+  "avoid-phrase": 1,
+  "line-length": 41,
+  "own-site-link": 1
+ },
+ "docs/modules/backends.md": {
+  "alt-text": 1,
+  "line-length": 6
+ },
+ "docs/modules/can.md": {
+  "line-length": 3
+ },
+ "docs/modules/file-map.md": {
+  "avoid-phrase": 2,
+  "line-length": 1
+ },
+ "docs/modules/frame-codec.md": {
+  "alt-text": 1,
+  "line-length": 4,
+  "own-site-link": 6,
+  "restatement": 1
+ },
+ "docs/modules/fwd-router.md": {
+  "alt-text": 1,
+  "avoid-phrase": 2,
+  "line-length": 25,
+  "own-site-link": 5
+ },
+ "docs/modules/graph.md": {
+  "alt-text": 1,
+  "avoid-phrase": 1,
+  "line-length": 9,
+  "own-site-link": 10
+ },
+ "docs/modules/index.md": {
+  "alt-text": 1,
+  "line-length": 2
+ },
+ "docs/modules/interface-map.md": {
+  "alt-text": 2,
+  "line-length": 1
+ },
+ "docs/modules/path.md": {
+  "alt-text": 1,
+  "line-length": 6
+ },
+ "docs/modules/security-acl.md": {
+  "line-length": 1
+ },
+ "docs/modules/segment.md": {
+  "alt-text": 1,
+  "line-length": 8
+ },
+ "docs/modules/status.md": {
+  "line-length": 1
+ },
+ "docs/modules/transport.md": {
+  "alt-text": 2,
+  "line-length": 20
+ },
+ "docs/modules/views.md": {
+  "alt-text": 1,
+  "line-length": 8
+ },
+ "docs/modules/wire-format-bits.md": {
+  "alt-text": 1,
+  "line-length": 1,
+  "own-site-link": 1
+ },
+ "docs/reference/00-overview.md": {
+  "avoid-phrase": 1,
+  "line-length": 51,
+  "own-site-link": 5,
+  "restatement": 4
+ },
+ "docs/reference/02-graph-model.md": {
+  "avoid-phrase": 2,
+  "line-length": 175,
+  "own-site-link": 59,
+  "restatement": 11
+ },
+ "docs/reference/04-communication-flows.md": {
+  "alt-text": 3,
+  "line-length": 78,
+  "own-site-link": 16,
+  "restatement": 4
+ },
+ "docs/reference/06-user-data-packing.md": {
+  "line-length": 59,
+  "own-site-link": 2
+ },
+ "docs/reference/07-host-embedding.md": {
+  "line-length": 56,
+  "own-site-link": 6,
+  "restatement": 3
+ },
+ "docs/reference/08-views-and-ownership.md": {
+  "line-length": 108,
+  "restatement": 1
+ },
+ "docs/reference/09-memory-substrate.md": {
+  "avoid-phrase": 1,
+  "line-length": 167,
+  "own-site-link": 7,
+  "restatement": 3
+ },
+ "docs/reference/10-module-catalog.md": {
+  "line-length": 55,
+  "own-site-link": 3,
+  "restatement": 2
+ },
+ "docs/reference/11-vertex-roles-and-aggregation.md": {
+  "line-length": 92,
+  "own-site-link": 7
+ },
+ "docs/reference/12-deployment-profiles.md": {
+  "line-length": 21,
+  "own-site-link": 1
+ },
+ "docs/reference/13-network-formation.md": {
+  "alt-text": 1,
+  "avoid-phrase": 1,
+  "line-length": 9,
+  "own-site-link": 12
+ },
+ "docs/reference/14-can-transport.md": {
+  "alt-text": 1,
+  "avoid-phrase": 2,
+  "line-length": 7,
+  "own-site-link": 1
+ },
+ "docs/reference/17-reclamation-policy.md": {
+  "line-length": 31
+ },
+ "docs/reference/18-composition-over-the-network.md": {
+  "alt-text": 1,
+  "avoid-phrase": 7,
+  "line-length": 4,
+  "own-site-link": 19,
+  "restatement": 2
+ },
+ "docs/reference/19-transports-are-vertices.md": {
+  "alt-text": 1,
+  "line-length": 13,
+  "own-site-link": 7
+ },
+ "docs/reference/20-bindings-map.md": {
+  "avoid-phrase": 1,
+  "line-length": 44,
+  "own-site-link": 1
+ },
+ "docs/reference/21-ros2-integration.md": {
+  "line-length": 2,
+  "own-site-link": 9
+ },
+ "docs/reference/22-backpressure-and-sizing.md": {
+  "line-length": 16,
+  "own-site-link": 5,
+  "restatement": 1
+ },
+ "docs/reference/24-modelling-granularity.md": {
+  "line-length": 1,
+  "own-site-link": 9
+ },
+ "docs/reference/README.md": {
+  "avoid-phrase": 1,
+  "line-length": 30
+ },
+ "docs/research/2026-07-04-architecture-deepening-review.md": {
+  "line-length": 23
+ },
+ "docs/research/2026-07-11-tlv-graph-folding-structure.md": {
+  "line-length": 48
+ },
+ "docs/research/2026-08-19-post-quantum-hybrid-kem-constraint.md": {
+  "line-length": 1,
+  "restatement": 2
+ },
+ "docs/research/horizon.md": {
+  "restatement": 4
+ },
+ "docs/research/m6-transport-and-batching.md": {
+  "alt-text": 1
+ },
+ "docs/research/nnstreamer-synergy.md": {
+  "alt-text": 1,
+  "line-length": 4
+ },
+ "docs/research/ros2-adapter.md": {
+  "alt-text": 1
+ },
+ "docs/spec/index.md": {
+  "own-site-link": 2,
+  "restatement": 2
+ },
+ "docs/start-here.md": {
+  "own-site-link": 2,
+  "restatement": 1
+ }
+}

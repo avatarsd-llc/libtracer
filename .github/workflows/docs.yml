@@ -95,6 +95,7 @@ jobs:
       # DERIVED by tools/gen_ci_paths.py -- do not hand-edit: this list is what
       # docs's jobs read and build. `gen_ci_paths.py --apply` rewrites it.
       DOCS_PATHS: |
+        CONTEXT-AVOID.md
         CONTEXT.md
         bench/**
         bindings/rust/examples/fwd_read_stats.rs
@@ -306,6 +307,11 @@ jobs:
       # fails the docs build itself rather than only a sibling check.
       - name: Doc-citation gate (symbol citations resolve; no line-number citations)
         run: python3 tools/check_doc_citations.py
+      # Docs style lint (#2371, the #2374 format): REPORT-ONLY. It prints every hit with
+      # the rule it breaks, marks a page/rule count above tools/docs_style_baseline.json
+      # as NEW, and exits 0. The style pass (#2373) switches it to `--gate`.
+      - name: Docs style lint (report-only)
+        run: python3 tools/check_docs_style.py
       # Auto-generate the Performance & Conformance page from the LIVE harnesses
       # (cross-core matrix + perf bench + coverage), replacing the static snapshot
       # (ADR-0032 §auto-published). Regenerated in-place each build; the artifact

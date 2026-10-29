@@ -136,6 +136,8 @@ DOCS_DECLARED = {
     # bench/gen_results_page.py runs tests/conformance/run-all.py for the published
     # conformance matrix; the harness and its vectors live under this tree.
     "tests/conformance": "conformance harness run by bench/gen_results_page.py",
+    # tools/check_docs_style.py reads the glossary's avoid list, which sits beside CONTEXT.md.
+    "CONTEXT-AVOID.md": "avoid-phrase list read by tools/check_docs_style.py",
 }
 
 
@@ -331,8 +333,8 @@ def docs_inputs(text: str) -> tuple[set[str], set[pathlib.Path]]:
     """
     confdir, srcdir = _sphinx_dirs(text)
     src = (ROOT / srcdir).resolve()
-    dirs = {confdir.strip("/")} | set(DOCS_DECLARED)
-    files: set[pathlib.Path] = set()
+    dirs = {confdir.strip("/")} | {d for d in DOCS_DECLARED if not (ROOT / d).is_file()}
+    files = {pathlib.Path(f) for f in DOCS_DECLARED if (ROOT / f).is_file()}
     for pattern in _include_patterns(ROOT / confdir / "conf.py"):
         if pattern.endswith("/**") and not any(c in pattern[:-3] for c in "*?["):
             dirs.add((src / pattern[:-3]).relative_to(ROOT).as_posix())
