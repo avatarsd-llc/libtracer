@@ -568,6 +568,43 @@ void test_table_replace() {
           "the replacement table's field is live");
 }
 
+/** @brief A source that refuses every block: the copy an owning declaration makes fails. */
+class refusing_source_t final : public tr::mem::block_source_t {
+   public:
+    /** @brief Name it so a census can tell it apart from the process heap. */
+    refusing_source_t() noexcept : tr::mem::block_source_t("refusing") {}
+    /** @brief Refuse. */
+    [[nodiscard]] void* try_alloc(std::size_t, std::size_t) noexcept override { return nullptr; }
+    /** @brief Nothing was ever drawn, so nothing comes back. */
+    void release(void*, std::size_t, std::size_t) noexcept override {}
+};
+
+// ---------------------------------------------------------------------------
+// #2288 part B — a declaration whose owning copy was refused is refused whole: set_policy
+// answers by value and the table already installed stays, values and all.
+void test_refused_copy_keeps_table() {
+    std::printf("refused declaration copy keeps the installed table (#2288):\n");
+    graph_t g;
+    const vertex_handle_t v = g.register_vertex(path_t("/dev/q"), role_t::STORED_VALUE);
+    std::vector<app_field_t> t1;
+    t1.push_back(app_field_t{.name = "kept", .access = app_access_t::RW});
+    (void)g.set_policy(v, {.app_fields = std::move(t1)});
+    const std::vector<std::byte> val = value_tlv("k1");
+    check(g.write(path_t("/dev/q:settings.app.kept"), make_value(val)).has_value(),
+          "the installed table's field takes a write");
+
+    refusing_source_t refuse;
+    const std::array<app_field_t, 1> t2{app_field_t{.name = "new", .access = app_access_t::RW}};
+    tr::graph::app_fields_decl_t decl(std::span<const app_field_t>(t2), &refuse);
+    check(decl.failed(), "the owning copy from a refusing source reads failed()");
+    check(!g.set_policy(v, {.app_fields = std::move(decl)}).has_value(),
+          "set_policy refuses the declaration, by value");
+    check(reads_back(g.read(path_t("/dev/q:settings.app.kept")), val),
+          "the installed field and its stored value are untouched");
+    check(fails_with(g.read(path_t("/dev/q:settings.app.new")), status_t::SCHEMA_NOT_FOUND),
+          "the refused table's field never appeared");
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -742,6 +779,7 @@ int main() {
     test_container_reads();
     test_apply_seam();
     test_table_replace();
+    test_refused_copy_keeps_table();
     test_borrowed_static_install();
     test_shape_gates_no_test_defended();
     return tr::testing::summary("app_fields");
