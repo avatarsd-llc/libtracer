@@ -319,6 +319,10 @@ jobs:
         run: |
           python3 tools/check_diagram_contrast.py
           python3 -m unittest discover -s tools/tests -p "test_check_diagram_contrast.py" -v
+      # The {hex-walk} directive (docs/_ext/hexwalk.py, #2372) renders a concept page's worked
+      # example from a conformance vector; the build itself fails on a vector it cannot walk.
+      - name: Hex walk tests (TLV walk, labels, rendering)
+        run: python3 -m unittest discover -s tools/tests -p "test_hexwalk.py" -v
       # Auto-generate the Performance & Conformance page from the LIVE harnesses
       # (cross-core matrix + perf bench + coverage), replacing the static snapshot
       # (ADR-0032 §auto-published). Regenerated in-place each build; the artifact

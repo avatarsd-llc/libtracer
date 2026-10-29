@@ -104,6 +104,14 @@ Examples <docs/examples/index>
 ```
 
 ```{toctree}
+:caption: Concepts
+:hidden:
+:maxdepth: 1
+
+Batching <docs/concepts/batching>
+```
+
+```{toctree}
 :caption: Specification
 :hidden:
 :maxdepth: 2

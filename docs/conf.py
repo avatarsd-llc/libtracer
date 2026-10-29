@@ -12,6 +12,10 @@
 import os
 import shutil
 import subprocess
+import sys
+
+# Local extensions: the generated hex walk of a concept page's worked example (#2372).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_ext"))
 
 project = "libtracer"
 project_copyright = "2026, avatarsd LLC"
@@ -25,6 +29,7 @@ extensions = [
     "sphinx.ext.githubpages",  # emit .nojekyll so underscore dirs (_static) serve
     "sphinx_sitemap",  # sitemap.xml (SEO) — needs html_baseurl
     "sphinxext.opengraph",  # Open Graph + Twitter cards + meta descriptions (SEO)
+    "hexwalk",  # {hex-walk}: a worked example's bytes, read from a conformance vector
 ]
 
 # --- SEO ---------------------------------------------------------------------
@@ -127,6 +132,8 @@ include_patterns = [
     # The diagram vocabulary's smoke page (#2378): an orphan page that renders every
     # class, so a Mermaid upgrade that breaks the styling shows on one page.
     "docs/style/**",
+    # The Concepts section (#2374): one page per concept, in the concept-page template.
+    "docs/concepts/**",
 ]
 exclude_patterns = [
     "_build",

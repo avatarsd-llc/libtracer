@@ -1,0 +1,30 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* The generated hex walk (docs/_ext/hexwalk.py, #2372): one collapsible row per TLV, nested as
+ * the TLVs nest. Colours are furo's own tokens, so both themes follow the site. */
+.lt-hexwalk-caption { font-weight: 600; margin-bottom: 0.25rem; }
+.lt-hexwalk { margin: 0.5rem 0 0.75rem; font-size: 0.9em; }
+.lt-hw-tlv {
+  border-left: 3px solid var(--color-foreground-border);
+  margin: 0.25rem 0 0.25rem 0.5rem;
+  padding: 0.1rem 0 0.1rem 0.6rem;
+}
+.lt-hw-tlv > summary { cursor: pointer; line-height: 1.6; }
+.lt-hw-tlv > summary:focus-visible { outline: 2px solid var(--color-brand-primary); }
+.lt-hw-bytes {
+  font-family: var(--font-stack--monospace);
+  background: var(--color-background-secondary);
+  color: var(--color-foreground-primary);
+  padding: 0 0.25rem;
+  border-radius: 0.2rem;
+}
+.lt-hw-what { margin-left: 0.4rem; }
+.lt-hw-fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0 0.75rem;
+  margin: 0.25rem 0 0.25rem 0.5rem;
+  color: var(--color-foreground-secondary);
+}
+.lt-hw-fields dt { font-weight: 600; }
+.lt-hw-fields dd { margin: 0; }
+.lt-hexwalk-hex pre { white-space: pre-wrap; word-break: break-all; }
