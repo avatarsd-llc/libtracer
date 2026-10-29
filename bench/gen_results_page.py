@@ -1472,7 +1472,7 @@ an MCU allocator in hundreds — so a host reading of churn is a *lower* bound.
 
 {compare_intro()}
 
-{mprose(M, f"4 · libtracer vs Zenoh (absolute, {ROUNDS}, same runner)")}
+{mprose(M, "4 · libtracer vs Zenoh (absolute, best of 3 rounds, same runner)")}
 
 ### Designated model boundaries
 

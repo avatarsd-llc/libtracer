@@ -178,11 +178,12 @@ jobs:
             [ "$relevant" = true ] || echo "no changed path matches DOCS_PATHS; the docs build is skipped"
             # The released-version assembly gates nothing a pull request can change (the
             # tags are immutable and a tag that fails to build is skipped, not failed), so
-            # a PR runs it only when it changes the assembler or the docs toolchain.
+            # a PR runs it only when it changes the assembler or the docs toolchain (this
+            # workflow included: its image, python and apt lines are toolchain).
             releases=false
             while IFS= read -r -d '' file; do
               case "$file" in
-                tools/assemble_release_docs.sh|tools/gen_versions_json.py|docs/requirements.txt|.github/ci-image/*)
+                tools/assemble_release_docs.sh|tools/gen_versions_json.py|docs/requirements.txt|.github/ci-image/*|.github/workflows/docs.yml)
                   echo "release assembly input changed: $file"; releases=true; break;;
               esac
             done < "$changed"
