@@ -52,6 +52,7 @@
 #include "libtracer/mem_source_backend.hpp"
 #include "libtracer/mem_string.hpp"
 #include "libtracer/path.hpp"
+#include "libtracer/path_object.hpp"
 #include "libtracer/reclaim.hpp"
 #include "libtracer/seq_latch.hpp"
 #include "libtracer/sink_slot.hpp"
@@ -2841,6 +2842,68 @@ class graph_t {
     /** @brief Resolve a canonical PATH-payload @p key to its vertex handle (`nullopt` if
      *         unknown). */
     [[nodiscard]] std::optional<vertex_handle_t> find(std::span<const std::byte> key) const;
+
+    /**
+     * @brief Make a path object (RFC-0030 §5) from a canonical path string, parsed and validated
+     *        once.
+     *
+     * The object's block (its header, inline chain cache and a copy of the canonical bytes) is
+     * drawn from @ref table_source. Nothing is resolved yet: the first door that takes the
+     * object learns its local pair.
+     *
+     * @retval INVALID_PATH @p text is not a valid path, or carries a `:field` tail: a path
+     *         object names a vertex, and a field door takes the field beside it.
+     * @retval BACKPRESSURE The table source refused the block; nothing was made.
+     */
+    [[nodiscard]] result_t<path_object_t> make_path(std::string_view text);
+    /**
+     * @brief Make a path object over a pre-encoded canonical `PATH` payload @p key, borrowed
+     *        rather than copied (v1 §3.1.2: it may sit in read-only memory).
+     *
+     * @p key MUST outlive the object.
+     *
+     * @retval INVALID_PATH @p key is not a canonical payload (an escape record, a bad length,
+     *         or more than `kMaxPathBytes`).
+     * @retval BACKPRESSURE As for the string form.
+     */
+    [[nodiscard]] result_t<path_object_t> make_path(std::span<const std::byte> key);
+
+    /**
+     * @brief The vertex @p p names now: its element 0 when that is still current, else the
+     *        canonical bytes resolved again, which re-learns element 0 (RFC-0030 §5.2).
+     *
+     * Both spellings give the same answer by construction; the pair is only the faster way to
+     * it. A miss clears element 0. Every path-object door starts here.
+     *
+     * @return The vertex, or `nullopt` when @p p names nothing or no vertex has its key.
+     */
+    [[nodiscard]] std::optional<vertex_handle_t> resolve(const path_object_t& p) const;
+
+    /** @brief The handle read, through a path object; `NOT_FOUND` when it resolves to
+     *         nothing. */
+    [[nodiscard]] result_t<value_ref_t> read(const path_object_t& p,
+                                             std::string_view caller = {}) const;
+    /** @brief The handle field read, through a path object. */
+    [[nodiscard]] result_t<value_ref_t> read(const path_object_t& p, const field_path_t& field,
+                                             std::string_view caller = {}) const;
+    /**
+     * @brief The handle write, through a path object.
+     *
+     * A miss answers as the string form does: `NOT_FOUND`, unless a parent's creation hook
+     * creates the target (RFC-0030 §7), and then the object learns the new vertex.
+     */
+    [[nodiscard]] result_t<void> write(const path_object_t& p, view::rope_t value,
+                                       std::string_view caller = {});
+    /** @brief The handle field write, through a path object. A field write never creates, so
+     *         a miss is `NOT_FOUND`. */
+    [[nodiscard]] result_t<void> write(const path_object_t& p, const field_path_t& field,
+                                       view::rope_t value, std::string_view caller = {});
+    /** @brief The callback subscribe, with the source named by a path object. */
+    [[nodiscard]] result_t<subscription_t> subscribe(const path_object_t& src, subscriber_fn_t fn,
+                                                     void* ctx, delivery_policy_t policy = {});
+    /** @brief The handle retire, through a path object. The object keeps its canonical bytes,
+     *         and a later door finds whatever is registered at them then. */
+    [[nodiscard]] result_t<void> retire(const path_object_t& p);
 
     /**
      * @brief @p v's copy-or-share hint (RFC-0022 Amendment 3): the `SHARE` or `COPY` it
