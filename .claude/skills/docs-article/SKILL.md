@@ -63,6 +63,8 @@ reports any heading of the page's own.
 3. `## When you need it`
 4. `## How it works` (R)
 5. `## Worked example`: real bytes, generated from a conformance vector, never typed.
+   Use the `{hex-walk}` directive (`docs/_ext/hexwalk.py`): name the vector and label its
+   leaves in order, one `<format>: <label>` line each; `docs/concepts/batching.md` shows it.
 6. `## Cost` (R): wire bytes, allocations, latency, and flash/RAM per NARROW/MID/WIDE
    target, including rows above 1 KiB. Numbers come from the size gate or the benches.
 7. `## What the library does not do`: for example pacing, timers or playout.
