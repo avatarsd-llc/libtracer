@@ -27,6 +27,7 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [Retirement](graph-retire.md) | L4 graph | logically absent, not erased: `NOT_FOUND`, live handles, the generation stamp |
 | [A HANDLER vertex](graph-handler-vertex.md) | L4 graph | the role decides what a write means: `on_write` executes, `on_read` computes |
 | [A STREAM vertex](graph-stream.md) | L4 graph | the bounded history ring and its owner-declared depth (no wire surface) |
+| [One batch, four spellings](graph-batch.md) | L2/L3 + L4 graph | one BATCH record framed or packed, standalone (`0x80`) or folded (`0x01`), pushed by `propagate` and `propagate` FOLD |
 | [Subscribe to one vertex](sub-callback.md) | L4 graph | `subscribe(src, callable)`, the `subscription_t` handle, and the inline delivery contract |
 | [One edge, a whole subtree](sub-subtree.md) | L4 graph | RFC-0005 vertical bubbling; `own_subs` vs `has_subscribers`; provenance rides in the data |
 | [Delivery terminates at the target](sub-terminal-delivery.md) | L4 graph | RFC-0007: `A → B` plus `B → C` does not relay; a cycle cannot loop |
@@ -286,6 +287,7 @@ Creation <graph-creation-hook>
 Retirement <graph-retire>
 A HANDLER vertex <graph-handler-vertex>
 A STREAM vertex <graph-stream>
+One batch, four spellings <graph-batch>
 Subscribe to one vertex <sub-callback>
 One edge, a whole subtree <sub-subtree>
 Delivery terminates at the target <sub-terminal-delivery>
