@@ -75,7 +75,7 @@
     },
     "tr::net::fwd_router_t::route_fwd_forward": {
       "ccn": [
-        17
+        16
       ],
       "file": "core/src/fwd_router.cpp"
     },
