@@ -108,7 +108,7 @@ jobs:
   # --- PR gate: same-runner baseline against main --------------------------------
   gate-pr:
     if: >-
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/')) &&
       (github.event_name == 'pull_request')
     # The pinned bench host, not a hosted VM. On `ubuntu-24.04` the gate shared its 4 vCPUs
     # with unknown neighbours: about half of its verdicts on 2026-10-02 came back
@@ -365,7 +365,7 @@ jobs:
   # The Zenoh arm is optional (bench/fetch_zenoh.sh vendors it) and is not fetched here,
   # matching how the ratchet job treats the Zenoh control series: absent is not a failure.
   compose-audit:
-    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8

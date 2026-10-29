@@ -37,7 +37,7 @@ name: esp-idf
 on:
   # NIGHTLY, NOT PER MAIN PUSH (#2348). A train merge lands a tree equal to the PR head
   # this workflow already passed, so a push to main runs only core-ci's smoke set
-  # (core-ci.yml's header, PUSH TO MAIN). This workflow runs nightly at 00:00 UTC
+  # (core-ci.yml's header, QUICK SET). This workflow runs nightly at 00:00 UTC
   # (02:00 Kyiv winter time, clear of the HIL and perf-local bench windows) and on
   # every release tag.
   push:
@@ -91,7 +91,7 @@ jobs:
   # PlatformIO deny-lists name exactly the groups they stand for. A list mistake fails
   # here in seconds instead of as a much later full-node LINK error.
   srcs-drift:
-    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -160,7 +160,7 @@ jobs:
   # broken reporter must not look like a green report; that is the one verdict an
   # advisory instrument still owes.
   rv32-census:
-    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: espressif/idf:release-v6.0
@@ -209,7 +209,7 @@ jobs:
   # under its bare job name — a `build` here, skipped on a srcs-drift failure, would be
   # a "passing" required check that built nothing.
   esp-build:
-    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
     needs: srcs-drift
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     # Measured worst leg 6.07 min (esp32c6, p50 5.83); the other three targets 3.5-3.7.
@@ -284,7 +284,7 @@ jobs:
   # target run below (full-node-host), and bus-/radio-level validation is the
   # on-silicon checklist on #183.
   full-node:
-    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
     needs: srcs-drift
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
@@ -434,7 +434,7 @@ jobs:
   # pass with the knob broken. The chip WS TUs are httpd_ws_link / esp_ws_client_link,
   # so those are what LIBTRACER_TRANSPORT_WS=n has to shed, and those are what is checked.
   full-node-trimmed:
-    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
     needs: srcs-drift
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
@@ -504,7 +504,7 @@ jobs:
   # to end. This is the runtime proof CI can give without silicon. Same v5.5 +
   # g++-12 arrangement as host-build (see the NOTE there re v6.0 linux target).
   full-node-host:
-    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: espressif/idf:release-v5.5
@@ -582,7 +582,7 @@ jobs:
   # longer resolve this example at all; the two `linux`-target jobs move to the
   # oldest release branch that satisfies the floor.
   host-build:
-    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: espressif/idf:release-v5.5
@@ -655,7 +655,7 @@ jobs:
   # that across all four targets). Board-only steps (flash, monitor, a peer on the network) are
   # named on each page and not run.
   concepts:
-    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
     needs: srcs-drift
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
@@ -702,7 +702,7 @@ jobs:
   # since an exit is a reset). release-v5.5 and g++-12 for the reason host-build gives.
   # arena_sizing runs with its init-exhaustion step off; that step aborts by design.
   concepts-host:
-    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
     needs: srcs-drift
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
