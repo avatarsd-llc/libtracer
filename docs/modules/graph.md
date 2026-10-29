@@ -691,6 +691,10 @@ the creator door by calling `attach(child_key)`.
 :members:
 ```
 
+```{doxygenvariable} tr::graph::kPathChainCapacity
+:project: libtracer
+```
+
 ```{doxygenclass} tr::graph::vertex_t
 :project: libtracer
 :members:
