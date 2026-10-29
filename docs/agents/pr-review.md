@@ -444,7 +444,8 @@ that breaks one of them is a finding; cite the rule.
   (`tools/no_heap_baseline.json`) goes through on its own.
 - **A push to `main` runs a smoke set only.** A train merge lands a tree equal to
   the PR head that already passed, so `main` runs core-ci's `build-test` default
-  leg, `ci-paths` and `format`, plus `no-binaries` and `doc-citations`. Push-only
+  leg alone (the other legs are the `build-test-variants` job, skipped there),
+  `ci-paths` and `format`, plus `no-binaries` and `doc-citations`. Push-only
   publishing jobs (docs deploy, perf ratchet and history, image publish) are
   unchanged. The full matrix runs nightly at 00:00 UTC and on every release tag.
 - **Docs-only PRs skip the C++ workflows.** A PR of `docs/` and Markdown alone

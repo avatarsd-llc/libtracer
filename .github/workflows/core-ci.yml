@@ -202,9 +202,10 @@ name: core-ci
 #
 # PUSH TO MAIN RUNS THE SMOKE SET (#2348). A train merge lands a tree equal to the PR
 # head that already passed the full matrix, so a branch push to main runs only
-# `changes`, `build-test` (the default leg), `ci-paths`, `format` and the
-# `build-test-required` verdict; every other core-ci job is skipped and the verdict
-# requires it to be. The full matrix runs on pull requests, nightly at 00:00 UTC (02:00
+# `changes`, `build-test` (the default leg; its four other configurations are the
+# separate `build-test-variants` job), `ci-paths`, `format` and the
+# `build-test-required` verdict; every other core-ci job, `build-test-variants`
+# included, is skipped and the verdict requires it to be. The full matrix runs on pull requests, nightly at 00:00 UTC (02:00
 # Kyiv winter time, clear of the HIL and perf-local bench windows), on every release tag
 # and on a manual dispatch. `changes` exports the choice as `full`. Outside core-ci the
 # smoke set is no-binaries and doc-citations; the push-only jobs (docs deploy, perf
@@ -362,6 +363,118 @@ jobs:
         include:
           - acl_full: OFF
             lkv_slot: single_writer_slot_t
+    name: build-test (acl_full=${{ matrix.acl_full }}, slot=${{ matrix.lkv_slot }})${{ matrix.root && format(' root={0}', matrix.root) || '' }}${{ matrix.reclaim && format(' reclaim={0}', matrix.reclaim) || '' }}
+    steps:
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
+      # Build parallelism (#1637, #1691, #2348): on the self-hosted runners, 4 while at most 3
+      # CI containers share the 11-core slice and 2 above that or when the count is
+      # unreadable (see BUILD_JOBS in core-ci.yml's header); `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice (this one included): $n"
+            if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
+          else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
+      - uses: actions/checkout@v4
+        with:
+          # NOT tidiness. checkout's POST step calls `removeAuth()` unconditionally,
+          # and `git config --unset-all http.<url>.extraheader` REWRITES `.git/config`
+          # when it matches — as ROOT, after the cleanup step below has already run.
+          # Measured on this host: with a match it re-owns the file to the caller; with
+          # no match it exits 5 and does not touch it. Without this the first green run
+          # of the fixed workflows still left exactly one root-owned file per runner,
+          # and it was `.git/config` — the one the next checkout must write to clean.
+          # These jobs build, test and lint; none uses git credentials after checkout.
+          persist-credentials: false
+      - name: Configure + build (C++23) + ctest
+        env:
+          LT_EXPECT_LKV_SLOT: ${{ matrix.lkv_slot }}
+          LT_EXPECT_RECLAIM_POLICY: ${{ matrix.reclaim == 'strict' && 'reclaim_strict_t' || 'reclaim_qsbr_t' }}
+          LT_EXPECT_ACL_POLICY: ${{ matrix.acl_full == 'ON' && 'full_acl_policy_t' || 'allow_only_policy_t' }}
+        run: |
+          preset=""
+          if [ "${{ matrix.acl_full }}" = "ON" ]; then preset="-I$PWD/core/tests/presets/acl-full"; fi
+          if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/hazard-slot"; fi
+          if [ "${{ matrix.root }}" = "heap" ]; then preset="-I$PWD/core/tests/presets/heap-root"; fi
+          if [ "${{ matrix.reclaim }}" = "strict" ]; then preset="-I$PWD/core/tests/presets/reclaim-strict"; fi
+          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="$preset"
+          cmake --build core/build --parallel "$BUILD_JOBS"
+          ctest --test-dir core/build --output-on-failure
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job and with sudo where the host grants it, so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+
+  # THE NON-DEFAULT build-test LEGS. The same steps as build-test above, for the four other
+  # configurations its comment names. A separate job only so that a branch push (the smoke
+  # set, header PUSH TO MAIN) runs the default leg alone and the build-test verdict can
+  # require these skipped there; on a PR, nightly or tag run they run like any leg.
+  build-test-variants:
+    needs: changes
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container:
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      # CPU is bounded host-side: the trusted route's `--cgroup-parent` puts every container in
+      # runners-ci.slice, under runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
+      # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
+      # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+    # Measured healthy max 4.82 min across the three legs (p50 ~4.5). 20 = ~4x, with
+    # extra room over a bare 3x because the image pull and the apt step below are inside
+    # the measured job time and are exactly the wedge surface.
+    timeout-minutes: 20
+    # Build + ctest under BOTH ACL policy configs: the default ALLOW-only MCU
+    # subset (acl_full=OFF) and the full security_acl host policy with DENY
+    # (acl_full=ON). The checked-in preset core/tests/presets/acl-full binds
+    # acl_policy_t at compile time, so the full config is a distinct compilation the
+    # default job never covers (#345). Presets, not -D options: the old
+    # -DLIBTRACER_ACL_FULL / -DLIBTRACER_LKV_SLOT were removed (#1722).
+    #
+    # The first two legs keep the default single-writer slot (the binding an RTOS target
+    # uses, RFC 0028 §5.5, here over the striped host mutex guard); the third rebinds
+    # tr::graph::lkv_slot_t to the hazard-reclamation slot (ADR-0069 §1). lkv_slot_test covers both
+    # policies in every leg by naming them, but only a rebound build puts one under
+    # graph_t — which is what caught the deferred-reclamation-vs-injected-pmr-resource
+    # break in graph_pmr_test.
+    strategy:
+      matrix:
+        include:
           - acl_full: ON
             lkv_slot: single_writer_slot_t
           - acl_full: OFF
@@ -1719,7 +1832,7 @@ jobs:
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
       (always())
-    needs: [changes, build-test, build-test-minimal-set, build-test-bus-closed, build-test-self-heal-closed, build-test-arm64, build-test-gcc15, build-test-noise, sanitizers, tsan, tsan-membarrier, install-consume, bench-compile, census-gate, ci-paths, format, doxygen-gate]
+    needs: [changes, build-test, build-test-variants, build-test-minimal-set, build-test-bus-closed, build-test-self-heal-closed, build-test-arm64, build-test-gcc15, build-test-noise, sanitizers, tsan, tsan-membarrier, install-consume, bench-compile, census-gate, ci-paths, format, doxygen-gate]
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
