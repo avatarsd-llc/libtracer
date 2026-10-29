@@ -60,7 +60,7 @@ jobs:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
-      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
@@ -97,26 +97,13 @@ jobs:
         # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Install arm-none-eabi toolchain
-        # The step that wedged. Measured healthy p50 0.68 min, max 1.0 off the incident
-        # day; 10 is ~15x that and would have caught all five multi-tens-of-minutes
-        # hangs. Over 50 runs, 41 of these installs finished under two minutes and every
-        # one of the six over five minutes is dated 2026-08-19.
-        timeout-minutes: 10
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          apt-get update
-          # gcc-arm-none-eabi on 24.04 is 13.2 (has -std=c++23, <expected>,
-          # <memory_resource>); it pulls in binutils (arm-none-eabi-size) and
-          # newlib-nano (nano.specs / nosys.specs) as dependencies.
-          #
-          # NOT --no-install-recommends, unlike every other apt call hardened alongside
-          # this one: `gcc-arm-none-eabi` carries `Recommends: libnewlib-arm-none-eabi`,
-          # which is where nano.specs / nosys.specs come from. Dropping recommends here
-          # would change WHICH packages are installed and break the link.
-          apt-get install -y -qq gcc-arm-none-eabi gh
-          arm-none-eabi-g++ --version | head -1
+      - name: arm-none-eabi toolchain
+        # Baked into the CI image (gcc-arm-none-eabi 13.2 on 24.04: -std=c++23, <expected>,
+        # <memory_resource>; binutils for arm-none-eabi-size; newlib-nano for nano.specs /
+        # nosys.specs; gh for the baseline download), so no apt step runs here (#2348). The
+        # install step it replaces is the one that wedged; the job-level note keeps the
+        # measurements.
+        run: arm-none-eabi-g++ --version | head -1
 
       - name: Fetch the previous main measurement (drift baseline)
         env:
@@ -170,11 +157,12 @@ jobs:
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
         # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
-        # container job and with sudo where the host grants it, so root-owned files go too.
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
 concurrency:
   group: footprint-cortexm0-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}

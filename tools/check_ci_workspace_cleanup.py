@@ -20,9 +20,10 @@ So every self-hosted job is bracketed by two canonical steps. FIRST,
 that names the runner, not the code. LAST, under `if: always()`, the cleanup:
 it deletes the job's checkout, build trees, workspace siblings and temp files, and
 hands the runner's own `$RUNNER_TEMP/_*` dirs back to the runner user. It runs as
-root in a container and with `sudo -n` on the host where granted, so root-owned
-files go too. A remedy that a new job can silently omit is a convention, not a
-fix; this gate makes it a rule, naming each job that lacks either step.
+root in a container, and a host job first hands root-owned leftovers back through a
+throwaway container (no sudo), so root-owned files go too. A remedy that a new job
+can silently omit is a convention, not a fix; this gate makes it a rule, naming each
+job that lacks either step.
 
 WHY NOT A COMPOSITE ACTION (which would remove the copy-paste this gate polices):
 a local `uses: ./.github/actions/...` is only resolvable after `actions/checkout`
@@ -66,6 +67,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from check_ci_image_tag import DOCKERFILE, IMAGE, expected_tag
+
 WORKFLOW_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
 SPACE_NAME = "Check the runner workspace has room"
@@ -90,24 +93,32 @@ actions: that dies in "Set up job" before any step, and is what the cleanup
 below prevents.
 """
 
+CI_IMAGE = f"{IMAGE}:{expected_tag((Path(__file__).resolve().parent.parent / DOCKERFILE).read_bytes())}"
+"""The pinned CI image the host cleanup runs its chown in: the tag check_ci_image_tag
+requires, so the cleanup never pulls a floating image and follows every image bump."""
+
 STEP_NAME = "Clean this job's workspace off the host runner"
 """The canonical last step's name. Also what the failure message tells an author to add."""
 
 STEP_RUN = (
-    "s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); "
     'w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; '
-    '$s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; '
-    '$s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; '
-    "$s find \"$t\" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; "
-    "$s chown -R \"$(stat -c '%u:%g' \"$w/..\")\" \"$t\" || r=1; "
+    'if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then '
+    f'docker run --rm -v "$w/..:/w" -v "$t:/t" {CI_IMAGE} chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; '
+    'find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; '
+    'find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; '
+    "find \"$t\" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; "
+    "chown -R \"$(stat -c '%u:%g' \"$w/..\")\" \"$t\" || r=1; "
     '[ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; '
     "the next job's free-space check names a full disk\""
 )
 """The canonical cleanup command.
 
-`s` is `sudo -n` on a host runner that grants it and empty otherwise: inside a
-container the step is already root, and on the hosted fallback there is nothing
-root-owned to remove. The `:?` guards make an unset variable abort the step
+No `sudo` (#2348): the runner user holds no sudo grant. Inside a container the
+step is already root. On a host self-hosted job, which runs as the runner user,
+a throwaway container of the pinned CI image first hands every file under the workspace's
+parent and `$RUNNER_TEMP` back to that user, so the root-owned leftovers of a
+container job that died before its own cleanup can be deleted. On the hosted
+fallback there is nothing root-owned to remove, so that container is skipped. The `:?` guards make an unset variable abort the step
 instead of widening `find` to `/`, and the trailing `/` is stripped first so
 `${w##*/}` always names the workspace dir. Each part runs whatever the one
 before it did (`;`, not `&&`): a delete that fails must not skip the `_temp`
