@@ -312,6 +312,13 @@ jobs:
       # as NEW, and exits 0. The style pass (#2373) switches it to `--gate`.
       - name: Docs style lint (report-only)
         run: python3 tools/check_docs_style.py
+      # Diagram palette gate (#2378): every class in docs/_static/diagram-vocabulary.css
+      # keeps AA text on its fill and a 3:1 stroke on the page, light and dark, and the
+      # pinned Mermaid is the vendored one. Standard library only; it fails the build.
+      - name: Diagram palette gate (contrast in both themes, vendored Mermaid)
+        run: |
+          python3 tools/check_diagram_contrast.py
+          python3 -m unittest discover -s tools/tests -p "test_check_diagram_contrast.py" -v
       # Auto-generate the Performance & Conformance page from the LIVE harnesses
       # (cross-core matrix + perf bench + coverage), replacing the static snapshot
       # (ADR-0032 §auto-published). Regenerated in-place each build; the artifact

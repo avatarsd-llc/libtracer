@@ -1,0 +1,172 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* The diagram vocabulary (#2374, #2378): one class per kind of thing a diagram draws.
+ *
+ *   frame   blue           #0072B2   a wire frame or record envelope
+ *   record  sky blue       #56B4E9   a TLV record inside a frame
+ *   vertex  bluish green   #009E73   a graph vertex
+ *   ring    orange         #E69F00   a ring or queue a vertex owns
+ *   app     reddish purple #CC79A7   the application and its seams
+ *   peer    vermillion     #D55E00   a remote peer or link
+ *   notlib  grey, dashed             outside libtracer (OS, transport hardware, other code)
+ *
+ * Hues are Okabe-Ito; yellow #F0E442 is held spare. Each class is a pale (light) or deep
+ * (dark) tint of its hue as fill, the hue as stroke, and near-black or near-white text.
+ * In light, the sky-blue and orange strokes are darkened so a stroke stands 3:1 off the
+ * page. tools/check_diagram_contrast.py checks every value below in both themes; the
+ * smoke page is docs/style/diagram-vocabulary.md.
+ *
+ * Use in a {mermaid} flowchart: `A[vertex /a]:::vertex`, or `class A,B vertex`. No
+ * classDef is needed; these rules beat Mermaid's own theme styles with !important,
+ * because Mermaid scopes its styles by the diagram's id.
+ */
+
+/* lt-palette: light */
+body {
+  --lt-frame-fill: #d1e6f1;
+  --lt-frame-stroke: #0072b2;
+  --lt-frame-text: #1a1a1a;
+  --lt-record-fill: #e1f2fb;
+  --lt-record-stroke: #4a9bc8;
+  --lt-record-text: #1a1a1a;
+  --lt-vertex-fill: #d1eee6;
+  --lt-vertex-stroke: #009e73;
+  --lt-vertex-text: #1a1a1a;
+  --lt-ring-fill: #fbeed1;
+  --lt-ring-stroke: #c68900;
+  --lt-ring-text: #1a1a1a;
+  --lt-app-fill: #f6e7ef;
+  --lt-app-stroke: #cc79a7;
+  --lt-app-text: #1a1a1a;
+  --lt-peer-fill: #f7e2d1;
+  --lt-peer-stroke: #d55e00;
+  --lt-peer-text: #1a1a1a;
+  --lt-notlib-fill: #e8e8e8;
+  --lt-notlib-stroke: #808080;
+  --lt-notlib-text: #1a1a1a;
+}
+
+/* lt-palette: dark */
+body[data-theme="dark"] {
+  --lt-frame-fill: #0e2e42;
+  --lt-frame-stroke: #0072b2;
+  --lt-frame-text: #f2f2f2;
+  --lt-record-fill: #264151;
+  --lt-record-stroke: #56b4e9;
+  --lt-record-text: #f2f2f2;
+  --lt-vertex-fill: #0e3b30;
+  --lt-vertex-stroke: #009e73;
+  --lt-vertex-text: #f2f2f2;
+  --lt-ring-fill: #4e3b10;
+  --lt-ring-stroke: #e69f00;
+  --lt-ring-text: #f2f2f2;
+  --lt-app-fill: #47303f;
+  --lt-app-stroke: #cc79a7;
+  --lt-app-text: #f2f2f2;
+  --lt-peer-fill: #492910;
+  --lt-peer-stroke: #d55e00;
+  --lt-peer-text: #f2f2f2;
+  --lt-notlib-fill: #323234;
+  --lt-notlib-stroke: #808080;
+  --lt-notlib-text: #f2f2f2;
+}
+
+@media (prefers-color-scheme: dark) {
+  /* lt-palette: dark-auto */
+  body:not([data-theme="light"]) {
+    --lt-frame-fill: #0e2e42;
+    --lt-frame-stroke: #0072b2;
+    --lt-frame-text: #f2f2f2;
+    --lt-record-fill: #264151;
+    --lt-record-stroke: #56b4e9;
+    --lt-record-text: #f2f2f2;
+    --lt-vertex-fill: #0e3b30;
+    --lt-vertex-stroke: #009e73;
+    --lt-vertex-text: #f2f2f2;
+    --lt-ring-fill: #4e3b10;
+    --lt-ring-stroke: #e69f00;
+    --lt-ring-text: #f2f2f2;
+    --lt-app-fill: #47303f;
+    --lt-app-stroke: #cc79a7;
+    --lt-app-text: #f2f2f2;
+    --lt-peer-fill: #492910;
+    --lt-peer-stroke: #d55e00;
+    --lt-peer-text: #f2f2f2;
+    --lt-notlib-fill: #323234;
+    --lt-notlib-stroke: #808080;
+    --lt-notlib-text: #f2f2f2;
+  }
+}
+
+.mermaid .node.frame :is(rect, polygon, circle, ellipse, path) {
+  fill: var(--lt-frame-fill) !important;
+  stroke: var(--lt-frame-stroke) !important;
+  stroke-width: 1.5px !important;
+}
+.mermaid .node.frame :is(.nodeLabel, .nodeLabel p, text, tspan) {
+  color: var(--lt-frame-text) !important;
+  fill: var(--lt-frame-text) !important;
+}
+
+.mermaid .node.record :is(rect, polygon, circle, ellipse, path) {
+  fill: var(--lt-record-fill) !important;
+  stroke: var(--lt-record-stroke) !important;
+  stroke-width: 1.5px !important;
+}
+.mermaid .node.record :is(.nodeLabel, .nodeLabel p, text, tspan) {
+  color: var(--lt-record-text) !important;
+  fill: var(--lt-record-text) !important;
+}
+
+.mermaid .node.vertex :is(rect, polygon, circle, ellipse, path) {
+  fill: var(--lt-vertex-fill) !important;
+  stroke: var(--lt-vertex-stroke) !important;
+  stroke-width: 1.5px !important;
+}
+.mermaid .node.vertex :is(.nodeLabel, .nodeLabel p, text, tspan) {
+  color: var(--lt-vertex-text) !important;
+  fill: var(--lt-vertex-text) !important;
+}
+
+.mermaid .node.ring :is(rect, polygon, circle, ellipse, path) {
+  fill: var(--lt-ring-fill) !important;
+  stroke: var(--lt-ring-stroke) !important;
+  stroke-width: 1.5px !important;
+}
+.mermaid .node.ring :is(.nodeLabel, .nodeLabel p, text, tspan) {
+  color: var(--lt-ring-text) !important;
+  fill: var(--lt-ring-text) !important;
+}
+
+.mermaid .node.app :is(rect, polygon, circle, ellipse, path) {
+  fill: var(--lt-app-fill) !important;
+  stroke: var(--lt-app-stroke) !important;
+  stroke-width: 1.5px !important;
+}
+.mermaid .node.app :is(.nodeLabel, .nodeLabel p, text, tspan) {
+  color: var(--lt-app-text) !important;
+  fill: var(--lt-app-text) !important;
+}
+
+.mermaid .node.peer :is(rect, polygon, circle, ellipse, path) {
+  fill: var(--lt-peer-fill) !important;
+  stroke: var(--lt-peer-stroke) !important;
+  stroke-width: 1.5px !important;
+}
+.mermaid .node.peer :is(.nodeLabel, .nodeLabel p, text, tspan) {
+  color: var(--lt-peer-text) !important;
+  fill: var(--lt-peer-text) !important;
+}
+
+.mermaid .node.notlib :is(rect, polygon, circle, ellipse, path) {
+  fill: var(--lt-notlib-fill) !important;
+  stroke: var(--lt-notlib-stroke) !important;
+  stroke-width: 1.5px !important;
+}
+.mermaid .node.notlib :is(.nodeLabel, .nodeLabel p, text, tspan) {
+  color: var(--lt-notlib-text) !important;
+  fill: var(--lt-notlib-text) !important;
+}
+
+.mermaid .node.notlib :is(rect, polygon, circle, ellipse, path) {
+  stroke-dasharray: 5 3 !important;
+}

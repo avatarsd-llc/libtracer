@@ -8,7 +8,7 @@
   "scripts": {
     "check": "node check-mermaid.mjs"
   },
-  "//": "mermaid is pinned to docs/conf.py's mermaid_version (sphinxcontrib-mermaid default). Bump both together so the gate parses exactly what the browser renders.",
+  "//": "mermaid is pinned to docs/conf.py's mermaid_version, the copy vendored under docs/_static/vendor/. Bump all three together so the gate parses exactly what the browser renders; tools/tests/test_check_diagram_contrast.py checks they agree.",
   "dependencies": {
     "jsdom": "^26.0.0",
     "mermaid": "11.12.1"

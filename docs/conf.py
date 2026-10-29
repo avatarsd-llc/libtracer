@@ -124,6 +124,9 @@ include_patterns = [
     "docs/start-here.md",
     "docs/spec/rfcs/**",
     "docs/adr-rfc-index.md",
+    # The diagram vocabulary's smoke page (#2378): an orphan page that renders every
+    # class, so a Mermaid upgrade that breaks the styling shows on one page.
+    "docs/style/**",
 ]
 exclude_patterns = [
     "_build",
@@ -145,6 +148,16 @@ exclude_patterns = [
 myst_enable_extensions = ["colon_fence", "deflist", "tasklist"]
 myst_fence_as_directive = ["mermaid"]
 myst_heading_anchors = 3
+
+# Mermaid is served from the site's own static assets at a pinned version, never from a
+# CDN (#2374 ruling 1, #2378). The files under _static/vendor/mermaid-<version>/ are the
+# npm package's ESM build, byte-identical, without source maps. To upgrade: replace that
+# directory with the new version's dist/mermaid.esm.min.mjs, dist/chunks/mermaid.esm.min/
+# and LICENSE, bump both values here, the sphinxcontrib-mermaid pin in requirements.txt and
+# the parser in tools/mermaid-lint/package.json (and its lock), then check the smoke page
+# docs/style/diagram-vocabulary.md in both themes.
+mermaid_version = "11.12.1"
+mermaid_use_local = f"vendor/mermaid-{mermaid_version}/mermaid.esm.min.mjs"
 
 # No warning category is suppressed. myst.xref_missing used to be, to tolerate a
 # handful of deliberate links into the unpublished trees (ADRs, RFCs, code) — but
@@ -185,7 +198,7 @@ html_extra_path = ["_extra"]
 # lives), unlike include_patterns which are relative to the source root — so this
 # is "_static", i.e. docs/_static, not "docs/_static".
 html_static_path = ["_static"]
-html_css_files = ["custom.css", "version-switcher.css"]
+html_css_files = ["custom.css", "version-switcher.css", "diagram-vocabulary.css"]
 # The sidebar version switcher. It reads a generated versions.json at the site
 # root (tools/gen_versions_json.py, emitted by docs.yml after the build) and
 # renders a picker only once a released vX.Y.Z subtree is actually deployed; until

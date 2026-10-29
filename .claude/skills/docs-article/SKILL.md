@@ -109,10 +109,13 @@ greyscale.
 - A link is a thick edge labelled with its transport. A control or reply path is a dotted
   edge.
 - MCU and host nodes go in dashed or solid groups titled with the target.
-- Colours are the Okabe-Ito classes, defined once in the site CSS with paired light and
-  dark values. Never style a node on the page (`style`, `classDef`, `linkStyle`). Use at
-  most four classes per diagram, and give every classed diagram a one-line legend in its
-  caption.
+- Colours are the Okabe-Ito classes, defined once in `docs/_static/diagram-vocabulary.css`
+  with paired light and dark values: `frame`, `record`, `vertex`, `ring`, `app`, `peer`
+  and `notlib`. Put one on a node with `:::vertex` or a `class A,B vertex` line. Never
+  style a node on the page (`style`, `classDef`, `linkStyle`). Use at most four classes
+  per diagram, and give every classed diagram a one-line legend in its `:caption:`. The
+  smoke page `docs/style/diagram-vocabulary.md` draws every class; check it in both themes
+  after a palette or Mermaid change, and run `python3 tools/check_diagram_contrast.py`.
 - Pick the diagram kind by its job:
 
   | Job | Kind |
@@ -130,8 +133,8 @@ greyscale.
 - New site pages use the directive spelling (```` ```{mermaid} ````). Bare
   ```` ```mermaid ```` fences are kept so GitHub renders them, and the lint skips them.
 - No heavy or networked tool: no Kroki, LaTeX, mermaid-cli or D2. Mermaid is pinned and
-  served from the site's own static assets, not a CDN (ruling 1, landing with the batching
-  pilot #2372).
+  served from the site's own static assets, not a CDN (ruling 1): the pin and the upgrade
+  steps are in `docs/conf.py`, the files under `docs/_static/vendor/`.
 
 ## Mechanics the lint checks
 
