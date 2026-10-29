@@ -697,7 +697,7 @@ def lkv_ratio_report_paired(bench: pathlib.Path, base_bench: pathlib.Path,
 #     lowest of its mask (`bench::pin_to_one_cpu`, #1906), and is judged over the whole set. The methodology's own rule is one CPU per single-threaded measurement; the
 #     old whole-sweep invocation needed several CPUs only because MULTI rows rode along.
 #   - A MULTI family runs on every bench CPU (`BENCH_CPU`), judged on foreign time only: its
-#     own threads raise its own cgroup's pressure (#1803). It sizes T from its affinity mask
+#     own threads raise the bench slice's pressure (#1803). It sizes T from its affinity mask
 #     (`bench::usable_cpus`), so T never exceeds the CPUs it was given. MULTI steps run after
 #     every SINGLE step, so no pressure-scored launch inherits their residue.
 #   - The sibling binaries (`BENCH_BY_KEY`, other than `main`) are one SINGLE step each.
@@ -887,7 +887,9 @@ def best_of(binaries: dict[str, pathlib.Path], runs: int) -> dict[str, dict]:
 #               leg the null tightens it replaces the disjoint-range rule and the pair-
 #               majority vote: a FAIL needs the median past the threshold AND the interval
 #               to exclude 1.0. A leg at the cap (or with no null) keeps main's WHOLE verdict
-#               — flat threshold, disjoint ranges, majority of pairs (ruling on #1874;
+#               — flat threshold, separated arms (the candidate's best past the baseline's
+#               median, ruled 2026-10-25 for #2205 and superseding #1874's disjointness),
+#               majority of pairs (ruling on #1874;
 #               `leg_verdict`), and adds only the fast-mode veto below.
 #   fast mode — on every leg, under either rule, the arms' SECOND-BEST samples (second-
 #               lowest p50/mean, second-highest deliveries/s across the pairs) must breach the
@@ -1153,10 +1155,20 @@ def legacy_verdict(cand: list[float], base: list[float], factor: float,
                    lower_is_worse: bool, tick_guard: bool = False) -> dict:
     """@brief Main's decision rule before #1807, for a leg the null does not tighten.
 
-    Fails only when the arms' medians breach @p factor (tick-guarded when asked), their
-    [min..max] ranges are disjoint, and a strict majority of the pairs breach on their own
-    (every pair below three), and the arms' second-best samples breach it too (#2168). The
-    ratio and interval of @ref paired_verdict are kept for the report; they do not decide.
+    Fails only when the median pair ratio breaches @p factor (tick-guarded when asked), the arms
+    are SEPARATED (the candidate's best sample is worse than the baseline's median), a
+    strict majority of the pairs breach on their own (every pair below three), and the arms'
+    second-best samples breach it too (#2168). The interval of @ref paired_verdict is kept
+    for the report; it does not decide.
+
+    Separation was [min..max] disjointness until #2205. Every run is a fresh copy since #2215,
+    and a copy that lands on a slow placement is one slow sample in either arm. One such
+    sample in the baseline overlapped the ranges, so a candidate whose code was x1.20 slower
+    on every run passed a flat row in 9 of 10 replayed sessions at a 1/4 slow-copy rate. This
+    supersedes the #1874 capped-leg rule (ruled 2026-10-25). Placement and contamination
+    only ever slow a run, so the baseline's median is its typical run and the candidate's best
+    is its least-slowed one; a real regression moves the second past the first, and a single
+    slow copy in either arm moves neither.
     """
     v = paired_verdict(cand, base, factor, lower_is_worse, tick_guard)
     cs, bs = cand[:v["n"]], base[:v["n"]]
@@ -1167,11 +1179,15 @@ def legacy_verdict(cand: list[float], base: list[float], factor: float,
         return c > b * factor and (not tick_guard or _tick_ok(c, b))
 
     pb = sum(1 for c, b in zip(cs, bs) if breach(c, b))
-    disjoint = (max(cs) < min(bs)) if lower_is_worse else (min(cs) > max(bs))
+    bmed = statistics.median(bs)
+    separated = (max(cs) < bmed) if lower_is_worse else (min(cs) > bmed)
     majority = pb * 2 > v["n"] if v["n"] >= 3 else pb == v["n"]
-    effect = breach(v["cand_med"], v["base_med"])
-    v.update(effect=effect, pairs_breached=pb, disjoint=disjoint, majority=majority,
-             fail=effect and disjoint and majority and v["fast_mode_moved"], rule="flat")
+    # The effect is the median PAIR ratio's, as on a null row (@ref paired_verdict), not the
+    # arms' medians: with a copy per run, half a baseline's samples on a slow placement drag
+    # its median toward the candidate's while every pair still reads the regression (#2205).
+    effect = v["effect"]
+    v.update(pairs_breached=pb, separated=separated, majority=majority,
+             fail=effect and separated and majority and v["fast_mode_moved"], rule="flat")
     return v
 
 
@@ -1209,7 +1225,7 @@ def paired_report(v: dict, label: str, unit: str, fmt: str, source: str = "") ->
             + (f" ({source})" if source else ""))
     if v["effect"] and v.get("rule") == "flat":
         line += (f"  | effect YES, pairs {v['pairs_breached']}/{v['n']}, "
-                 f"ranges {'DISJOINT' if v['disjoint'] else 'OVERLAP'}, fast mode x{v['fast_mode']:.3f}")
+                 f"cand best {'PAST' if v['separated'] else 'WITHIN'} base median, fast mode x{v['fast_mode']:.3f}")
     elif v["effect"]:
         line += (f"  | effect YES, pairs {v['pairs_breached']}/{v['n']}, "
                  f"CI {'excludes' if v['significant'] else 'includes'} 1, fast mode x{v['fast_mode']:.3f}")
@@ -1266,7 +1282,7 @@ def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
             if v["fail"]:
                 lo, hi = v["ci"]
                 why = (f"{BOOT_CONF:.0%} CI [{lo:.3f}..{hi:.3f}]" if v["rule"] == "ci" else
-                       f"{v['pairs_breached']}/{v['n']} pairs, disjoint ranges")
+                       f"{v['pairs_breached']}/{v['n']} pairs, cand best past base median")
                 fails.append(
                     f"{k} {label} pullback: {v['cand_med']:,.0f}{unit} vs base "
                     f"{v['base_med']:,.0f}{unit} (median pair ratio x{v['ratio']:.3f}, "
@@ -1408,7 +1424,7 @@ def gate_cliff(samples: dict, null: dict | None = None) -> tuple[list[str], list
         if v["fail"]:
             lo, hi = v["ci"]
             why = (f"CI [{lo:.3f}..{hi:.3f}]" if v["rule"] == "ci" else
-                   f"{v['pairs_breached']}/{v['n']} pairs, disjoint ranges")
+                   f"{v['pairs_breached']}/{v['n']} pairs, cand best past base median")
             fails.append(f"{k} p50 pullback: {v['cand_med']:.3f}ns vs base "
                          f"{v['base_med']:.3f}ns (median pair ratio x{v['ratio']:.3f}, "
                          f"{why}, threshold x{factor:.3f} {source})")
@@ -2140,7 +2156,7 @@ def print_conditions() -> None:
     """@brief The measurement-conditions block every verdict is printed under (#1676)."""
     print(f"Measurement conditions ({'CLEAN' if LEDGER.clean else 'CONTENDED'}; "
           f"contended = foreign > {bc.FOREIGN_MAX_PCT:g}% on the bench CPU or "
-          f"CPU pressure > {bc.PRESSURE_MAX:g} (own cgroup if pinned, host if not), re-run up to {bc.DEFAULT_ATTEMPTS}x):")
+          f"CPU pressure > {bc.PRESSURE_MAX:g} (the bench slice's; host pressure is logged only), re-run up to {bc.DEFAULT_ATTEMPTS}x):")
     print(f"  {LEDGER.line()}")
     for x in LEDGER.report(notable_only=True):
         print(x)

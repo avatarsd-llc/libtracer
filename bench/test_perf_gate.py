@@ -28,6 +28,7 @@ import contextlib
 import io
 import json
 import pathlib
+import random
 import re
 import sys
 import tempfile
@@ -115,7 +116,7 @@ class NoFalseFails(unittest.TestCase):
         self.assertEqual(v["fail"], pg.legacy_verdict(c, b, pg.TPUT_REGRESS, True)["fail"])
         v, _f, _s = pg.leg_verdict("fold-b4/512/1/1", "deliv_s", [80, 80, 80, 130],
                                    [100, 100, 100, 100], null)
-        self.assertFalse(v["disjoint"])
+        self.assertFalse(v["separated"])
         self.assertFalse(v["fail"], "main's separation rule still holds on a capped leg")
         v, _f, _s = pg.leg_verdict("fold-b4/512/1/1", "deliv_s", [10, 80, 95, 99],
                                    [100, 100, 100, 100], null)
@@ -170,7 +171,7 @@ class ModeFlipsDoNotFail(unittest.TestCase):
         cand = [103.0, 150, 103.5, 150, 150, 150, 150, 150]
         v = pg.legacy_verdict(cand, base, pg.LAT_REGRESS, False)
         self.assertTrue(v["effect"])
-        self.assertTrue(v["disjoint"])
+        self.assertTrue(v["separated"])
         self.assertTrue(v["majority"])
         self.assertFalse(v["fast_mode_moved"])
         self.assertFalse(v["fail"])
@@ -1110,7 +1111,7 @@ class GateTimesFamilyByFamily(unittest.TestCase):
                               pinned=True, clk_tck=100, score_pressure=not multi)
 
     def test_a_foreign_intruder_is_contended_on_either_set(self):
-        # 12% of the window was someone else's CPU time; our own cgroup psi reads 0.
+        # 12% of the window was someone else's CPU time; the bench slice's psi reads 0.
         for multi in (False, True):
             with self.subTest(multi=multi):
                 rc, out = self.verdict_for(self.run_cond(8.8, 0.0, multi))
@@ -1130,6 +1131,88 @@ def _row(mode: str, size: int, fan: int, ep: int) -> str:
     """@brief One 12-column RESULT line for @p mode at the given key."""
     return "\t".join(["RESULT", "libtracer", mode, str(size), str(fan), str(ep),
                       "1000000", "1000000", "0", "200", "300", "210"])
+
+
+class WholeBinaryModeReplay(unittest.TestCase):
+    """@brief #2205: a speed mode that holds for a whole executable FILE cannot fail the gate.
+
+    The #2175 A/A ran two byte-identical `bench_chain_delivery` files, and one of them read
+    chain-terminus 14-22% slow in all 12 rounds. Such a mode moves an arm's best and second-
+    best samples together, so the fast-mode veto (#2168) cannot catch it: run from its build
+    file, the slow file fails the row like a regression. This replays that shape through
+    `paired_samples` and the row's own verdict. Each file a run executes draws one placement
+    when it is first run, slow (x1.20) with probability 1/4; a placement is the file's, not
+    the bytes'. Run from the build files, a slow candidate file fails; run from a fresh copy
+    per run (#2215), byte-identical arms pass ten sessions of ten. The twin, a candidate whose
+    code is x1.20 slower on every run, fails at least nine (#2205)."""
+
+    KEY = "chain-terminus/64/1/1"
+    SLOW, P_SLOW = 1.20, 0.25
+
+    def session(self, seed: int, copies: bool, slow_build: str | None = None,
+                cand_code: float = 1.0) -> list[str]:
+        """@brief One gate session of the chain step: the failing legs of @ref KEY. The arms
+        are byte-identical unless @p cand_code slows every candidate run by that factor (a real
+        regression, on top of its placement). @p slow_build names the arm whose build file is
+        on the slow placement (else it draws like any other file)."""
+        placement: dict[pathlib.Path, float] = {}
+
+        def fake(argv, timeout, score_pressure=True, cpus=None):
+            exe = pathlib.Path(argv[0])
+            if exe not in placement:
+                arm = exe.parts[-2] if exe.parent.name in ("c", "b") else None
+                rng = random.Random(f"{seed}:{exe.relative_to(root)}")
+                placement[exe] = (self.SLOW if arm == slow_build and arm
+                                  else self.SLOW if rng.random() < self.P_SLOW else 1.0)
+            x = placement[exe] * (cand_code if root / "c" in exe.parents else 1.0)
+            line = "\t".join(["RESULT", "libtracer", "chain-terminus", "64", "1", "1",
+                              "1000000", f"{2_800_000 / x:.0f}", "0", f"{350 * x:.1f}", "400",
+                              f"{360 * x:.1f}"])
+            return _measurement(argv, line + "\n", True)
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            arms = {}
+            for tag in ("c", "b"):
+                (root / tag).mkdir()
+                arms[tag] = {"chain": root / tag / "bench_chain_delivery"}
+                arms[tag]["chain"].write_bytes(b"one build")
+            patches = [unittest.mock.patch.object(pg, "timed_run", fake)]
+            if not copies:
+                patches.append(unittest.mock.patch.object(pg, "fresh_copy", lambda src, n: src))
+            with contextlib.ExitStack() as st, contextlib.redirect_stdout(io.StringIO()):
+                for p in patches:
+                    st.enter_context(p)
+                s = pg.paired_samples(arms["c"], arms["b"], pg.PAIRS_DEFAULT)
+        null = pg.load_null()
+        failed = []
+        for leg in ("p50_ns", "mean_ns", "deliv_s"):
+            c = [float(v[leg]) for v in s["cand"][self.KEY]]
+            b = [float(v[leg]) for v in s["base"][self.KEY]]
+            v, _f, _src = pg.leg_verdict(self.KEY, leg, c, b, null, pg.tick_guarded(self.KEY))
+            if v["fail"]:
+                failed.append(leg)
+        return failed
+
+    def test_a_slow_build_file_fails_when_every_run_is_that_file(self):
+        """The hole: the slow file's best and second-best are both slow, so no veto holds."""
+        self.assertIn("p50_ns", self.session(0, copies=False, slow_build="c"))
+
+    def test_byte_identical_arms_pass_ten_of_ten_from_fresh_copies(self):
+        for seed in range(10):
+            self.assertEqual(self.session(seed, copies=True, slow_build="c"), [], f"session {seed}")
+
+    # One slow copy in either arm used to hide this: the flat rule asked for disjoint
+    # [min..max] ranges and an effect on the arms' medians, and main's rule let this x1.20
+    # regression pass 9 of these 10 sessions. The rule ruled on 2026-10-25 (#2205) asks for the
+    # candidate's best past the baseline's median and takes the effect from the median pair
+    # ratio. At this 1/4 slow-placement rate it still loses one session in ten to a candidate
+    # arm that drew several slow copies at once, so the bar is nine.
+    def test_a_real_x120_regression_still_fails_from_fresh_copies(self):
+        """The twin: copies and placement noise do not hide a candidate whose code is x1.20
+        slower on every run; it fails p50 in at least nine of ten sessions."""
+        failed = sum("p50_ns" in self.session(seed, copies=True, cand_code=self.SLOW)
+                     for seed in range(10))
+        self.assertGreaterEqual(failed, 9)
 
 
 class MissingGatedKeysFail(unittest.TestCase):
