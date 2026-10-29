@@ -2360,7 +2360,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
     // nothrow and allocates nothing while the chain fits the rope's inline links; a refused
     // spill is BACKPRESSURE by value, which the delivery leg counts as OUT_OF_MEMORY.
     if (value.source() == nullptr) {
-        view::rope_t clone;
+        view::rope_t clone{*tables_};  // a spilled chain is the graph's, never the heap's
         if (!value.try_rope(clone)) {
             drops = vertex_t::store_drops_t{};
             return std::unexpected(status_t::BACKPRESSURE);
@@ -3859,7 +3859,8 @@ struct folded_own_t {
  * framing cannot drift between them (#831): byte-identical to `wire::emit_header(out,
  * type_t::POINT, {.pl = true, .ll}, body_len)` plus `wire::emit_name` into a
  * `std::vector<std::byte>`, emitted by cursor with no throwing vector transient on the reply
- * path (the op_resolve_walk assemble pattern). The node's sub-branches are the caller's.
+ * path (the op_resolve_walk assemble pattern). The node's sub-branches are the caller's; it
+ * passes their link count as @p then, so the one reservation here covers its join too.
  *
  * Two headers in one segment, deliberately. Before RFC-0018 the folds emitted a POINT header
  * and then BORROWED the node's key record, because that record already WAS a `NAME` TLV. A
@@ -3882,7 +3883,7 @@ struct folded_own_t {
  */
 [[nodiscard]] bool append_folded_node(view::rope_t& out, mem::mem_backend_t& backend,
                                       std::size_t body_len, const vertex_t* named,
-                                      const value_t* lkv) {
+                                      const value_t* lkv, std::size_t then = 0) {
     const bool ll = body_len > 0xFFFFu;  // mirror emit_tlv's auto-widen exactly
     const std::size_t len_bytes = ll ? 4u : 2u;
     const std::span<const std::byte> seg =
@@ -3904,6 +3905,10 @@ struct folded_own_t {
         nseg = view::borrow_const(seg);
         if (!nseg) return false;
     }
+    // Reserve every link this node adds, plus the @p then links its caller joins after it,
+    // before the first append: `out` spills into the graph's table source (#2288), which may
+    // refuse, and `append` and `concat` have no failure channel.
+    if (!out.try_reserve(folded_own(named, lkv).links + then)) return false;
     out.append(view::view_t::over(std::move(hseg)));            // owned POINT (+ NAME) headers
     if (nseg) out.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
     if (lkv != nullptr) {  // the stored TLV verbatim — links cloned, refcount bump
@@ -3942,7 +3947,7 @@ result_t<value_ref_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     // READ routes to — see append_folded_node for the full seam argument, which the
     // composed-root fold below shares verbatim.
     mem::mem_backend_t& hdr_backend = *value_backend_;
-    view::rope_t members;
+    view::rope_t members{*tables_};
     std::size_t members_len = 0;
     bool oom = false;
     {
@@ -3957,20 +3962,16 @@ result_t<value_ref_t> graph_t::read_children_folded(vertex_handle_t vh) const {
             members_len += folded_hdr_len(body) + body;
         });
     }
-    view::rope_t out;
+    view::rope_t out{*tables_};
     if (oom || !append_folded_node(out, hdr_backend, members_len, nullptr, nullptr))
         return std::unexpected(status_t::BACKPRESSURE);
     // The member count is already in hand, so take the join as ONE sized growth instead of
-    // the geometric push_back ladder (a wide listing is 2 links per child). Best effort:
-    // on soft-fail the concat below still produces the right chain, it just pays the
-    // ordinary growth path. `concat` no longer reserves for us — that guard belongs to the
-    // caller that knows the count, not to every 1-link delivery clone (#1022).
-    //
-    // #981 residual: a listing wide enough to spill grows the rope's `std::vector<view_t>`
-    // chain, and under `-fno-exceptions` that growth is probe-then-commit — a task switch
-    // between the probe's free and the `reserve` abort()s the node (#850). `view_t` is
-    // refcounted, so the chain cannot take `block_array_t`'s memcpy relocation (#873).
-    static_cast<void>(out.try_reserve(members.link_count()));
+    // the geometric push_back ladder (a wide listing is 2 links per child). `concat` does not
+    // reserve for us — that guard belongs to the caller that knows the count, not to every
+    // 1-link delivery clone (#1022). The reservation is a refusal, not a hint: the chain
+    // draws from the graph's table source, which may answer no (#2288), and `concat` has no
+    // failure channel.
+    if (!out.try_reserve(members.link_count())) return std::unexpected(status_t::BACKPRESSURE);
     out.concat(members);  // empty members (no children) => header-only rope, len 0
     return composed_or_backpressure(std::move(out));
 }
@@ -4085,12 +4086,9 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
     for (std::size_t i = nodes.size(); i-- > 1;)
         nodes[nodes[i].parent].body_len += folded_hdr_len(nodes[i].body_len) + nodes[i].body_len;
 
-    // #981 residual: the reservation itself is the `std::vector<view_t>` growth this
-    // paragraph exists to make ONE growth — but under `-fno-exceptions` that one growth is
-    // still probe-then-commit and abort()s the node if a racer takes the freed probe block
-    // (#850). Refcounted `view_t` links cannot ride `block_array_t`'s memcpy relocation, so
-    // the seam migration waits on a move-relocating failable array (#873).
-    view::rope_t out;
+    // ONE refusable growth for the whole frame: the chain draws one block from the graph's
+    // table source (#2288), and a refusal is BACKPRESSURE here, before any link is taken.
+    view::rope_t out{*tables_};
     if (!out.try_reserve(total_links)) return std::unexpected(status_t::BACKPRESSURE);
 
     // Pass 3 — emit, in array (= pre-order = wire) order, through the one member emitter the
@@ -4143,6 +4141,9 @@ namespace {
  * inventing a value or resurrecting a stale one.
  */
 struct fold_node_t {
+    /** @brief A node whose two ropes spill into @p src, the graph's table source. */
+    explicit fold_node_t(mem::block_source_t& src) noexcept : kids(src), frame(src) {}
+
     vertex_t* vx = nullptr;   /**< @brief The named vertex; its segment text is
                                           pinned and immutable, so it is borrowable. */
     value_ref_t lkv;          /**< @brief Its contributed VALUE, or null (skeleton). */
@@ -4201,12 +4202,12 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
     //
     // The root is `lo`, a strict prefix of every other key, so it is index 0 for the life of the
     // table. It is tagged once, here, as `v` itself; every other node resolves by key.
-    const auto [root, root_fresh] = tree.try_emplace(lo);
+    const auto [root, root_fresh] = tree.try_emplace(lo, *tables_);
     if (root == nullptr) return std::unexpected(status_t::BACKPRESSURE);
     root->vx = v;
     const auto admit = [this, &tree](std::span<const std::byte> key,
                                      bool selected) -> result_t<fold_node_t*> {
-        const auto [found, fresh] = tree.try_emplace(key);
+        const auto [found, fresh] = tree.try_emplace(key, *tables_);
         if (found == nullptr) return std::unexpected(status_t::BACKPRESSURE);
         fold_node_t& n = *found;
         if (fresh) n.vx = find_ptr(key);
@@ -4276,13 +4277,15 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
         if (n.vx == nullptr) continue;
         const folded_own_t own = folded_own(n.vx, n.lkv.get());
         n.body_len = own.len + n.kids_len;
-        if (!n.frame.try_reserve(own.links + n.kids.link_count()) ||
-            !append_folded_node(n.frame, hdr_backend, n.body_len, n.vx, n.lkv.get()))
+        if (!append_folded_node(n.frame, hdr_backend, n.body_len, n.vx, n.lkv.get(),
+                                n.kids.link_count()))
             return std::unexpected(status_t::BACKPRESSURE);
         n.frame.concat(n.kids);  // the sub-branches, in key order
         if (ti == 0) break;      // the root folds into nobody
         // admit() inserted every level, so the parent is always there.
         fold_node_t& parent = *tree.find(key_view_t{tree.at(ti).key}.parent().bytes());
+        if (!parent.kids.try_reserve(n.frame.link_count()))
+            return std::unexpected(status_t::BACKPRESSURE);
         parent.kids.concat(n.frame);
         parent.kids_len += folded_hdr_len(n.body_len) + n.body_len;
     }
