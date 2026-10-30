@@ -94,6 +94,20 @@ void app_fields_decl_t::push(const app_field_t& f) noexcept {
 
 namespace {
 
+/**
+ * @brief @p bytes copied into one value block from @p backend, or `BACKPRESSURE` when the
+ *        backend refuses — the audited alloc/copy/over locus every synthesized read ends on.
+ *
+ * The bytes are non-empty by construction at every caller (a TLV header at minimum), so a
+ * `nullopt` from `over_bytes` is exactly an allocation failure.
+ */
+[[nodiscard]] result_t<view::view_t> over_or_backpressure(std::span<const std::byte> bytes,
+                                                          mem::mem_backend_t& backend) noexcept {
+    std::optional<view::view_t> out = view::over_bytes(bytes, backend);
+    if (!out) return std::unexpected(status_t::BACKPRESSURE);
+    return std::move(*out);
+}
+
 /** @brief True iff @p s is a plain NAME step (no `[N]` / `[]` / `[*]` selector). */
 [[nodiscard]] bool plain_step(const field_step_t& s) noexcept {
     return !s.indexed && !s.append && !s.wildcard;
@@ -380,9 +394,7 @@ constexpr std::size_t kScratchBytes = 256;
         return std::unexpected(status_t::BACKPRESSURE);
     // `block` is non-empty by construction; `nullopt` is exactly an alloc failure
     // → BACKPRESSURE (the audited alloc/copy/over locus).
-    const auto out = view::over_bytes(mem::as_span(block), g.value_backend());
-    if (!out) return std::unexpected(status_t::BACKPRESSURE);
-    return *out;
+    return over_or_backpressure(mem::as_span(block), g.value_backend());
 }
 
 // The flat protocol-knob name table is GONE (RFC-0022 §3.B): `settings_t` is deleted, so
@@ -1210,9 +1222,7 @@ result_t<view::view_t> graph_t::read_schema(vertex_t* v) const {
 
     // `point` is a POINT TLV (never empty); `nullopt` is exactly an alloc failure
     // → BACKPRESSURE. One audited locus for the alloc/copy/over triplet.
-    const auto out = view::over_bytes(mem::as_span(point), *value_backend_);
-    if (!out) return std::unexpected(status_t::BACKPRESSURE);
-    return *out;
+    return over_or_backpressure(mem::as_span(point), *value_backend_);
 }
 
 /**
@@ -1305,10 +1315,7 @@ result_t<view::view_t> graph_t::read_identity() const {
     }
     // Pre-serialized at install, so every vertex of this node serves BYTE-IDENTICAL
     // bytes (§C.1) — the invariant that makes the record a valid cross-path key.
-    const auto out =
-        view::over_bytes(std::span<const std::byte>(scratch.data(), len), *value_backend_);
-    if (!out) return std::unexpected(status_t::BACKPRESSURE);
-    return *out;
+    return over_or_backpressure(std::span<const std::byte>(scratch.data(), len), *value_backend_);
 }
 
 result_t<view::view_t> graph_t::read_settings(vertex_t* v) const {
@@ -1336,9 +1343,7 @@ result_t<view::view_t> graph_t::read_settings(vertex_t* v) const {
         return std::unexpected(status_t::BACKPRESSURE);
     // `out` is non-empty by construction; `nullopt` is exactly an alloc failure
     // → BACKPRESSURE (the audited alloc/copy/over locus).
-    const auto res = view::over_bytes(mem::as_span(out), *value_backend_);
-    if (!res) return std::unexpected(status_t::BACKPRESSURE);
-    return *res;
+    return over_or_backpressure(mem::as_span(out), *value_backend_);
 }
 
 result_t<view::view_t> graph_t::read_settings_app(vertex_t* v) const {
@@ -1356,9 +1361,7 @@ result_t<view::view_t> graph_t::read_settings_app(vertex_t* v) const {
         return std::unexpected(status_t::BACKPRESSURE);
     // `out` is non-empty by construction (the SETTINGS header at minimum); `nullopt` is
     // exactly an alloc failure → BACKPRESSURE (the audited alloc/copy/over locus).
-    const auto res = view::over_bytes(mem::as_span(out), *value_backend_);
-    if (!res) return std::unexpected(status_t::BACKPRESSURE);
-    return *res;
+    return over_or_backpressure(mem::as_span(out), *value_backend_);
 }
 
 app_field_read_hook_t graph_t::app_field_reader(const vertex_t* v) const noexcept {
@@ -1379,9 +1382,7 @@ result_t<view::view_t> graph_t::read_acl(vertex_t* v) const {
     });
     if (!ok) return std::unexpected(status_t::BACKPRESSURE);
     if (acl.empty()) return std::unexpected(status_t::NOT_FOUND);
-    const auto out = view::over_bytes(mem::as_span(acl), *value_backend_);
-    if (!out) return std::unexpected(status_t::BACKPRESSURE);
-    return *out;
+    return over_or_backpressure(mem::as_span(acl), *value_backend_);
 }
 
 }  // namespace tr::graph
