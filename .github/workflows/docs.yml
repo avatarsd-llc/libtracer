@@ -233,6 +233,13 @@ jobs:
     # healthy cold runs. The fixes are the cache save that survives a cancellation and
     # the scaled endpoint budget (see those steps); this margin is only the backstop.
     timeout-minutes: 75
+    # Every pull request's build is a PREVIEW (#2348), batch/* included, since the batch run
+    # is the landing path. The page generators then skip what only RENDERS a verdict another
+    # workflow gates on: ctest (build-test), the cross-core driver (conformance.yml), the ts
+    # and rust codec benches (ts.yml, conformance.yml), and say so on the page. main, nightly
+    # and tags run all of it, so a page-only regression in those parts first shows there.
+    env:
+      LIBTRACER_DOCS_PREVIEW: ${{ github.event_name == 'pull_request' && '1' || '' }}
     defaults:
       run:
         # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
@@ -393,6 +400,12 @@ jobs:
       # table and the step markers on the trend charts are both drawn from it.
       - name: Sustained-step detector tests
         run: python3 bench/test_step_detect.py
+      - name: PR preview mode tests
+        run: python3 bench/test_docs_preview.py
+      # Before the performance page: ctest runs once, here, and that page's test rollup
+      # reads the JUnit file it leaves.
+      - name: Generate live test report (ctest across every suite)
+        run: python3 bench/gen_test_report.py
       - name: Generate live performance + conformance page
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
@@ -430,8 +443,6 @@ jobs:
             const existing = comments.find(c => c.body.includes(marker));
             if (existing) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
             else await github.rest.issues.createComment({ owner, repo, issue_number, body });
-      - name: Generate live test report (ctest across every suite)
-        run: python3 bench/gen_test_report.py
       # -n -W --keep-going: nitpicky, warnings are errors, and report them all rather
       # than stopping at the first. This is the link-integrity gate — a broken
       # cross-reference, a dead toctree entry or an @ref that no page publishes fails
