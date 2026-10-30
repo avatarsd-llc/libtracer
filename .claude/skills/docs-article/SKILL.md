@@ -239,11 +239,11 @@ greyscale.
 
 ## Before you ask for review
 
-Run these from the repo root. The lint is report-only for now, so read its output
-for your own pages: a line marked `NEW` is a hit your change added.
+Run these from the repo root. The lint gates the docs workflow: a line marked `NEW` is a
+hit your change added, and it fails CI.
 
 ```sh
-python3 tools/check_docs_style.py                      # style lint, report-only
+python3 tools/check_docs_style.py --gate               # style lint, as CI runs it
 python3 tools/check_doc_citations.py                   # symbol citations resolve
 python3 tools/gen_file_map.py --check                  # file map is current
 sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html
@@ -251,4 +251,4 @@ sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html
 
 `python3 tools/check_docs_style.py --update-baseline` records today's hits. Run it only
 when a change deliberately moves the baseline, such as fixing hits or adding a rule, and
-say so in the PR. The docs workflow switches to `--gate` in #2382.
+say so in the PR.

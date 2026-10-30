@@ -305,8 +305,8 @@ by name:
 A docs page is judged against the unified format (#2374), written down once in
 [the docs-article skill](../../.claude/skills/docs-article/SKILL.md): its page type, the
 concept template, the diagram vocabulary, and the rule that a guide links the spec instead
-of restating it. `tools/check_docs_style.py` reports the mechanical part (report-only
-until #2373), so a review names only the hits marked `NEW` and what the lint cannot see.
+of restating it. `tools/check_docs_style.py` checks the mechanical part and gates the
+`docs` workflow (#2382), so a review names only what the lint cannot see.
 
 ### 2f. Mechanical conventions
 
@@ -398,6 +398,7 @@ yourself**; CI already did.
 | Symbol-size ratchet (`symbol-ratchet`) | `cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release && cmake --build bench/build --target bench_libtracer bench_chain_delivery -j && python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json` — toolchain-bound, so a local number is not CI's | no |
 | Perf gate (`perf`, path-filtered to `core/`, `bench/`, `docs/methodology.md`) | `gate-pr` in `.github/workflows/perf.yml`: a same-runner interleaved A/B against `main` via `bench/perf_gate.py`; a contributor does not reproduce it locally | no |
 | QSBR model check (`genmc`, path-filtered to the reclaim headers, not required) | `GENMC=<path to genmc> tools/genmc_qsbr.sh` — GenMC v0.19.0, built as `.github/workflows/genmc.yml` does; a VIOLATION prints the trace | no |
+| Docs style lint (`docs`) | `python3 tools/check_docs_style.py --gate` — fails on a page/rule hit count above `tools/docs_style_baseline.json` (marked `NEW`); baselined hits pass. A PR that fixes hits runs `--update-baseline` and says so | no |
 | Docs build (`docs`) | `sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html` after `doxygen core/Doxyfile`; a Doxygen autolink inside backticks breaks `-n -W` — escape it with `%` | no |
 | Cortex-M0 footprint sentinel | the `sentinel` job in `.github/workflows/footprint-cortexm0.yml` (needs `arm-none-eabi`) | no |
 | ESP32-C6 hardware arms | `.github/workflows/hil-esp32c6.yml` | **yes** |

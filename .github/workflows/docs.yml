@@ -308,11 +308,13 @@ jobs:
       # fails the docs build itself rather than only a sibling check.
       - name: Doc-citation gate (symbol citations resolve; no line-number citations)
         run: python3 tools/check_doc_citations.py
-      # Docs style lint (#2371, the #2374 format): REPORT-ONLY. It prints every hit with
-      # the rule it breaks, marks a page/rule count above tools/docs_style_baseline.json
-      # as NEW, and exits 0. The style pass (#2373) switches it to `--gate`.
-      - name: Docs style lint (report-only)
-        run: python3 tools/check_docs_style.py
+      # Docs style lint (#2371, the #2374 format), GATING since #2382. It prints every hit
+      # with the rule it breaks and fails on a page/rule count above
+      # tools/docs_style_baseline.json (marked NEW). Baselined hits pass: the baseline holds
+      # what is not yet fixed, among them the restatement hits the MUST/SHALL erratum review
+      # (#2384) has not judged. A PR that fixes hits shrinks it with --update-baseline.
+      - name: Docs style lint (gate)
+        run: python3 tools/check_docs_style.py --gate
       # Diagram palette gate (#2378): every class in docs/_static/diagram-vocabulary.css
       # keeps AA text on its fill and a 3:1 stroke on the page, light and dark, and the
       # pinned Mermaid is the vendored one. Standard library only; it fails the build.

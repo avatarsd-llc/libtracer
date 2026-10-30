@@ -38,10 +38,10 @@ work leaves those pages alone; they change by erratum or amendment.
 Code blocks and code spans are quoted text and never linted, except that `alt-text`
 reads the diagram directives themselves.
 
-The lint is REPORT-ONLY against a committed baseline (`tools/docs_style_baseline.json`,
-hits counted per page and rule): it prints every hit, marks the page/rule counts that
-exceed the baseline as NEW, and exits 0. `--gate` makes a NEW count fail (#2382 switches
-it on in the docs workflow); `--update-baseline` records today's hits.
+The lint runs against a committed baseline (`tools/docs_style_baseline.json`, hits
+counted per page and rule): it prints every hit and marks the page/rule counts that
+exceed the baseline as NEW. Without flags it exits 0; `--gate`, which the docs workflow
+runs (#2382), makes a NEW count fail. `--update-baseline` records today's hits.
 
 Usage:  python3 tools/check_docs_style.py [--gate] [--baseline FILE] [--update-baseline]
 Unit tests in `tools/tests/test_check_docs_style.py`. Standard library only.
