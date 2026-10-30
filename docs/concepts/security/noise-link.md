@@ -122,7 +122,7 @@ the annex [v1 §3](../../spec/v1.md#3-wire-format) incorporates for a link that 
 - Version 0.19.1 shipped the crypto backends, and 0.20.0 the host link.
 :::
 
-Next concept: back to [security](../security.md). Go deeper:
+Next concept: [Concurrency](../concurrency.md). Go deeper:
 [reference 23 §8, resources](../../reference/23-noise-link-binding.md#8-resources-the-receiver-pays-and-nothing-is-allocated-before-the-psk-is-proven),
 then [§9, failure](../../reference/23-noise-link-binding.md#9-failure-counted-never-answered-in-clear),
 then [datagram links](../transports/datagram.md).

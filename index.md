@@ -125,6 +125,7 @@ Memory <docs/concepts/memory>
 Batching <docs/concepts/batching>
 Transports <docs/concepts/transports>
 Security <docs/concepts/security>
+Concurrency <docs/concepts/concurrency>
 ```
 
 ```{toctree}

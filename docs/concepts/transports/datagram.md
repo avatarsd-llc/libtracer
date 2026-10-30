@@ -66,15 +66,18 @@ way; the library's overhead stays 0 or 25 bytes. The Noise handshake is one 58-b
 
 ### Allocations
 
-None per send: `sendmsg` takes a stack scatter-gather list. A gather of more than 16 entries
+None per send on plain UDP: `sendmsg` takes a stack scatter-gather list. Under Noise each send
+seals into one `frame + 25` block from the link's transmit memory. A gather of more than 16 entries
 spills once, about 288 bytes (measured by `bench_transport_iov`). One segment per received
 datagram, drawn from the link's receive memory.
 
 ### Latency
 
 Not benched on this page. `bench_transports` and the UDP arm of `bench_compose_net` measure the
-link; their figures are on the generated Performance page. No bench isolates the Noise
-encryption; a Noise arm in `bench_transports` would.
+link; their figures are on the generated Performance page. `bench_noise_link` measures the Noise
+link against the plain UDP link (request and reply, streaming, setup) at 64 B to 64 KiB, and
+`bench_noise_crypto` the seal, open and handshake cost of each crypto backend; `bench/run_noise.sh`
+runs both. No figure from them is banked yet, so this page quotes none.
 
 ### Flash and RAM per target
 
