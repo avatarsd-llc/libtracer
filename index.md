@@ -124,6 +124,7 @@ The graph <docs/concepts/graph>
 Memory <docs/concepts/memory>
 Batching <docs/concepts/batching>
 Transports <docs/concepts/transports>
+Security <docs/concepts/security>
 ```
 
 ```{toctree}

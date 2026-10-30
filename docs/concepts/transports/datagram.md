@@ -116,6 +116,6 @@ The frames it carries are [v1 §3](../../spec/v1.md#3-wire-format).
 
 **Exercised by:** `udp_test`, `noise_link_test`, `security_noise_test`.
 
-Next concept: back to [transports](../transports.md). Go deeper:
+Next concept: [Security](../security.md). Go deeper:
 [reference 23](../../reference/23-noise-link-binding.md), then the
 [transport module page](../../modules/transport.md), then [v1 §1](../../spec/v1.md#1-scope).
