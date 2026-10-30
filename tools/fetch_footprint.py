@@ -6,7 +6,7 @@
 The MCU lane's footprint rows are generated, never typed: `docs/_ext/footprint.py`
 renders them from the JSON each size gate uploads. This script downloads, for each
 (workflow, artifact) pair below, the artifact of that workflow's newest successful run on
-main, and unpacks its JSON into the output directory (default
+main that still holds it (walking back a few pages of runs), and unpacks its JSON into the output directory (default
 `docs/_generated/footprint`).
 
 It degrades, never fails: no token, a run with no such artifact, an expired artifact or
@@ -34,6 +34,9 @@ ARTIFACTS = [
 ]
 
 API = "https://api.github.com"
+#: How far back an artifact is looked for: MAX_PAGES pages of PER_PAGE successful main runs.
+PER_PAGE = 10
+MAX_PAGES = 3
 
 
 class _NoAuthRedirect(urllib.request.HTTPRedirectHandler):
@@ -54,26 +57,49 @@ def _get(url: str, token: str) -> bytes:
         return resp.read()
 
 
+def _runs(repo: str, token: str, workflow: str, get):
+    """@brief Yield (run id, head sha) of @p workflow's successful main runs, newest first,
+    one page at a time and at most MAX_PAGES pages."""
+    for page in range(1, MAX_PAGES + 1):
+        listing = json.loads(get(f"{API}/repos/{repo}/actions/workflows/{workflow}/runs"
+                                 f"?branch=main&status=success&per_page={PER_PAGE}&page={page}",
+                                 token))
+        found = listing.get("workflow_runs") or []
+        if not found:
+            return
+        yield from ((r["id"], r.get("head_sha", "")) for r in found)
+
+
 def fetch(repo: str, token: str, out: pathlib.Path, get=_get) -> list[str]:
-    """@brief Unpack each artifact's JSON into @p out; return the files written."""
+    """@brief Unpack each artifact's JSON into @p out; return the files written.
+
+    Each artifact comes from the newest successful main run that still holds it live: a
+    nightly that passed with the size job skipped, or uploaded nothing, falls back to the
+    run before it, at most MAX_PAGES pages of runs back."""
     out.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
-    runs: dict[str, tuple[int, str] | None] = {}
+    listed: dict[str, list] = {}  # the runs of a workflow listed so far, shared by its artifacts
+    walks: dict[str, object] = {}
     for workflow, name in ARTIFACTS:
         try:
-            if workflow not in runs:
-                listing = json.loads(get(f"{API}/repos/{repo}/actions/workflows/{workflow}/runs"
-                                         "?branch=main&status=success&per_page=1", token))
-                found = listing.get("workflow_runs") or []
-                runs[workflow] = (found[0]["id"], found[0].get("head_sha", "")) if found else None
-            if runs[workflow] is None:
-                raise LookupError(f"no successful main run of {workflow}")
-            run_id, head_sha = runs[workflow]
-            arts = json.loads(get(f"{API}/repos/{repo}/actions/runs/{run_id}/artifacts"
-                                  f"?name={name}", token)).get("artifacts") or []
-            live = [a for a in arts if not a.get("expired")]
-            if not live:
-                raise LookupError(f"run {run_id} of {workflow} has no live {name} artifact")
+            walk = walks.setdefault(workflow, _runs(repo, token, workflow, get))
+            seen = listed.setdefault(workflow, [])
+
+            def runs():
+                yield from list(seen)
+                for run in walk:
+                    seen.append(run)
+                    yield run
+
+            for run_id, head_sha in runs():
+                arts = json.loads(get(f"{API}/repos/{repo}/actions/runs/{run_id}/artifacts"
+                                      f"?name={name}", token)).get("artifacts") or []
+                live = [a for a in arts if not a.get("expired")]
+                if live:
+                    break
+            else:
+                raise LookupError(f"no successful main run of {workflow} in the last "
+                                  f"{MAX_PAGES * PER_PAGE} has a live {name} artifact")
             with zipfile.ZipFile(io.BytesIO(get(live[0]["archive_download_url"], token))) as z:
                 payload = json.loads(z.read(f"{name}.json"))
             # An artifact that does not record its commit (esp_size_gate's) takes the run's.

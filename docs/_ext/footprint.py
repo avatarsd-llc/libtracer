@@ -6,7 +6,8 @@ The figures on the MCU page are never typed. The docs workflow fetches the newes
 successful main run's JSON artifact from each size gate (tools/fetch_footprint.py) into
 ``docs/_generated/footprint``, and ``{footprint-table}`` renders one row per artifact. A
 missing artifact renders as "not measured in this build", naming the workflow that
-produces it, so a local build without the artifacts still builds.
+produces it, so a local build without the artifacts still builds; a malformed one renders
+the same way, naming the artifact as unreadable.
 
 One row per source, in this order:
 
@@ -46,10 +47,15 @@ def _row(path, target, scale, what, workflow, flash_key, ram_key):
     if not path.exists():
         return [target, scale, what, UNMEASURED, UNMEASURED,
                 f"produced nightly by {workflow}", "none"]
-    data = json.loads(path.read_text(encoding="utf-8"))
-    flash = data.get(flash_key)
-    if not isinstance(flash, int):
-        raise ValueError(f"{path.name}: no integer {flash_key!r}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        flash = data.get(flash_key)
+    except (OSError, ValueError, AttributeError):  # unreadable, not JSON, not an object
+        data, flash = None, None
+    if not isinstance(flash, int) or isinstance(flash, bool):
+        # A malformed artifact is a gap in the measurement, never a failed docs build.
+        return [target, scale, what, UNMEASURED, UNMEASURED,
+                f"artifact unreadable; produced nightly by {workflow}", "none"]
     flash_cell = _b(flash)
     budget = data.get("max_flash_bytes")
     if isinstance(budget, int):

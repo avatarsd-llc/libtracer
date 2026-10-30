@@ -7,7 +7,7 @@ The MCU lane's footprint rows come from the size gates' own JSON artifacts, fetc
 the docs build, and are never typed. The fixtures are real nightly artifacts:
 footprint-cortexm0.json (footprint-cortexm0.yml), rv32-footprint.json and
 footprint-esp32c6.json (esp-idf.yml). These pin the row each one becomes, the row a missing
-artifact becomes, and the refusal of an artifact that carries no flash figure.
+artifact becomes, and the unmeasured row a malformed artifact becomes.
 
 Run with ``python3 -m unittest discover -s tools/tests`` (no third-party deps).
 """
@@ -59,11 +59,17 @@ class RowsTest(unittest.TestCase):
         rows = footprint.rows(pathlib.Path("/nonexistent/footprint"))
         self.assertEqual([r[3] for r in rows], ["not measured in this build"] * 3)
 
-    def test_an_artifact_without_a_flash_figure_is_refused(self):
-        with tempfile.TemporaryDirectory() as d:
-            (pathlib.Path(d) / "footprint-cortexm0.json").write_text(json.dumps({"mcpu": "x"}))
-            with self.assertRaises(ValueError):
-                footprint.rows(pathlib.Path(d))
+    def test_a_malformed_artifact_renders_unmeasured_and_never_fails_the_build(self):
+        for bad in (json.dumps({"mcpu": "x"}), "{not json", json.dumps([1, 2]),
+                    json.dumps({"flash_bytes": "14192"}), b"\xff\xfe"):
+            with tempfile.TemporaryDirectory() as d:
+                path = pathlib.Path(d) / "footprint-cortexm0.json"
+                path.write_bytes(bad if isinstance(bad, bytes) else bad.encode())
+                shutil.copy(FIXTURES / "rv32-footprint.json", d)
+                rows = footprint.rows(pathlib.Path(d))
+            self.assertEqual((rows[0][3], rows[0][4]), (footprint.UNMEASURED,) * 2, bad)
+            self.assertIn("unreadable", rows[0][5], bad)
+            self.assertEqual(rows[1][3], "38,611 B", bad)
 
 
 
@@ -116,6 +122,47 @@ class FetchTest(unittest.TestCase):
         self.assertNotIn("rv32-footprint.json", written)
         self.assertEqual(rows[1][3], footprint.UNMEASURED)
         self.assertNotEqual(rows[0][3], footprint.UNMEASURED)
+
+    def test_a_run_without_the_artifact_falls_back_to_an_older_successful_run(self):
+        calls = []
+
+        def get(url, token):
+            calls.append(url)
+            if "/workflows/" in url:
+                page = int(url.split("page=")[-1])
+                ids = {1: [10, 11], 2: [12, 13]}.get(page, [])
+                return json.dumps({"workflow_runs": [{"id": i, "head_sha": f"{i:040d}"}
+                                                     for i in ids]}).encode()
+            if "/artifacts?name=" in url:
+                run = int(url.split("/runs/")[1].split("/")[0])
+                name = url.split("name=")[1]
+                arts = [{"expired": False, "archive_download_url": f"zip:{name}"}] if run == 12 else []
+                return json.dumps({"artifacts": arts}).encode()
+            name = url.split("zip:")[1]
+            return _zip(f"{name}.json", (FIXTURES / f"{name}.json").read_bytes())
+
+        with tempfile.TemporaryDirectory() as d:
+            written = fetch_footprint.fetch("o/r", "t", pathlib.Path(d), get=get)
+            rows = footprint.rows(pathlib.Path(d))
+        self.assertEqual(len(written), 3)
+        self.assertEqual(rows[2][6], "00000000")  # the ESP commit comes from run 12, the one used
+        self.assertFalse(any("/runs/13/" in c for c in calls))  # stops at the first hit
+
+    def test_the_walk_back_is_bounded(self):
+        calls = []
+
+        def get(url, token):
+            calls.append(url)
+            if "/workflows/" in url:
+                page = int(url.split("page=")[-1])
+                return json.dumps({"workflow_runs": [{"id": page * 100 + k, "head_sha": "x"}
+                                                     for k in range(5)]}).encode()
+            return json.dumps({"artifacts": []}).encode()
+
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(fetch_footprint.fetch("o/r", "t", pathlib.Path(d), get=get), [])
+        listed = [c for c in calls if "/workflows/" in c]
+        self.assertEqual(len(listed), 2 * fetch_footprint.MAX_PAGES)  # two workflows, each bounded
 
     def test_an_api_error_is_skipped_not_fatal(self):
         def get(url, token):

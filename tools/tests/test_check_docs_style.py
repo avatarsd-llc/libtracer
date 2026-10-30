@@ -195,6 +195,38 @@ class DiagramStyleTest(unittest.TestCase):
         self.assertEqual(self.hits(page), [])
 
 
+class DirectiveBodyTest(unittest.TestCase):
+    """A prose directive's body is prose and is linted; a code or diagram body is not (#2392)."""
+
+    def rules(self, text):
+        return sorted(h.rule for h in cds.lint_page("docs/reference/x.md", text, CTX))
+
+    def test_a_must_and_an_own_site_link_inside_a_note_are_hits(self):
+        page = ("# P\n\n:::{note}\n:class: tip\nA receiver MUST accept it, see "
+                "[here](https://libtracer.avatarsd.com/docs/x.html).\n:::\n")
+        self.assertEqual(self.rules(page), ["own-site-link", "restatement"])
+
+    def test_admonition_and_dropdown_bodies_are_linted_too(self):
+        for opener in ("```{admonition} Why", "::::{dropdown} History"):
+            close = opener.split("{")[0]
+            page = f"# P\n\n{opener}\nA sender SHOULD do it.\n{close}\n"
+            self.assertEqual(self.rules(page), ["restatement"], opener)
+
+    def test_an_overlong_line_inside_a_dropdown_is_a_hit(self):
+        page = "# P\n\n:::{dropdown} Long\n" + "word " * 30 + "\n:::\n"
+        self.assertEqual(self.rules(page), ["line-length"])
+
+    def test_a_code_block_inside_a_note_stays_opaque(self):
+        page = ("# P\n\n::::{note}\nPlain prose.\n\n```text\nA receiver MUST accept it.\n"
+                "```\n::::\n")
+        self.assertEqual(self.rules(page), [])
+
+    def test_code_mermaid_and_hex_walk_bodies_stay_opaque(self):
+        for opener in ("```{code-block} text", "```{hex-walk} v/x", "```text", "```"):
+            page = f"# P\n\n{opener}\nA receiver MUST accept it. " + "x" * 120 + "\n```\n"
+            self.assertEqual(self.rules(page), [], opener)
+
+
 class AnnexSetTest(unittest.TestCase):
     """The annex set is read from v1 §3, the only list of what is normative."""
 
@@ -254,6 +286,44 @@ class BaselineTest(unittest.TestCase):
                                                                "b.md": {"alt-text": 1}})
 
 
+class RatchetTest(unittest.TestCase):
+    """The baseline may only shrink, unless the change says why (#2392)."""
+
+    def test_a_shrinking_or_equal_baseline_passes_without_a_reason(self):
+        old = {"a.md": {"line-length": 3}, "b.md": {"restatement": 1}}
+        new = {"a.md": {"line-length": 2}}
+        self.assertEqual(cds.ratchet_failures(old, new, ""), [])
+
+    def test_a_rising_count_without_a_reason_fails(self):
+        old = {"a.md": {"line-length": 2}}
+        new = {"a.md": {"line-length": 3, "restatement": 1}}
+        self.assertEqual(cds.ratchet_failures(old, new, "Fix a typo."),
+                         ["a.md: [line-length] 2 -> 3", "a.md: [restatement] 0 -> 1"])
+
+    def test_a_rising_count_with_a_stated_reason_passes(self):
+        old, new = {"a.md": {"line-length": 2}}, {"a.md": {"line-length": 3}}
+        reason = "Body text.\n\nDocs-Style-Baseline: main's long lines, rewrapped in #9999.\n"
+        self.assertEqual(cds.ratchet_failures(old, new, reason), [])
+
+    def test_an_empty_reason_trailer_is_no_reason(self):
+        old, new = {}, {"a.md": {"line-length": 1}}
+        self.assertEqual(len(cds.ratchet_failures(old, new, "Docs-Style-Baseline:   \n")), 1)
+
+    def test_a_concept_page_in_the_baseline_fails_whatever_the_reason(self):
+        new = {"docs/concepts/x.md": {"line-length": 1}}
+        got = cds.ratchet_failures(new, new, "Docs-Style-Baseline: because.")
+        self.assertEqual(got, ["docs/concepts/x.md: a concept page is never baselined"])
+
+    def test_the_committed_baseline_names_no_concept_page(self):
+        base = json.loads((pathlib.Path(REPO) / "tools" / "docs_style_baseline.json").read_text())
+        self.assertEqual([p for p in base if p.startswith("docs/concepts/")], [])
+
+    def test_the_docs_workflow_runs_the_ratchet_on_pull_requests(self):
+        wf = (pathlib.Path(REPO) / ".github" / "workflows" / "docs.yml").read_text()
+        self.assertIn("python3 tools/check_docs_style.py --ratchet", wf)
+        self.assertIn("DOCS_STYLE_BASELINE_REASON: ${{ github.event.pull_request.body }}", wf)
+
+
 class RealTreeTest(unittest.TestCase):
     """End to end on the real tree. Nothing here pins today's hit count: the committed baseline
     is the pin, and the gate below holds the tree to it (#2382)."""
@@ -284,8 +354,7 @@ class RealTreeTest(unittest.TestCase):
 
     def test_the_docs_workflow_runs_the_lint_as_a_gate(self):
         wf = (pathlib.Path(REPO) / ".github" / "workflows" / "docs.yml").read_text()
-        runs = [ln.strip() for ln in wf.splitlines() if "check_docs_style.py" in ln
-                and ln.strip().startswith("run:")]
+        runs = [ln.strip() for ln in wf.splitlines() if "check_docs_style.py --gate" in ln]
         self.assertEqual(runs, ["run: python3 tools/check_docs_style.py --gate"])
 
 

@@ -339,6 +339,19 @@ jobs:
       # (#2384) has not judged. A PR that fixes hits shrinks it with --update-baseline.
       - name: Docs style lint (gate)
         run: python3 tools/check_docs_style.py --gate
+      # The baseline ratchet (#2392): against the PR's base, a page/rule count may fall or
+      # stay; it rises only when the PR body carries a `Docs-Style-Baseline:` line saying why,
+      # and a concept page is never baselined. A base with no baseline yet passes.
+      - name: Docs style baseline ratchet
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          DOCS_STYLE_BASELINE_REASON: ${{ github.event.pull_request.body }}
+        run: |
+          old="$RUNNER_TEMP/docs-style-baseline.base.json"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git show FETCH_HEAD:tools/docs_style_baseline.json > "$old" 2>/dev/null || rm -f "$old"
+          python3 tools/check_docs_style.py --ratchet "$old"
       # Diagram palette gate (#2378): every class in docs/_static/diagram-vocabulary.css
       # keeps AA text on its fill and a 3:1 stroke on the page, light and dark, and the
       # pinned Mermaid is the vendored one. Standard library only; it fails the build.

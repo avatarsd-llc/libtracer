@@ -45,6 +45,8 @@ exceed the baseline as NEW. Without flags it exits 0; `--gate`, which the docs w
 runs (#2382), makes a NEW count fail. `--update-baseline` records today's hits.
 
 Usage:  python3 tools/check_docs_style.py [--gate] [--baseline FILE] [--update-baseline]
+        python3 tools/check_docs_style.py --ratchet OLD_BASELINE  (a count may rise only when
+        $DOCS_STYLE_BASELINE_REASON, the PR body, has a `Docs-Style-Baseline:` line saying why)
 Unit tests in `tools/tests/test_check_docs_style.py`. Standard library only.
 """
 from __future__ import annotations
@@ -54,6 +56,7 @@ import ast
 import dataclasses
 import fnmatch
 import json
+import os
 import pathlib
 import posixpath
 import re
@@ -92,6 +95,12 @@ KEYWORD = re.compile(r"\b(?:MUST|SHALL|SHOULD|REQUIRED)\b")
 RECORDS = ("docs/adr/", "docs/research/")
 STYLED = re.compile(r"^\s*(style|classDef|linkStyle)\s")  # page-local styling in a diagram
 FENCE = re.compile(r"^\s*(`{3,}|~{3,}|:{3,})\s*(\{[\w-]+\})?\s*(\w+)?")
+#: Directives whose body is prose, linted like the page around it (#2392). Every other fence,
+#: a code block, a diagram, a hex walk or a toctree, is opaque.
+PROSE_DIRECTIVES = frozenset("{%s}" % d for d in (
+    "admonition", "note", "tip", "hint", "important", "warning", "caution", "attention",
+    "danger", "error", "seealso", "dropdown"))
+OPTION = re.compile(r"^\s*:[\w-]+:")  # a directive option line, `:class: tip`
 
 
 @dataclasses.dataclass(frozen=True)
@@ -161,11 +170,14 @@ def lint_page(rel: str, text: str, ctx: Context) -> list[Hit]:
     headings: list[tuple[int, str]] = []
     cost_parts: list[str] = []
     fence = None  # (marker, directive, body lines, start, is a Mermaid diagram)
+    prose_fences: list[str] = []  # the markers of the prose directives this line sits in
     for n, line in enumerate(lines, 1):
         hit = lambda rule, msg: hits.append(Hit(rel, n, rule, msg))  # noqa: E731
         m = FENCE.match(line)
+        closes = lambda marker: (line.strip().startswith(marker)  # noqa: E731
+                                 and line.strip().strip(marker[0]) == "")
         if fence:
-            if line.strip().startswith(fence[0]) and line.strip().strip(fence[0][0]) == "":
+            if closes(fence[0]):
                 if fence[1] == "{mermaid}" and not ("accTitle:" in fence[2] and "accDescr" in fence[2]):
                     hits.append(Hit(rel, fence[3], "alt-text", "mermaid diagram lacks accTitle: and accDescr"))
                 if fence[1] in ("{image}", "{figure}") and ":alt:" not in fence[2]:
@@ -177,6 +189,14 @@ def lint_page(rel: str, text: str, ctx: Context) -> list[Hit]:
                 fence = None
             else:
                 fence = (fence[0], fence[1], fence[2] + line + "\n", fence[3], fence[4])
+            continue
+        if prose_fences and closes(prose_fences[-1]):
+            prose_fences.pop()
+            continue
+        if m and m.group(2) in PROSE_DIRECTIVES:
+            prose_fences.append(m.group(1))
+            continue
+        if prose_fences and OPTION.match(line):
             continue
         if m:
             fence = (m.group(1), m.group(2), "", n,
@@ -263,6 +283,23 @@ def baseline_json(hits: list[Hit]) -> str:
     return json.dumps(out, indent=1, sort_keys=True) + "\n"
 
 
+#: The line a commit message or PR body carries when it raises a baseline count on purpose.
+REASON = re.compile(r"^\s*Docs-Style-Baseline:\s*\S", re.M)
+
+
+def ratchet_failures(old: dict, new: dict, reason: str) -> list[str]:
+    """@brief Why the baseline `new` may not replace `old`; empty when it may.
+
+    A count may fall or stay. It may rise only when `reason` (the PR body) carries a
+    non-empty `Docs-Style-Baseline:` line saying why. A concept page is never baselined.
+    """
+    concept = [f"{p}: a concept page is never baselined" for p in sorted(new)
+               if p.startswith("docs/concepts/")]
+    rises = [f"{p}: [{r}] {old.get(p, {}).get(r, 0)} -> {c}" for p in sorted(new)
+             for r, c in sorted(new[p].items()) if c > old.get(p, {}).get(r, 0)]
+    return concept + ([] if REASON.search(reason) else rises)
+
+
 def _conf_patterns() -> tuple[list[str], list[str]]:
     tree = ast.parse((REPO / "docs" / "conf.py").read_text())
     found = {t.id: ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
@@ -296,7 +333,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--gate", action="store_true", help="exit 1 when a count exceeds the baseline")
     ap.add_argument("--baseline", default=str(BASELINE))
     ap.add_argument("--update-baseline", action="store_true", help="record today's hits")
+    ap.add_argument("--ratchet", metavar="OLD_BASELINE",
+                    help="exit 1 when the committed baseline rises above OLD_BASELINE without a "
+                         "Docs-Style-Baseline: line in $DOCS_STYLE_BASELINE_REASON")
     args = ap.parse_args(argv)
+    if args.ratchet:
+        old_path = pathlib.Path(args.ratchet)
+        if not old_path.exists():
+            print("docs style ratchet: no baseline before this change; nothing to compare")
+            return 0
+        fails = ratchet_failures(json.loads(old_path.read_text()),
+                                 json.loads(pathlib.Path(args.baseline).read_text()),
+                                 os.environ.get("DOCS_STYLE_BASELINE_REASON", ""))
+        for f in fails:
+            print(f"RISE {f}")
+        print(f"docs style ratchet: {len(fails)} baseline rises without a stated reason"
+              if fails else "docs style ratchet: the baseline did not rise, or says why")
+        return 1 if fails else 0
     ctx, pages = real_context()
     hits = [h for p in pages for h in lint_page(p, (REPO / p).read_text(), ctx)]
     if args.update_baseline:

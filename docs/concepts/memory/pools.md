@@ -77,10 +77,12 @@ subscriber; past about 1,365 subscribers that is an oversize draw on every publi
 
 ### Latency
 
-A classed 64 KiB draw costs 20.9 ns; the same draw past the last row cost 28.7 ns, which is why
-the 65,584-byte row exists. A shared free-list pool on a 12-core host fell from 8.3 M to
-1.36 M operations a second, and its median from 60 ns to 3,587 ns, where the platform heap
-scaled: a contended cache line, which a lock-free list head does not fix.
+A 64 KiB draw costs 20.9 ns. An oversize draw is kept out of `in_use` because counting it would
+raise that to 28.7 ns. The 65,584-byte row exists because a 64 KiB payload's one-block segment
+would otherwise fall past the last row to the root, at about twice the cost of a classed draw. A
+shared free-list pool on a 12-core host fell from 8.3 M to 1.36 M operations a second, and its
+median from 60 ns to 3,587 ns, where the platform heap scaled: a contended cache line, which a
+lock-free list head does not fix.
 
 ### Flash and RAM per target
 

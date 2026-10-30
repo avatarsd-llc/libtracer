@@ -73,7 +73,8 @@ its offset. The descriptor, not the record, says which shape the bytes are.
 :class: warning
 
 How a FOLD subscriber knows that a branch-write node's `VALUE` is a batch, and reads it back,
-waits on a maintainer ruling: #2394 (can a FOLD subscriber read a folded batch). Until it is ruled, this page shows only the standalone read-back.
+waits on a maintainer ruling: #2394 (can a FOLD subscriber read a folded batch). Until it is
+ruled, this page shows only the standalone read-back.
 ```
 
 ## Worked example
@@ -211,7 +212,7 @@ the header in [reference 01 §Frame layout](../reference/01-data-format.md#frame
 - #2366 (retire the reference playout helper) moves playout wholly to the application.
 :::
 
-Next concept: transports (#2379, the transports pilot). Go deeper:
+Next concept: [Transports](transports.md). Go deeper:
 [reference 22 §3.5](../reference/22-backpressure-and-sizing.md#35-high-rate-acquisition--recipe-c-compose--swap--push),
 then [reference 05 §User range](../reference/05-protocol-tlvs.md#user-range-0x80--0xff), then
 [v1 §3](../spec/v1.md#3-wire-format).
