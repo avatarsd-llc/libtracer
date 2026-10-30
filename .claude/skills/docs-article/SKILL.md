@@ -130,9 +130,9 @@ recorded here.
   history. This is rule `normative-source`. For a concept v1 leaves to the
   implementation, such as transport framing, cite the v1 §1 carve-out plus any annex that
   applies (reference 23 for Noise), and say in words that the rest is not normative.
-- `**Exercised by:**` names the conformance vector (`` `batch-time-base` `` or its
-  directory under `tests/conformance/vectors/v1/`) or the test (by file stem) that
-  proves the claim, and each one must exist. This is rule `exercised-by`.
+- `**Exercised by:**` names each conformance vector by its own name
+  (`` `batch-time-roundtrip` ``), never a category such as `framing`, and each test by its
+  file stem, and each one must exist. This is rule `exercised-by`.
 
 ## Reference pages: the header block
 

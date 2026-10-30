@@ -120,6 +120,7 @@ Getting started <docs/getting-started>
 :maxdepth: 1
 
 The wire format <docs/concepts/wire>
+The graph <docs/concepts/graph>
 Batching <docs/concepts/batching>
 Transports <docs/concepts/transports>
 ```

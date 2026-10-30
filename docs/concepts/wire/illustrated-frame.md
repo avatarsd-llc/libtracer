@@ -153,7 +153,7 @@ header in [reference 01 §Frame layout](../../reference/01-data-format.md#frame-
   one compact path element and reserved the top two `op` bits.
 :::
 
-Next concept: [Batching](../batching.md). Go deeper:
+Next concept: [The graph](../graph.md). Go deeper:
 [wire format, bit by bit](../../modules/wire-format-bits.md#5--a-fwd-frame-the-remote-operation-envelope),
 then the [frame codec](../../modules/frame-codec.md), then
 [v1 §3](../../spec/v1.md#3-wire-format).
