@@ -205,7 +205,8 @@ void test_wo_field_stores_nothing() {
     check(g_allocs.load() > 0,
           "positive control: the first `rw` store DOES allocate `values` (the counter is live)");
 
-    for (const app_field_t& f : vx(v)->app_fields_snapshot())
+    const tr::graph::app_fields_decl_t snap1 = vx(v)->app_fields_snapshot(tr::mem::heap_source());
+    for (const app_field_t& f : snap1.owned())
         if (f.name == "secret")
             check(f.value.empty(), "the table snapshot holds no bytes for the `wo` field");
 
@@ -220,8 +221,8 @@ void test_wo_field_stores_nothing() {
     t2.push_back(app_field_t{.name = "key", .access = app_access_t::WO, .value = val});
     const vertex_handle_t w = g.register_vertex(path_t("/dev/b"), role_t::STORED_VALUE);
     (void)g.set_policy(w, {.app_fields = std::move(t2)});
-    const std::vector<app_field_t> snap = vx(w)->app_fields_snapshot();
-    check(snap.size() == 1 && snap[0].value.empty(),
+    const tr::graph::app_fields_decl_t snap = vx(w)->app_fields_snapshot(tr::mem::heap_source());
+    check(snap.owned().size() == 1 && snap.owned()[0].value.empty(),
           "an install-time value on a `wo` field is not stored either");
 }
 
