@@ -137,6 +137,8 @@ docs/performance.md
 # copy drifted — it advertised 21 suites and 24 vectors against a tree holding
 # 67 and 36 — while the published page was correct. One source of truth.
 docs/test-report.md
+# The MCU page's footprint artifacts, fetched each docs build by tools/fetch_footprint.py.
+docs/_generated/
 
 # ESP component: the release job vendors core/ into the component and packs it to
 # dist/ for a self-contained registry archive — CI-only, never committed.

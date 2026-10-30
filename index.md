@@ -180,4 +180,5 @@ Context glossary <CONTEXT>
 :maxdepth: 1
 
 Route by intent <docs/start-here>
+On an MCU <docs/start-here-mcu>
 ```

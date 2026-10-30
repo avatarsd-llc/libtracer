@@ -1,0 +1,21 @@
+{
+  "target": "esp32c6",
+  "component_archive": "esp-idf/libtracer/libtracer.a",
+  "component_flash_bytes": 178098,
+  "component_static_ram_bytes": 36629,
+  "component_breakdown": {
+    "Flash Code": 178098,
+    "DIRAM": 36629
+  },
+  "app_total_image_bytes": 475260,
+  "app_used_by_memory_type": {
+    "Flash Code": 435494,
+    "DIRAM": 108394,
+    "LP SRAM": 24
+  },
+  "thresholds": {
+    "max_flash_bytes": null,
+    "max_static_ram_bytes": null
+  },
+  "verdict": "REPORTED"
+}

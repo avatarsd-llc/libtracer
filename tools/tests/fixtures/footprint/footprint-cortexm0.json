@@ -1,0 +1,24 @@
+{
+  "mcpu": "cortex-m0",
+  "required_modules": [
+    "frame",
+    "tlv_arena",
+    "backend_set",
+    "mem_pool",
+    "mem_source",
+    "mem_heap",
+    "rope",
+    "path"
+  ],
+  "toolchain": "arm-none-eabi-g++ (15:13.2.rel1-2) 13.2.1 20231009",
+  "commit": "b529978b1c45333eeeec8a3046dda06d40e75fb2",
+  "text_bytes": 13924,
+  "data_bytes": 268,
+  "bss_bytes": 7416,
+  "flash_bytes": 14192,
+  "ram_bytes": 7684,
+  "max_flash_bytes": 16384,
+  "headroom_bytes": 2192,
+  "mode": "fail",
+  "verdict": "PASS"
+}

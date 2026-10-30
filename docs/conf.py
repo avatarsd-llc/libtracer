@@ -30,6 +30,7 @@ extensions = [
     "sphinx_sitemap",  # sitemap.xml (SEO) — needs html_baseurl
     "sphinxext.opengraph",  # Open Graph + Twitter cards + meta descriptions (SEO)
     "hexwalk",  # {hex-walk}: a worked example's bytes, read from a conformance vector
+    "footprint",  # {footprint-table}: the MCU lane's rows, read from the size gates' artifacts
 ]
 
 # --- SEO ---------------------------------------------------------------------
@@ -127,6 +128,7 @@ include_patterns = [
     # getting-started.md so a parallel doc car adding its own entry conflicts on one
     # line at most.
     "docs/start-here.md",
+    "docs/start-here-mcu.md",
     "docs/spec/rfcs/**",
     "docs/adr-rfc-index.md",
     # The diagram vocabulary's smoke page (#2378): an orphan page that renders every
