@@ -101,6 +101,34 @@ class FixturePageTest(unittest.TestCase):
         self.assertEqual(hits_of("avoid-phrase.md", "docs/reference/x.md"), [("avoid-phrase", 5)])
 
 
+class SidebarOrderTest(unittest.TestCase):
+    """The sidebar runs by reader intent, set by index.md's toctree order (#2381)."""
+
+    @staticmethod
+    def index(*captions):
+        return "# libtracer\n\n" + "".join(
+            f"```{{toctree}}\n:caption: {c}\n:hidden:\n\npage-{i}\n```\n\n"
+            for i, c in enumerate(captions))
+
+    def hits(self, text):
+        return [(h.rule, h.line) for h in cds.lint_page("index.md", text, CTX)]
+
+    def test_the_intent_order_draws_no_hit(self):
+        self.assertEqual(self.hits(self.index(*cds.SIDEBAR)), [])
+
+    def test_start_here_last_is_a_hit(self):
+        order = list(cds.SIDEBAR[1:]) + [cds.SIDEBAR[0]]
+        self.assertEqual([r for r, _ in self.hits(self.index(*order))], ["sidebar-order"])
+
+    def test_a_section_outside_the_intent_list_is_a_hit(self):
+        hits = self.hits(self.index(*cds.SIDEBAR, "Glossary"))
+        self.assertEqual([r for r, _ in hits], ["sidebar-order"])
+
+    def test_the_real_index_follows_the_intent_order(self):
+        text = (pathlib.Path(REPO) / "index.md").read_text()
+        self.assertEqual([h for h in cds.lint_page("index.md", text, CTX) if h.rule == "sidebar-order"], [])
+
+
 class AnnexBannerTest(unittest.TestCase):
     """Exactly the annexes v1 §3 lists carry the one-line banner (#2385, ruling 5)."""
 
