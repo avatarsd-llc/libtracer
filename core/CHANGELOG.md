@@ -49,6 +49,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     an arena build. Pass `tr::mem::heap_source()` explicitly to keep the old draw.
   - On a build without the slab pool, the hazard domain's node class draws its slabs from the
     build's value draw (the arena), not the platform heap.
+- **An app field holds no standard container (#2288, part B, ADR-0083) — BREAKING.**
+  `app_field_t` is view-shaped: `name` is a `std::string_view`, and `descriptor` and `value` are
+  `std::span<const std::byte>`. An owning `app_fields_decl_t` copies every field's bytes, when it
+  is constructed, into one block drawn from the source it is given (the new
+  `app_fields_decl_t(std::span<const app_field_t>, block_source_t*)`), else the build's default
+  root; `owned()` returns a `std::span<const app_field_t>` into that block, and a refused copy
+  reads `failed()` and makes the install it carries refused. `vertex_t::app_fields_snapshot`
+  takes the source its copy is drawn from and returns an `app_fields_decl_t`;
+  `vertex_t::app_field_get` writes into a `mem::bytes_t` and answers the new
+  `app_read_t::REFUSED` when that buffer's source refuses; `vertex_t::set_app_fields` and
+  `build_owning_table` take a span. The `:settings.app.<name>` key is joined in place, bounded by
+  the field grammar, so the archive names no platform heap for any of it. Migration: keep the
+  bytes a field views alive until the declaration is constructed — name a `std::string` or a
+  `std::vector<std::byte>` a function returns rather than viewing the temporary
+  (`.descriptor = dtype_desc("f32")` dangles; `const auto d = dtype_desc("f32"); … .descriptor =
+  d` does not) — and read a snapshot through `.owned()`.
 - **A PAIR chain is learned with no flag (RFC-0029 §6.2/§7.1, #2245) — BREAKING (wire).** A
   successful terminus reply seeds its `src` with `PATH{<target PAIR>}`, and every relaying hop
   prepends its PAIR (else its NAME run), so the origin receives its whole chain in `src`. Every
