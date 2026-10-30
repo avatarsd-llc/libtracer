@@ -137,8 +137,7 @@ int main() {
     const cost_t op_owned = measure("opo", [](graph_t& g, const path_t& p) {
         std::vector<tr::graph::app_field_t> owned;
         for (const auto& f : kDescribe)
-            owned.push_back({.name = std::string(f.name),
-                             .descriptor = {f.descriptor.begin(), f.descriptor.end()}});
+            owned.push_back({.name = f.name, .descriptor = f.descriptor});
         (void)g.register_vertex(p, role_t::HANDLER, op_handlers(), {.app_fields = owned});
     });
 

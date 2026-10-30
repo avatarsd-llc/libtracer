@@ -19,8 +19,8 @@
 #include <cstdint>
 #include <initializer_list>
 #include <memory>
+#include <new>
 #include <span>
-#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -97,11 +97,18 @@ enum class app_access_t : std::uint8_t {
  * projection, #907): dtype/range validation is the owner's, in its apply seam
  * (@ref handlers_t::on_app_field_write) — the runtime
  * validates only addressing (declared / undeclared, writability): one table lookup.
+ *
+ * VIEW-SHAPED (#2288): every member views bytes the builder keeps alive, so no owning
+ * standard type crosses the API (ADR-0083 Q15) and the archive names no platform heap for
+ * it. An @ref app_fields_decl_t built from these copies the viewed bytes into one block of
+ * its own when it is constructed, so they need to outlive only that construction — a braced
+ * list of literals, or a caller's local buffers, both do. A view of an rvalue container (a
+ * function's returned `std::vector`) dangles at the end of its full-expression: name it.
  */
 struct app_field_t {
     /** @brief The field's key below `settings.app.` — a `.`-joined spelling of the field
      *         steps (`"kp"`, `"wifi.ssid"`); the runtime keys the joined string flat. */
-    std::string name{};
+    std::string_view name{};
     app_access_t access = app_access_t::RO; /**< @brief Owner-declared remote writability. */
     /** @brief What a write to this field retains (RFC-0028 §5.4). Defaults from the access —
      *         a `wo` field is @ref retention_t::NONE — its write reaches
@@ -112,11 +119,11 @@ struct app_field_t {
     /** @brief The §B.1 descriptor record members (dtype/unit/min/max/label…, concatenated
      *         child TLVs) served inside this field's `:schema` entry VERBATIM, after the
      *         runtime-projected `access` member. Never parsed by the runtime. */
-    std::vector<std::byte> descriptor{};
+    std::span<const std::byte> descriptor{};
     /** @brief The field's current TLV bytes, stored and served verbatim (§D). Empty ⇒
      *         never written (reads `NOT_FOUND`; omitted from container reads). An install
      *         MAY carry an initial value here; on a field that retains nothing it is dropped. */
-    std::vector<std::byte> value{};
+    std::span<const std::byte> value{};
 };
 
 /**
@@ -240,24 +247,37 @@ class borrowed_fields_t {
  *
  * Replaces the two install verbs (`set_app_fields` / `set_app_fields_static`) with one value.
  * It converts implicitly from each spelling a caller already writes:
- * - a braced list or a `std::vector<app_field_t>` — OWNING: names, descriptors and initial
- *   values are copied onto the vertex;
+ * - a braced list, a `std::vector<app_field_t>` or a span of fields — OWNING: names,
+ *   descriptors and initial values are copied, at construction, into ONE block drawn from a
+ *   source (the build's default root unless one is named, #2288), and the install copies them
+ *   onto the vertex;
  * - a `borrowed_fields_t`, or the static array spellings it accepts — BORROWED: the vertex
  *   views the caller's array and bytes in place (zero declaration RAM), so both MUST outlive
  *   the vertex.
  *
- * A `std::vector` never converts to the borrowed form (ADR-0058 erratum 2 still holds).
+ * A `std::vector` never converts to the borrowed form (ADR-0058 erratum 2 still holds). A
+ * source that refuses the owning copy leaves the declaration @ref failed, and an install of it
+ * is refused the way any other refused draw is.
  */
 class app_fields_decl_t {
    public:
     /** @brief No fields. */
     app_fields_decl_t() = default;
-    /** @brief An OWNING table from a braced list of fields. */
-    app_fields_decl_t(std::initializer_list<app_field_t> owned)  // NOLINT(google-explicit-*)
-        : owned_(owned) {}
-    /** @brief An OWNING table. */
-    app_fields_decl_t(std::vector<app_field_t> owned) noexcept  // NOLINT(google-explicit-*)
-        : owned_(std::move(owned)) {}
+    /** @brief An OWNING table copied from a braced list of fields. */
+    app_fields_decl_t(
+        std::initializer_list<app_field_t> owned) noexcept  // NOLINT(google-explicit-*)
+        : app_fields_decl_t(std::span<const app_field_t>(owned.begin(), owned.size())) {}
+    /** @brief An OWNING table copied from the caller's vector (inline, so the vector stays the
+     *         caller's: the library names no heap for it). */
+    app_fields_decl_t(const std::vector<app_field_t>& owned) noexcept  // NOLINT(google-explicit-*)
+        : app_fields_decl_t(std::span<const app_field_t>(owned)) {}
+    /**
+     * @brief An OWNING table copied from @p owned into one block drawn from @p src.
+     * @param owned The fields; their bytes need outlive only this call.
+     * @param src The source of the block; null ⇒ the build's default root.
+     */
+    app_fields_decl_t(std::span<const app_field_t> owned,  // NOLINT(google-explicit-*)
+                      mem::block_source_t* src = nullptr) noexcept;
     /** @brief A BORROWED table (ADR-0058): viewed in place, never copied. */
     constexpr app_fields_decl_t(borrowed_fields_t borrowed) noexcept  // NOLINT
         : borrowed_(borrowed) {}
@@ -270,21 +290,66 @@ class app_fields_decl_t {
     constexpr app_fields_decl_t(  // NOLINT(google-explicit-constructor)
         const std::array<app_field_static_t, N>& table) noexcept
         : borrowed_(table) {}
+    /** @brief A deep copy into a block from @p o's source; @ref failed if it refused. */
+    app_fields_decl_t(const app_fields_decl_t& o) noexcept;
+    /** @brief Take @p o's block; @p o is left empty. */
+    app_fields_decl_t(app_fields_decl_t&& o) noexcept
+        : src_(o.src_),
+          block_(std::exchange(o.block_, nullptr)),
+          bytes_(std::exchange(o.bytes_, 0)),
+          n_(std::exchange(o.n_, 0)),
+          failed_(std::exchange(o.failed_, false)),
+          borrowed_(std::exchange(o.borrowed_, {})) {}
+    /** @brief Copy-and-swap: a refused copy leaves this @ref failed. */
+    app_fields_decl_t& operator=(const app_fields_decl_t& o) noexcept {
+        if (this != &o) *this = app_fields_decl_t(o);
+        return *this;
+    }
+    /** @brief Release this declaration's block, then take @p o's. */
+    app_fields_decl_t& operator=(app_fields_decl_t&& o) noexcept {
+        if (this == &o) return *this;
+        this->~app_fields_decl_t();
+        return *::new (this) app_fields_decl_t(std::move(o));
+    }
+    /** @brief Returns the owning block to its source. */
+    ~app_fields_decl_t();
+
+    /**
+     * @brief Draw the block for an owning copy of @p n fields carrying @p bytes of names,
+     *        descriptors and values — the first step of the two-pass copy that
+     *        `vertex_t::app_fields_snapshot` and the owning constructors share.
+     * @retval false @p src refused; the declaration is @ref failed.
+     */
+    [[nodiscard]] bool reserve(std::size_t n, std::size_t bytes, mem::block_source_t& src) noexcept;
+    /** @brief Copy @p f's bytes into the reserved block as the next field; @ref reserve must
+     *         have succeeded for at least as many fields. */
+    void push(const app_field_t& f) noexcept;
 
     /** @brief True when this declares no field at all. */
-    [[nodiscard]] bool empty() const noexcept { return owned_.empty() && borrowed_.empty(); }
+    [[nodiscard]] bool empty() const noexcept { return n_ == 0 && borrowed_.empty(); }
+    /** @brief True when the source refused the owning copy: nothing is declared, and an install
+     *         of this declaration is refused. */
+    [[nodiscard]] bool failed() const noexcept { return failed_; }
     /** @brief True when this is a BORROWED declaration. */
     [[nodiscard]] bool is_borrowed() const noexcept { return !borrowed_.empty(); }
-    /** @brief The owning table (empty for a borrowed or empty declaration). */
-    [[nodiscard]] const std::vector<app_field_t>& owned() const& noexcept { return owned_; }
-    /** @brief The owning table, moved out of an expiring declaration (no copy). */
-    [[nodiscard]] std::vector<app_field_t> owned() && noexcept { return std::move(owned_); }
+    /** @brief The owning table (empty for a borrowed or empty declaration). Its views point into
+     *         this declaration's block, so they live as long as it does. */
+    [[nodiscard]] std::span<const app_field_t> owned() const noexcept {
+        return {reinterpret_cast<const app_field_t*>(block_), n_};
+    }
     /** @brief The borrowed table (empty for an owning or empty declaration). */
     [[nodiscard]] borrowed_fields_t borrowed() const noexcept { return borrowed_; }
 
    private:
-    std::vector<app_field_t> owned_{}; /**< @brief The owning spelling's fields. */
-    borrowed_fields_t borrowed_{};     /**< @brief The borrowed spelling's view. */
+    mem::block_source_t* src_ = nullptr; /**< @brief Where `block_` came from. */
+    /** @brief The owning spelling's one block: the field array, then every field's name,
+     *         descriptor and value bytes, which the fields view. */
+    std::byte* block_ = nullptr;
+    std::size_t bytes_ = 0;        /**< @brief The size `block_` was drawn at. */
+    std::size_t n_ = 0;            /**< @brief Fields pushed into `block_`. */
+    std::size_t off_ = 0;          /**< @brief Where the next field's bytes go in `block_`. */
+    bool failed_ = false;          /**< @brief The source refused the owning copy. */
+    borrowed_fields_t borrowed_{}; /**< @brief The borrowed spelling's view. */
 };
 
 /**
