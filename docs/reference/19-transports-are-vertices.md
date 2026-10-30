@@ -122,6 +122,8 @@ selecting one.
 
 ```{mermaid}
 flowchart TD
+    accTitle: What a write to a transport module vertex does
+    accDescr: A write of SPEC with a name and config to /net/ws-server/conn passes the graph WRITE gate and reaches on_write, which branches on the payload type. SPEC resolves the module declaration, which fixes kind and role. NAME removes the link: un-route, retire the vertex, close the socket. Anything else is an ERROR type_mismatch. For SPEC, a staged link is used if one exists, borrowed from the caller, or else the kind factory constructs the socket, owned by the vertex. Then the identity vertex is registered at /net/module/name, the router adds the NAME-to-link demux entry, and liveness is published: UP for a dial, LISTENING for a listen.
     W["write /net/ws-server/conn = SPEC{name, config}"] --> G["graph_t: WRITE gate admits, then on_write"]
     G --> D{"payload TLV type"}
     D -->|"SPEC"| C["resolve the module's declaration: it fixes kind and role"]

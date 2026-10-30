@@ -60,6 +60,8 @@ endpoints (the `rclcpp` generic sub/pub) touch the type. A ROS topic `/scan` map
 
 ```{mermaid}
 flowchart LR
+    accTitle: A ROS 2 topic bridged into a libtracer vertex
+    accDescr: In the ROS 2 graph over DDS, /lidar publishes /scan and /slam subscribes to it. The bridge takes /scan with a generic subscription, maps the topic to a path and writes the CDR bytes as the VALUE of vertex /scan, which a transport carries across the fabric. Coming back, a graph subscription on /scan feeds a generic publisher that republishes /scan to DDS.
     subgraph ros["ROS 2 graph (DDS)"]
         N1["node: /lidar (pub /scan)"]
         N2["node: /slam (sub /scan)"]

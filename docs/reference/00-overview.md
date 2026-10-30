@@ -86,6 +86,8 @@ Each adjacent pair of layers communicates through a small contract:
 
 ```mermaid
 flowchart TB
+    accTitle: The six layers, L5 to L0
+    accDescr: L5 application semantics calls read, write and await with a path handle on L4, the graph endpoint logic. L4 uses the TLV semantics of L3 (PATH, SUBSCRIBER, FWD). L3 rests on the type byte and opt.PL of the L2 frame envelope. L2 is a view-cast of L1, the views and ownership layer, which allocates, releases and cache-hooks through L0, the memory substrate.
   L5["L5 — Application semantics<br/>(what bytes inside VALUE mean)"]
   L4["L4 — Graph endpoint logic<br/>vertices, edges, paths, fanout, QoS, ACL, FWD forwarding"]
   L3["L3 — TLV semantics<br/>type byte, structured (PL=1) recursion"]
@@ -99,19 +101,13 @@ flowchart TB
   L2 -->|view-cast| L1
   L1 -->|alloc/release/cache hooks| L0
 
-  classDef applic fill:#fdf,stroke:#333
-  classDef graphl fill:#dfd,stroke:#333
-  classDef tlv    fill:#dff,stroke:#333
-  classDef wire   fill:#ddf,stroke:#333
-  classDef view   fill:#ffd,stroke:#333
-  classDef mem    fill:#fdd,stroke:#333
-  class L5 applic
-  class L4 graphl
-  class L3 tlv
-  class L2 wire
-  class L1 view
-  class L0 mem
+  class L5 app
+  class L4 vertex
+  class L3 record
+  class L2 frame
 ```
+
+Legend: purple = application (L5), green = graph (L4), sky blue = TLV (L3), blue = frame (L2).
 
 The wire format (L2) carries the `type` byte and `opt.PL` at fixed positions so routers can decide whether to recurse into nested children without parsing payload. The `type` byte's meaning is L3; it sits in the L2 header for routing convenience. Priority is **not** an L2 concern — it is cached at L4 from the SUBSCRIPTION's delivery policy (bits 2-4, [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A; it was a per-vertex `:settings.priority` knob until then, and nothing consumed it). The L2 `opt` byte's other bits select wire-format variants (`LL` length width, `CW` CRC width, `TF` TS form) — these are framing choices, not semantic information.
 
@@ -121,6 +117,8 @@ The path-handle mechanism (load-bearing claim 6) sits at the **L4 ↔ L5 boundar
 
 ```mermaid
 flowchart LR
+    accTitle: A path is encoded once and used by handle
+    accDescr: Once, at build time or node init, the path string /sensor/temp is encoded and validated as an L3 PATH TLV into a .rodata or heap segment. On the hot path, once per write, an L4 path handle points into that segment, L5 calls tracer_write with the handle and a value, and L4 dispatch keys on the PATH bytes.
   subgraph BuildOrInit["Once — build time or node init"]
     SRC["Path string<br/>&quot;/sensor/temp&quot;"]
     ENC["Encode &amp; validate<br/>(L3 PATH TLV layout)"]

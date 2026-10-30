@@ -429,6 +429,8 @@ The GPU module's own entry points (built only in the tier):
 
 ```{mermaid}
 classDiagram
+    accTitle: The memory backend seam
+    accDescr: mem_backend_t is the interface, with alloc, destroy, before_io, after_io and alignment. heap_backend_t, borrowed_backend_t, pool_t and your own backend implement it, and a segment_t holds a pointer to its backend. Your backend can bind a DMA ring, an lwIP pbuf or MMIO.
     class mem_backend_t { <<interface>> +alloc() +destroy() +before_io() +after_io() +alignment() }
     mem_backend_t <|-- heap_backend_t
     mem_backend_t <|-- borrowed_backend_t

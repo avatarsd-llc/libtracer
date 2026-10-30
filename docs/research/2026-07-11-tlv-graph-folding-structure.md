@@ -35,21 +35,18 @@ Two **orthogonal** compositions fold the same bytes ([reference/02](../reference
 
 ```mermaid
 flowchart LR
-  P["POINT 0x07<br/>vertex node / container"]:::node
-  N["NAME 0x02 · PATH 0x06<br/>identity / address"]:::ident
-  V["VALUE 0x01 · TIME 0x0C<br/>data"]:::data
-  C["SUBSCRIBER 0x04 · SETTINGS 0x0B · ACL 0x0A<br/>: control plane (rides the vertex)"]:::ctrl
-  F["STATUS 0x09 · ERROR 0x08<br/>fault (in place of VALUE)"]:::fault
-  H["hot value-slot · materialization overlay<br/>runtime state — NOT folded"]:::hot
-  S["refcount-shared subtree<br/>(C3 fold)"]:::shared
-  classDef node fill:#fef3c7,stroke:#92400e,color:#3a2606
-  classDef ident fill:#dcfce7,stroke:#166534,color:#0b3d1e
-  classDef data fill:#fce7f3,stroke:#9f1239,color:#500724
-  classDef ctrl fill:#dbeafe,stroke:#1e40af,color:#0b2a6b
-  classDef fault fill:#fee2e2,stroke:#991b1b,color:#450a0a
-  classDef hot fill:#ffedd5,stroke:#9a3412,color:#431407
-  classDef shared fill:#ede9fe,stroke:#5b21b6,color:#2e1065
+    accTitle: The TLV kinds a folded vertex is made of
+    accDescr: POINT 0x07 is the vertex node or container. NAME and PATH give identity and address. VALUE and TIME are data. SUBSCRIBER, SETTINGS and ACL are the control plane riding the vertex. STATUS and ERROR are a fault in place of VALUE. The hot value slot and materialization overlay are runtime state and are not folded. A refcount-shared subtree is the C3 fold.
+  P["POINT 0x07<br/>vertex node / container"]:::vertex
+  N["NAME 0x02 · PATH 0x06<br/>identity / address"]:::record
+  V["VALUE 0x01 · TIME 0x0C<br/>data"]:::record
+  C["SUBSCRIBER 0x04 · SETTINGS 0x0B · ACL 0x0A<br/>: control plane (rides the vertex)"]:::record
+  F["STATUS 0x09 · ERROR 0x08<br/>fault (in place of VALUE)"]:::record
+  H["hot value-slot · materialization overlay<br/>runtime state — NOT folded"]:::ring
+  S["refcount-shared subtree<br/>(C3 fold)"]:::record
 ```
+
+Legend: green = a vertex (POINT), sky blue = a record riding it, orange = unfolded runtime state.
 
 | Colour | Class | Type codes | Role in the fold |
 | --- | --- | --- | --- |
@@ -69,20 +66,20 @@ A vertex folds into **one `POINT` (`0x07`, `PL=1`)** whose children map one-to-o
 
 ```mermaid
 flowchart TB
-  PT["POINT 0x07 (PL=1)  ⟨0⟩  — the vertex"]:::node
-  NM["NAME 0x02  — leaf segment (REQUIRED, first child)"]:::ident
-  VL["VALUE 0x01  — own value (optional; hot ⇒ overlay slot)"]:::data
-  DS["DESCRIPTION 0x03  — human label (optional)"]:::ident
-  ST["SETTINGS 0x0B  — :settings (QoS + app.*)"]:::ctrl
-  AC["ACL 0x0A  — :acl (ACE collection)"]:::ctrl
-  SB["SUBSCRIBER 0x04 ×N  — :subscribers[] (edges)"]:::ctrl
-  CH["POINT 0x07 ×N  — child vertices (the / tree)"]:::node
+    accTitle: The child order inside one POINT
+    accDescr: A POINT 0x07 with PL=1 is the vertex. Its children come in order: NAME (the leaf segment, required and first), its own VALUE (optional, an overlay slot when hot), DESCRIPTION (an optional human label), SETTINGS, ACL, N SUBSCRIBER edges, and N child POINTs forming the tree.
+  PT["POINT 0x07 (PL=1)  ⟨0⟩  — the vertex"]:::vertex
+  NM["NAME 0x02  — leaf segment (REQUIRED, first child)"]:::record
+  VL["VALUE 0x01  — own value (optional; hot ⇒ overlay slot)"]:::record
+  DS["DESCRIPTION 0x03  — human label (optional)"]:::record
+  ST["SETTINGS 0x0B  — :settings (QoS + app.*)"]:::record
+  AC["ACL 0x0A  — :acl (ACE collection)"]:::record
+  SB["SUBSCRIBER 0x04 ×N  — :subscribers[] (edges)"]:::record
+  CH["POINT 0x07 ×N  — child vertices (the / tree)"]:::vertex
   PT-->NM-->VL-->DS-->ST-->AC-->SB-->CH
-  classDef node fill:#fef3c7,stroke:#92400e,color:#3a2606
-  classDef ident fill:#dcfce7,stroke:#166534,color:#0b3d1e
-  classDef data fill:#fce7f3,stroke:#9f1239,color:#500724
-  classDef ctrl fill:#dbeafe,stroke:#1e40af,color:#0b2a6b
 ```
+
+Legend: green = a vertex (POINT), sky blue = a record inside it.
 
 | Child TLV | `:` / `/` | Carries | Notes |
 | --- | --- | --- | --- |
@@ -171,23 +168,23 @@ The three planes the reader composes into "one virtual continuous rope of views"
 
 ```mermaid
 flowchart TB
+    accTitle: Meaning fold, storage fold and the hot overlay
+    accDescr: The meaning fold is the L3 TLV nesting: root POINT, hw, bme680, air_temp, with a cold VALUE placeholder under air_temp. The storage fold is an L1 rope of views across segments A (hw and bme680 headers), B (air_temp and NAME) and C (SETTINGS), decoupled from the nesting. The hot overlay is not folded: the air_temp value slot, an atomic shared_ptr rope, and the listener count, write sequence and return route. Iterating air_temp overlays the live value from the slot.
   subgraph MEAN["⟨M⟩ Meaning-fold — L3 TLV nesting (opt.PL)"]
-    R["root POINT ⟨0⟩"]:::node --> HW["POINT hw ⟨1⟩"]:::node --> DEV["POINT bme680 ⟨2⟩"]:::node --> LEAF["POINT air_temp ⟨3⟩"]:::node
-    LEAF --> VN["VALUE (placeholder / cold)"]:::data
+    R["root POINT ⟨0⟩"]:::vertex --> HW["POINT hw ⟨1⟩"]:::vertex --> DEV["POINT bme680 ⟨2⟩"]:::vertex --> LEAF["POINT air_temp ⟨3⟩"]:::vertex
+    LEAF --> VN["VALUE (placeholder / cold)"]:::record
   end
   subgraph STORE["⟨S⟩ Storage-fold — L1 rope of views (decoupled)"]
-    SEGA["segment A: hw+bme680 headers"]:::node -.view.-> SEGB["segment B: air_temp+NAME"]:::node -.view.-> SEGC["segment C: SETTINGS"]:::ctrl
+    SEGA["segment A: hw+bme680 headers"]:::vertex -.view.-> SEGB["segment B: air_temp+NAME"]:::vertex -.view.-> SEGC["segment C: SETTINGS"]:::record
   end
   subgraph OVER["⟨O⟩ Hot overlay — NOT folded (decision b)"]
-    SLOT["air_temp value-slot<br/>atomic shared_ptr rope"]:::hot
-    BK["listener-count · write-seq · return-route"]:::hot
+    SLOT["air_temp value-slot<br/>atomic shared_ptr rope"]:::ring
+    BK["listener-count · write-seq · return-route"]:::ring
   end
   LEAF -. "iterator overlays live value" .-> SLOT
-  classDef node fill:#fef3c7,stroke:#92400e,color:#3a2606
-  classDef data fill:#fce7f3,stroke:#9f1239,color:#500724
-  classDef ctrl fill:#dbeafe,stroke:#1e40af,color:#0b2a6b
-  classDef hot fill:#ffedd5,stroke:#9a3412,color:#431407
 ```
+
+Legend: green = a vertex (POINT), sky blue = a record, orange = runtime state that is not folded.
 
 - **Meaning-fold ⟨M⟩** is the POINT tree — the vertex hierarchy *is* the `PL=1` nesting. Depth = path depth.
 - **Storage-fold ⟨S⟩** is the rope — where bytes physically live. A cold subtree can be one contiguous segment; an assembled/edited subtree scatters across segments. Independent of ⟨M⟩.

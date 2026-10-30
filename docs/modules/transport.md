@@ -277,6 +277,8 @@ model](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0038-net-pla
 
 ```{mermaid}
 flowchart LR
+    accTitle: The forward fast path
+    accDescr: Inbound frame bytes get an offset peek at the first dst NAME, and child_registry_t maps the NAME to a transport. Stack-built heads plus the untouched frame views go out as one send(iov), one syscall.
     IN["inbound frame bytes"] --> PEEK["offset peek:<br/>first dst NAME"]
     PEEK --> DEMUX["child_registry_t<br/>NAME → transport"]
     DEMUX --> SG["stack-built heads<br/>+ untouched frame views"]
@@ -286,17 +288,19 @@ flowchart LR
 ## Two nodes over a wire
 
 ```{mermaid}
+:caption: "Legend: vermillion = a link endpoint, orange = an inbox queue."
 flowchart LR
+    accTitle: A request and its reply between two nodes
+    accDescr: fwd_router A sends through endpoint a, which enqueues into inbox B. Its receive thread hands it to endpoint b and on to fwd_router B. The FWD REPLY goes back the same way: endpoint b enqueues into inbox A, whose receive thread hands it through endpoint a to fwd_router A.
     FA["fwd_router A"] -->|send| EA["endpoint a"]
-    EA -->|enqueue| QB[("inbox B")]
+    EA -->|enqueue| QB[("inbox B")]:::ring
     QB -->|recv thread| EB["endpoint b"]
     EB -->|receiver| FB["fwd_router B"]
     FB -->|FWD REPLY send| EB2["endpoint b"]
-    EB2 -->|enqueue| QA[("inbox A")]
+    EB2 -->|enqueue| QA[("inbox A")]:::ring
     QA -->|recv thread| EA2["endpoint a"]
     EA2 -->|receiver| FA
-    classDef m fill:#fef9c3,stroke:#92400e
-    class EA,EB,EA2,EB2 m
+    class EA,EB,EA2,EB2 peer
 ```
 
 ## Consequences

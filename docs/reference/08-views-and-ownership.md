@@ -195,6 +195,8 @@ The lifetime drawing for a single segment under fan-out:
 
 ```mermaid
 sequenceDiagram
+    accTitle: A received segment refcount through dispatch
+    accDescr: Transport RX creates a segment with refcount 1, held by the backend receive buffer. The view is handed to the dispatcher (2) and RX releases its hold (1). The dispatcher clones it for two subscribers (2, then 3), delivers both views and releases its own hold (2). Each subscriber drops its view (1, then 0), and the view layer calls the backend destroy, which reclaims the bytes: a heap free, a pool return or a DMA half marked reusable.
     autonumber
     participant TX as Transport RX
     participant V as View layer

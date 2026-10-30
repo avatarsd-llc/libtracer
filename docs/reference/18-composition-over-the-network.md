@@ -77,6 +77,8 @@ own tree is unchanged by being mounted somewhere else.
 
 ```{mermaid}
 flowchart LR
+    accTitle: Three node trees composed by mounts
+    accDescr: Node A, a web UI, has /net/ws-client/board-01 as a connection vertex beside /view/live. Node B, board-01, has /can/can0 as a connection vertex beside /state/mode. Node C is a 1-Wire probe on the bus with /ow/t-probe. The board-01 vertex of A mounts the tree of B, and the can0 vertex of B mounts the tree of C.
     subgraph A["node A — a web UI"]
         A0["/"] --> A1["net"]
         A1 --> A2["ws-client"]

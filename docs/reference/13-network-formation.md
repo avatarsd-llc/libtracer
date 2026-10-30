@@ -50,6 +50,8 @@ A **peer** is anything that speaks the wire format: an MCU, a host process, a co
 
 ```{mermaid}
 sequenceDiagram
+    accTitle: An orchestrator wiring a subscription between two devices
+    accDescr: Peers are discovered by mDNS or static config, and the owner delegates admin to the orchestrator. The orchestrator writes a connection SPEC on consumer B, which dials producer A over QUIC. It then adds a SUBSCRIBER with target /B/in to /A/sensor:subscribers[]. A authorizes the subscriber at its fan-out gate and delivers by ordinary writes to /B/in, which B authorizes at its fan-in gate. The orchestrator disconnects, and the A to B link persists.
     participant O as Orchestrator (web UI, temp admin)
     participant B as Consumer device B
     participant A as Producer device A

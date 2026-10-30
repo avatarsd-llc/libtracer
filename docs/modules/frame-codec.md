@@ -33,6 +33,8 @@ vocabulary (`core/include/libtracer/frame.hpp:Decode failures reuse`).
 
 ```{mermaid}
 flowchart TD
+    accTitle: Decoding one TLV region
+    accDescr: Read a header (type, opt, length) and check its bounds and reserved bits. A failure returns err_t. A structured TLV (opt.PL = 1) pushes its children region onto the open-node stack. An opaque one makes its payload a span into the input. Both verify the trailer CRC, then loop while the region has bytes, and end as a borrowed tlv_node_t with nothing built.
     H["read header:<br/>type · opt · length"] --> V{"bounds ok?<br/>reserved bits zero?"}
     V -->|no| E["err_t"]
     V -->|yes| P{"opt.PL?"}

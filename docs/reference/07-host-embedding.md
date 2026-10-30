@@ -184,6 +184,8 @@ The full path of one remote delivery. **Every dispatch step uses pre-encoded PAT
 
 ```mermaid
 sequenceDiagram
+    accTitle: A write from an STM32 app over CAN to a local subscriber
+    accDescr: The STM32 app holds the path handle h_wheel, a .rodata PATH TLV for /wheel/left, and writes a VALUE. A remote subscriber is bound, so producer fan-out emits FWD WRITE to its return route, stored once at subscribe and refcount-cloned per delivery. The framed bytes cross the CAN bus to the forwarder, where dst names a local vertex: it decodes and resolves on the canonical PATH body with no key materialization, writes the target vertex, and the vertex delivers to its local subscriber, which matches on its own .rodata handle by byte equality.
     autonumber
     participant App as App on STM32
     participant TxA as producer fan-out (egress)

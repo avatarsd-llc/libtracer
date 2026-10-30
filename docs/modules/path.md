@@ -51,13 +51,15 @@ and a step's `name` views that block. The root path with no field tail draws not
 ## String → bytes, once
 
 ```{mermaid}
+:caption: "Legend: green = the vertex map."
 flowchart LR
+    accTitle: Parsing a path string once
+    accDescr: path_t::parse turns /sensor/temp:settings.app.setpoint into key bytes (length-prefixed segments sensor and temp) and a field path settings, app, setpoint. The key bytes look up the byte-keyed vertex map.
     S["/sensor/temp:settings.app.setpoint"] --> P[path_t::parse]
     P --> K["key bytes<br/>06 &quot;sensor&quot; · 04 &quot;temp&quot;"]
     P --> F["field<br/>settings → app → setpoint"]
     K --> M{{"vertex map<br/>(byte-keyed)"}}
-    classDef e fill:#dbeafe,stroke:#1e40af
-    class M e
+    class M vertex
 ```
 
 ## Consequences
