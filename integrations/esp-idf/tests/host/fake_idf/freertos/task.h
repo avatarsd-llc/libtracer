@@ -70,3 +70,44 @@ inline UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t /*task*/) {
 
 /** @brief Block the caller for @p ticks_to_delay scheduler ticks. */
 void vTaskDelay(TickType_t ticks_to_delay);
+
+// --- Static task creation (#2416) --------------------------------------------------
+// The FreeRTOS facilities `tr::static_thread_t`'s ESP-IDF branch (core/src/static_thread.cpp)
+// rests on, declared here and defined by the one suite that compiles that branch
+// (static_thread_freertos_test.cpp). Only the STATIC creator is declared: a TU that reached
+// for a heap-allocating one (`xTaskCreate`, `xTaskCreatePinnedToCore`) would not compile
+// against this fake.
+
+/** @brief One stack word, as the port defines it (IDF's RISC-V and Xtensa ports: a byte). */
+typedef uint8_t StackType_t;
+
+/** @brief Storage for a task's control block; its contents are the fake's business. */
+typedef struct {
+    void* opaque[8];
+} StaticTask_t;
+
+/** @brief Task states, as `eTaskGetState` reports them. */
+typedef enum { eRunning = 0, eReady, eBlocked, eSuspended, eDeleted, eInvalid } eTaskState;
+
+/** @brief Pin to no core. */
+#ifndef tskNO_AFFINITY
+#define tskNO_AFFINITY ((BaseType_t)0x7FFFFFFF)
+#endif
+
+/** @brief Task entry, as FreeRTOS spells it. */
+typedef void (*TaskFunction_t)(void*);
+
+/** @brief Create a task on caller-provided storage: @p stack (@p depth bytes, IDF's unit)
+ *         and @p tcb. Returns its handle, or null when the fake is told to refuse. */
+TaskHandle_t xTaskCreateStaticPinnedToCore(TaskFunction_t fn, const char* name, uint32_t depth,
+                                           void* arg, UBaseType_t priority, StackType_t* stack,
+                                           StaticTask_t* tcb, BaseType_t core);
+
+/** @brief Suspend @p task; null is the calling task. */
+void vTaskSuspend(TaskHandle_t task);
+
+/** @brief Delete @p task. */
+void vTaskDelete(TaskHandle_t task);
+
+/** @brief @p task's state. */
+eTaskState eTaskGetState(TaskHandle_t task);

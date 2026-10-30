@@ -3,22 +3,25 @@
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 """Unit tests for the MCU no-heap link check (`tools/check_no_heap.py`, #1783).
 
-The check reads ``objdump -r -t`` output, so these drive its parser and its ratchet with that
+The check reads ``objdump -r -t`` output, so these drive its parser and its gate with that
 output's shape, built by a small helper, without a cross toolchain:
 
 * every heap entry point is recognised, in every C++ variant, and nothing else is;
 * a function reaches the heap by naming an entry point or by calling, within the archive, a
   function that does, to a fixpoint and across members; debug and unwind relocations and data
   sections that merely point at such a function are not calls;
-* the ratchet fails on a new function that names the heap, a new function that only calls an
-  already-pinned allocating helper (``push_back`` into ``_M_realloc_insert``), the same from
-  another object, and a second call at a pinned site; a site that shrank is GONE, and
-  ``lower`` never raises a pin.
+* the gate is zero (#2288): an archive with no heap reference passes, any reference fails and
+  is named by object, function and entry point, and there is no baseline file or flag that
+  could absorb one.
 
 Run with ``python3 -m unittest discover -s tools/tests`` (no third-party deps).
 """
+import contextlib
+import io
 import os
+import pathlib
 import sys
+import tempfile
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -132,148 +135,62 @@ class ClosureTest(unittest.TestCase):
                          {"via _ZN2tr5graph7graph_t9subscribeEv": 1})
 
 
-class RatchetTest(unittest.TestCase):
-    def setUp(self):
-        self.pins = cnh.parse_relocs(BASE)
-
-    def test_pinned_passes(self):
-        self.assertEqual(cnh.compare(cnh.parse_relocs(BASE), self.pins), ({}, {}))
-
-    def test_planted_new_in_a_pinned_object_fails(self):
-        new, gone = cnh.compare(cnh.parse_relocs(
-            with_fn("graph.cpp.obj", "_Z14tr_planted_newv", ["_Znwj"])), self.pins)
-        self.assertEqual(new, {("graph.cpp.obj", "_Z14tr_planted_newv", "operator new"): (0, 1)})
-        self.assertEqual(gone, {})
-
-    def test_new_call_into_a_pinned_helper_fails(self):
-        # The re-review's attack: a new function whose only call is push_back, i.e. the
-        # already-pinned emplace_back -> _M_realloc_insert. It names no heap entry point.
-        new, gone = cnh.compare(cnh.parse_relocs(
-            with_fn("path.cpp.obj", "_Z12planted_pushv", [EMPLACE])), self.pins)
-        self.assertEqual(new, {("path.cpp.obj", "_Z12planted_pushv", "via " + EMPLACE): (0, 1)})
-        self.assertEqual(gone, {})
-
-    def test_call_into_a_pinned_helper_from_another_object_fails(self):
-        new, _ = cnh.compare(cnh.parse_relocs(
-            with_fn("twai_link.cpp.obj", "_Z12planted_pushv", [EMPLACE])), self.pins)
-        self.assertEqual(new, {("twai_link.cpp.obj", "_Z12planted_pushv", "via " + EMPLACE):
-                               (0, 1)})
-
-    def test_call_to_a_clean_function_passes(self):
-        new, gone = cnh.compare(cnh.parse_relocs(
-            with_fn("graph.cpp.obj", "_Z5cleanv", ["_ZN2tr5graph6helperEv", "memcpy"])),
-            self.pins)
-        self.assertEqual((new, gone), ({}, {}))
-
-    def test_second_call_in_a_pinned_function_fails(self):
-        text = BASE.replace(f"00000000 R_RISCV_CALL_PLT  {EMPLACE}\n",
-                            f"00000000 R_RISCV_CALL_PLT  {EMPLACE}\n"
-                            f"00000040 R_RISCV_CALL_PLT  {EMPLACE}\n", 1)
-        new, gone = cnh.compare(cnh.parse_relocs(text), self.pins)
-        self.assertEqual(new, {("path.cpp.obj", "_ZN2tr5graph6path_t5parseEv",
-                                "via " + EMPLACE): (1, 2)})
-        self.assertEqual(gone, {})
-
-    def test_removed_reference_must_be_unpinned(self):
-        pins = cnh.parse_relocs(with_fn("path.cpp.obj", "_Z12planted_pushv", [EMPLACE]))
-        new, gone = cnh.compare(cnh.parse_relocs(BASE), pins)
-        self.assertEqual(new, {})
-        self.assertEqual(gone, {("path.cpp.obj", "_Z12planted_pushv", "via " + EMPLACE): (1, 0)})
-
-    def test_repin_only_lowers(self):
-        pins = cnh.parse_relocs(with_fn("path.cpp.obj", "_Z12planted_pushv", [EMPLACE]))
-        found = cnh.parse_relocs(with_fn("graph.cpp.obj", "_Z14tr_planted_newv", ["_Znwj"]))
-        self.assertEqual(cnh.lower(pins, found), self.pins,
-                         "the dropped site goes, the new one is not added")
-
-    def test_strict_has_no_pins(self):
-        new, _ = cnh.compare(cnh.parse_relocs(BASE), {})
-        self.assertEqual(len(new), 9)
+CLEAN = archive(member("graph.cpp.obj", {"_ZN2tr5graph6helperEv": ("g", ["memcpy"])}, DEBUG),
+                member("path.cpp.obj", {"_ZN2tr5graph6path_t4sizeEv": ("g", [])}))
 
 
-class RebaselineTest(unittest.TestCase):
-    SUB = "_ZN2tr5graph7graph_t9subscribeEv"
-    SUB2 = "_ZN2tr5graph7graph_t9subscribeEi"
-    D0 = "_ZN2tr5graph8vertex_tD0Ev"
-    D0I = "_ZN2tr5graph8vertex_tD0Ei"
+class GateTest(unittest.TestCase):
+    """The gate is zero: any reference fails, and there is no baseline to absorb one (#2288)."""
 
-    def setUp(self):
-        self.pins = cnh.parse_relocs(BASE)
+    def run_main(self, text):
+        with tempfile.TemporaryDirectory() as d:
+            dump = pathlib.Path(d) / "objdump.txt"
+            dump.write_text(text)
+            tool = pathlib.Path(d) / "objdump"
+            tool.write_text(f"#!/bin/sh\ncat '{dump}'\n")
+            tool.chmod(0o755)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cnh.main(["--target", "esp32c6", "--archive", "libtracer.a",
+                                 "--objdump", str(tool)])
+        return code, out.getvalue()
 
-    def build(self, graph=None, path=None, twai=None):
-        return archive(member("graph.cpp.obj", graph or GRAPH, DEBUG),
-                       member("path.cpp.obj", path or PATH),
-                       member("twai_link.cpp.obj", twai or TWAI))
+    def test_an_archive_with_no_heap_reference_passes(self):
+        code, out = self.run_main(CLEAN)
+        self.assertEqual(code, 0, out)
+        self.assertIn("0 heap reference(s)", out)
 
-    def run_rb(self, text):
-        found = cnh.parse_relocs(text)
-        names = cnh.demangle(sorted({k for t in (found, self.pins)
-                                     for o in t.values() for k in o}))
-        return cnh.rebaseline(self.pins, found, names)
+    def test_any_reference_fails_and_names_each_function_and_entry_point(self):
+        code, out = self.run_main(BASE)
+        self.assertEqual(code, 1)
+        errors = [ln for ln in out.splitlines() if ln.startswith("::error::")]
+        self.assertEqual(len(errors), 9, out)  # one per (function, entry point)
+        self.assertTrue(any("twai_link.cpp.obj" in e and "heap_caps_malloc" in e for e in errors))
+        self.assertTrue(any(("path_t5parse" in e or "path_t::parse" in e) and "reaches the heap" in e for e in errors))
 
-    def renamed_graph(self, **over):
-        g = {}
-        for k, v in GRAPH.items():
-            g[{self.SUB: self.SUB2}.get(k, k)] = v
-        g.update(over)
-        return g
+    def test_one_planted_new_fails_a_clean_archive(self):
+        planted = CLEAN.replace("RELOCATION RECORDS FOR [.text._ZN2tr5graph6helperEv]:\n"
+                                "OFFSET   TYPE              VALUE\n",
+                                "RELOCATION RECORDS FOR [.text._ZN2tr5graph6helperEv]:\n"
+                                "OFFSET   TYPE              VALUE\n"
+                                "00000040 R_RISCV_CALL_PLT  _Znwj\n", 1)
+        code, out = self.run_main(planted)
+        self.assertEqual(code, 1)
+        self.assertIn("operator new", out)
 
-    def test_pure_rename_reseeds_cleanly(self):
-        problems, moves = self.run_rb(self.build(self.renamed_graph()))
-        self.assertEqual(problems, [])
-        self.assertEqual(moves, [("graph.cpp.obj", self.SUB, self.SUB2)])
+    def test_there_is_no_baseline_to_absorb_a_reference(self):
+        self.assertFalse((pathlib.Path(REPO) / "tools" / "no_heap_baseline.json").exists())
+        for flag in ("--baseline", "--repin", "--rebaseline", "--seed", "--strict"):
+            with self.assertRaises(SystemExit, msg=flag), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                cnh.main(["--target", "x", "--archive", "a", flag, "y"])
 
-    def test_callers_via_keys_follow_a_renamed_callee(self):
-        realloc2 = REALLOC[:-2] + "Ei"
-        path = {(realloc2 if k == REALLOC else k): ("w", v[1]) if k == REALLOC else v
-                for k, v in PATH.items()}
-        path[EMPLACE] = ("w", [realloc2])
-        problems, moves = self.run_rb(self.build(path=path))
-        self.assertEqual(problems, [])
-        self.assertEqual(moves, [("path.cpp.obj", REALLOC, realloc2)])
-
-    def test_rename_that_adds_a_heap_call_is_refused(self):
-        g = self.renamed_graph()
-        g[self.SUB2] = ("g", ["_Znwj", "_Znwj", "_ZdlPvj"])
-        self.assertTrue(self.run_rb(self.build(g))[0])
-
-    def test_shrink_plus_new_function_with_the_same_reach_is_refused(self):
-        g = dict(GRAPH)
-        del g[self.D0]
-        twai = dict(TWAI)
-        twai["_Z9brand_newv"] = ("g", ["_ZdlPvj"])
-        problems, _ = self.run_rb(self.build(g, twai=twai))
-        self.assertTrue(any("brand_new" in x for x in problems), problems)
-
-    def test_new_function_next_to_a_rename_is_refused(self):
-        g = self.renamed_graph()
-        g["_ZN2tr5graph4evilEv"] = ("g", ["_Znwj"])
-        problems, _ = self.run_rb(self.build(g))
-        self.assertTrue(any("evil" in x for x in problems), problems)
-
-    def test_direct_calls_moved_into_another_object_are_refused(self):
-        g = dict(GRAPH)
-        del g[self.D0]
-        twai = dict(TWAI)
-        twai[self.D0] = ("g", ["_ZdlPvj"])
-        self.assertTrue(self.run_rb(self.build(g, twai=twai))[0])
-
-    def test_direct_growth_in_a_renamed_function_is_refused(self):
-        g = self.renamed_graph()
-        g[self.SUB2] = ("g", ["_Znwj", "_ZdlPvj", "_ZdlPvj"])
-        problems, _ = self.run_rb(self.build(g))
-        self.assertTrue(problems)
-
-    def test_swapped_reach_between_renamed_pairs_is_refused(self):
-        g = {k: v for k, v in GRAPH.items() if k not in (self.SUB, self.D0)}
-        g[self.SUB2] = GRAPH[self.D0]
-        g[self.D0I] = GRAPH[self.SUB]
-        self.assertTrue(self.run_rb(self.build(g))[0])
-
-    def test_plain_deletion_is_left_to_repin(self):
-        g = dict(GRAPH)
-        del g[self.D0]
-        self.assertTrue(self.run_rb(self.build(g))[0])
+    def test_the_ci_gates_run_without_a_baseline(self):
+        for wf in ("esp-idf.yml", "footprint-cortexm0.yml"):
+            text = (pathlib.Path(REPO) / ".github" / "workflows" / wf).read_text()
+            self.assertIn("check_no_heap.py", text, wf)
+            self.assertNotIn("no_heap_baseline", text, wf)
+            self.assertNotIn("--repin", text, wf)
 
 
 if __name__ == "__main__":
