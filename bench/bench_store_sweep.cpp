@@ -300,7 +300,9 @@ std::atomic<std::uint64_t> g_sink{0};
  *     edit would undo without any other symptom.
  *  2. **Per-lane seam reachability, NARROW.** Same test on the per-child rx and per-link egress
  *     stores, which are a different wiring path (`add_child`'s `rx` argument and
- *     `transport_t::set_egress_source`) and can break independently.
+ *     `transport_t::set_egress_source`) and can break independently. The rx half drives
+ *     `step_net_overflow`, a frame too wide for the forward hop's stack gather table: since
+ *     #2329 that overflow is the only per-frame draw on the per-child rx store.
  *  3. **The null arm.** Two occupancy snapshots with nothing between them must differ by
  *     exactly 0 — `bench_conn_ram.cpp`'s rule. A non-zero reading means the instrument is
  *     itself drawing inside the window and every memory figure is off by that.
@@ -341,6 +343,10 @@ std::atomic<std::uint64_t> g_sink{0};
         node_t n(arm_t::NARROW, /*lanes=*/2, /*count_channels=*/true);
         n.step_full(n.lane(0));
         n.step_full(n.lane(1));
+        // A per-frame `rx` draw happens only when the forward gather overflows its stack table
+        // (#2329), so the per-child check drives one frame per lane that must overflow it.
+        n.step_net_overflow(n.lane(0));
+        n.step_net_overflow(n.lane(1));
         const bench_store::stores_t& st = n.stores();
         std::size_t rx_blocks = 0;
         std::size_t tx_blocks = 0;
