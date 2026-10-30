@@ -43,9 +43,23 @@ Each page does one job. When a draft is doing two, split it into two pages.
 | evidence | generated performance and test reports | never hand-edited |
 
 The sidebar runs by reader intent: Start here (with an MCU lane), Learn, Concepts,
-Recipes, Reference, Specification, Decisions, Evidence. Set the order through toctree
-order and never rename a file. A new section (Concepts, Start here) goes into
-`include_patterns` in `docs/conf.py` in the same PR as its first page.
+Recipes, Reference, Specification, Decisions, Evidence. Each is one toctree in
+`index.md`, whose `:caption:` is the section name; the lint's `sidebar-order` rule holds
+the captions to exactly that list and order. Place a page by moving its toctree entry,
+never by renaming or moving its file, so every old link still resolves. A new section
+(Concepts, Start here) goes into `include_patterns` in `docs/conf.py` in the same PR as
+its first page.
+
+| Section | Holds |
+| --- | --- |
+| Start here | the route by intent and the MCU lane |
+| Learn | tutorials: getting started |
+| Concepts | concept pages |
+| Recipes | how-tos: the compiled examples, building a custom device, a production ESP32 node |
+| Reference | the numbered reference suite, the C++ API, interoperability, the capability matrix, the implementation registry, the glossary, design notes |
+| Specification | v1 and its annexes |
+| Decisions | the ADR and RFC index |
+| Evidence | the generated performance and test reports |
 
 Extending an existing page beats adding a new one. A concept page links into reference
 sections and does not absorb them. It may replace the *explanation* on a non-normative
@@ -120,6 +134,47 @@ recorded here.
   directory under `tests/conformance/vectors/v1/`) or the test (by file stem) that
   proves the claim, and each one must exist. This is rule `exercised-by`.
 
+## Reference pages: the header block
+
+A page under `docs/reference/` opens with one header block: a blockquote right under
+the title (and under the annex banner, on an annex), one field per line, in this order.
+
+```md
+# Reference 07 — Host embedding
+
+> **Status**: descriptive. It explains v1 and the reference implementation; v1 wins.
+> **Audience**: anyone designing a multi-host deployment.
+> **Prerequisites**: [Reference 04](04-communication-flows.md), multi-hop FWD.
+> **See also**: [Reference 10](10-module-catalog.md) for the forwarder modules.
+```
+
+- `**Status**` (required): `normative, v1` for an annex, with the part v1 §3 incorporates,
+  or `descriptive` for every other page. It never restates what the page says.
+- `**Audience**` (required): who the page is for, in one line.
+- `**Prerequisites**` and `**See also**`: links, only when they help.
+- `**Numbering**`: only on a page whose bare `§` signs need explaining.
+
+Other fields (Topic, Scope, Genre, Reading time) fold into these four. A reference page
+keeps its number and file name; the style pass (#2373) applies the block page by page.
+
+## History: one dropdown at the end
+
+A non-normative page (a concept, reference or how-to page) that carries history puts it
+last, under `## History`, folded in one dropdown, so the current text reads cleanly. RFCs
+and ADRs are named there and only there; the body links the rule, not its record.
+
+```md
+## History
+
+:::{dropdown} How batching got here
+- [RFC-0025](../spec/rfcs/0025-stream-class-values.md) Amendment 3 (2026-08-21) made a
+  batch the wire form of the flush.
+:::
+```
+
+One dated line per change, oldest first, each naming its RFC, ADR or issue. The spec and
+its annexes take no History section: their record is the RFC index under Decisions.
+
 ## Diagrams: one visual vocabulary
 
 Shape carries the meaning and colour only reinforces it, so a diagram still reads in
@@ -169,6 +224,8 @@ greyscale.
 
 ## Mechanics the lint checks
 
+- The sidebar sections in `index.md` are exactly the reader-intent list, in order
+  (`sidebar-order`).
 - Prose lines are at most 100 characters. Link targets are not counted, and table rows,
   code and HTML are exempt (`line-length`).
 - Link our own published pages relatively, never as `libtracer.avatarsd.com`, the

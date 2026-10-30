@@ -94,13 +94,24 @@ other document disagree, the spec wins.
 
 ::::
 
+<!-- The sidebar runs by reader intent (#2374, #2381). Its sections and their order are
+     checked by the docs style lint's `sidebar-order` rule; move an entry, never a file. -->
+
 ```{toctree}
-:caption: Getting started
+:caption: Start here
+:hidden:
+:maxdepth: 1
+
+Route by intent <docs/start-here>
+On an MCU <docs/start-here-mcu>
+```
+
+```{toctree}
+:caption: Learn
 :hidden:
 :maxdepth: 2
 
 Getting started <docs/getting-started>
-Examples <docs/examples/index>
 ```
 
 ```{toctree}
@@ -113,19 +124,13 @@ Transports <docs/concepts/transports>
 ```
 
 ```{toctree}
-:caption: Specification
+:caption: Recipes
 :hidden:
 :maxdepth: 2
 
-The specification <docs/spec/index>
-```
-
-```{toctree}
-:caption: RFCs and decisions
-:hidden:
-:maxdepth: 1
-
-ADR and RFC index <docs/adr-rfc-index>
+Examples <docs/examples/index>
+Build a custom device <docs/interop/custom-device>
+A production ESP32 node <docs/interop/esp32-production-node>
 ```
 
 ```{toctree}
@@ -134,27 +139,28 @@ ADR and RFC index <docs/adr-rfc-index>
 :maxdepth: 2
 
 Reference (descriptive) <docs/reference/README>
+C++ API reference <docs/modules/index>
+Interoperability <docs/interoperability>
+Capability matrix <docs/capability-matrix>
+Implementation registry <docs/implementations>
+Context glossary <CONTEXT>
 Design notes <docs/design/README>
 ```
 
 ```{toctree}
-:caption: C++ API reference
+:caption: Specification
 :hidden:
 :maxdepth: 2
 
-C++ API reference <docs/modules/index>
+The specification <docs/spec/index>
 ```
 
 ```{toctree}
-:caption: Interoperate
+:caption: Decisions
 :hidden:
-:maxdepth: 2
+:maxdepth: 1
 
-Interoperability <docs/interoperability>
-Build a custom device <docs/interop/custom-device>
-A production ESP32 node <docs/interop/esp32-production-node>
-Capability matrix <docs/capability-matrix>
-Implementation registry <docs/implementations>
+ADR and RFC index <docs/adr-rfc-index>
 ```
 
 ```{toctree}
@@ -164,21 +170,4 @@ Implementation registry <docs/implementations>
 
 Performance & conformance <docs/performance>
 Test report <docs/test-report>
-```
-
-```{toctree}
-:caption: Glossary
-:hidden:
-:maxdepth: 1
-
-Context glossary <CONTEXT>
-```
-
-```{toctree}
-:caption: Start here
-:hidden:
-:maxdepth: 1
-
-Route by intent <docs/start-here>
-On an MCU <docs/start-here-mcu>
 ```

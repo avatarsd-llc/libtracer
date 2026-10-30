@@ -25,6 +25,9 @@ The spec itself is never linted: v1, the annexes v1 §3 incorporates (read from 
 the only list of them), and the RFCs under `docs/spec/rfcs/`, which are records. Format
 work leaves those pages alone; they change by erratum or amendment.
 - `avoid-phrase`: a phrase from `CONTEXT-AVOID.md`, the short list beside the glossary.
+- `sidebar-order`: `index.md`'s toctree captions, which are the sidebar's sections, must be
+  exactly the reader-intent order (#2381): Start here, Learn, Concepts, Recipes, Reference,
+  Specification, Decisions, Evidence. Order is set here, never by renaming a file.
 - `annex-banner`: an annex v1 §3 lists that does not open with the one-line annex banner
   under its title, or any other page that carries it (#2385). This is the one rule that
   reads an annex, and the unit tests hold the real tree to zero hits of it.
@@ -62,6 +65,10 @@ V1 = "docs/spec/v1.md"
 # carries (#2385, ruling 5). A page whose annex scope is narrower says so after it.
 BANNER = "> **Normative annex of [Tracer v1](../spec/v1.md#3-wire-format), per v1 §3.**"
 MAX_LINE = 100
+#: The sidebar's sections, in reader-intent order (#2374, #2381).
+SIDEBAR = ("Start here", "Learn", "Concepts", "Recipes", "Reference", "Specification",
+           "Decisions", "Evidence")
+CAPTION = re.compile(r"^:caption:\s*(.+?)\s*$")
 
 # Generated pages: the generators own their text, and the committed copies are snapshots.
 GENERATED = {"docs/performance.md", "docs/test-report.md"}
@@ -137,6 +144,11 @@ def lint_page(rel: str, text: str, ctx: Context) -> list[Hit]:
     if rel == V1 or rel.startswith("docs/spec/rfcs/"):
         return []  # hands off: the spec is changed by erratum or amendment, never by format work
     hits: list[Hit] = []
+    if rel == "index.md":
+        captions = [(n, m.group(1)) for n, ln in enumerate(lines, 1) if (m := CAPTION.match(ln))]
+        if tuple(c for _, c in captions) != SIDEBAR:
+            hits.append(Hit(rel, captions[0][0] if captions else 1, "sidebar-order",
+                            f"sidebar sections {[c for _, c in captions]} are not {list(SIDEBAR)}"))
     concept = rel.startswith("docs/concepts/") and rel != "docs/concepts/index.md"  # navigation
     headings: list[tuple[int, str]] = []
     cost_parts: list[str] = []
