@@ -143,7 +143,7 @@ and [subtree delivery](../../reference/05-protocol-tlvs.md#subtree-subscription-
 **Exercised by:** `fwd-write-subscriber-field`, `policy-durability`, `policy-absent`,
 `no-target`, `subscribe_toward_test`, `subscription_selector_test`.
 
-Next concept: [Batching](../batching.md). Go deeper:
+Next concept: [Memory](../memory.md). Go deeper:
 [reference 04 §Subscribe via field-write](../../reference/04-communication-flows.md#subscribe-via-field-write),
 then the [graph module](../../modules/graph.md), then
 [reference 05 §0x04 SUBSCRIBER](../../reference/05-protocol-tlvs.md#0x04--subscriber).
