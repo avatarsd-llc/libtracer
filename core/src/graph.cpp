@@ -1723,8 +1723,7 @@ bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
     const app_fields_decl_t& fields = *policy.app_fields;
     if (fields.failed()) return false;  // its owning copy was refused at construction (#2288)
     const std::span<const app_field_slot_t> have = vx->app_field_slots();
-    const std::span<const app_field_slot_t> want =
-        fields.is_borrowed() ? fields.borrowed().slots() : std::span<const app_field_slot_t>{};
+    const std::span<const app_field_slot_t> want = fields.borrowed().slots();  // empty if owned
     const bool fields_move = !fields.owned().empty() || std::pair(have.data(), have.size()) !=
                                                             std::pair(want.data(), want.size());
     // Stage: a member that moves draws its blocks now. A ring or a field group already there
