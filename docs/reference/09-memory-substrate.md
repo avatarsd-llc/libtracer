@@ -111,6 +111,8 @@ Lifetime: continuous (data flows through, no stable identity per byte). Ownershi
 
 ```mermaid
 flowchart TB
+    accTitle: Memory backends grouped by who owns the bytes
+    accDescr: CPU-owned, free at will: mem_heap, mem_pool_static, mem_pool_class. Hardware-owned, with an external lifetime: mem_dma_buffer (cache hooks required), mem_mmio (a permanent segment), mem_uart_rx_dma and can_reassembly. Network-stack-owned: mem_lwip_pbuf and a future mem_skbuff. Shared or cross-process: mem_shared (single publisher by default), a future mem_iceoryx2 and an aspirational mem_rdma.
     subgraph CPU_OWNED["CPU-owned (free at will)"]
         A1[mem_heap]
         A2[mem_pool_static]
@@ -130,10 +132,6 @@ flowchart TB
         D2[mem_iceoryx2<br/><i>future, robust SHM</i>]
         D3[mem_rdma<br/><i>aspirational</i>]
     end
-    style CPU_OWNED fill:#dcfce7,stroke:#166534
-    style HW_OWNED fill:#fef3c7,stroke:#92400e
-    style STACK_OWNED fill:#dbeafe,stroke:#1e40af
-    style SHARED fill:#fce7f3,stroke:#9f1239
 ```
 
 All four families implement the same `tr::mem::mem_backend_t` interface ([§the backend abstraction](#the-backend-abstraction) below); the differences are in how they honor `destroy`, whether they need cache hooks, and what their per-segment lifetime story is.

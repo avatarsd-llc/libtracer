@@ -191,18 +191,19 @@ Signature source: `core/include/libtracer/fwd_router.hpp:fwd_router_t::fwd_route
 ## Routing one inbound frame
 
 ```{mermaid}
+:caption: "Legend: blue = the frame and its untouched views, vermillion = the link it leaves on."
 flowchart TB
-    IN["inbound frame on child NAME"] --> PEEK["offset peek: first dst segment"]
+    accTitle: Routing one inbound frame
+    accDescr: An inbound frame on child NAME gets an offset peek at its first dst segment, and child_registry_t finds the longest prefix. If it resolves to a link, the router strips the dst segment, prepends the inbound NAME to src and sends stack-built heads plus the untouched frame views to the transport as one iov. With no link and an op other than REPLY, the frame is arena-decoded, resolved against the graph, and answered with a FWD REPLY over the inbound link. With no link and a REPLY, it goes to the rope-native reply sink without flattening.
+    IN[/"inbound frame on child NAME"/]:::frame --> PEEK["offset peek: first dst segment"]
     PEEK --> DEMUX{"child_registry_t<br/>longest_prefix"}
     DEMUX -->|"resolves to a link"| FWD["strip dst segment<br/>prepend inbound NAME to src"]
-    FWD --> SG["stack-built heads<br/>+ untouched frame views"]
-    SG -->|"send(iov)"| OUT(["transport_t"])
+    FWD --> SG["stack-built heads<br/>+ untouched frame views"]:::frame
+    SG -->|"send(iov)"| OUT[["transport_t"]]:::peer
     DEMUX -->|"no link, op != REPLY"| TERM["arena decode<br/>(nothrow block source)"]
     TERM --> RES["op_resolver_t against graph_t"]
     RES --> RPL["FWD{REPLY} back over the inbound link"]
     DEMUX -->|"no link, op == REPLY"| SINK["reply sink<br/>rope-native, no flatten"]
-    classDef zc fill:#dcfce7,stroke:#166534
-    class SG,SINK zc
 ```
 
 ## Originating an operation

@@ -10,6 +10,9 @@ page, its line and its rule:
 - `alt-text`: a `{mermaid}` directive without `accTitle:` and `accDescr`, an image
   with empty alt text, or an `{image}`/`{figure}` without `:alt:`. Bare ```` ```mermaid ````
   fences are kept for GitHub and not linted (ruling 6).
+- `diagram-style`: a `style`, `classDef` or `linkStyle` line in a Mermaid diagram, bare
+  fence or directive. Colour comes from the vocabulary classes in
+  `docs/_static/diagram-vocabulary.css`, never from the page (#2373).
 - `concept-sections`: a page under `docs/concepts/` that lacks a required template
   heading, puts the template headings out of order, adds a heading of its own, or has a
   `## Cost` without a `### Latency`. `docs/concepts/index.md` is navigation, not a
@@ -37,8 +40,8 @@ reads the diagram directives themselves.
 
 The lint is REPORT-ONLY against a committed baseline (`tools/docs_style_baseline.json`,
 hits counted per page and rule): it prints every hit, marks the page/rule counts that
-exceed the baseline as NEW, and exits 0. `--gate` makes a NEW count fail (#2373 switches
-it on after the style pass); `--update-baseline` records today's hits.
+exceed the baseline as NEW, and exits 0. `--gate` makes a NEW count fail (#2382 switches
+it on in the docs workflow); `--update-baseline` records today's hits.
 
 Usage:  python3 tools/check_docs_style.py [--gate] [--baseline FILE] [--update-baseline]
 Unit tests in `tools/tests/test_check_docs_style.py`. Standard library only.
@@ -84,6 +87,7 @@ OWN_SITES = re.compile(r"https?://(?:libtracer\.avatarsd\.com|avatarsd-llc\.gith
 OWN_REPO_DOC = re.compile(r"https?://github\.com/avatarsd-llc/libtracer/(?:blob|tree)/[^/\s)]+/([^\s)#]+)")
 LINK = re.compile(r"\]\(([^)\s]*)\)")
 KEYWORD = re.compile(r"\b(?:MUST|SHALL|SHOULD|REQUIRED)\b")
+STYLED = re.compile(r"^\s*(style|classDef|linkStyle)\s")  # page-local styling in a diagram
 FENCE = re.compile(r"^\s*(`{3,}|~{3,}|:{3,})\s*(\{[\w-]+\})?\s*(\w+)?")
 
 
@@ -152,7 +156,7 @@ def lint_page(rel: str, text: str, ctx: Context) -> list[Hit]:
     concept = rel.startswith("docs/concepts/") and rel != "docs/concepts/index.md"  # navigation
     headings: list[tuple[int, str]] = []
     cost_parts: list[str] = []
-    fence = None  # (marker, directive, body lines, start)
+    fence = None  # (marker, directive, body lines, start, is a Mermaid diagram)
     for n, line in enumerate(lines, 1):
         hit = lambda rule, msg: hits.append(Hit(rel, n, rule, msg))  # noqa: E731
         m = FENCE.match(line)
@@ -162,12 +166,17 @@ def lint_page(rel: str, text: str, ctx: Context) -> list[Hit]:
                     hits.append(Hit(rel, fence[3], "alt-text", "mermaid diagram lacks accTitle: and accDescr"))
                 if fence[1] in ("{image}", "{figure}") and ":alt:" not in fence[2]:
                     hits.append(Hit(rel, fence[3], "alt-text", f"{fence[1]} lacks :alt:"))
+                if fence[4]:
+                    hits.extend(Hit(rel, fence[3] + k, "diagram-style",
+                                    "a diagram styles a node on the page; use a vocabulary class")
+                                for k, ln in enumerate(fence[2].splitlines(), 1) if STYLED.match(ln))
                 fence = None
             else:
-                fence = (fence[0], fence[1], fence[2] + line + "\n", fence[3])
+                fence = (fence[0], fence[1], fence[2] + line + "\n", fence[3], fence[4])
             continue
         if m:
-            fence = (m.group(1), m.group(2), "", n)
+            fence = (m.group(1), m.group(2), "", n,
+                     m.group(2) == "{mermaid}" or (m.group(2) is None and m.group(3) == "mermaid"))
             continue
         prose = _strip_code_spans(line)
         if BANNER in line:

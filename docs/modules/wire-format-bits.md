@@ -167,12 +167,14 @@ There is no separate "decode into a struct" step. The wire bytes, the in-memory
 value, and the graph node are one buffer.
 
 ```{mermaid}
+:caption: "Legend: blue = the one buffer of wire bytes."
 flowchart LR
-    B["bytes:<br/>06 00 0C 00 06 &quot;sensor&quot; …"]:::b
+    accTitle: One buffer, three roles
+    accDescr: The same bytes are the frame on the wire, a borrowed view in memory with no copy, and the vertex value or key in the graph.
+    B[/"bytes:<br/>06 00 0C 00 06 &quot;sensor&quot; …"/]:::frame
     B --> W["on the wire<br/>(a frame)"]
     B --> M["in memory<br/>(a borrowed view, no copy)"]
     B --> G["in the graph<br/>(the vertex's value / key)"]
-    classDef b fill:#dbeafe,stroke:#1e40af;
 ```
 
 ## Consequences of the layout

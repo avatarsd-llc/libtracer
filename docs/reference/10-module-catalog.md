@@ -363,13 +363,15 @@ A string-form convenience (`tracer_write_str(const char *path, ...)`) MAY be exp
 
 ```mermaid
 flowchart LR
-    APP[application]
+    accTitle: The modules a write passes through
+    accDescr: The application calls tracer_write with a handle and a view into the dispatcher, a PATH-TLV-keyed map, which takes handle bytes from the path_handle module. The dispatcher feeds the subscriber mux, which feeds the FWD router, which sends over transport A or transport B.
+    APP([application]):::app
     PH[path_handle module<br/>read-only literals + register]
     DISP[dispatcher<br/>PATH-TLV-keyed map]
     SUBM[subscriber_mux]
     FR[fwd_router]
-    TXA[transport A]
-    TXB[transport B]
+    TXA[[transport A]]:::peer
+    TXB[[transport B]]:::peer
 
     APP -- "tracer_write(h, view)" --> DISP
     PH -. "handle bytes" .-> DISP
@@ -377,10 +379,9 @@ flowchart LR
     SUBM --> FR
     FR --> TXA
     FR --> TXB
-    style APP fill:#fce7f3,stroke:#9f1239
-    style PH fill:#dcfce7,stroke:#166534
-    style DISP fill:#dbeafe,stroke:#1e40af
 ```
+
+Legend: purple = the application, vermillion = a transport.
 
 The handle module supplies bytes; the dispatcher keys on them; the subscriber multiplexer fans out; the forwarder picks the transport per outbound remote subscriber's link. No module on this path takes a string.
 

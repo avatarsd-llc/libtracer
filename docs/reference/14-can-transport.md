@@ -627,6 +627,8 @@ the reply is itself a directed send. The whole round trip:
 
 ```{mermaid}
 sequenceDiagram
+    accTitle: Listing and reading a CAN peer through a transit node
+    accDescr: Peer P announces itself and transit T records n5 as last heard. The client reads :children[] of /net/can/can0 and gets a synthesized POINT list naming n5. The client then reads /net/can/can0/n5/a/b. T matches the mount and peer n5, strips the four segments, grows src to /cli/reply-ep and sends a directed group to node 5 with dst /a/b. Bystander Q consumes the slices and delivers nothing. P resolves /a/b, sees inbound name n1, and replies by a directed group to node 1, which T forwards to the client over cli.
     participant C as client
     participant T as transit T (CAN node 1)
     participant P as peer P (CAN node 5)

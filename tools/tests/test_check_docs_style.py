@@ -161,6 +161,36 @@ class AnnexBannerTest(unittest.TestCase):
         self.assertEqual(hits, [])
 
 
+class DiagramStyleTest(unittest.TestCase):
+    """No diagram styles a node on the page; colour comes from the vocabulary classes (#2373)."""
+
+    def hits(self, text):
+        return [(h.rule, h.line) for h in cds.lint_page("docs/reference/x.md", text, CTX)
+                if h.rule == "diagram-style"]
+
+    def diagram(self, fence, *body):
+        alt = ["accTitle: A", "accDescr: B"] if fence == "{mermaid}" else []
+        return "\n".join(["# P", "", "```" + fence, "flowchart LR", *alt, *body, "```", ""])
+
+    def test_vocabulary_classes_draw_no_hit(self):
+        page = self.diagram("{mermaid}", "A[a]:::vertex --> B[b]", "class B ring")
+        self.assertEqual(self.hits(page), [])
+
+    def test_style_classdef_and_linkstyle_in_a_directive_are_hits_on_their_lines(self):
+        page = self.diagram("{mermaid}", "A --> B", "style A fill:#f00",
+                            "  classDef hot fill:#f00", "linkStyle 0 stroke:#f00")
+        self.assertEqual(self.hits(page), [("diagram-style", 8), ("diagram-style", 9),
+                                           ("diagram-style", 10)])
+
+    def test_a_bare_mermaid_fence_is_held_to_the_vocabulary_too(self):
+        self.assertEqual(self.hits(self.diagram("mermaid", "A --> B", "style A fill:#f00")),
+                         [("diagram-style", 6)])
+
+    def test_the_words_in_another_code_block_or_in_prose_are_not_hits(self):
+        page = "# P\n\nstyle A fill:#f00\n\n```text\nclassDef hot fill:#f00\n```\n"
+        self.assertEqual(self.hits(page), [])
+
+
 class AnnexSetTest(unittest.TestCase):
     """The annex set is read from v1 §3, the only list of what is normative."""
 

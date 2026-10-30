@@ -100,6 +100,8 @@ backends, because what they produce is an L1 handle:
 
 ```{mermaid}
 sequenceDiagram
+    accTitle: A segment refcount through a fan-out
+    accDescr: A producer makes a segment with count 1. Two subscribers clone it with relaxed increments, to 3. The producer drops its reference and each subscriber releases, with acq_rel decrements. At 0 the views call the backend destroy_dispatch and the bytes are reclaimed.
     participant TX as producer
     participant V as views
     participant S1 as subscriber 1

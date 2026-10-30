@@ -404,7 +404,6 @@
   "restatement": 1
  },
  "docs/getting-started.md": {
-  "alt-text": 2,
   "line-length": 4,
   "own-site-link": 1
  },
@@ -437,7 +436,6 @@
   "own-site-link": 1
  },
  "docs/modules/backends.md": {
-  "alt-text": 1,
   "line-length": 6
  },
  "docs/modules/can.md": {
@@ -448,55 +446,45 @@
   "line-length": 1
  },
  "docs/modules/frame-codec.md": {
-  "alt-text": 1,
   "line-length": 4,
   "own-site-link": 6,
   "restatement": 1
  },
  "docs/modules/fwd-router.md": {
-  "alt-text": 1,
   "avoid-phrase": 2,
   "line-length": 25,
   "own-site-link": 5
  },
  "docs/modules/graph.md": {
-  "alt-text": 1,
   "avoid-phrase": 1,
   "line-length": 9,
   "own-site-link": 10
  },
  "docs/modules/index.md": {
-  "alt-text": 1,
   "line-length": 2
  },
  "docs/modules/interface-map.md": {
-  "alt-text": 2,
   "line-length": 1
  },
  "docs/modules/path.md": {
-  "alt-text": 1,
   "line-length": 6
  },
  "docs/modules/security-acl.md": {
   "line-length": 1
  },
  "docs/modules/segment.md": {
-  "alt-text": 1,
   "line-length": 8
  },
  "docs/modules/status.md": {
   "line-length": 1
  },
  "docs/modules/transport.md": {
-  "alt-text": 2,
   "line-length": 20
  },
  "docs/modules/views.md": {
-  "alt-text": 1,
   "line-length": 8
  },
  "docs/modules/wire-format-bits.md": {
-  "alt-text": 1,
   "line-length": 1,
   "own-site-link": 1
  },
@@ -513,7 +501,6 @@
   "restatement": 11
  },
  "docs/reference/04-communication-flows.md": {
-  "alt-text": 3,
   "line-length": 78,
   "own-site-link": 16,
   "restatement": 4
@@ -551,13 +538,11 @@
   "own-site-link": 1
  },
  "docs/reference/13-network-formation.md": {
-  "alt-text": 1,
   "avoid-phrase": 1,
   "line-length": 9,
   "own-site-link": 12
  },
  "docs/reference/14-can-transport.md": {
-  "alt-text": 1,
   "avoid-phrase": 2,
   "line-length": 7,
   "own-site-link": 1
@@ -566,14 +551,12 @@
   "line-length": 31
  },
  "docs/reference/18-composition-over-the-network.md": {
-  "alt-text": 1,
   "avoid-phrase": 7,
   "line-length": 4,
   "own-site-link": 19,
   "restatement": 2
  },
  "docs/reference/19-transports-are-vertices.md": {
-  "alt-text": 1,
   "line-length": 13,
   "own-site-link": 7
  },
@@ -612,15 +595,8 @@
  "docs/research/horizon.md": {
   "restatement": 4
  },
- "docs/research/m6-transport-and-batching.md": {
-  "alt-text": 1
- },
  "docs/research/nnstreamer-synergy.md": {
-  "alt-text": 1,
   "line-length": 4
- },
- "docs/research/ros2-adapter.md": {
-  "alt-text": 1
  },
  "docs/spec/index.md": {
   "own-site-link": 2,

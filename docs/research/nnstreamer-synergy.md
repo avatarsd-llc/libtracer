@@ -294,6 +294,8 @@ registration seam plus a decision on the HOST/DEVICE question above.
 
 ```{mermaid}
 flowchart LR
+    accTitle: An nnstreamer pipeline bridged to libtracer through a custom edge library
+    accDescr: A stock GStreamer and nnstreamer pipeline runs a source through tensor_converter and tensor_filter, on the NPU, into edgesink, and from edgesrc into tensor_sink. Stock nnstreamer-edge dlopens a custom library, the one piece to write, whose vtable sends data and sets the event callback. That vtable bridges to a libtracer transport, which reads and writes a STREAM vertex with history depth, both ways. A dmabuf memory backend is not on this path: only host pointers cross, no fd.
     subgraph gst["GStreamer / nnstreamer (LGPL-2.1) — stock, unmodified"]
         P1["camera or file src"] --> TC["tensor_converter"] --> TF["tensor_filter<br/>(NPU inference)"]
         TF --> ES["edgesink<br/>connect-type=CUSTOM<br/>custom-lib=..."]

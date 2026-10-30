@@ -198,7 +198,8 @@ greyscale.
 - Colours are the Okabe-Ito classes, defined once in `docs/_static/diagram-vocabulary.css`
   with paired light and dark values: `frame`, `record`, `vertex`, `ring`, `app`, `peer`
   and `notlib`. Put one on a node with `:::vertex` or a `class A,B vertex` line. Never
-  style a node on the page (`style`, `classDef`, `linkStyle`). Use at most four classes
+  style a node on the page (`style`, `classDef`, `linkStyle`): rule `diagram-style`, in
+  bare fences too. Use at most four classes
   per diagram, and give every classed diagram a one-line legend in its `:caption:`. The
   smoke page `docs/style/diagram-vocabulary.md` draws every class; check it in both themes
   after a palette or Mermaid change, and run `python3 tools/check_diagram_contrast.py`.
@@ -224,6 +225,7 @@ greyscale.
 
 ## Mechanics the lint checks
 
+- No `style`, `classDef` or `linkStyle` line in any Mermaid diagram (`diagram-style`).
 - The sidebar sections in `index.md` are exactly the reader-intent list, in order
   (`sidebar-order`).
 - Prose lines are at most 100 characters. Link targets are not counted, and table rows,
@@ -249,6 +251,4 @@ sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html
 
 `python3 tools/check_docs_style.py --update-baseline` records today's hits. Run it only
 when a change deliberately moves the baseline, such as fixing hits or adding a rule, and
-say so in the PR. The style pass (#2373) switches the docs workflow to `--gate`. The rule
-against per-page diagram styling stays off until the CSS vocabulary is proven in the
-batching pilot (#2372).
+say so in the PR. The docs workflow switches to `--gate` in #2382.

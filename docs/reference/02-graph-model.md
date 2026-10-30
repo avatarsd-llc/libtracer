@@ -56,6 +56,8 @@ The substrate layers (L0 and L1) are what give libtracer zero-copy reach. A TLV 
 
 ```mermaid
 flowchart BT
+    accTitle: The six layers, L0 to L5
+    accDescr: L0, the memory substrate, gives L1 its bytes through alloc, release and cache hooks. L1 views and ownership decode into the L2 frame envelope as a zero-copy cast. L2 gives L3 the type byte and opt.PL. L3 TLV semantics feed L4 graph endpoint logic through the TLV registry, and L5 application semantics uses L4 by read, write and await on a handle.
     L0["L0 — Memory substrate<br/><i>real bytes: heap, MMIO, DMA, pbuf, pool</i>"]
     L1["L1 — Views and ownership<br/><i>refcounted segments, ropes, TLV-as-cast</i>"]
     L2["L2 — Frame envelope<br/><i>header + payload + optional trailer</i>"]
@@ -67,13 +69,13 @@ flowchart BT
     L2 -- "type byte + opt.PL" --> L3
     L3 -- "TLV registry: VALUE, PATH, FWD…" --> L4
     L4 -- "read / write / await on handle" --> L5
-    style L0 fill:#fef3c7,stroke:#92400e
-    style L1 fill:#fef3c7,stroke:#92400e
-    style L2 fill:#dbeafe,stroke:#1e40af
-    style L3 fill:#dbeafe,stroke:#1e40af
-    style L4 fill:#dcfce7,stroke:#166534
-    style L5 fill:#fce7f3,stroke:#9f1239
+    class L2 frame
+    class L3 record
+    class L4 vertex
+    class L5 app
 ```
+
+Legend: blue = frame (L2), sky blue = TLV (L3), green = graph (L4), purple = application (L5).
 
 The `type` byte sits at the L2 / L3 boundary. It is **carried** in the wire header (so a router can decide whether to recurse without parsing payload) but its **meaning** is L3. A pure-framing parser that just dispatches by `length + CRC` could ignore `type` entirely; a TLV-aware router uses `type` (and `opt.PL`) to decide whether to walk into nested children.
 
@@ -247,22 +249,23 @@ This is the structural rule that lets [03-addressing.md](03-addressing.md) §sta
 
 ```mermaid
 flowchart LR
+    accTitle: Three ways to the same canonical PATH bytes
+    accDescr: A build-time literal in .rodata needs no parse and no allocation. An init-time registered path is validated once at init. A string-form path is parsed and canonicalized, on the slow path only. All three yield the canonical PATH TLV bytes, which key the dispatch table by byte equality and reach the vertex at /sensor/temp.
     BL["build-time literal<br/>.rodata PATH TLV<br/>(handle = &bytes, len)"]
     IR["init-time registered<br/>heap PATH TLV<br/>(handle = pointer)"]
     SR["string-form path<br/>(slow path only)"]
     CB["canonical PATH TLV bytes"]
     DT["dispatch table<br/>(byte-equality key)"]
-    V[/"vertex at /sensor/temp"/]
+    V("vertex at /sensor/temp"):::vertex
     BL -- "no parse, no alloc" --> CB
     IR -- "validated once at init" --> CB
     SR -- "parse + canonicalize<br/>(P0 may omit)" --> CB
     CB --> DT
     DT --> V
-    style BL fill:#dcfce7,stroke:#166534
-    style IR fill:#dcfce7,stroke:#166534
-    style SR fill:#fef3c7,stroke:#92400e
-    style DT fill:#dbeafe,stroke:#1e40af
+    class CB record
 ```
+
+Legend: sky blue = the canonical PATH record, green = the vertex.
 
 **Why this matters at L4.** The dispatch table is a hashmap (or radix tree, or whatever the implementation uses) whose key is the PATH TLV's payload bytes. Insertion, lookup, and removal all see those bytes — never a parsed string. This is what makes path-handle dispatch O(1) on the hot path: the handle already holds the bytes that the dispatch table is indexed by. There is no resolution step at all, just a hash + memcmp.
 
@@ -822,6 +825,8 @@ Forwarding is **loop-free by construction**: `dst` is consumed monotonically per
 
 ```mermaid
 sequenceDiagram
+    accTitle: A WRITE forwarded from STM32 to ESP32 and its reply
+    accDescr: The STM32 client sends FWD WRITE with dst /esp/wheel/left and src /stm to the Linux forwarder. The forwarder strips esp from dst, prepends its inbound-link segment to src and sends FWD WRITE with dst /wheel/left and src /can0/stm to the ESP32. There the leading dst segments are local, so the ESP32 is the terminus: it sheds the envelope and stores the bare VALUE at /wheel/left. The REPLY goes to /can0/stm, and the forwarder sends it on to /stm.
     autonumber
     participant STM as STM32 client
     participant LB as Linux forwarder
