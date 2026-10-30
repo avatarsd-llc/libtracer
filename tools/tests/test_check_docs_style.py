@@ -251,8 +251,8 @@ class BaselineTest(unittest.TestCase):
 
 
 class RealTreeTest(unittest.TestCase):
-    """End to end on the real tree. Nothing here pins today's hit count: a docs PR that adds a
-    hit must not fail a unit test while the lint is report-only."""
+    """End to end on the real tree. Nothing here pins today's hit count: the committed baseline
+    is the pin, and the gate below holds the tree to it (#2382)."""
 
     def run_main(self, *argv):
         out = io.StringIO()
@@ -272,6 +272,17 @@ class RealTreeTest(unittest.TestCase):
             code, out = self.run_main("--gate", "--baseline", str(empty))
         self.assertEqual(code, 1)
         self.assertIn("NEW", out)
+
+    def test_the_real_tree_passes_the_gate_against_its_baseline(self):
+        code, out = self.run_main("--gate")
+        self.assertEqual(code, 0, out[-2000:])
+        self.assertIn("gating", out)
+
+    def test_the_docs_workflow_runs_the_lint_as_a_gate(self):
+        wf = (pathlib.Path(REPO) / ".github" / "workflows" / "docs.yml").read_text()
+        runs = [ln.strip() for ln in wf.splitlines() if "check_docs_style.py" in ln
+                and ln.strip().startswith("run:")]
+        self.assertEqual(runs, ["run: python3 tools/check_docs_style.py --gate"])
 
 
 if __name__ == "__main__":
