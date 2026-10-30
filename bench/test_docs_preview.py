@@ -71,5 +71,29 @@ class PreviewMode(unittest.TestCase):
             self.assertEqual([r[0] for r in results], ["a_test"])
 
 
+
+class EmptyResults(unittest.TestCase):
+    """@brief Off preview, a test report with no ctest results is a build fault, not a page."""
+
+    def _main(self, strict: bool):
+        env = {"LIBTRACER_DOCS_PREVIEW": "", "LIBTRACER_DOCS_STRICT": "1" if strict else ""}
+        with mock.patch.dict(os.environ, env), tempfile.TemporaryDirectory() as d:
+            importlib.reload(tr)
+            with mock.patch.object(tr, "run_ctest_junit", return_value=[]), \
+                 mock.patch.object(tr, "OUT", pathlib.Path(d) / "test-report.md"):
+                return tr.main()
+
+    def tearDown(self):
+        _load(False)
+
+    def test_strict_fails_when_ctest_left_no_results(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._main(strict=True)
+        self.assertNotIn(cm.exception.code, (0, None))
+
+    def test_a_local_run_still_writes_the_placeholder(self):
+        self.assertEqual(self._main(strict=False), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

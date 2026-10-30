@@ -405,6 +405,9 @@ jobs:
       # Before the performance page: ctest runs once, here, and that page's test rollup
       # reads the JUnit file it leaves.
       - name: Generate live test report (ctest across every suite)
+        env:
+          # Off preview, no ctest results fails the build instead of publishing a note.
+          LIBTRACER_DOCS_STRICT: "1"
         run: python3 bench/gen_test_report.py
       - name: Generate live performance + conformance page
         env:
@@ -644,10 +647,12 @@ jobs:
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
       (github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
-    # The deployment lock (see the workflow `concurrency:` above): newest deploy wins.
+    # The deployment lock (see the workflow `concurrency:` above). A deploy already in
+    # progress finishes: cancelling it mid-upload can leave Pages without a completed
+    # deployment, and the next one queues behind it (maintainer ruling 2026-10-30).
     concurrency:
       group: pages
-      cancel-in-progress: true
+      cancel-in-progress: false
     # #1403 bounded the build job above and left this job unbounded — it is a single
     # actions/deploy-pages@v4 call against a GitHub service and can hang the same way.
     # Measured max 1.05 min over the 10 deploy runs (healthy max 0.38, p50 0.23);

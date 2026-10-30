@@ -217,6 +217,11 @@ def main() -> int:
         print(f"wrote {OUT} (PR preview, ctest not run)")
         return 0
     if not results:
+        # The published report must not swap its verdict for a "not available" note:
+        # under LIBTRACER_DOCS_STRICT (docs.yml, off preview) no results is a build fault.
+        if os.environ.get("LIBTRACER_DOCS_STRICT") == "1":
+            sys.exit(f"gen_test_report: no ctest results in {BUILD}, and "
+                     "LIBTRACER_DOCS_STRICT=1. Build the test tree before this step.")
         lines.append("_(the Release build was not available — run "
                      "`cmake -S core -B core/build -DBUILD_TESTING=ON && cmake --build core/build` "
                      "then re-run this generator.)_")
