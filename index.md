@@ -121,6 +121,7 @@ Getting started <docs/getting-started>
 
 The wire format <docs/concepts/wire>
 The graph <docs/concepts/graph>
+Memory <docs/concepts/memory>
 Batching <docs/concepts/batching>
 Transports <docs/concepts/transports>
 ```
