@@ -56,7 +56,8 @@ page with a link, but sizing and archetype references stay whole.
 A page under `docs/concepts/` uses these level-2 headings, spelled exactly like this and
 in this order. Required ones are marked R. An optional one may be left out, but the rest
 keep their order. The lint's `concept-sections` rule checks presence and order, and
-reports any heading of the page's own.
+reports any heading of the page's own. `docs/concepts/index.md` is navigation, not a
+concept, and is exempt.
 
 1. `## In one paragraph` (R): what it is and why it exists, in one paragraph.
 2. `## The picture` (R): one diagram, one zoom level, at most 12 nodes.
@@ -65,28 +66,56 @@ reports any heading of the page's own.
 5. `## Worked example`: real bytes, generated from a conformance vector, never typed.
    Use the `{hex-walk}` directive (`docs/_ext/hexwalk.py`): name the vector and label its
    leaves in order, one `<format>: <label>` line each; `docs/concepts/batching.md` shows it.
-6. `## Cost` (R): wire bytes, allocations, latency, and flash/RAM per NARROW/MID/WIDE
-   target, including rows above 1 KiB. Numbers come from the size gate or the benches.
+   Leave the section out when no vector exists (transport framing has none), and propose
+   the vector in the PR instead.
+6. `## Cost` (R): four level-3 subsections, in this order: `### Wire bytes`,
+   `### Allocations`, `### Latency` (required; the lint checks it) and
+   `### Flash and RAM per target` (a NARROW/MID/WIDE table). Include rows above 1 KiB.
+   Numbers come from the size gate, the benches or the RAM pins. Where none measures the
+   feature, a structural statement is allowed: write "not measured" or "not benched" and
+   name the gate row or bench that would measure it.
 7. `## What the library does not do`: for example pacing, timers or playout.
 8. `## Pitfalls`: symptom, then cause, then fix.
-9. `## Where the rules live` (R): carries the `**Normative source:**` field.
+9. `## Where the rules live` (R): carries the `**Normative source:**` field, with
+   `**Exercised by:**` beside it.
 10. `## History`: collapsed into a dropdown. RFCs are named here and only here.
 
-Budgets: 150 to 350 source lines, at most 2,000 words of prose, at most 4 diagrams.
+Budgets: 150 to 350 source lines, at most 2,000 words of prose, at most 4 diagrams
+of at most 12 nodes and 4 classes each. A hex walk counts toward none of them. The
+150-line floor applies to a standalone page, or to a parent counted together with its
+children; a child page has no floor.
 End the page with "Next concept" and "Go deeper" links (explanation, then reference,
-then spec). A large concept gets a parent page plus child pages, each following the
-template.
+then spec).
 
-The template freezes only after the two pilots (batching, then transports) and the
-maintainer's approval (#2379, the template freeze). Until then, a page that needs a
-different shape is evidence for the pilots: say so in the PR and do not quietly
-diverge.
+**Parent and children.** A large concept gets a parent page plus child pages, each
+following the template. The children live in `docs/concepts/<parent>/`, listed by a
+hidden toctree on the parent. The parent's Cost summarizes and points at the children;
+its "Next concept" leads into the first child, and the children chain to each other.
+`docs/concepts/transports.md` shows the shape.
+
+**Tables owned elsewhere** (a pairing table, a type registry) are linked, never copied.
+
+**Open questions** take one form: an admonition titled `Open question: <what>` that
+links the issue tracking it.
+
+````md
+```{admonition} Open question: reading a folded batch
+Which seat reads a folded batch is undecided; see #NNNN (its short name).
+```
+````
+
+**Template v1, frozen 2026-10-30, #2379 (the template freeze).** The maintainer approved
+it after the two pilots (batching, then transports). A page that needs a different shape
+does not quietly diverge: say so in the PR, and a change to the template is a new version
+recorded here.
 
 ### The two header fields
 
 - `**Normative source:**` names **only** v1 or an annex anchor, as relative links
   (`[v1 §3](../spec/v1.md#3-wire-format)`). It never names an RFC, because RFCs are
-  history. This is rule `normative-source`.
+  history. This is rule `normative-source`. For a concept v1 leaves to the
+  implementation, such as transport framing, cite the v1 §1 carve-out plus any annex that
+  applies (reference 23 for Noise), and say in words that the rest is not normative.
 - `**Exercised by:**` names the conformance vector (`` `batch-time-base` `` or its
   directory under `tests/conformance/vectors/v1/`) or the test (by file stem) that
   proves the claim, and each one must exist. This is rule `exercised-by`.

@@ -109,6 +109,7 @@ Examples <docs/examples/index>
 :maxdepth: 1
 
 Batching <docs/concepts/batching>
+Transports <docs/concepts/transports>
 ```
 
 ```{toctree}

@@ -65,6 +65,12 @@ class FixturePageTest(unittest.TestCase):
     def test_concept_sections_out_of_order_are_a_hit(self):
         self.assert_only("concept-order.md", "docs/concepts/x.md", "concept-sections")
 
+    def test_a_cost_section_without_a_latency_heading_is_a_hit(self):
+        self.assert_only("concept-no-latency.md", "docs/concepts/x.md", "concept-sections")
+
+    def test_the_concepts_index_is_navigation_not_a_concept(self):
+        self.assertEqual(hits_of("concept-missing.md", "docs/concepts/index.md"), [])
+
     def test_the_concept_template_binds_only_concept_pages(self):
         self.assertEqual(hits_of("concept-missing.md", "docs/reference/x.md"), [])
 

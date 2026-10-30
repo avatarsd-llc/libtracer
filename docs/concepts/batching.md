@@ -69,12 +69,11 @@ vertex. There is no batch-specific write path and no batch role.
 gets a `batch_view_t`: the sample count, each sample, and each sample's time from the base and
 its offset. The descriptor, not the record, says which shape the bytes are.
 
-```{admonition} TODO: reading a folded batch
+```{admonition} Open question: reading a folded batch
 :class: warning
 
 How a FOLD subscriber knows that a branch-write node's `VALUE` is a batch, and reads it back,
-waits on a maintainer ruling (the FOLD-seat reader question raised with #2377, the compiled
-batch example). Until it is ruled, this page shows only the standalone read-back.
+waits on a maintainer ruling: #2394 (can a FOLD subscriber read a folded batch). Until it is ruled, this page shows only the standalone read-back.
 ```
 
 ## Worked example
@@ -117,7 +116,9 @@ and checks them; `stream/batch-packed-roundtrip` is the packed vector.
 
 ## Cost
 
-**Wire bytes.** A record is a 4-byte header, a 12-byte `TIME` base, a 4-byte header plus 4 bytes
+### Wire bytes
+
+A record is a 4-byte header, a 12-byte `TIME` base, a 4-byte header plus 4 bytes
 per sample of offsets on a non-uniform stream, then the samples: `4 + width` bytes each framed,
 or one 4-byte header plus `n × width` packed. Above 64 KiB of body the record header grows to 6
 bytes (`opt.LL`). For `u16` samples:
@@ -131,17 +132,23 @@ bytes (`opt.LL`). For `u16` samples:
 
 Packed and uniform is the one shape whose overhead stays flat (20 bytes) as the batch grows.
 
-**Allocations.** `compose_batch` allocates one head segment per composition, about 196 bytes,
+### Allocations
+
+`compose_batch` allocates one head segment per composition, about 196 bytes,
 flat from 64 B to 64 KiB per sample; the copying spelling spends 459 KB at the top of that
 ladder (`batch_compose_alloc_test`, figures from
 [reference 22 §3.5](../reference/22-backpressure-and-sizing.md#35-high-rate-acquisition--recipe-c-compose--swap--push)).
 `encode_packed_batch` and both readers allocate nothing. Delivery is the ordinary write path:
 one ring entry per batch at the receiving vertex, not one per sample.
 
-**Latency.** One delivery per batch. A sample waits until the application decides the batch is
-full, and that wait is the application's own choice. There is no separate batch benchmark.
+### Latency
 
-**Flash and RAM per target.**
+One delivery per batch. A sample waits until the application decides the batch is
+full, and that wait is the application's own choice.
+Not benched: no bench isolates batching yet; a compose-and-propagate row in
+`bench_compose_net` would cover it.
+
+### Flash and RAM per target
 
 | Target | Graph RAM | Flash |
 | --- | --- | --- |
@@ -149,7 +156,8 @@ full, and that wait is the application's own choice. There is no separate batch 
 | MID | none | same |
 | WIDE | none | same |
 
-The size gate does not yet measure the batch functions on their own.
+Flash is not measured: the size gates measure the core without the batch functions, and a
+per-feature row in `tools/esp_size_gate.py` would measure them.
 
 ## What the library does not do
 
