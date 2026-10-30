@@ -267,7 +267,9 @@ void test_enumeration_and_forwarding() {
     // ----- transit node T (CAN node 1): graph + router + /net/can/can0. ----------
     // Declaration = reverse teardown order (the RAII idiom of fwd_multihop_test):
     // the CAN transports are declared LAST so their receive threads stop first —
-    // no frame can be forwarded into a half-destroyed loopback/mailbox.
+    // no frame can be forwarded into a half-destroyed loopback/mailbox. The other
+    // direction is the loopback's own thread forwarding INTO tcan_t; declaration
+    // order cannot cover both, so the test shuts the channel down at its end (#2396).
     graph_t graph_t_;
     fwd_router_t router_t(graph_t_);
     transport_vertex_t net_t(graph_t_, router_t);
@@ -394,6 +396,13 @@ void test_enumeration_and_forwarding() {
     // Statelessness of the transit: still no peer vertices, no label state.
     check(!graph_t_.find(path_t::parse("/n5")->key()).has_value(),
           "transit graph still untouched after forwarded READ+WRITE");
+
+    // The loopback's receive thread is the one that forwarded the client's frames into
+    // tcan_t, and it may still be finishing that send after the reply has come back. A
+    // transport is not destroyed under a sender: its owner quiesces the senders first.
+    // shutdown() joins that thread while tcan_t is alive; a CAN thread that still answers
+    // "cli" afterwards only queues onto the stopped endpoint (#2396).
+    channel.shutdown();
 }
 
 // ---------------------------------------------------------------------------
