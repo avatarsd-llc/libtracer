@@ -72,7 +72,7 @@ Publisher              Local router            Vertex            Subscriber 1   
 
 Invariants:
 
-- TLV ownership transfers from the publisher to the router on `write`. The publisher MUST NOT touch `tlv` after the call returns.
+- TLV ownership transfers from the publisher to the router on `write`. The publisher does not touch `tlv` after the call returns.
 - The router clones (refcount-bumps) the view per subscriber. **No bytes are copied.**
 - Each subscriber's queue holds the view; when the subscriber consumes and releases, its refcount drops.
 - The backing segment is freed only when the last view is released.
@@ -187,6 +187,8 @@ There is no `subscribe()` verb — a subscription **is** a control-plane field-w
 
 ```{mermaid}
 sequenceDiagram
+    accTitle: Subscribing by writing a SUBSCRIBER record
+    accDescr: The subscriber writes a SUBSCRIBER with a target and qos to /sensor/temp:subscribers[] on the producer node, which field-writes it into slot N of the vertex and acknowledges, with a FWD REPLY when the subscriber is remote. Later writes to /sensor/temp fan out to that slot, by local re-dispatch or by FWD WRITE to a remote subscriber.
     autonumber
     participant App as Subscriber
     participant N as Producer node
@@ -283,6 +285,8 @@ Exhaustion of the terminus decode budget is a **reject**, never an allocation fa
 
 ```{mermaid}
 sequenceDiagram
+    accTitle: One FWD operation through a forward hop
+    accDescr: The client sends FWD with dst /h/sensor/temp to the forward hop. The hop reads about three headers by offset, with no decoded tree and no heap allocation for a contiguous frame, demuxes the leading dst mount run to a transport child, strips that run, prepends its inbound-link mount run to src and scatter-gather sends to the terminus. The terminus arena-decodes the frame, applies the read, write or await to the local vertex, and direct-emits FWD REPLY to the accumulated src. The hop routes the REPLY by the same step without growing src, to the client reply sink.
     autonumber
     participant C as Client node
     participant H as Forward hop
@@ -400,6 +404,8 @@ Memory exhaustion is the first failure a constrained node meets, and it is a **f
 
 ```{mermaid}
 sequenceDiagram
+    accTitle: Where a write meets each memory bound
+    accDescr: A client sends FWD WRITE to dst /b/sensor. If the link RX backend is exhausted while reassembling, the frame is drained and counted as a drop with no reply, since no route is known yet. If the decode budget is exhausted, the frame is rejected as tlv nesting too deep. If the value backend is exhausted, the write is rejected as backpressure, and the client gets a FWD REPLY of kind ERROR carrying the status. A success reply too large to assemble becomes an addressed ERROR backpressure reply on the same link, never a silent drop.
     autonumber
     participant C as Client node
     participant L as Link (receiver side)
@@ -542,6 +548,8 @@ This is the MCU-friendly variant of `write`. The path's PATH TLV is encoded once
 
 ```mermaid
 sequenceDiagram
+    accTitle: Registering a path once at startup
+    accDescr: At startup the application calls tracer_path_register for /sensor/temp. The registry validates it against the addressing rules, allocates the PATH TLV bytes once in a long-lived segment and returns the handle h_sensor_temp. A build-time literal skips this phase, with its PATH TLV in .rodata.
     participant App as Application init
     participant Reg as Path registry
     participant Mem as Long-lived segment
@@ -561,6 +569,8 @@ A build-time literal skips the fallible runtime parse: the path constructor pars
 
 ```mermaid
 sequenceDiagram
+    accTitle: One write on the hot path
+    accDescr: A publisher loads its path handle in one memory read and calls tracer_write with the value. Dispatch keys on the PATH bytes with no string parse and no allocation, stores the value as the last-known value of the vertex, enqueues a refcounted view for each of two subscribers and returns OK synchronously. The subscribers consume and release independently.
     participant Pub as Publisher (ISR / sample loop)
     participant Hnd as Path handle
     participant Disp as Router dispatch
@@ -583,10 +593,12 @@ The bytes flowing through the router are identical to the string-form write at t
 
 ### Cross-mode equivalence
 
-A subscriber registered against `/sensor/temp` in string form MUST receive deliveries from a publisher writing through a static handle for `/sensor/temp`, and vice versa. Dispatch is keyed on canonical PATH TLV bytes, and both forms produce the same key.
+A subscriber registered against `/sensor/temp` in string form receives deliveries from a publisher writing through a static handle for `/sensor/temp`, and vice versa: [v1 §3.1.1](../spec/v1.md#31-static-path-handle-conformance) makes the two writes indistinguishable on the wire. Dispatch is keyed on canonical PATH TLV bytes, and both forms produce the same key.
 
 ```mermaid
 flowchart TB
+    accTitle: Three publishers, one dispatch key
+    accDescr: A publisher with a build-time .rodata PATH TLV, one with a heap PATH TLV allocated once at init, and one that writes by string form, which is parsed and canonicalized, all reach the same dispatch table key, the canonical PATH TLV bytes, and so the same /sensor/temp vertex.
   subgraph PubBuild["Publisher (build-time path)"]
     P1[".rodata PATH TLV<br/>for /sensor/temp"]
     P2["tracer_write(P1, value)"]

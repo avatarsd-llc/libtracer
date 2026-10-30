@@ -24,6 +24,8 @@ This is the **facade principle**. The `:schema` field ([02-graph-model.md](02-gr
 
 ```mermaid
 flowchart LR
+    accTitle: One API, many vertex roles
+    accDescr: A path handle, the canonical PATH TLV bytes, is used with read, write or await. The vertex role decides what answers: stored, stream, sink with model, computed, proxy, aggregate or live MMIO. It can be backed by a RAM segment, an MMIO register, a function on read, or a remote vertex reached by source route.
     H["path handle<br/>(canonical PATH TLV bytes)"]
     API[/"read · write · await"/]
     R{{"vertex role<br/>(stored / stream / sink+model /<br/>computed / proxy / aggregate / live MMIO)"}}
@@ -37,10 +39,11 @@ flowchart LR
     R --> BACK2
     R --> BACK3
     R --> BACK4
-    style H fill:#dcfce7,stroke:#166534
-    style API fill:#dbeafe,stroke:#1e40af
-    style R fill:#fef3c7,stroke:#92400e
+    class H record
+    class R vertex
 ```
+
+Legend: sky blue = the PATH record, green = the vertex role.
 
 A consumer holds a path handle and calls read / write / await. What sits behind the role boundary is invisible. Two vertices with the same schema are observationally equivalent regardless of role.
 

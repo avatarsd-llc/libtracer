@@ -15,8 +15,9 @@ Three are permanent accusations about the bytes: `FRAME_TRUNCATED` (the frame st
   `FRAME_INVALID`, not a successful parse of the prefix. A stream reader frames first and
   decodes exactly one TLV's worth.
 - **A reserved `opt` bit is checked before anything is believed.** Bits 7 and 0 are
-  MUST-be-zero; a peer that sets one has said something this version cannot interpret, and the
-  frame is refused rather than partially honoured.
+  reserved and zero ([v1 §3](../spec/v1.md#3-wire-format)); a peer that sets one has said
+  something this version cannot interpret, and the frame is refused rather than partially
+  honoured.
 - **`TLV_NESTING_TOO_DEEP` is different in kind.** It means "exceeds **this receiver's** decode
   resources"
   ([RFC-0006](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md),

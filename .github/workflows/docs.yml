@@ -43,6 +43,7 @@ permissions:
   pages: write
   id-token: write
   pull-requests: write # post the libtracer-vs-Zenoh absolute comparison as a PR comment
+  actions: read # download the size gates' footprint artifacts for the MCU page (#2380)
 
 # Deploys serialize on one group; PR builds do NOT belong in it.
 #
@@ -95,6 +96,7 @@ jobs:
       # DERIVED by tools/gen_ci_paths.py -- do not hand-edit: this list is what
       # docs's jobs read and build. `gen_ci_paths.py --apply` rewrites it.
       DOCS_PATHS: |
+        CONTEXT-AVOID.md
         CONTEXT.md
         bench/**
         bindings/rust/examples/fwd_read_stats.rs
@@ -330,6 +332,41 @@ jobs:
       # fails the docs build itself rather than only a sibling check.
       - name: Doc-citation gate (symbol citations resolve; no line-number citations)
         run: python3 tools/check_doc_citations.py
+      # Docs style lint (#2371, the #2374 format), GATING since #2382. It prints every hit
+      # with the rule it breaks and fails on a page/rule count above
+      # tools/docs_style_baseline.json (marked NEW). Baselined hits pass: the baseline holds
+      # what is not yet fixed, among them the restatement hits the MUST/SHALL erratum review
+      # (#2384) has not judged. A PR that fixes hits shrinks it with --update-baseline.
+      - name: Docs style lint (gate)
+        run: python3 tools/check_docs_style.py --gate
+      # The baseline ratchet (#2392): against the PR's base, a page/rule count may fall or
+      # stay; it rises only when the PR body carries a `Docs-Style-Baseline:` line saying why,
+      # and a concept page is never baselined. A base with no baseline yet passes.
+      - name: Docs style baseline ratchet
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          DOCS_STYLE_BASELINE_REASON: ${{ github.event.pull_request.body }}
+        run: |
+          old="$RUNNER_TEMP/docs-style-baseline.base.json"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git show FETCH_HEAD:tools/docs_style_baseline.json > "$old" 2>/dev/null || rm -f "$old"
+          python3 tools/check_docs_style.py --ratchet "$old"
+      # Diagram palette gate (#2378): every class in docs/_static/diagram-vocabulary.css
+      # keeps AA text on its fill and a 3:1 stroke on the page, light and dark, and the
+      # pinned Mermaid is the vendored one. Standard library only; it fails the build.
+      - name: Diagram palette gate (contrast in both themes, vendored Mermaid)
+        run: |
+          python3 tools/check_diagram_contrast.py
+          python3 -m unittest discover -s tools/tests -p "test_check_diagram_contrast.py" -v
+      # The {hex-walk} directive (docs/_ext/hexwalk.py, #2372) renders a concept page's worked
+      # example from a conformance vector; the build itself fails on a vector it cannot walk.
+      - name: Hex walk tests (TLV walk, labels, rendering)
+        run: python3 -m unittest discover -s tools/tests -p "test_hexwalk.py" -v
+      # The {footprint-table} directive (docs/_ext/footprint.py, #2380) renders the MCU page's
+      # rows from the size gates' artifacts; tools/fetch_footprint.py fetches them.
+      - name: Footprint table tests (rows, missing artifacts, fetch)
+        run: python3 -m unittest discover -s tools/tests -p "test_footprint.py" -v
       # Auto-generate the Performance & Conformance page from the LIVE harnesses
       # (cross-core matrix + perf bench + coverage), replacing the static snapshot
       # (ADR-0032 §auto-published). Regenerated in-place each build; the artifact
@@ -446,6 +483,13 @@ jobs:
             const existing = comments.find(c => c.body.includes(marker));
             if (existing) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
             else await github.rest.issues.createComment({ owner, repo, issue_number, body });
+      # The MCU page's footprint rows (#2380): the newest successful main run's artifact from
+      # each size gate. A gap (expired artifact, API error) prints a notice and the page shows
+      # that row as not measured; it never fails the docs.
+      - name: Fetch the size gates' footprint artifacts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/fetch_footprint.py
       # -n -W --keep-going: nitpicky, warnings are errors, and report them all rather
       # than stopping at the first. This is the link-integrity gate — a broken
       # cross-reference, a dead toctree entry or an @ref that no page publishes fails

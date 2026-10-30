@@ -8,8 +8,11 @@ type below is a real `core/` C++ symbol. For prose on each, follow the links.
 Arrows point from a module to the module(s) whose interface it uses.
 
 ```{mermaid}
+:caption: "Legend: purple = the application or bench; every other box is a library module."
 flowchart TD
-    APP["application / bench"]:::app
+    accTitle: Which module uses which interface
+    accDescr: The application uses graph and fwd-router. Graph uses path, views and status. The FWD router uses graph, the frame codec and transport. The transport vertex uses the FWD router and graph. Views use the frame codec and segment. The frame codec and path use status. Segment and backends use each other.
+    APP(["application / bench"]):::app
     GRAPH["graph<br/><small>graph_t · vertex_t · role_t</small>"]
     PATH["path<br/><small>path_t · path_key_t</small>"]
     FWD["fwd-router<br/><small>fwd_router_t · child_registry_t</small>"]
@@ -38,15 +41,14 @@ flowchart TD
     BACK --> SEG
     PATH --> STATUS
 
-    classDef app fill:#fce7f3,stroke:#9f1239;
-    classDef lib fill:#dcfce7,stroke:#166534;
-    class GRAPH,PATH,FWD,TVERT,TRANSPORT,FRAME,VIEWS,SEG,BACK,STATUS lib;
 ```
 
 ## The seams (who hands what to whom)
 
 ```{mermaid}
 flowchart LR
+    accTitle: The two seams of a remote operation
+    accDescr: At each hop, a client sends FWD with an op, a dst under /net, a src and an optional payload. The router peeks the leading dst run without decoding, finds the transport by longest prefix, strips the matched run, grows src and sends by scatter-gather. At the terminus, where dst is empty, the transport receiver decodes into a span arena, op_resolver_t resolves against the local vertex, and a FWD REPLY is routed back along src.
     subgraph fwd["remote op (FWD source-routing, RFC-0004)"]
         direction TB
         W1["client: FWD{op, dst=/net/&lt;module&gt;/&lt;name&gt;/&lt;peer path&gt;, src, payload?}"] --> W2["fwd_router: peek the leading dst segment run (offset, no decode)"]

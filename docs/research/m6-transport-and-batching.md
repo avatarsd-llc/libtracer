@@ -54,6 +54,8 @@ single change above it. Batching, and later encryption / metering / tracing, are
 
 ```{mermaid}
 flowchart LR
+    accTitle: A composable transport stack under the bridge
+    accDescr: The bridge sends and receives through a composable transport stack: an opt-in BatchingTransport that coalesces, a future EncryptedTransport, and a StreamTransport over TCP or QUIC or a UdpTransport, which reaches the kernel through an fd or a QUIC stream.
     BR["Bridge"] -->|send / receive| DEC
     subgraph DEC["composable Transport stack"]
         B["BatchingTransport<br/>(coalesce, opt-in)"] --> E["EncryptedTransport<br/>(future)"] --> S["StreamTransport (TCP/QUIC)<br/>or UdpTransport (M5)"]

@@ -94,13 +94,62 @@ other document disagree, the spec wins.
 
 ::::
 
+<!-- The sidebar runs by reader intent (#2374, #2381). Its sections and their order are
+     checked by the docs style lint's `sidebar-order` rule; move an entry, never a file. -->
+
 ```{toctree}
-:caption: Getting started
+:caption: Start here
+:hidden:
+:maxdepth: 1
+
+Route by intent <docs/start-here>
+On an MCU <docs/start-here-mcu>
+```
+
+```{toctree}
+:caption: Learn
 :hidden:
 :maxdepth: 2
 
 Getting started <docs/getting-started>
+```
+
+```{toctree}
+:caption: Concepts
+:hidden:
+:maxdepth: 1
+
+The wire format <docs/concepts/wire>
+The graph <docs/concepts/graph>
+Memory <docs/concepts/memory>
+Batching <docs/concepts/batching>
+Transports <docs/concepts/transports>
+Security <docs/concepts/security>
+Concurrency <docs/concepts/concurrency>
+```
+
+```{toctree}
+:caption: Recipes
+:hidden:
+:maxdepth: 2
+
 Examples <docs/examples/index>
+Build a custom device <docs/interop/custom-device>
+A production ESP32 node <docs/interop/esp32-production-node>
+```
+
+```{toctree}
+:caption: Reference
+:hidden:
+:maxdepth: 2
+
+Reference (descriptive) <docs/reference/README>
+C++ API reference <docs/modules/index>
+Interoperability <docs/interoperability>
+Capability matrix <docs/capability-matrix>
+Implementation registry <docs/implementations>
+Context glossary <CONTEXT>
+Design notes <docs/design/README>
 ```
 
 ```{toctree}
@@ -112,40 +161,11 @@ The specification <docs/spec/index>
 ```
 
 ```{toctree}
-:caption: RFCs and decisions
+:caption: Decisions
 :hidden:
 :maxdepth: 1
 
 ADR and RFC index <docs/adr-rfc-index>
-```
-
-```{toctree}
-:caption: Reference
-:hidden:
-:maxdepth: 2
-
-Reference (descriptive) <docs/reference/README>
-Design notes <docs/design/README>
-```
-
-```{toctree}
-:caption: C++ API reference
-:hidden:
-:maxdepth: 2
-
-C++ API reference <docs/modules/index>
-```
-
-```{toctree}
-:caption: Interoperate
-:hidden:
-:maxdepth: 2
-
-Interoperability <docs/interoperability>
-Build a custom device <docs/interop/custom-device>
-A production ESP32 node <docs/interop/esp32-production-node>
-Capability matrix <docs/capability-matrix>
-Implementation registry <docs/implementations>
 ```
 
 ```{toctree}
@@ -155,20 +175,4 @@ Implementation registry <docs/implementations>
 
 Performance & conformance <docs/performance>
 Test report <docs/test-report>
-```
-
-```{toctree}
-:caption: Glossary
-:hidden:
-:maxdepth: 1
-
-Context glossary <CONTEXT>
-```
-
-```{toctree}
-:caption: Start here
-:hidden:
-:maxdepth: 1
-
-Route by intent <docs/start-here>
 ```

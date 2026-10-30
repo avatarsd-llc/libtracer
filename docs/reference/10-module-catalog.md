@@ -357,19 +357,21 @@ int  tracer_await (path_handle_t h, uint64_t deadline_ns, view_t **out_value);
 
 The handle's bytes are the canonical PATH TLV, and the dispatcher's vertex map is keyed by exactly those bytes. No string formatting, no allocation, no parser walk on the hot path.
 
-A string-form convenience (`tracer_write_str(const char *path, ...)`) MAY be exposed, but MUST route internally through the same handle dispatch — typically via an init-time `tracer_path_register(...)` cache. P0 builds MAY omit the string entry entirely.
+A string-form convenience (`tracer_write_str(const char *path, ...)`) is optional ([v1 §3.1.4](../spec/v1.md#31-static-path-handle-conformance)); the reference implementation routes it through the same handle dispatch — typically via an init-time `tracer_path_register(...)` cache. A P0 build can omit the string entry entirely.
 
 ### Module composition for the hot path
 
 ```mermaid
 flowchart LR
-    APP[application]
+    accTitle: The modules a write passes through
+    accDescr: The application calls tracer_write with a handle and a view into the dispatcher, a PATH-TLV-keyed map, which takes handle bytes from the path_handle module. The dispatcher feeds the subscriber mux, which feeds the FWD router, which sends over transport A or transport B.
+    APP([application]):::app
     PH[path_handle module<br/>read-only literals + register]
     DISP[dispatcher<br/>PATH-TLV-keyed map]
     SUBM[subscriber_mux]
     FR[fwd_router]
-    TXA[transport A]
-    TXB[transport B]
+    TXA[[transport A]]:::peer
+    TXB[[transport B]]:::peer
 
     APP -- "tracer_write(h, view)" --> DISP
     PH -. "handle bytes" .-> DISP
@@ -377,10 +379,9 @@ flowchart LR
     SUBM --> FR
     FR --> TXA
     FR --> TXB
-    style APP fill:#fce7f3,stroke:#9f1239
-    style PH fill:#dcfce7,stroke:#166534
-    style DISP fill:#dbeafe,stroke:#1e40af
 ```
+
+Legend: purple = the application, vermillion = a transport.
 
 The handle module supplies bytes; the dispatcher keys on them; the subscriber multiplexer fans out; the forwarder picks the transport per outbound remote subscriber's link. No module on this path takes a string.
 
@@ -421,7 +422,7 @@ A view over an MMIO register is a view onto bytes that change asynchronously: a 
 
 ### Cross-process refcounts on shared memory
 
-A POSIX SHM region mapped into several processes carries an independent libtracer refcount in each, and they cannot decrement one another: a handle released in one process is invisible to the other. The rule for v1's `mem_shared` is **single-publisher, multi-reader** — the publisher owns the segment, and it MUST NOT reclaim a segment until readers have observably released it or a generation counter has invalidated stale views; the grace period is required, not optional. A robust shared refcount in the SHM region itself is rejected for v1 on complexity and on its failure mode — a process dying while holding the count needs a watchdog — and belongs in a future `mem_iceoryx2` module built on existing robust bookkeeping. Copying at the process boundary remains the fallback where neither is available, at the cost of a fast loopback transport.
+A POSIX SHM region mapped into several processes carries an independent libtracer refcount in each, and they cannot decrement one another: a handle released in one process is invisible to the other. The rule for v1's `mem_shared` is **single-publisher, multi-reader** — the publisher owns the segment, and it does not reclaim a segment until readers have observably released it or a generation counter has invalidated stale views; the grace period is required, not optional. A robust shared refcount in the SHM region itself is rejected for v1 on complexity and on its failure mode — a process dying while holding the count needs a watchdog — and belongs in a future `mem_iceoryx2` module built on existing robust bookkeeping. Copying at the process boundary remains the fallback where neither is available, at the cost of a fast loopback transport.
 
 ### Aliased refcounts on network-stack buffers
 

@@ -384,6 +384,8 @@ how coalescing composes across a link — is
 
 ```{mermaid}
 sequenceDiagram
+    accTitle: One write fanning out to two subscribers
+    accDescr: A publisher writes a rope to /sensor/temp. The graph stores it as the vertex value atomically, with no per-vertex mutex, and snapshots the subscribers under a brief lock. A callback subscriber gets a refcounted clone. A target-vertex subscriber gets the value stored and notified at its target, with no re-dispatch from there. Await waiters are woken, and the write returns OK.
     participant P as publisher
     participant G as graph
     participant V as /sensor/temp

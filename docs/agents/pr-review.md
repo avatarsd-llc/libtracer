@@ -122,7 +122,7 @@ questions to ask:
   change what a conforming implementation does, it is not an erratum.* Check that
   against `docs/spec/v1.md` yourself rather than trusting the label.
 - **Amendment** — the normative surface itself changes: a new or altered
-  MUST/SHOULD, a new error code, a new frame shape, any behaviour a conforming
+  `MUST`/`SHOULD`, a new error code, a new frame shape, any behaviour a conforming
   peer could observe. Needs an RFC (`docs/spec/rfcs/NNNN-short-title.md` from
   `0000-template.md`) and maintainer approval.
 
@@ -302,6 +302,12 @@ by name:
   `tr::<concept>::<error>`; a flat byte registry and a module-keyed namespace are
   both near-misses with named costs.
 
+A docs page is judged against the unified format (#2374), written down once in
+[the docs-article skill](../../.claude/skills/docs-article/SKILL.md): its page type, the
+concept template, the diagram vocabulary, and the rule that a guide links the spec instead
+of restating it. `tools/check_docs_style.py` checks the mechanical part and gates the
+`docs` workflow (#2382), so a review names only what the lint cannot see.
+
 ### 2f. Mechanical conventions
 
 Check these, but only where CI does not already: the `Doxyfile`, `clang-format`
@@ -392,6 +398,7 @@ yourself**; CI already did.
 | Symbol-size ratchet (`symbol-ratchet`) | `cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release && cmake --build bench/build --target bench_libtracer bench_chain_delivery -j && python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json` — toolchain-bound, so a local number is not CI's | no |
 | Perf gate (`perf`, path-filtered to `core/`, `bench/`, `docs/methodology.md`) | `gate-pr` in `.github/workflows/perf.yml`: a same-runner interleaved A/B against `main` via `bench/perf_gate.py`; a contributor does not reproduce it locally | no |
 | QSBR model check (`genmc`, path-filtered to the reclaim headers, not required) | `GENMC=<path to genmc> tools/genmc_qsbr.sh` — GenMC v0.19.0, built as `.github/workflows/genmc.yml` does; a VIOLATION prints the trace | no |
+| Docs style lint (`docs`) | `python3 tools/check_docs_style.py --gate` — fails on a page/rule hit count above `tools/docs_style_baseline.json` (marked `NEW`); baselined hits pass. A PR that fixes hits runs `--update-baseline` and says so | no |
 | Docs build (`docs`) | `sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html` after `doxygen core/Doxyfile`; a Doxygen autolink inside backticks breaks `-n -W` — escape it with `%` | no |
 | Cortex-M0 footprint sentinel | the `sentinel` job in `.github/workflows/footprint-cortexm0.yml` (needs `arm-none-eabi`) | no |
 | ESP32-C6 hardware arms | `.github/workflows/hil-esp32c6.yml` | **yes** |
@@ -421,8 +428,9 @@ that breaks one of them is a finding; cite the rule.
   hosted is the arm64 leg (a different architecture), named with its reason in
   core-ci.yml's header. Jobs that cannot run in a container (the `setarch -R`
   sanitizer, TSan, QSBR and QUIC legs, `can-vcan-e2e`, `mesh-testbed`) run on the
-  ci-local host itself as the runner user. A new job never adds to the hosted list. `CI_SELF_HOSTED=false` is the operator's
-  switch for an outage, not a route a workflow is designed around.
+  ci-local host itself as the runner user. A new job never adds to the hosted list.
+  `CI_SELF_HOSTED=false` is the operator's switch for an outage, not a route a workflow is
+  designed around.
 - **Fork PRs never run CI.** Every job skips for a pull request from a fork.
   To test one, a maintainer reviews it, pushes its head to `ci/fork-<N>` and opens
   a pull request from that branch, where it runs as trusted code. A fork PR is never

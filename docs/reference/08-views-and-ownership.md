@@ -195,6 +195,8 @@ The lifetime drawing for a single segment under fan-out:
 
 ```mermaid
 sequenceDiagram
+    accTitle: A received segment refcount through dispatch
+    accDescr: Transport RX creates a segment with refcount 1, held by the backend receive buffer. The view is handed to the dispatcher (2) and RX releases its hold (1). The dispatcher clones it for two subscribers (2, then 3), delivers both views and releases its own hold (2). Each subscriber drops its view (1, then 0), and the view layer calls the backend destroy, which reclaims the bytes: a heap free, a pool return or a DMA half marked reusable.
     autonumber
     participant TX as Transport RX
     participant V as View layer
@@ -651,7 +653,7 @@ A view over an MMIO register is a view onto bytes that change asynchronously. Al
 
 A POSIX SHM region mapped into multiple processes has independent libtracer refcounts in each. They cannot decrement each other.
 
-- **Single-publisher, multi-reader** — only the publisher owns the segment; readers' views are reaped by the publisher's heartbeat-GC. Acceptable for unidirectional pub/sub. **The publisher MUST NOT reclaim a segment until readers have observably released it, or a generation counter has invalidated stale views** — otherwise a reader mid-read races the reap. The grace/epoch is required, not optional.
+- **Single-publisher, multi-reader** — only the publisher owns the segment; readers' views are reaped by the publisher's heartbeat-GC. Acceptable for unidirectional pub/sub. **The publisher does not reclaim a segment until readers have observably released it, or a generation counter has invalidated stale views** — otherwise a reader mid-read races the reap. The grace/epoch is required, not optional.
 - **Robust shared refcount** — atomic + robust mutex in the SHM region; every process participates. Complex.
 - **Copy at process boundary** — each process treats the other's SHM as foreign; the boundary copies. No zero-copy across process.
 

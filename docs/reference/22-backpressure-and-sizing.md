@@ -47,6 +47,8 @@ what refusal looks like, and the member that observes it.
 
 ```mermaid
 flowchart LR
+    accTitle: The seven stages a received frame passes
+    accDescr: Transport RX with its scratch and frame cap, the rx arena for TLV decode, the graph write with ACL and value backend, byte-accounted ring admission, fan-out over the subscriber snapshot, the flat and egress seams for reply and delivery assembly, and the TX slot, one per peer, where the latest write per path wins.
   RX["transport RX<br/>scratch + frame cap"] --> ARENA["rx arena<br/>TLV decode"]
   ARENA --> GW["graph write<br/>ACL + value backend"]
   GW --> RING["ring admission<br/>byte-accounted"]
@@ -54,8 +56,6 @@ flowchart LR
   FAN --> FLAT["flat / egress seams<br/>reply + delivery assembly"]
   FLAT --> TX["TX slot<br/>one per peer, latest wins per path"]
 
-  classDef stage fill:#dff,stroke:#333
-  class RX,ARENA,GW,RING,FAN,FLAT,TX stage
 ```
 
 | Stage | The bound | Where the capacity comes from | Refusal | Observed by |
@@ -82,7 +82,7 @@ Two reading rules for this table:
   `transport_t::send` returns `void` and always will in v1: there is **no wire carrier for
   backpressure** (§2 property 2 — the per-edge credit window is the v2 escalation), so a link
   that dropped a frame has nobody to refuse to. What it owes instead is a **count**: every drop
-  MUST land in `drop_stats()`, and that tally — readable in-process, and on the wire as
+  lands in `drop_stats()`, and that tally — readable in-process, and on the wire as
   `read <any-vertex>:stats.link.<child>` — is the whole of the feedback this plane offers.
   **Counted shed IS the transport contract.** Re-opening it is scoped to M5 (a real socket
   transport), where a link owning its own socket buffer would have something to push back with.

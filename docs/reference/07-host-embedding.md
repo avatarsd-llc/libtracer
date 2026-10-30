@@ -107,7 +107,7 @@ A topology walk that needs to recognize "the same node reached two ways" pins `:
 
 ### The peer-id surface is specified but unrealised
 
-A 128-bit **peer-id** appears in the v1 material as the `origin_peer_id` of the `0x0D` ROUTER frame and as the origin half of the `(origin_peer_id, ts)` in-flight identity. **`0x0D` ROUTER is a reserved, decodable codepoint with no implemented mechanism** ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x0D`): senders MUST NOT emit it, so **no v1 frame carries a peer-id**. Correspondingly, the protocol defines no peer-id generation rule, no persistence rule, and no announce path, and a second implementer building one would be building against nothing.
+A 128-bit **peer-id** appears in the v1 material as the `origin_peer_id` of the `0x0D` ROUTER frame and as the origin half of the `(origin_peer_id, ts)` in-flight identity. **`0x0D` ROUTER is a reserved, decodable codepoint with no implemented mechanism** ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x0D`): senders never emit it, so **no v1 frame carries a peer-id**. Correspondingly, the protocol defines no peer-id generation rule, no persistence rule, and no announce path, and a second implementer building one would be building against nothing.
 
 What *is* realised under that name is narrower and local: the CAN transport composes a 16-byte origin from the bus node-id purely as the grouping key of its own multi-frame reassembly ([14-can-transport.md](14-can-transport.md)). Both peers derive it identically from the same CAN id, so it is header-elided — never transmitted. It groups slices on one bus; it is not a network-wide node identity.
 
@@ -184,6 +184,8 @@ The full path of one remote delivery. **Every dispatch step uses pre-encoded PAT
 
 ```mermaid
 sequenceDiagram
+    accTitle: A write from an STM32 app over CAN to a local subscriber
+    accDescr: The STM32 app holds the path handle h_wheel, a .rodata PATH TLV for /wheel/left, and writes a VALUE. A remote subscriber is bound, so producer fan-out emits FWD WRITE to its return route, stored once at subscribe and refcount-cloned per delivery. The framed bytes cross the CAN bus to the forwarder, where dst names a local vertex: it decodes and resolves on the canonical PATH body with no key materialization, writes the target vertex, and the vertex delivers to its local subscriber, which matches on its own .rodata handle by byte equality.
     autonumber
     participant App as App on STM32
     participant TxA as producer fan-out (egress)

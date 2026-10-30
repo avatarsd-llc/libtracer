@@ -13,6 +13,8 @@ bytes are what travel on the wire when two nodes are connected.
 
 ```{mermaid}
 flowchart LR
+    accTitle: One vertex and its three kinds of subscriber
+    accDescr: A publisher writes a view to the vertex /sensor/temp. The vertex delivers to a callback subscriber, wakes a thread waiting in await, and for a remote subscriber sends FWD through a transport to a peer node.
     P["publisher<br/>write(v, view_t)"] --> V(("vertex<br/>/sensor/temp"))
     V --> C["callback subscriber"]
     V --> A["thread in await()"]
@@ -213,6 +215,8 @@ way back for the reply. No per-request state lives on any hop
 
 ```{mermaid}
 flowchart LR
+    accTitle: A write from node A to a subscriber on node B
+    accDescr: Node A sends FWD WRITE with dst /b/sensor/temp. Router A peeks the first dst segment, finds link b, strips b, grows src and sends over the transport. Router B sees dst /sensor/temp as a local terminus, writes /sensor/temp on node B, and the subscriber on B is delivered the value.
     CA["node A: FWD{WRITE dst=/b/sensor/temp}"] --> RA["router A<br/>peek first dst seg → link b"]
     RA -->|"strip b · grow src"| T(["transport (wire)"])
     T --> RB["router B<br/>dst=/sensor/temp → local terminus"]

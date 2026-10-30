@@ -1,0 +1,130 @@
+{
+  "text": 27758,
+  "rodata": 4433,
+  "unwind": 6124,
+  "init_arrays": 24,
+  "data": 272,
+  "bss": 6996,
+  "flash": 38611,
+  "ram": 7268,
+  "sections": {
+    ".text": 27758,
+    ".rodata": 4433,
+    ".eh_frame": 5940,
+    ".gcc_except_table": 184,
+    ".init_array": 12,
+    ".fini_array": 12,
+    ".data": 156,
+    ".sdata": 116,
+    ".sbss": 100,
+    ".bss": 6896,
+    ".comment": 47,
+    ".riscv.attributes": 103
+  },
+  "per_object": {
+    "frame": {
+      "text": 3718,
+      "rodata": 1588,
+      "unwind": 0,
+      "init_arrays": 0,
+      "data": 0,
+      "bss": 0,
+      "flash": 5306,
+      "ram": 0
+    },
+    "tlv_arena": {
+      "text": 2394,
+      "rodata": 1588,
+      "unwind": 0,
+      "init_arrays": 0,
+      "data": 0,
+      "bss": 0,
+      "flash": 3982,
+      "ram": 0
+    },
+    "backend_set": {
+      "text": 410,
+      "rodata": 52,
+      "unwind": 0,
+      "init_arrays": 0,
+      "data": 0,
+      "bss": 0,
+      "flash": 462,
+      "ram": 0
+    },
+    "mem_pool": {
+      "text": 756,
+      "rodata": 113,
+      "unwind": 0,
+      "init_arrays": 0,
+      "data": 0,
+      "bss": 0,
+      "flash": 869,
+      "ram": 0
+    },
+    "mem_source": {
+      "text": 112,
+      "rodata": 195,
+      "unwind": 0,
+      "init_arrays": 0,
+      "data": 8,
+      "bss": 0,
+      "flash": 315,
+      "ram": 8
+    },
+    "mem_heap": {
+      "text": 3402,
+      "rodata": 560,
+      "unwind": 0,
+      "init_arrays": 0,
+      "data": 156,
+      "bss": 2568,
+      "flash": 4118,
+      "ram": 2724
+    },
+    "rope": {
+      "text": 596,
+      "rodata": 52,
+      "unwind": 0,
+      "init_arrays": 0,
+      "data": 0,
+      "bss": 0,
+      "flash": 648,
+      "ram": 0
+    },
+    "path": {
+      "text": 2616,
+      "rodata": 287,
+      "unwind": 0,
+      "init_arrays": 0,
+      "data": 0,
+      "bss": 0,
+      "flash": 2903,
+      "ram": 0
+    },
+    "sentinel_node": {
+      "text": 2492,
+      "rodata": 251,
+      "unwind": 0,
+      "init_arrays": 0,
+      "data": 8,
+      "bss": 4096,
+      "flash": 2751,
+      "ram": 4104
+    }
+  },
+  "march": "rv32imac_zicsr_zifencei",
+  "mabi": "ilp32",
+  "toolchain": "riscv32-esp-elf-g++ (crosstool-NG esp-15.2.0_20251204) 15.2.0",
+  "commit": "6b6eba06fe47de554a43bc102cb0e664ba442799",
+  "required_modules": [
+    "frame",
+    "tlv_arena",
+    "backend_set",
+    "mem_pool",
+    "mem_source",
+    "mem_heap",
+    "rope",
+    "path"
+  ]
+}

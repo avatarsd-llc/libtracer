@@ -27,7 +27,7 @@ Two rules govern it:
 | Move data between two boards | [Getting started §5](getting-started.md) | [lane 1](#lane-1--move-data-between-two-boards) | NARROW → MID |
 | Let a browser see robot state | [Reference 16 — WebSocket session authentication](reference/16-websocket-session-auth.md) | [lane 2](#lane-2--let-a-browser-see-robot-state) | MID |
 | Implement the wire protocol myself | [The specification](spec/index.md) | [lane 3](#lane-3--implement-the-wire-protocol-myself) | any |
-| Embed a node on an MCU | [Reference 12 — deployment profiles](reference/12-deployment-profiles.md) | [lane 4](#lane-4--embed-a-node-on-an-mcu) | NARROW |
+| Embed a node on an MCU | [On an MCU](start-here-mcu.md) | [lane 4](#lane-4--embed-a-node-on-an-mcu) | NARROW |
 | Decide whether it fits at all | [Performance & conformance](performance.md) | [other doors](#other-doors) | any |
 | Build a device other vendors integrate with | [Interoperability](interoperability.md) | [other doors](#other-doors) | NARROW → WIDE |
 | Extend or embed the C++ core in a host application | [C++ API reference](modules/index.md) | [other doors](#other-doors) | MID → WIDE |
@@ -161,6 +161,8 @@ Two things to know before you start:
 ## Lane 4 — Embed a node on an MCU
 
 NARROW: a constrained node where flash, static RAM and hot-path allocation all bind.
+**[On an MCU](start-here-mcu.md)** is this lane's first page: what to build, what to leave
+out, and the measured footprint. The route after it:
 
 1. **[Reference 12 — deployment profiles](reference/12-deployment-profiles.md)** —
    rung 1, the single-transport leaf: the exact module tree, its conformance profile,
@@ -189,8 +191,8 @@ NARROW: a constrained node where flash, static RAM and hot-path allocation all b
 
 The footprint claim is gated, not asserted: a stripped Cortex-M0 build is measured by
 [`footprint-cortexm0.yml`](https://github.com/avatarsd-llc/libtracer/blob/main/.github/workflows/footprint-cortexm0.yml)
-on every change under `core/`, and its budget verdict currently runs in **warn** mode —
-so take the size from that job's own output rather than from a figure quoted elsewhere.
+nightly and on every pull request that changes `core/`, and the build fails past its 16 KiB
+flash budget. The [MCU page](start-here-mcu.md#what-it-costs) shows the newest measurement.
 
 ---
 
@@ -214,7 +216,7 @@ runs top to bottom.
 
 | Genre | Where | Answers | Status |
 | --- | --- | --- | --- |
-| Normative specification | [`docs/spec/v1.md`](spec/v1.md) + its annexes | What a conforming implementation MUST do | Wins against every other document |
+| Normative specification | [`docs/spec/v1.md`](spec/v1.md) + its annexes | What a conforming implementation has to do | Wins against every other document |
 | Descriptive reference | [`docs/reference/`](reference/README.md) | What the protocol *is*, implementation-independently | Canonical for that question; draft for v1 |
 | API reference | [`docs/modules/`](modules/index.md) | What the C++23 reference implementation exposes | One implementation, not the standard |
 | Measured evidence | [Performance](performance.md), [capability matrix](capability-matrix.md), [design notes](design/README.md) | What it costs, and what is verified | Generated from CI runs |

@@ -78,13 +78,14 @@ std::expected<tlv_node_t, err_t> tr::wire::tlv_node_t::over(const view_t&,
 
 ```{mermaid}
 flowchart LR
+    accTitle: One message held as a rope of three views
+    accDescr: A header view over a static segment, a payload view over a DMA segment and a tail view over a pool segment form one rope. Each view points into its own segment. rope_t.to_iovec() hands all three to one writev().
     H["view A · header<br/>static segment"] --> P["view B · payload<br/>DMA segment"] --> T["view C · tail<br/>pool segment"]
     H -.-> S1[(seg 1)]
     P -.-> S2[(seg 2)]
     T -.-> S3[(seg 3)]
-    R["rope_t.to_iovec() → writev()"]:::e
+    R["rope_t.to_iovec() → writev()"]
     H --- R
-    classDef e fill:#dbeafe,stroke:#1e40af;
 ```
 
 A rope holds its first two links in small-buffer storage (`kInline = 2`,

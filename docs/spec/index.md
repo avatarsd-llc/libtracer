@@ -14,7 +14,7 @@ Normative status is not a property of a directory. It is declared by
 - **[Protocol v1](v1.md)** is the normative core — scope, terminology, the
   conformance procedure, and the static path-handle requirements.
 - **Four reference documents are incorporated as normative annexes** by
-  [v1.md §3](v1.md#3-wire-format). Their MUST/SHOULD/MAY clauses are clauses of
+  [v1.md §3](v1.md#3-wire-format). Their `MUST`/`SHOULD`/`MAY` clauses are clauses of
   the specification; their paragraphs marked *informative* are not:
   - [01-data-format.md](../reference/01-data-format.md) — frame layout, the
     `opt` bits, fixed-width lengths, the trailer.
@@ -64,7 +64,7 @@ applied in place with a changelog entry.
 
 An implementation is "libtracer vN compatible" if and only if it:
 
-1. Honors every MUST clause in `vN.md` and in the documents `vN.md` incorporates.
+1. Honors every `MUST` clause in `vN.md` and in the documents `vN.md` incorporates.
 2. Passes every test vector under
    [`tests/conformance/`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/)
    tagged for vN.

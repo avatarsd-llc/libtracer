@@ -20,9 +20,12 @@ A libtracer node is **a set of modules linked together** — there is no monolit
 "core". The implemented modules form a clean six-layer stack:
 
 ```{mermaid}
+:caption: "Legend: purple = the application; every other box is a library module."
 flowchart TB
+    accTitle: The six module layers
+    accDescr: From the top: L5 the application. L4 graph, dispatch, fwd-router and transport. L2/L3 the frame codec. L1 views. L0 segment and backends. The application uses the graph, which feeds dispatch and the FWD router. The router uses the frame codec and the transports. A graph value is a rope_t. The frame codec casts into views with no copy, and views sit on segments, which sit on backends.
     subgraph L5["L5 · application"]
-        APP[your data / handlers]
+        APP([your data / handlers]):::app
     end
     subgraph L4["L4 · graph + transport"]
         GRAPH["graph — vertices, read/write/await"]
@@ -48,8 +51,6 @@ flowchart TB
     GRAPH -. "value IS a rope_t (scalar = 1 link)" .-> VIEWS
     FRAME -- "cast, no copy" --> VIEWS
     VIEWS --> SEG --> BACK
-    classDef impl fill:#dcfce7,stroke:#166534;
-    class FRAME,VIEWS,SEG,BACK,GRAPH,DISP,FWD,TRANSPORT impl;
 ```
 
 The load-bearing idea: a **TLV at L2 is a cast from an L1 `view_t`**, and an L1 `view_t` is
