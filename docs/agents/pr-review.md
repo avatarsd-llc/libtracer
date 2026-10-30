@@ -417,11 +417,14 @@ These are maintainer rulings about the CI itself. A diff to `.github/workflows/`
 that breaks one of them is a finding; cite the rule.
 
 - **Self-hosted local runners only.** CI runs on the project's self-hosted
-  `ci-local` runners, never on GitHub-hosted ones. The one job that still runs
-  hosted is the arm64 leg (a different architecture), named with its reason in
-  core-ci.yml's header. Jobs that cannot run in a container (the `setarch -R`
-  sanitizer, TSan, QSBR and QUIC legs, `can-vcan-e2e`, `mesh-testbed`) run on the
-  ci-local host itself as the runner user. A new job never adds to the hosted list. `CI_SELF_HOSTED=false` is the operator's
+  `ci-local` runners, never on GitHub-hosted ones; no GitHub-hosted build, test
+  or lint job remains (the arm64 leg was dropped). The hosted jobs left are not
+  CI: release and npm publishing and the docs deploy (they hold secrets), the
+  `reviewable` trigger, and perf's push-only ratchet/history and perf-local's
+  `density` check (kept off the bench host on purpose). Jobs that cannot run in a container (the
+  `setarch -R` sanitizer, TSan, QSBR and QUIC legs, `can-vcan-e2e`,
+  `mesh-testbed`) run on the ci-local host itself as the runner user. A new job
+  never runs hosted. `CI_SELF_HOSTED=false` is the operator's
   switch for an outage, not a route a workflow is designed around.
 - **Fork PRs never run CI.** Every job skips for a pull request from a fork.
   To test one, a maintainer reviews it, pushes its head to `ci/fork-<N>` and opens

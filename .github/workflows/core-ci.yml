@@ -29,14 +29,12 @@
 # carries the event half of that guard as its `if:` — `github.event_name !=
 # 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`
 # — so a fork PR's jobs are SKIPPED on every route: not run locally, not on a hosted
-# fallback, not even the host-only and hosted-only legs (the setarch sanitizer legs,
-# vcan, mesh, arm64). There is no ok-to-test label and no `labeled` re-run. To test a fork, the
+# fallback, not even the host-only legs (the setarch sanitizer legs, vcan, mesh). There is no ok-to-test label and no `labeled` re-run. To test a fork, the
 # maintainer reviews it and pushes its head to `ci/fork-<N>` in this repository, then
 # opens a pull request from that branch: it is now same-repo, so every check runs as
 # trusted code. A fork PR is never merged on its own checks (CONTRIBUTING.md,
 # docs/agents/pr-review.md). NEVER route here: a `pull_request_target` job, anything
-# touching secrets (release.yml, publish-npm.yml, docs.yml's deploy), the arm64 leg
-# below, or perf.yml (its gate takes the pinned bench-local runner by its own guard).
+# touching secrets (release.yml, publish-npm.yml, docs.yml's deploy), or perf.yml (its gate takes the pinned bench-local runner by its own guard).
 #
 # CONTAINER: the self-hosted runners are bare machines, NOT the ubuntu-24.04 image —
 # there is no preinstalled tool set. Every migrated job therefore runs inside the CI
@@ -110,8 +108,8 @@
 # join runners-ci.slice (that needs privilege the runner user does not hold); it runs in
 # its runner's unit under runners.slice, and counts itself into the adaptive BUILD_JOBS.
 # It keeps its own compiler cache under the runner user's home, because the shared
-# /ccache holds root-owned entries from the containers. The arm64 leg is a different
-# architecture and stays hosted for now.
+# /ccache holds root-owned entries from the containers. No core-ci job runs on a
+# GitHub-hosted runner: the arm64 leg was dropped by owner ruling (#2348).
 #
 # ── COMPILER CACHE (#1691) ──────────────────────────────────────────────────────────
 # Every job that compiles on the self-hosted route shares ONE persistent ccache: the host
@@ -935,68 +933,6 @@ jobs:
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
         run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
-
-  # WEAKLY-ORDERED host gate (#1140). Every other leg here runs x86-64, whose TSO model
-  # hides an entire class of defect: a seq_cst store lowers to a locked `xchg`, so a LATER
-  # RELAXED load of zero still cannot observe the pre-store world. Every acquire/release and
-  # Dekker pairing in the graph's lock-free gates — `own_subs_ordered`'s fan-out skip (#635),
-  # `mark_pending`'s deferred skip (#1140) — is therefore untestable where CI runs, and both
-  # were argued from the code rather than covered. aarch64 does NOT order a relaxed load
-  # after a seq_cst store, which is the same property the shipped rv32 targets have and the
-  # reason those arguments matter at all. This leg is the real evidence: same sources, same
-  # ctest, a memory model that can actually exhibit the anomaly. Ablate it by relaxing any of
-  # those ordered loads — the graph race guards can then fail HERE and nowhere else.
-  # NOT routed to `ci-local`: the self-hosted runners are x86-64, and this leg exists
-  # precisely to run somewhere x86-64's TSO model does not hide the defect. Hosted,
-  # permanently.
-  build-test-arm64:
-    needs: changes
-    if: >-
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
-    runs-on: ubuntu-24.04-arm
-    # Measured healthy max 4.92 min. 20 = ~4x. No container and no apt step here, but the
-    # number is kept equal to the rest of the build-test group so one review covers them.
-    timeout-minutes: 20
-    steps:
-      # Build parallelism (#1637, #1691, #2348): on the self-hosted runners, 4 while at most 3
-      # CI containers share the 11-core slice and 2 above that or when the count is
-      # unreadable (see BUILD_JOBS in core-ci.yml's header); `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes
-      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
-      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
-      # sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS) + compiler cache
-        run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
-            echo "CI containers running in runners-ci.slice (this one included): $n"
-            if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
-          else jobs="$(nproc)"; fi
-          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
-          echo "BUILD_JOBS=$jobs"
-          if [ -d /ccache ]; then
-            {
-              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
-              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
-              echo "CCACHE_DIR=/ccache"
-              echo "CCACHE_MAXSIZE=20G"
-              echo "CCACHE_COMPILERCHECK=content"
-              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
-              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
-            } >> "$GITHUB_ENV"
-            echo "ccache: ON (/ccache)"
-          fi
-      - uses: actions/checkout@v4
-      - name: Configure + build (C++23, aarch64) + ctest
-        env:
-          LT_EXPECT_LKV_SLOT: single_writer_slot_t
-          LT_EXPECT_RECLAIM_POLICY: reclaim_qsbr_t
-          LT_EXPECT_ACL_POLICY: allow_only_policy_t
-        run: |
-          cmake -S core -B core/build-arm64 -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build core/build-arm64 --parallel "$BUILD_JOBS"
-          ctest --test-dir core/build-arm64 --output-on-failure
 
   # GCC-15 host gate: build the core + ctest with GCC 15 (the same major the
   # ESP-IDF v6.0 RISC-V toolchain ships), so the core is gated on the compiler
@@ -1933,7 +1869,7 @@ jobs:
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
       (always())
-    needs: [changes, build-test, build-test-variants, build-test-minimal-set, build-test-bus-closed, build-test-self-heal-closed, build-test-arm64, build-test-gcc15, build-test-noise, sanitizers, tsan, tsan-membarrier, install-consume, bench-compile, census-gate, ci-paths, format, doxygen-gate]
+    needs: [changes, build-test, build-test-variants, build-test-minimal-set, build-test-bus-closed, build-test-self-heal-closed, build-test-gcc15, build-test-noise, sanitizers, tsan, tsan-membarrier, install-consume, bench-compile, census-gate, ci-paths, format, doxygen-gate]
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
