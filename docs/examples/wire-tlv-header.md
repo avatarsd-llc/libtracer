@@ -9,9 +9,10 @@ This is the first thing to read before any other page in this domain.
 ## What to notice
 
 - **`opt` is a bitfield with two reserved bits.** `opt_t::encode` / `opt_t::decode` round-trip
-  the six meaningful bits exactly, and bits 7 and 0 are reserved-MUST-be-zero. `reserved_set`
-  answers that question about a *raw* byte, before anything has been parsed — a set reserved
-  bit makes the frame invalid ([wire-format bits](../modules/wire-format-bits.md)).
+  the six meaningful bits exactly, and bits 7 and 0 are reserved, zero on the wire
+  ([v1 §3](../spec/v1.md#3-wire-format)). `reserved_set` answers that question about a *raw*
+  byte, before anything has been parsed — a set reserved bit makes the frame invalid
+  ([wire-format bits](../modules/wire-format-bits.md)).
 - **The length width is `emit_tlv`'s decision, not the caller's.** The example passes
   `opt_t{.ll = false}` with a 64 KiB body and gets a six-byte header with `LL` set anyway.
   Before [#924](https://github.com/avatarsd-llc/libtracer/issues/924) a programmatically built

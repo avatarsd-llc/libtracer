@@ -7,12 +7,10 @@
   "line-length": 3
  },
  "docs/adr/0002-versioning-protocol-vs-release-no-per-frame-version.md": {
-  "line-length": 6,
-  "restatement": 1
+  "line-length": 6
  },
  "docs/adr/0003-retire-list-type-code-0x05.md": {
-  "line-length": 3,
-  "restatement": 1
+  "line-length": 3
  },
  "docs/adr/0004-crc-in-optional-trailer.md": {
   "avoid-phrase": 2,
@@ -29,8 +27,7 @@
   "line-length": 4
  },
  "docs/adr/0008-schema-driven-array-indexing.md": {
-  "line-length": 7,
-  "restatement": 1
+  "line-length": 7
  },
  "docs/adr/0009-built-in-error-model-tr-concept-namespace.md": {
   "line-length": 10
@@ -39,20 +36,16 @@
   "line-length": 7
  },
  "docs/adr/0011-address-shift-totality-opt-in.md": {
-  "line-length": 7,
-  "restatement": 1
+  "line-length": 7
  },
  "docs/adr/0012-modular-memory-binding-transparent-router.md": {
-  "line-length": 7,
-  "restatement": 1
+  "line-length": 7
  },
  "docs/adr/0013-v1-scope-boundaries.md": {
-  "line-length": 10,
-  "restatement": 1
+  "line-length": 10
  },
  "docs/adr/0014-router-cycle-termination-hop-count.md": {
-  "line-length": 9,
-  "restatement": 4
+  "line-length": 9
  },
  "docs/adr/0015-graph-runtime-concurrency-and-in-process-cycle-cap.md": {
   "line-length": 13
@@ -79,8 +72,7 @@
   "line-length": 17
  },
  "docs/adr/0023-ros2-binding-via-rmw-tracer.md": {
-  "line-length": 20,
-  "restatement": 1
+  "line-length": 20
  },
  "docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md": {
   "line-length": 17
@@ -113,12 +105,10 @@
   "line-length": 4
  },
  "docs/adr/0034-typescript-client-sdk.md": {
-  "line-length": 35,
-  "restatement": 2
+  "line-length": 35
  },
  "docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md": {
-  "line-length": 27,
-  "restatement": 1
+  "line-length": 27
  },
  "docs/adr/0036-bridge-dissolves-into-connection-vertex.md": {
   "line-length": 16
@@ -127,12 +117,10 @@
   "line-length": 31
  },
  "docs/adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md": {
-  "line-length": 40,
-  "restatement": 1
+  "line-length": 40
  },
  "docs/adr/0039-pmr-memory-model-host-aligned-allocation.md": {
-  "line-length": 36,
-  "restatement": 1
+  "line-length": 36
  },
  "docs/adr/0040-net-plane-is-explicit-source-routed-only.md": {
   "line-length": 29
@@ -141,8 +129,7 @@
   "line-length": 29
  },
  "docs/adr/0042-refcounted-receiver-seam-view-delivery.md": {
-  "line-length": 18,
-  "restatement": 1
+  "line-length": 18
  },
  "docs/adr/0043-quic-webtransport-optional-module-msquic.md": {
   "line-length": 18
@@ -160,8 +147,7 @@
   "line-length": 33
  },
  "docs/adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md": {
-  "line-length": 19,
-  "restatement": 1
+  "line-length": 19
  },
  "docs/adr/0049-field-write-single-subscriber-admission-door.md": {
   "line-length": 15
@@ -197,17 +183,14 @@
   "line-length": 18
  },
  "docs/adr/0060-lkv-copy-store-injected-value-backend.md": {
-  "line-length": 18,
-  "restatement": 1
+  "line-length": 18
  },
  "docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md": {
   "avoid-phrase": 1,
-  "line-length": 35,
-  "restatement": 1
+  "line-length": 35
  },
  "docs/adr/0062-resolve-once-label-bindings-hold-resolutions-not-names.md": {
-  "line-length": 35,
-  "restatement": 1
+  "line-length": 35
  },
  "docs/adr/0063-connection-table-lock-free-reads-trait-serialized-writes.md": {
   "line-length": 25
@@ -240,12 +223,10 @@
   "line-length": 36
  },
  "docs/adr/0073-naming-authority-the-application-mints-one-predicate-gates.md": {
-  "line-length": 28,
-  "restatement": 2
+  "line-length": 28
  },
  "docs/adr/0074-terminus-reply-egress-is-its-own-injected-backend.md": {
-  "line-length": 16,
-  "restatement": 1
+  "line-length": 16
  },
  "docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md": {
   "line-length": 36
@@ -275,15 +256,13 @@
   "line-length": 40
  },
  "docs/adr/0084-remote-await-completes-from-a-receiver-side-waiter.md": {
-  "line-length": 24,
-  "restatement": 1
+  "line-length": 24
  },
  "docs/adr/0085-ingress-drain-budget-waits-for-the-idle-task-not-a-clock.md": {
   "line-length": 41
  },
  "docs/adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md": {
-  "line-length": 34,
-  "restatement": 1
+  "line-length": 34
  },
  "docs/adr/0087-the-peer-path-is-one-frame-ingress-one-shared-egress-frame-one-wait-module-per-node.md": {
   "line-length": 50
@@ -291,7 +270,7 @@
  "docs/agents/pr-review.md": {
   "avoid-phrase": 1,
   "line-length": 3,
-  "restatement": 3
+  "restatement": 2
  },
  "docs/capability-matrix.md": {
   "own-site-link": 1
@@ -302,8 +281,7 @@
  "docs/design/allocation-and-backpressure.md": {
   "avoid-phrase": 1,
   "line-length": 29,
-  "own-site-link": 5,
-  "restatement": 1
+  "own-site-link": 5
  },
  "docs/design/concurrency/00-scaling-and-serialization.md": {
   "avoid-phrase": 1,
@@ -390,8 +368,7 @@
  },
  "docs/examples/wire-decode-refusals.md": {
   "line-length": 2,
-  "own-site-link": 1,
-  "restatement": 1
+  "own-site-link": 1
  },
  "docs/examples/wire-packed-path.md": {
   "line-length": 1,
@@ -400,17 +377,13 @@
  "docs/examples/wire-path-escape.md": {
   "own-site-link": 2
  },
- "docs/examples/wire-tlv-header.md": {
-  "restatement": 1
- },
  "docs/getting-started.md": {
   "line-length": 4,
   "own-site-link": 1
  },
  "docs/ietf/wire-audit.md": {
   "avoid-phrase": 1,
-  "own-site-link": 1,
-  "restatement": 6
+  "own-site-link": 1
  },
  "docs/implementations.md": {
   "avoid-phrase": 1,
@@ -418,8 +391,7 @@
  },
  "docs/interop/custom-device.md": {
   "line-length": 2,
-  "own-site-link": 4,
-  "restatement": 4
+  "own-site-link": 4
  },
  "docs/interop/esp32-production-node.md": {
   "avoid-phrase": 1,
@@ -447,8 +419,7 @@
  },
  "docs/modules/frame-codec.md": {
   "line-length": 4,
-  "own-site-link": 6,
-  "restatement": 1
+  "own-site-link": 6
  },
  "docs/modules/fwd-router.md": {
   "avoid-phrase": 2,
@@ -498,12 +469,12 @@
   "avoid-phrase": 2,
   "line-length": 175,
   "own-site-link": 59,
-  "restatement": 11
+  "restatement": 5
  },
  "docs/reference/04-communication-flows.md": {
   "line-length": 78,
   "own-site-link": 16,
-  "restatement": 4
+  "restatement": 2
  },
  "docs/reference/06-user-data-packing.md": {
   "line-length": 59,
@@ -512,22 +483,19 @@
  "docs/reference/07-host-embedding.md": {
   "line-length": 56,
   "own-site-link": 6,
-  "restatement": 3
+  "restatement": 2
  },
  "docs/reference/08-views-and-ownership.md": {
-  "line-length": 108,
-  "restatement": 1
+  "line-length": 108
  },
  "docs/reference/09-memory-substrate.md": {
   "avoid-phrase": 1,
   "line-length": 167,
-  "own-site-link": 7,
-  "restatement": 3
+  "own-site-link": 7
  },
  "docs/reference/10-module-catalog.md": {
   "line-length": 55,
-  "own-site-link": 3,
-  "restatement": 2
+  "own-site-link": 3
  },
  "docs/reference/11-vertex-roles-and-aggregation.md": {
   "line-length": 92,
@@ -554,7 +522,7 @@
   "avoid-phrase": 7,
   "line-length": 4,
   "own-site-link": 19,
-  "restatement": 2
+  "restatement": 1
  },
  "docs/reference/19-transports-are-vertices.md": {
   "line-length": 13,
@@ -571,8 +539,7 @@
  },
  "docs/reference/22-backpressure-and-sizing.md": {
   "line-length": 16,
-  "own-site-link": 5,
-  "restatement": 1
+  "own-site-link": 5
  },
  "docs/reference/24-modelling-granularity.md": {
   "line-length": 1,
@@ -589,21 +556,15 @@
   "line-length": 48
  },
  "docs/research/2026-08-19-post-quantum-hybrid-kem-constraint.md": {
-  "line-length": 1,
-  "restatement": 2
- },
- "docs/research/horizon.md": {
-  "restatement": 4
+  "line-length": 1
  },
  "docs/research/nnstreamer-synergy.md": {
   "line-length": 4
  },
  "docs/spec/index.md": {
-  "own-site-link": 2,
-  "restatement": 2
+  "own-site-link": 2
  },
  "docs/start-here.md": {
-  "own-site-link": 2,
-  "restatement": 1
+  "own-site-link": 2
  }
 }

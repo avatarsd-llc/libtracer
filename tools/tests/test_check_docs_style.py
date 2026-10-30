@@ -89,6 +89,10 @@ class FixturePageTest(unittest.TestCase):
     def test_a_must_outside_the_spec_is_a_restatement_hit(self):
         self.assert_only("restatement.md", "docs/reference/x.md", "restatement")
 
+    def test_a_record_states_its_own_decision_and_is_no_restatement(self):
+        for rel in ("docs/adr/0001-x.md", "docs/research/2026-07-11-x.md"):
+            self.assertEqual([r for r, _ in hits_of("restatement.md", rel)], [], rel)
+
     def test_the_spec_is_left_alone(self):
         for rel in ("docs/reference/01-data-format.md", "docs/spec/v1.md", "docs/spec/rfcs/0001-x.md"):
             for fixture in ("line-length.md", "restatement.md"):  # the banner rule aside

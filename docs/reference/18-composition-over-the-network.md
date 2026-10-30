@@ -68,7 +68,7 @@ never one segment ([RFC-0014](https://github.com/avatarsd-llc/libtracer/blob/mai
 The segments already carry the identifiers, so **the path needs no separate naming layer** and
 no destination field: the path-suffix *is* the address.
 
-Send-side routing and receive-side mounting are **duals and MUST agree** — the suffix a caller
+Send-side routing and receive-side mounting are **duals and agree** — the suffix a caller
 routes *through* a transport vertex equals the prefix that vertex mounts inbound data *under*
 (RFC-0004 §A, consistency requirement). They are one operation, not two that happen to match.
 

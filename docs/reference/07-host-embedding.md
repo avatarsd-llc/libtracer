@@ -107,7 +107,7 @@ A topology walk that needs to recognize "the same node reached two ways" pins `:
 
 ### The peer-id surface is specified but unrealised
 
-A 128-bit **peer-id** appears in the v1 material as the `origin_peer_id` of the `0x0D` ROUTER frame and as the origin half of the `(origin_peer_id, ts)` in-flight identity. **`0x0D` ROUTER is a reserved, decodable codepoint with no implemented mechanism** ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x0D`): senders MUST NOT emit it, so **no v1 frame carries a peer-id**. Correspondingly, the protocol defines no peer-id generation rule, no persistence rule, and no announce path, and a second implementer building one would be building against nothing.
+A 128-bit **peer-id** appears in the v1 material as the `origin_peer_id` of the `0x0D` ROUTER frame and as the origin half of the `(origin_peer_id, ts)` in-flight identity. **`0x0D` ROUTER is a reserved, decodable codepoint with no implemented mechanism** ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x0D`): senders never emit it, so **no v1 frame carries a peer-id**. Correspondingly, the protocol defines no peer-id generation rule, no persistence rule, and no announce path, and a second implementer building one would be building against nothing.
 
 What *is* realised under that name is narrower and local: the CAN transport composes a 16-byte origin from the bus node-id purely as the grouping key of its own multi-frame reassembly ([14-can-transport.md](14-can-transport.md)). Both peers derive it identically from the same CAN id, so it is header-elided — never transmitted. It groups slices on one bus; it is not a network-wide node identity.
 

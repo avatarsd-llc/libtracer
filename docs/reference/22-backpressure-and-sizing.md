@@ -82,7 +82,7 @@ Two reading rules for this table:
   `transport_t::send` returns `void` and always will in v1: there is **no wire carrier for
   backpressure** (§2 property 2 — the per-edge credit window is the v2 escalation), so a link
   that dropped a frame has nobody to refuse to. What it owes instead is a **count**: every drop
-  MUST land in `drop_stats()`, and that tally — readable in-process, and on the wire as
+  lands in `drop_stats()`, and that tally — readable in-process, and on the wire as
   `read <any-vertex>:stats.link.<child>` — is the whole of the feedback this plane offers.
   **Counted shed IS the transport contract.** Re-opening it is scoped to M5 (a real socket
   transport), where a link owning its own socket buffer would have something to push back with.

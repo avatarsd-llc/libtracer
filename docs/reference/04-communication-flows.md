@@ -72,7 +72,7 @@ Publisher              Local router            Vertex            Subscriber 1   
 
 Invariants:
 
-- TLV ownership transfers from the publisher to the router on `write`. The publisher MUST NOT touch `tlv` after the call returns.
+- TLV ownership transfers from the publisher to the router on `write`. The publisher does not touch `tlv` after the call returns.
 - The router clones (refcount-bumps) the view per subscriber. **No bytes are copied.**
 - Each subscriber's queue holds the view; when the subscriber consumes and releases, its refcount drops.
 - The backing segment is freed only when the last view is released.
@@ -593,7 +593,7 @@ The bytes flowing through the router are identical to the string-form write at t
 
 ### Cross-mode equivalence
 
-A subscriber registered against `/sensor/temp` in string form MUST receive deliveries from a publisher writing through a static handle for `/sensor/temp`, and vice versa. Dispatch is keyed on canonical PATH TLV bytes, and both forms produce the same key.
+A subscriber registered against `/sensor/temp` in string form receives deliveries from a publisher writing through a static handle for `/sensor/temp`, and vice versa: [v1 §3.1.1](../spec/v1.md#31-static-path-handle-conformance) makes the two writes indistinguishable on the wire. Dispatch is keyed on canonical PATH TLV bytes, and both forms produce the same key.
 
 ```mermaid
 flowchart TB

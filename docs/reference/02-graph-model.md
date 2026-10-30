@@ -245,7 +245,7 @@ This is the structural rule that lets [03-addressing.md](03-addressing.md) §sta
 - A write whose path argument is a build-time `.rodata` PATH TLV byte literal hashes / compares against that same key — no string is involved at any point.
 - A write whose path argument is the equivalent string `"sensor/temp"` is canonicalized into the same PATH TLV bytes once (by the slow-path string entry, if the implementation provides one) and then dispatched against the same key.
 
-**Implication.** Two paths that name the same vertex MUST canonicalize to byte-identical PATH TLV payload bytes. The canonicalization rules in [03-addressing.md](03-addressing.md) §path canonicalization are the spec for this; conformance vectors under `tests/conformance/vectors/v1/path/` pin the encoded bytes.
+**Implication.** Two paths that name the same vertex canonicalize to byte-identical PATH TLV payload bytes. The canonicalization rules in [03-addressing.md](03-addressing.md) §path canonicalization are the spec for this; conformance vectors under `tests/conformance/vectors/v1/path/` pin the encoded bytes.
 
 ```mermaid
 flowchart LR
@@ -298,7 +298,7 @@ destroy callback fires; memory returned to pool/allocator
 
 ### Required atomic operations
 
-Implementations on multi-threaded hosts MUST use atomic refcounts with these memory orderings (canonical Boost intrusive_ptr pattern):
+On a multi-threaded host the reference implementation uses atomic refcounts with these memory orderings (canonical Boost intrusive_ptr pattern):
 
 | Operation | Order | Why |
 | ---- | ---- | ---- |
@@ -307,7 +307,7 @@ Implementations on multi-threaded hosts MUST use atomic refcounts with these mem
 | Read for inspection (debug, metrics) | `acquire` | Pairs with each decrement; gives consistent snapshot |
 | Weak-to-strong upgrade (CAS loop) | `acq_rel` on success, `acquire` on failure | Same logic as inc + sync with last decrementer |
 
-Rationale is expanded in [08-views-and-ownership.md](08-views-and-ownership.md) §refcount semantics. The reference implementation uses C++ `std::atomic`; implementations in C (`<stdatomic.h>`), Rust (`Arc<T>` / `AtomicUsize`), or any other language MUST implement equivalent semantics.
+Rationale is expanded in [08-views-and-ownership.md](08-views-and-ownership.md) §refcount semantics. The reference implementation uses C++ `std::atomic`; implementations in C (`<stdatomic.h>`), Rust (`Arc<T>` / `AtomicUsize`), or any other language need equivalent semantics.
 
 ### Single-threaded mode
 
@@ -547,7 +547,7 @@ new wire structure — as one packed 16-bit value under the key `delivery_policy
 | 2–4 | `priority` | `0`–`7`, `0` = default |
 | 5 | `durability_request` | `1` = deliver the producer's latched last value on join |
 | 6–7 | `delivery_class` | `0` = conflate (default), `1` = immediate, `2` = batch, `3` = stream ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1) — assigned, not yet honoured |
-| 8–15 | reserved | MUST be written `0`, MUST be **ignored** on read — never rejected |
+| 8–15 | reserved | written `0` and **ignored** on read, never rejected ([05 §`0x04` SUBSCRIBER](05-protocol-tlvs.md)) |
 
 **Absent ⇒ all-zero ⇒ the default behaviour**, byte-identically: a sender that predates the
 policy is a conforming sender. Only `durability_request` is honoured today (§the transient-local
@@ -680,7 +680,7 @@ whatever the class.
 
 ### Owner-declared application fields (`settings.app`)
 
-The `app` key is **reserved inside the vertex `SETTINGS` namespace** ([05 §`0x0B`](05-protocol-tlvs.md)): the protocol MUST never mint a QoS or machinery knob named `app`, and everything below `settings.app.` is **owner-defined** — names, nesting, and value bytes are the application's, opaque to the runtime. This is the substrate for the device-private half of the field discipline ([ADR-0021](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md) rule 3: fields are standard *and* device-private, like ioctls — the protocol owns the addressing, the device owns the catalog of what each field accepts):
+The `app` key is **reserved inside the vertex `SETTINGS` namespace** ([05 §`0x0B`](05-protocol-tlvs.md)): the protocol never mints a QoS or machinery knob named `app`, and everything below `settings.app.` is **owner-defined** — names, nesting, and value bytes are the application's, opaque to the runtime. This is the substrate for the device-private half of the field discipline ([ADR-0021](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md) rule 3: fields are standard *and* device-private, like ioctls — the protocol owns the addressing, the device owns the catalog of what each field accepts):
 
 - **Declaration is owner-initiated and local** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §A.2): the owner installs, through the local host API, a per-vertex **field descriptor table** — `{ name, access ∈ {ro, rw, wo}, descriptor bytes, initial value? }` per field. It may also install one **intent document** for the vertex, which `:schema` serves at the `POINT` level, before the owner part; a field the document describes may leave its descriptor bytes empty ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105) Amendment 5). There is **no wire operation that declares a field**; a remote peer writes declared fields, never invents them. Undeclared names — under `settings.app.` and everywhere else — keep `SCHEMA_NOT_FOUND` (the `ENOTTY` default survives; the table opens only the holes the owner named).
 - **Writes**: the owner always reads and writes its own declared fields (`ro`/`wo` constrain remote callers). A caller-attributed write is admitted iff the caller holds the ordinary WRITE right on the vertex (otherwise `tr::access::denied` — evaluated **first**, before any name under `settings.app.` is resolved, so a denied caller cannot probe which owner names exist; [RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §Erratum 2026-08-12) — and the field is declared `rw`/`wo` (otherwise `SCHEMA_NOT_FOUND`, the answer every admitted caller gets, identically). The value is stored **verbatim**: the runtime performs no dtype/range validation against the descriptor (self-description for consumers; semantic validation is the owner's). The owner may take that validation *before* the store rather than after it, by installing the admission filter `on_app_field_admit` (§Admission above), which refuses or normalises the write; absent one, the bytes land exactly as written and the apply step is the only place the owner sees them. Field writes to a nonexistent vertex do not create it.
@@ -727,7 +727,7 @@ A retired path may be **revived** by a later registration, the owner's own or a 
 
 #### Retirement notification
 
-**A composite subscriber is never told that a child went away.** On the `live → retired` transition the vertex delivers nothing along any subscription edge: no tombstone record, no `STATUS`, no `NOT_FOUND` at the child's path, no snapshot diff. The `DELETE` access-mask bit ([05 §ACL](05-protocol-tlvs.md)) gates the *right* to remove; it does not define a *notification*, and no other mechanism supplies one. Enumeration agrees with the silence: a retired child MUST NOT appear in `read(<parent>:children[])`, exactly as a child that was never created.
+**A composite subscriber is never told that a child went away.** On the `live → retired` transition the vertex delivers nothing along any subscription edge: no tombstone record, no `STATUS`, no `NOT_FOUND` at the child's path, no snapshot diff. The ACL ([05 §ACL](05-protocol-tlvs.md)) gates the *right* to write; it defines no removal *notification* (the `DELETE` access-mask bit it once had was retired by RFC-0036 §3.1), and no other mechanism supplies one. Enumeration agrees with the silence: a retired child MUST NOT appear in `read(<parent>:children[])`, exactly as a child that was never created.
 
 The consequence is asymmetry. Appearance is observable, because whatever creates a vertex — a creation hook acting on a write, a creator-endpoint create — is itself a write, and it bubbles to every subtree subscriber. Disappearance is observable only by **polling** — re-reading the parent's member list, or reading the child's path and finding `not_found`.
 
@@ -751,7 +751,7 @@ A transport module MAY add module-namespaced settings, e.g. `:settings.transport
 
 - Module fields MUST live under their own module name (here, `transport_tcp`).
 - The name `app` inside vertex `SETTINGS` is **reserved for the application** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §A.1): no module or future protocol knob may claim it. The application is one more namespace owner under the same nesting shape; `app` is its name.
-- Module names MUST match the module's directory in `libtracer/modules/` for the reference implementation; cross-implementation module-name uniqueness is a registry concern.
+- In the reference implementation a module name matches the module's directory in `libtracer/modules/`; cross-implementation module-name uniqueness is a registry concern.
 - Module fields MUST appear in the vertex's `:schema` output if they apply to that vertex.
 - Reading a module field on a vertex where that module is not active returns `ERROR{tr::schema::not_found}`.
 

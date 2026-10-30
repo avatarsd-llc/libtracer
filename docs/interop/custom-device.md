@@ -94,7 +94,7 @@ static constexpr std::array<tr::graph::app_field_static_t, 1> kLevelFields{{
 ```
 
 A descriptor is a structured TLV the runtime never parses. Its vocabulary —
-`dtype`, `unit`, `min`/`max`, `label` — is a SHOULD-level convention so that
+`dtype`, `unit`, `min`/`max`, `label` — is a recommended convention so that
 generic consumers converge, and owner-defined extras ride alongside opaquely: a
 semantic tag such as `com.example.widget.actuator.ramp_ms` is exactly such an
 extra. `access` is the one member an owner must **not** supply: the runtime
@@ -195,7 +195,10 @@ mandatory:
 
 ---
 
-## What a custom device MUST implement
+## What a custom device implements
+
+The floor is [v1 §4](../spec/v1.md#4-conformance) and the documents it incorporates; this is
+that floor in a device builder's terms.
 
 The irreducible floor — the required modules of conformance profile P0:
 
@@ -217,7 +220,7 @@ The irreducible floor — the required modules of conformance profile P0:
 5. **FWD hop logic — only if ≥ 2 transports are loaded.** A single-transport leaf
    never forwards.
 
-## What a custom device MUST NOT do
+## What a custom device never does
 
 These are the interop-breakers — each one either poisons the shared byte-plane or
 silently forks the protocol:
@@ -257,7 +260,7 @@ A condensed contract a coding agent can execute against:
 - [ ] If the tree is dynamic, pair every creation path with a retirement policy.
 - [ ] Keep proprietary logic behind the vertices; publish nothing but bytes,
       names, and legible descriptions.
-- [ ] Never touch the MUST-NOT table above.
+- [ ] Do none of the things in the table above.
 
 For a complete, resource-budgeted embedded application of this checklist, continue
 to the [production ESP32 node example](esp32-production-node.md).

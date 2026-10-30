@@ -110,7 +110,7 @@ router's receive thread rather than to the graph. It carries a **fourth** inject
 for a different contract: `flat` (`fwd_router.hpp:router_planes_t::flat`, documented on the member), the `mem_backend_t` **every rope flatten on
 the forward and terminus paths** draws its owned `segment` from — the byte-buffer seam, with cache
 hooks and a refcount, which the block source is not. The split is `graph_t`'s `ctl_` /
-`value_backend_` split one layer out. Like `value_backend_`, an injected `flat` **MUST be
+`value_backend_` split one layer out. Like `value_backend_`, an injected `flat` **is
 thread-safe** (ADR-0060 §2): all of those sites but one run on a transport child's receive thread
 and the remaining one on the writer thread, and the `segment` it hands out self-routes its reclaim
 on whichever thread drops the last reference. A bare `pool_t` is not thread-safe and must not be injected here;
