@@ -22,7 +22,8 @@ page, its line and its rule:
 - `line-length`: a prose line over 100 characters, link targets not counted.
 - `own-site-link`: an absolute link to one of our own published pages.
 - `restatement`: an RFC 2119 keyword (MUST, SHALL, SHOULD, REQUIRED) stated outside the
-  spec. Guides link the clause instead of restating it.
+  spec. Guides link the clause instead of restating it. ADRs and research notes are dated
+  records of a decision and are exempt (#2384).
 
 The spec itself is never linted: v1, the annexes v1 §3 incorporates (read from v1 itself,
 the only list of them), and the RFCs under `docs/spec/rfcs/`, which are records. Format
@@ -87,6 +88,8 @@ OWN_SITES = re.compile(r"https?://(?:libtracer\.avatarsd\.com|avatarsd-llc\.gith
 OWN_REPO_DOC = re.compile(r"https?://github\.com/avatarsd-llc/libtracer/(?:blob|tree)/[^/\s)]+/([^\s)#]+)")
 LINK = re.compile(r"\]\(([^)\s]*)\)")
 KEYWORD = re.compile(r"\b(?:MUST|SHALL|SHOULD|REQUIRED)\b")
+#: Dated records: an ADR or research note states the decision it recorded, in its own words.
+RECORDS = ("docs/adr/", "docs/research/")
 STYLED = re.compile(r"^\s*(style|classDef|linkStyle)\s")  # page-local styling in a diagram
 FENCE = re.compile(r"^\s*(`{3,}|~{3,}|:{3,})\s*(\{[\w-]+\})?\s*(\w+)?")
 
@@ -153,6 +156,7 @@ def lint_page(rel: str, text: str, ctx: Context) -> list[Hit]:
         if tuple(c for _, c in captions) != SIDEBAR:
             hits.append(Hit(rel, captions[0][0] if captions else 1, "sidebar-order",
                             f"sidebar sections {[c for _, c in captions]} are not {list(SIDEBAR)}"))
+    record = rel.startswith(RECORDS)  # a dated record states its own decision, not the spec
     concept = rel.startswith("docs/concepts/") and rel != "docs/concepts/index.md"  # navigation
     headings: list[tuple[int, str]] = []
     cost_parts: list[str] = []
@@ -211,7 +215,7 @@ def lint_page(rel: str, text: str, ctx: Context) -> list[Hit]:
         for path in OWN_REPO_DOC.findall(prose):
             if ctx.published(path):
                 hit("own-site-link", f"{path} is published; link it relatively")
-        if KEYWORD.search(prose):
+        if KEYWORD.search(prose) and not record:
             hit("restatement", "an RFC 2119 keyword outside the spec; link the spec clause instead")
         low = prose.lower()
         for phrase, instead in ctx.avoid:

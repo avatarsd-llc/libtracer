@@ -77,14 +77,14 @@ The 24 verdicts that need a new instrument fold into 12 proposed follow-ups (F1�
 | ACL | `0x0A` | assigned | `:acl`; `acl/acl-aces` | — | **keep** | |
 | SETTINGS | `0x0B` | assigned | qos, `:settings`, `:identity`, `:stats`; `settings/*` | — | **keep** | |
 | TIME | `0x0C` | assigned, core-neutral | the batch base child written by `tr::wire::compose_batch`; `stream/batch-time-roundtrip` | — | **keep**: the batch layout needs it. | |
-| ROUTER | `0x0D` | reserved, decodable, MUST NOT emit | none emitted; only the stale `tlv-types/router-wrapped` vector, whose helpers were deleted | — | **delete**: retire it like `0x14`; the flooding profile it waits for has no plan. | F11 |
+| ROUTER | `0x0D` | reserved, decodable, `MUST NOT` emit | none emitted; only the stale `tlv-types/router-wrapped` vector, whose helpers were deleted | — | **delete**: retire it like `0x14`; the flooding profile it waits for has no plan. | F11 |
 | SPEC | `0x0E` | assigned | creator endpoint and `:children[]`; `conn/create-via-spec`, `spec/create-child` | — | **keep** | |
 | FWD | `0x0F` | assigned | every remote op; `fwd/*` | 4 (ops change) | **keep** | |
 | FIELD | `0x10` | assigned | `field/*` | — | **keep** | |
 | ADVERTISE | `0x11` | assigned, no vectors | `fwd_router.cpp` (route-handle plane) | 6 (#1950, #1951) | **delete**: COMPACT goes. | covered |
 | COMPACT | `0x12` | assigned, no vectors | `fwd_router.cpp` | 6 (#1950, #1951) | **delete** | covered |
 | HANDLE_NACK | `0x13` | assigned, no vectors | `fwd_router.cpp` | 6 (#1950, #1951) | **delete** | covered |
-| PATH_REF (retired) | `0x14` | retired by RFC-0029 §5.3; MUST be refused as `dst` | still emitted and honoured on main; `path-ref/ref-*`, `fwd/fwd-bound-*` | RFC-0029 S1–S2 (PR #1684 (RFC-0029 S1: the PAIR element and its hop arm)) | **delete**: the PAIR element replaces it; the code stays reserved, never reassigned. | covered |
+| PATH_REF (retired) | `0x14` | retired by RFC-0029 §5.3; `MUST` be refused as `dst` | still emitted and honoured on main; `path-ref/ref-*`, `fwd/fwd-bound-*` | RFC-0029 S1–S2 (PR #1684 (RFC-0029 S1: the PAIR element and its hop arm)) | **delete**: the PAIR element replaces it; the code stays reserved, never reassigned. | covered |
 | PATH_REF_REVERSE | `0x15` | assigned | `op_resolve_walk.hpp` reads it; `fwd/fwd-reverse-mint` | RFC-0029 S5 re-spells the body | **keep** | |
 | unassigned | `0x16`–`0x1F` | unassigned | none | — | **keep** | |
 | long-term registry | `0x20`–`0x7F` | reserved | none | — | **keep** | |
@@ -106,7 +106,7 @@ The 24 verdicts that need a new instrument fold into 12 proposed follow-ups (F1�
 | segment count cap | 255 | assigned | `path/path-deep-255-packed` | — | **keep** | |
 | reserved characters | `/ : . [ ] * ?` | assigned | `path/path-reserved-brackets` | — | **keep** | |
 | address-segment index | `segment = name [index]` | grammar only, no wire carrier | none found | — | **delete**: an ABNF production with no encoding. | F9 |
-| path as a VALUE string "where a path is expected" | VALUE `0x01` | MUST accept (05 §string form) | none: `parse_subscriber_tlv` reads only a PATH child | — | **merge** into the PATH form: the text contradicts what ships. | F10, done ([#2014](https://github.com/avatarsd-llc/libtracer/pull/2014)) |
+| path as a VALUE string "where a path is expected" | VALUE `0x01` | `MUST` accept (05 §string form) | none: `parse_subscriber_tlv` reads only a PATH child | — | **merge** into the PATH form: the text contradicts what ships. | F10, done ([#2014](https://github.com/avatarsd-llc/libtracer/pull/2014)) |
 
 ## 4. `SUBSCRIBER` and its `qos_settings` (05 §`0x04`)
 
@@ -116,7 +116,7 @@ The 24 verdicts that need a new instrument fold into 12 proposed follow-ups (F1�
 | `qos_settings` | SETTINGS child | optional | `parse_subscriber_tlv`; `subscriber/*` | — | **keep** | |
 | `capability` | ACL child | optional | none found: no reader | — | **delete**: subscribe is gated by the producer's `:acl`, not a carried token. | F1 |
 | `subscriber_id` | NAME child | optional | none found: no reader | — | **delete** | F1 |
-| no-`target_path` "clear this slot" | SUBSCRIBER without PATH | MUST (05 §Validation) | the field door refuses it (`TYPE_MISMATCH`); the wire door subscribes | — | **delete**: the empty STATUS is the shipped sentinel. Done: RFC-0009 erratum 2026-10-08, [#2015](https://github.com/avatarsd-llc/libtracer/pull/2015). | F2, done |
+| no-`target_path` "clear this slot" | SUBSCRIBER without PATH | `MUST` (05 §Validation) | the field door refuses it (`TYPE_MISMATCH`); the wire door subscribes | — | **delete**: the empty STATUS is the shipped sentinel. Done: RFC-0009 erratum 2026-10-08, [#2015](https://github.com/avatarsd-llc/libtracer/pull/2015). | F2, done |
 | empty STATUS to `:subscribers[N]` | `09 00 00 00` | assigned | `graph_fields.cpp` slot-clear arm | — | **keep** | |
 | `delivery_scope` | key | reserved, read by nothing | none found | — | **delete** | F3 |
 | `delivery_compact` | key, u8 | assigned | `parse_subscriber_tlv`; `subscriber/policy-absent` | 6 (#1950, #1951) | **delete** | covered |
@@ -127,7 +127,7 @@ The 24 verdicts that need a new instrument fold into 12 proposed follow-ups (F1�
 | `priority` | policy bits 2–4 | stored, not yet honoured | stored and read back | — | **keep**: the one egress hint; honouring it is transport work. | |
 | `durability_request` | policy bit 5 | honoured | the latch; `subscriber/policy-durability` | — | **keep** | |
 | `delivery_class` | policy bits 6–7 | decoded, not yet honoured | all three cores decode it; `subscriber/policy-reserved-bits` | — | **keep**: phase 3 of #1204 (delivery classes) honours it. | |
-| reserved policy bits | bits 8–15 | MUST write 0, MUST ignore | `subscriber/policy-reserved-bits` | — | **keep** | |
+| reserved policy bits | bits 8–15 | `MUST` write 0, `MUST` ignore | `subscriber/policy-reserved-bits` | — | **keep** | |
 | per-vertex `delivery_mode` | `:settings` key | "deferred" wire spelling | none: the core namespace is empty | — | **delete**: host-only state; the text contradicts RFC-0022. Done: erratum, PR [#2013](https://github.com/avatarsd-llc/libtracer/pull/2013). | F4 |
 
 ## 5. `POINT`, `ERROR`, `STATUS` (05 §`0x07`–`0x09`)
@@ -241,7 +241,7 @@ rows here.
 | op WRITE | `1` | assigned | `fwd/fwd-write-value` | 4 (the reply becomes a write) | **keep** | |
 | op AWAIT | `2` | assigned | `fwd/fwd-await-timeout` | 4 (#1946) | **delete** | covered |
 | op REPLY | `3` | assigned | `fwd/fwd-reply-result` | 4 (#1946) | **delete** | covered |
-| `op` bits 7–6 | `0xC0` | reserved, MUST be zero | the `op & 0x3F` mask | — | **keep** | |
+| `op` bits 7–6 | `0xC0` | reserved, `MUST` be zero | the `op & 0x3F` mask | — | **keep** | |
 | `op` bit 7 mint request | `0x80` | retired by RFC-0029 §5.3 | `kFwdOpFlagMintRequest`; `fwd/fwd-mint-request` | RFC-0029 S2 | **delete** | covered |
 | `dst` | PATH | required | every FWD | 1 (#1939) | **keep** | |
 | `selector` | FIELD | optional | `fwd/fwd-write-subscriber-field` | — | **keep** | |

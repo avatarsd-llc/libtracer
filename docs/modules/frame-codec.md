@@ -49,7 +49,7 @@ flowchart TD
 
 The `opt` byte is the protocol's compactness lever: six 1-bit flags select
 structure, trailer contents, and field widths, so the common frame is just **4
-bytes** of header. Bits 7 and 0 are reserved-MUST-be-zero; a set reserved bit makes
+bytes** of header. Bits 7 and 0 are reserved and zero ([v1 §3](../spec/v1.md#3-wire-format)); a set reserved bit makes
 the frame invalid (`opt_t::kReservedMask`, `core/include/libtracer/tlv.hpp`).
 
 ### Trailer CRCs

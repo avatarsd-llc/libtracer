@@ -216,7 +216,7 @@ runs top to bottom.
 
 | Genre | Where | Answers | Status |
 | --- | --- | --- | --- |
-| Normative specification | [`docs/spec/v1.md`](spec/v1.md) + its annexes | What a conforming implementation MUST do | Wins against every other document |
+| Normative specification | [`docs/spec/v1.md`](spec/v1.md) + its annexes | What a conforming implementation has to do | Wins against every other document |
 | Descriptive reference | [`docs/reference/`](reference/README.md) | What the protocol *is*, implementation-independently | Canonical for that question; draft for v1 |
 | API reference | [`docs/modules/`](modules/index.md) | What the C++23 reference implementation exposes | One implementation, not the standard |
 | Measured evidence | [Performance](performance.md), [capability matrix](capability-matrix.md), [design notes](design/README.md) | What it costs, and what is verified | Generated from CI runs |

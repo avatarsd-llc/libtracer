@@ -122,7 +122,7 @@ questions to ask:
   change what a conforming implementation does, it is not an erratum.* Check that
   against `docs/spec/v1.md` yourself rather than trusting the label.
 - **Amendment** — the normative surface itself changes: a new or altered
-  MUST/SHOULD, a new error code, a new frame shape, any behaviour a conforming
+  `MUST`/`SHOULD`, a new error code, a new frame shape, any behaviour a conforming
   peer could observe. Needs an RFC (`docs/spec/rfcs/NNNN-short-title.md` from
   `0000-template.md`) and maintainer approval.
 
