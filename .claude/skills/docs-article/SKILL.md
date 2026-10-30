@@ -81,7 +81,9 @@ concept, and is exempt.
 10. `## History`: collapsed into a dropdown. RFCs are named here and only here.
 
 Budgets: 150 to 350 source lines, at most 2,000 words of prose, at most 4 diagrams
-of at most 12 nodes and 4 classes each. A hex walk counts toward none of them.
+of at most 12 nodes and 4 classes each. A hex walk counts toward none of them. The
+150-line floor applies to a standalone page, or to a parent counted together with its
+children; a child page has no floor.
 End the page with "Next concept" and "Go deeper" links (explanation, then reference,
 then spec).
 
@@ -102,10 +104,10 @@ Which seat reads a folded batch is undecided; see #NNNN (its short name).
 ```
 ````
 
-The template is provisionally frozen after the two pilots (batching, then transports),
-pending the maintainer's approval recorded on #2379 (the template freeze). Until then, a
-page that needs a different shape is evidence: say so in the PR and do not quietly
-diverge.
+**Template v1, frozen 2026-10-30, #2379 (the template freeze).** The maintainer approved
+it after the two pilots (batching, then transports). A page that needs a different shape
+does not quietly diverge: say so in the PR, and a change to the template is a new version
+recorded here.
 
 ### The two header fields
 
