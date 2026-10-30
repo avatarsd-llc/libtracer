@@ -17,7 +17,8 @@ that no longer decodes, or no longer matches the page's labels, fails the build.
 
 Each content line labels one leaf (a TLV with ``opt.PL = 0``), in byte order, as
 ``<format>: <label>``. Formats: ``u8``…``u64``, ``i8``…``i64``, an array of either
-(``i32[]``), ``str`` (UTF-8) and ``hex``. Standard library and docutils only.
+(``i32[]``), ``str`` (UTF-8), ``path`` (a PATH body: segment records and PAIR escapes, one
+row each, #2386) and ``hex``. Standard library and docutils only.
 """
 import html
 import pathlib
@@ -105,8 +106,41 @@ def label(nodes, lines):
     return found
 
 
+PAIR_KIND = 0x16  # Reference 05 §0x06: the path element PAIR, an escape record of 8 bytes.
+
+
+def path_records(body):
+    """The records of a PATH @p body, as (bytes, reading); refuse one that does not tile."""
+    out, at = [], 0
+    while at < len(body):
+        n = body[at]
+        if n:
+            end = at + 1 + n
+            text = None if end > len(body) else 'NAME "' + body[at + 1:end].decode("utf-8") + '"'
+        else:
+            end = at + 3 + (body[at + 2] if at + 2 < len(body) else 0)
+            esc = body[at:end]
+            if end > len(body) or len(esc) < 3:
+                text = None
+            elif esc[1] == PAIR_KIND and esc[2] == 8:
+                index, gen = struct.unpack("<II", esc[3:])
+                text = f"PAIR(index {index}, generation {gen})"
+            else:
+                text = f"escape kind 0x{esc[1]:02x}, {esc[2]} bytes"
+        if text is None:
+            raise ValueError(f"PATH record at body offset {at} runs past the {len(body)}-byte body")
+        out.append((body[at:end], text))
+        at = end
+    return out
+
+
 def render_value(fmt, payload):
     """@p payload read as @p fmt, for a reader."""
+    if fmt == "path":
+        recs = path_records(payload)
+        if not recs:
+            return "empty"
+        return "".join("/" + (t[6:-1] if t.startswith("NAME ") else t) for _, t in recs)
     if fmt == "str":
         return '"' + payload.decode("utf-8") + '"'
     if fmt == "hex":
@@ -141,7 +175,10 @@ def _row(n, depth):
               f"<dt>type</dt><dd><code>0x{n.type:02x}</code> {name}</dd>"
               f"<dt>opt</dt><dd><code>0x{n.opt:02x}</code>: {_opt(n.opt)}</dd>"
               f"<dt>length</dt><dd>{n.length} (u{8 * (n.header - 2)} LE)</dd>")
-    if n.children is None:
+    if n.fmt == "path":
+        fields += "".join(f"<dt>record</dt><dd><code>{r.hex(' ')}</code> {html.escape(t)}</dd>"
+                          for r, t in path_records(n.payload)) or "<dt>records</dt><dd>none</dd>"
+    elif n.children is None:
         fields += f"<dt>payload</dt><dd>{html.escape(n.fmt)} LE</dd>"
     fields += "</dl>"
     body = "".join(_row(c, depth + 1) for c in n.children) if n.children is not None else ""

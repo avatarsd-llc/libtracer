@@ -13,6 +13,7 @@ Run with ``python3 -m unittest discover -s tools/tests`` (no third-party deps).
 """
 import os
 import pathlib
+import re
 import sys
 import unittest
 
@@ -98,6 +99,71 @@ class RenderTest(unittest.TestCase):
         nodes = hexwalk.decode(bytes.fromhex("01000200" "6400"))
         hexwalk.label(nodes, ["u16: <b>x</b>"])
         self.assertIn("&lt;b&gt;x&lt;/b&gt;", hexwalk.render(nodes))
+
+
+class PathFormatTest(unittest.TestCase):
+    """A PATH payload reads as its path elements, one segment record each (#2386)."""
+
+    def test_names(self):
+        self.assertEqual(hexwalk.render_value("path", bytes.fromhex("0673656e736f720474656d70")),
+                         "/sensor/temp")
+
+    def test_empty(self):
+        self.assertEqual(hexwalk.render_value("path", b""), "empty")
+
+    def test_a_pair(self):
+        body = bytes.fromhex("00" "16" "08" "03000000" "01000000")
+        self.assertEqual(hexwalk.render_value("path", body), "/PAIR(index 3, generation 1)")
+
+    def test_each_record_keeps_its_bytes(self):
+        recs = hexwalk.path_records(bytes.fromhex("0673656e736f72" "0016080300000001000000"))
+        self.assertEqual([r for r, _ in recs],
+                         [bytes.fromhex("0673656e736f72"), bytes.fromhex("0016080300000001000000")])
+        self.assertEqual([t for _, t in recs], ['NAME "sensor"', "PAIR(index 3, generation 1)"])
+
+    def test_an_overrun_is_refused(self):
+        with self.assertRaises(ValueError):
+            hexwalk.render_value("path", bytes.fromhex("0673656e"))
+
+    def test_the_row_lists_the_records_without_repeating_a_byte(self):
+        data = (VECTORS / "path" / "path-sensor-temp" / "input.bin").read_bytes()
+        nodes = hexwalk.decode(data)
+        hexwalk.label(nodes, ["path: the address"])
+        html = hexwalk.render(nodes)
+        self.assertIn('NAME &quot;sensor&quot;', html)
+        self.assertEqual("".join(hexwalk.BYTES.findall(html)).replace(" ", ""), data.hex())
+
+
+DOCS = pathlib.Path(REPO) / "docs"
+WALK = re.compile(r"^```\{hex-walk\} (\S+)\n(.*?)^```", re.M | re.S)
+
+
+def walks(page):
+    """Each ``{hex-walk}`` on @p page, as (vector, label lines)."""
+    for vector, body in WALK.findall(page.read_text(encoding="utf-8")):
+        yield vector, [ln for ln in body.splitlines() if ln.strip() and not ln.startswith(":")]
+
+
+class PagesTest(unittest.TestCase):
+    """Every walk on a page decodes and labels its vector; the flagship walks a whole frame."""
+
+    def test_every_walk_on_the_site_labels_its_vector(self):
+        for page in sorted(DOCS.rglob("*.md")):
+            for vector, lines in walks(page):
+                with self.subTest(page=page.name, vector=vector):
+                    data = (VECTORS / vector / "input.bin").read_bytes()
+                    hexwalk.label(hexwalk.decode(data), lines)
+
+    def test_the_illustrated_frame_reads_every_byte(self):
+        page = DOCS / "concepts" / "wire" / "illustrated-frame.md"
+        found = list(walks(page))
+        self.assertTrue(found, "the flagship page has no hex walk")
+        vector, lines = found[0]
+        (frame,) = hexwalk.decode((VECTORS / vector / "input.bin").read_bytes())
+        self.assertIsNotNone(frame.children, "the flagship frame is a structured FWD")
+        self.assertEqual(frame.type, 0x0F)
+        self.assertFalse([ln for ln in lines if ln.startswith("hex:")],
+                         "a leaf left as raw hex is a byte the page does not explain")
 
 
 if __name__ == "__main__":
