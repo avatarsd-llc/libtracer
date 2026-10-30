@@ -119,6 +119,7 @@ Getting started <docs/getting-started>
 :hidden:
 :maxdepth: 1
 
+The wire format <docs/concepts/wire>
 Batching <docs/concepts/batching>
 Transports <docs/concepts/transports>
 ```
