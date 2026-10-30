@@ -172,7 +172,8 @@ registered types, and `:children[]` as an enumeration is untouched on every plan
 
 Removal has no wire spelling on the `:children[]` surface: a `[N]` clear of `:children[]` is
 not implemented, and `graph_t::retire` is an owner-side call with no wire operation
-behind it (`core/include/libtracer/graph.hpp:graph_t::retire`). A connection is the exception:
+behind it (`core/include/libtracer/graph.hpp:result_t<void> retire(vertex_handle_t vh)`).
+A connection is the exception:
 `NAME{<name>}` to its module's `conn` endpoint retires it, the other half of that one
 control. Retirement empties the
 vertex in place rather than freeing it — the handle stays dereferenceable and a

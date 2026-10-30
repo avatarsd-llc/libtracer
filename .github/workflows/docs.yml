@@ -84,7 +84,7 @@ jobs:
       (github.event_name != 'workflow_run' || ( github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event.workflow_run.event)))
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
-      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
@@ -124,6 +124,10 @@ jobs:
         .github/workflows/docs.yml
     outputs:
       relevant: ${{ steps.decide.outputs.relevant }}
+      # true when the released-version subtrees must be assembled: always off a pull
+      # request (the deploy path), and on a pull request only when it touches what those
+      # subtrees are built with (docs-build's assembly comment).
+      releases: ${{ steps.decide.outputs.releases }}
     defaults:
       run:
         # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
@@ -156,6 +160,7 @@ jobs:
         run: |
           set -euo pipefail
           relevant=true
+          releases=true
           if [ "$EVENT" = "pull_request" ] && git rev-parse -q --verify HEAD^2 >/dev/null; then
             changed="$RUNNER_TEMP/changed"
             git diff --name-only -z HEAD^1 HEAD > "$changed"
@@ -173,20 +178,34 @@ jobs:
               done
             done < "$changed"
             [ "$relevant" = true ] || echo "no changed path matches DOCS_PATHS; the docs build is skipped"
+            # The released-version assembly gates nothing a pull request can change (the
+            # tags are immutable and a tag that fails to build is skipped, not failed), so
+            # a PR runs it only when it changes the assembler or the docs toolchain (this
+            # workflow included: its image, python and apt lines are toolchain).
+            releases=false
+            while IFS= read -r -d '' file; do
+              case "$file" in
+                tools/assemble_release_docs.sh|tools/gen_versions_json.py|docs/requirements.txt|.github/ci-image/*|.github/workflows/docs.yml)
+                  echo "release assembly input changed: $file"; releases=true; break;;
+              esac
+            done < "$changed"
           else
             echo "event '$EVENT': building unconditionally"
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          echo "releases=$releases" >> "$GITHUB_OUTPUT"
+          echo "releases=$releases"
           echo "relevant=$relevant"
       - name: Clean this job's workspace off the host runner
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
         # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
-        # container job and with sudo where the host grants it, so root-owned files go too.
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   docs-build:
     needs: changes
@@ -195,7 +214,7 @@ jobs:
       (needs.changes.outputs.relevant == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
-      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
@@ -216,6 +235,13 @@ jobs:
     # healthy cold runs. The fixes are the cache save that survives a cancellation and
     # the scaled endpoint budget (see those steps); this margin is only the backstop.
     timeout-minutes: 75
+    # Every pull request's build is a PREVIEW (#2348), batch/* included, since the batch run
+    # is the landing path. The page generators then skip what only RENDERS a verdict another
+    # workflow gates on: ctest (build-test), the cross-core driver (conformance.yml), the ts
+    # and rust codec benches (ts.yml, conformance.yml), and say so on the page. main, nightly
+    # and tags run all of it, so a page-only regression in those parts first shows there.
+    env:
+      LIBTRACER_DOCS_PREVIEW: ${{ github.event_name == 'pull_request' && '1' || '' }}
     defaults:
       run:
         # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
@@ -255,9 +281,10 @@ jobs:
           fi
       - uses: actions/checkout@v4
         with:
-          # Full history + tags: the released-version doc subtrees are rebuilt
-          # from their vX.Y.Z tags on every deploy (tools/assemble_release_docs.sh).
-          fetch-depth: 0
+          # Full history + tags only when the released-version subtrees are assembled
+          # from their vX.Y.Z tags (tools/assemble_release_docs.sh); nothing else in this
+          # job reads history, and a full fetch costs 4-10 min on the ci-local runners.
+          fetch-depth: ${{ needs.changes.outputs.releases == 'true' && '0' || '1' }}
           persist-credentials: false
       - name: Trust the checkout for git
         # The container runs as root over a workspace the host runner user owns, so git
@@ -274,13 +301,10 @@ jobs:
       - name: Install dependencies
         # The step that wedged (see the job-level note). Ten minutes is ~4x its healthy
         # runtime, so a genuine slow mirror still passes while a wedge fails fast and
-        # names itself, instead of being read as "still running" for hours.
+        # names itself, instead of being read as "still running" for hours. doxygen, unzip
+        # and curl are baked into the CI image, so only pip runs here (#2348).
         timeout-minutes: 10
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends doxygen unzip curl
-          python -m pip install -r docs/requirements.txt
+        run: python -m pip install -r docs/requirements.txt
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -362,7 +386,12 @@ jobs:
           # the SAME loop the same number of times — reducing one arm over rounds while
           # the other gets one shot would be a thumb on the scale, not a measurement.
           : >"$raw"
-          for r in 1 2 3; do
+          # A pull request runs ONE round: its numbers feed only the sticky PR comment and
+          # the preview page, both labelled "1 round (PR preview), not a measurement".
+          # main, nightly and tags keep best-of-3, the published measurement.
+          rounds=3; [ "$GITHUB_EVENT_NAME" = pull_request ] && rounds=1
+          echo "LIBTRACER_COMPARE_ROUNDS=$rounds" >> "$GITHUB_ENV"
+          for r in $(seq "$rounds"); do
             { ./bench/build/bench_libtracer grid; ./bench/build/bench_zenoh grid; } >>"$raw" 2>/dev/null || true
           done
           python3 bench/best_of_rounds.py <"$raw" >"$out" || cp "$raw" "$out"
@@ -395,6 +424,15 @@ jobs:
       # table and the step markers on the trend charts are both drawn from it.
       - name: Sustained-step detector tests
         run: python3 bench/test_step_detect.py
+      - name: PR preview mode tests
+        run: python3 bench/test_docs_preview.py
+      # Before the performance page: ctest runs once, here, and that page's test rollup
+      # reads the JUnit file it leaves.
+      - name: Generate live test report (ctest across every suite)
+        env:
+          # Off preview, no ctest results fails the build instead of publishing a note.
+          LIBTRACER_DOCS_STRICT: "1"
+        run: python3 bench/gen_test_report.py
       - name: Generate live performance + conformance page
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
@@ -421,6 +459,7 @@ jobs:
             } catch (e) { core.warning('comparison sweep produced no data; skipping PR comment'); return; }
             const marker = '<!-- ltz-compare -->';
             const body = `${marker}\n### 📊 libtracer vs Zenoh — absolute (this run)\n\n`
+              + (process.env.LIBTRACER_COMPARE_ROUNDS === '1' ? `**1 round (PR preview), not a measurement:** do not quote these numbers; main publishes best of 3.\n\n` : '')
               + `Measured on this CI runner in the same pass. libtracer built from source at \`-O3\`; Zenoh is the upstream zenoh-c 1.9.0 prebuilt release. Absolute values, no ratios — `
               + `shared-runner variance is real, read trends not the third digit. Interactive charts land on the `
               + `[Performance page](https://libtracer.avatarsd.com/docs/performance.html) after merge.\n\n`
@@ -431,8 +470,6 @@ jobs:
             const existing = comments.find(c => c.body.includes(marker));
             if (existing) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
             else await github.rest.issues.createComment({ owner, repo, issue_number, body });
-      - name: Generate live test report (ctest across every suite)
-        run: python3 bench/gen_test_report.py
       # The MCU page's footprint rows (#2380): the newest successful main run's artifact from
       # each size gate. A gap (expired artifact, API error) prints a notice and the page shows
       # that row as not measured; it never fails the docs.
@@ -446,7 +483,13 @@ jobs:
       # the PR check instead of shipping as unlinked plain text. docs/conf.py records
       # the two Breathe-generated reference classes that are deliberately not nitpicked.
       - name: Build (sphinx-build, config in docs/, source = repo root)
-        run: sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html
+        run: sphinx-build -n -W --keep-going -j "$BUILD_JOBS" -b html -c docs . docs/_build/html
+      # Pull requests skip the assembly (#2348, owner ruling 2026-10-29) unless they change
+      # its inputs (the changes job's `releases`): it gates nothing a PR can change, and a
+      # PR's cache entries are visible only to that PR, so on the ci-local runners it missed
+      # and rebuilt every tag (28-34 min) on every run. A push to main and a tag still
+      # assemble every tag, and main's entries are the ones a PR restores by prefix.
+      #
       # Released-version subtree cache (#1603). Each vX.Y.Z subtree is a pure function
       # of (tag, docs toolchain, assembler script), yet rebuilding all of them was ~13 of
       # this job's ~35 minutes on every PR. Entries are keyed
@@ -474,6 +517,7 @@ jobs:
       # the marker set did not change, so a warm run adds no entry.
       # The cache lives outside the checkout, since the checkout is the Sphinx source root.
       - name: Fingerprint the released-docs toolchain
+        if: needs.changes.outputs.releases == 'true'
         id: release-docs-key
         run: |
           fp="$( { python3 --version; python -m pip freeze | grep -viE '^(certifi|charset[-_]normalizer|idna|requests|urllib3)=='; doxygen --version; sha256sum tools/assemble_release_docs.sh; } | sha256sum | cut -c1-16)"
@@ -483,6 +527,7 @@ jobs:
           echo "key=release-docs-${fp}-${tags}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
           echo "release-docs cache key: release-docs-${fp}-${tags}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
       - name: Restore the released-version subtree cache
+        if: needs.changes.outputs.releases == 'true'
         uses: actions/cache/restore@v4
         # Same reasoning as the install step's ceiling: a healthy restore takes seconds,
         # so a stalled cache download fails here and names itself.
@@ -494,6 +539,7 @@ jobs:
             ${{ steps.release-docs-key.outputs.tags-prefix }}
             ${{ steps.release-docs-key.outputs.fp-prefix }}
       - name: Record the restored subtree markers
+        if: needs.changes.outputs.releases == 'true'
         id: release-docs-before
         run: echo "markers=$(ls -d "$HOME"/.cache/libtracer-release-docs/v*/.built "$HOME"/.cache/libtracer-release-docs/v*/.failed 2>/dev/null | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       # Rebuild each released version's docs from its vX.Y.Z tag into a subtree of
@@ -502,11 +548,12 @@ jobs:
       # Tags already in the cache are copied instead of rebuilt.
       # A tag whose docs fail to build is skipped — the manifest stays honest.
       - name: Assemble released-version doc subtrees
+        if: needs.changes.outputs.releases == 'true'
         # `~` is expanded by actions/cache but not in an `env:` value, hence $HOME here.
         run: RELEASE_DOCS_CACHE="$HOME/.cache/libtracer-release-docs" bash tools/assemble_release_docs.sh docs/_build/html
       - name: Did the assembly finish a new tag
         id: release-docs-after
-        if: always() && steps.release-docs-before.outcome == 'success'
+        if: always() && needs.changes.outputs.releases == 'true' && steps.release-docs-before.outcome == 'success'
         run: echo "markers=$(ls -d "$HOME"/.cache/libtracer-release-docs/v*/.built "$HOME"/.cache/libtracer-release-docs/v*/.failed 2>/dev/null | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       - name: Save the released-version subtree cache
         if: always() && steps.release-docs-after.outputs.markers != '' && steps.release-docs-after.outputs.markers != steps.release-docs-before.outputs.markers
@@ -559,11 +606,12 @@ jobs:
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
         # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
-        # container job and with sudo where the host grants it, so root-owned files go too.
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # THE REQUIRED CHECK `build` (#1614). Always runs: green when `docs-build` passed, or
   # when `changes` decided it had nothing to build and it was skipped; red otherwise
@@ -578,7 +626,7 @@ jobs:
     needs: [changes, docs-build]
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
-      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
@@ -617,11 +665,12 @@ jobs:
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
         # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
-        # container job and with sudo where the host grants it, so root-owned files go too.
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   deploy:
     needs: docs-build
@@ -629,10 +678,12 @@ jobs:
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
       (github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
-    # The deployment lock (see the workflow `concurrency:` above): newest deploy wins.
+    # The deployment lock (see the workflow `concurrency:` above). A deploy already in
+    # progress finishes: cancelling it mid-upload can leave Pages without a completed
+    # deployment, and the next one queues behind it (maintainer ruling 2026-10-30).
     concurrency:
       group: pages
-      cancel-in-progress: true
+      cancel-in-progress: false
     # #1403 bounded the build job above and left this job unbounded — it is a single
     # actions/deploy-pages@v4 call against a GitHub service and can hang the same way.
     # Measured max 1.05 min over the 10 deploy runs (healthy max 0.38, p50 0.23);

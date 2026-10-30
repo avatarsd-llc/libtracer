@@ -28,6 +28,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import counted_ledger  # noqa: E402  (sibling module in bench/)
@@ -40,6 +41,18 @@ OUT = REPO / "docs" / "performance.md"
 BENCH = REPO / "bench" / "build" / "bench_libtracer"
 BENCH_ZENOH = REPO / "bench" / "build" / "bench_zenoh"
 CODEC = REPO / "bench" / "build" / "bench_codec"
+# How many rounds the comparison sweep ran. docs.yml runs ONE on a pull request (a preview,
+# so the page says so and nobody quotes it) and best-of-3 everywhere else.
+ROUNDS = (
+    "1 round (PR preview), not a measurement"
+    if os.environ.get("LIBTRACER_COMPARE_ROUNDS") == "1"
+    else "best of 3 rounds"
+)
+# A pull request's docs build is a PREVIEW (#2348): it skips the parts of this page that
+# only render a result another workflow already gates on (the cross-core driver is
+# conformance.yml's gate, the ts and rust cores are ts.yml's and conformance.yml's, ctest is
+# build-test's) and says so where they would be. main, nightly and tags run them all.
+PREVIEW = os.environ.get("LIBTRACER_DOCS_PREVIEW") == "1"
 VECTORS = REPO / "tests" / "conformance" / "vectors" / "v1"
 CXX = os.environ.get("LIBTRACER_CXX_HARNESS") or str(REPO / "build" / "tests" / "conformance_runner")
 
@@ -62,11 +75,23 @@ def _missing(binary: str, hint: str) -> str:
     return f"_({binary} not built — `{hint}`)_"
 
 
+def timed(label: str, fn, *args):
+    """@brief Call fn(*args) and log its wall time to stderr, so the docs job's log shows
+    where this step's minutes go without a local run."""
+    t0 = time.monotonic()
+    out = fn(*args)
+    print(f"gen_results_page: {label} took {time.monotonic() - t0:.1f}s", file=sys.stderr)
+    return out
+
+
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, cwd=REPO, **kw).stdout
 
 
 def cross_core_block() -> str:
+    if PREVIEW:
+        return ("- _(not run on PR previews: conformance.yml runs this driver and is the gate)_",
+                False)
     env = dict(os.environ, LIBTRACER_CXX_HARNESS=CXX)
     out = subprocess.run([sys.executable, "tests/conformance/run-all.py"],
                          capture_output=True, text=True, cwd=REPO, env=env).stdout
@@ -153,7 +178,7 @@ SURFACES: tuple[surface_t, ...] = (
               "same topology for both engines; p50, the p99 tail and the p999 deep tail — "
               "published, never gated"),
     surface_t("compare", "Engine comparison", "libtracer and Zenoh side by side, absolute",
-              "same runner, best of 3 rounds — no ratios"),
+              f"same runner, {ROUNDS} — no ratios"),
     surface_t("codec", "Cross-core codec", "decode→encode roundtrip per implementation",
               "the same v1 vectors for every core",
               ("bindings/typescript/…/bench/perf.mjs", "bindings/rust/examples/perf.rs"),
@@ -864,10 +889,14 @@ def codec_block() -> str:
     rows = ["| core | throughput (median) | p50 latency (median) | mean (median) |",
             "| --- | --- | --- | --- |"]
     notes: list[str] = []
+    if PREVIEW:
+        cores = cores[:1]
+        notes.append("- _ts-core, rust-core: not run on PR previews (ts.yml and conformance.yml"
+                     " build and test them)_")
     any_ok = False
     for name, fn in cores:
         try:
-            data, err = fn()
+            data, err = timed(f"codec {name}", fn)
         except OSError as e:  # toolchain present but blew up — degrade, don't crash
             data, err = None, str(e)
         if not data:
@@ -973,7 +1002,7 @@ def compare_intro() -> str:
     return f"""\
 {head("zenoh")}
 
-Both engines on **one runner, best of 3 rounds**, so the numbers are directly comparable on
+Both engines on **one runner, {ROUNDS}**, so the numbers are directly comparable on
 identical hardware: two **in-process** comparison axes — subscriber fan-out and payload size
 — and a **network latency** comparison over the real loopback kernel path, one socket and
 one paced value per transport in two processes. The charts plot **absolute** throughput,
@@ -1151,12 +1180,14 @@ def tests_block() -> str:
     with the per-suite detail remaining on the Test report page."""
     try:
         import gen_test_report as tr
-        results = tr.run_ctest_junit(tr.BUILD)
+        if PREVIEW:
+            return tr.PREVIEW_NOTE
+        results = tr.run_ctest_junit(tr.BUILD, run=False)
     except Exception:
         results = []
     if not results:
-        return ("_(the Release test build was not available in this pass — see the"
-                " [full test report](test-report.md))_")
+        return ("_(no ctest results in this pass: `bench/gen_test_report.py` runs ctest and"
+                " this rollup reads its JUnit file — see the [full test report](test-report.md))_")
     total = len(results)
     passed = sum(1 for _, s, _ in results if s == "pass")
     wall = sum(t for _, _, t in results)
@@ -1352,11 +1383,11 @@ def check_heading_depth(page: str) -> None:
 
 def main() -> int:
     check_registry()
-    summary, passed = cross_core_block()
+    summary, passed = timed("cross-core driver", cross_core_block)
     M = _methodology()
     history = _load_history()
     history_local = _load_history("dev/bench-local/data.js")
-    charts = history_sections(history, history_local)
+    charts = timed("history charts", history_sections, history, history_local)
     assets = render_history.assets_block()
     page = f"""\
 # Performance & Conformance
@@ -1390,7 +1421,7 @@ every harness in `bench/` drives and reports.
 
 {LEDGER_INTRO}
 
-{ledger_block(history_local)}
+{timed("ledger", ledger_block, history_local)}
 
 {charts_for(charts, "ledger")}
 
@@ -1444,7 +1475,7 @@ Live driver summary:
 
 Eight armed windows feed the store, each counted around exactly one operation:
 
-{probes_table()}
+{timed("probes", probes_table)}
 
 Every probe reports two independent quantities and **both ratchet**: `bytes=`, the live
 usable-size balance, and `allocs=`, the number of heap blocks. They ratchet on different
@@ -1475,7 +1506,7 @@ an MCU allocator in hundreds — so a host reading of churn is a *lower* bound.
 
 {mprose(M, "Fairness in the Zenoh comparison")}
 
-{zenoh_compare_block(history_local)}
+{timed("zenoh compare", zenoh_compare_block, history_local)}
 
 {head("codec")}
 
@@ -1483,11 +1514,11 @@ an MCU allocator in hundreds — so a host reading of churn is a *lower* bound.
 
 {instruments_table("codec")}
 
-{codec_block()}
+{timed("codec block", codec_block)}
 
 {head("tests")}
 
-{tests_block()}
+{timed("tests block", tests_block)}
 
 {head("repro")}
 

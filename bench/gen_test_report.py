@@ -29,6 +29,11 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 OUT = REPO / "docs" / "test-report.md"
 BUILD = pathlib.Path(os.environ.get("LIBTRACER_CORE_BUILD") or (REPO / "core" / "build"))
 VECTORS = REPO / "tests" / "conformance" / "vectors" / "v1"
+# A pull request's docs build is a preview (#2348): build-test runs every suite and is the
+# gate, so a preview does not run ctest a second time just to render it.
+PREVIEW = os.environ.get("LIBTRACER_DOCS_PREVIEW") == "1"
+PREVIEW_NOTE = ("_(not run on PR previews: build-test runs every ctest suite and is the gate;"
+                " this report is regenerated on main, nightly and tags)_")
 
 # Suite name -> (category, legacy one-liner). The description half is now DEAD for any
 # suite whose source resolves: `_brief()` reads the test file's own @brief instead, so
@@ -64,13 +69,17 @@ CATEGORY_ORDER = ["Codec (L2/L3)", "Substrate (L0/L1)", "Graph (L4)", "Net (FWD 
                   "Net (ROUTER plane)", "Transport", "Examples", "other"]
 
 
-def run_ctest_junit(build: pathlib.Path) -> list[tuple[str, str, float]]:
-    """Return [(name, status, time_s)] from a ctest JUnit run, or [] if unavailable."""
+def run_ctest_junit(build: pathlib.Path, *, run: bool = True) -> list[tuple[str, str, float]]:
+    """Return [(name, status, time_s)] from a ctest JUnit run, or [] if unavailable.
+
+    run=False reads the JUnit file an earlier call left instead of running ctest again:
+    the docs job runs ctest once, here, and gen_results_page's rollup reads that file."""
     if not build.exists():
         return []
     junit = build / "ctest-junit.xml"
-    subprocess.run(["ctest", "--test-dir", str(build), "--output-junit", str(junit)],
-                   capture_output=True, text=True)
+    if run:
+        subprocess.run(["ctest", "--test-dir", str(build), "--output-junit", str(junit)],
+                       capture_output=True, text=True)
     if not junit.exists():
         return []
     out = []
@@ -190,7 +199,7 @@ def category_of(name: str) -> str:
 
 
 def main() -> int:
-    results = run_ctest_junit(BUILD)
+    results = [] if PREVIEW else run_ctest_junit(BUILD)
     vectors = len(list(VECTORS.rglob("input.bin"))) if VECTORS.exists() else 0
 
     lines: list[str] = []
@@ -202,7 +211,17 @@ def main() -> int:
     lines.append("```")
     lines.append("")
 
+    if PREVIEW:
+        lines.append(PREVIEW_NOTE)
+        OUT.write_text("\n".join(lines) + "\n")
+        print(f"wrote {OUT} (PR preview, ctest not run)")
+        return 0
     if not results:
+        # The published report must not swap its verdict for a "not available" note:
+        # under LIBTRACER_DOCS_STRICT (docs.yml, off preview) no results is a build fault.
+        if os.environ.get("LIBTRACER_DOCS_STRICT") == "1":
+            sys.exit(f"gen_test_report: no ctest results in {BUILD}, and "
+                     "LIBTRACER_DOCS_STRICT=1. Build the test tree before this step.")
         lines.append("_(the Release build was not available — run "
                      "`cmake -S core -B core/build -DBUILD_TESTING=ON && cmake --build core/build` "
                      "then re-run this generator.)_")

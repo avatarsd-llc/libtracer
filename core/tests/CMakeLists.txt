@@ -1628,6 +1628,12 @@ target_link_libraries(graph_pmr_test PRIVATE libtracer)
 libtracer_test_warnings(graph_pmr_test)
 add_test(NAME graph_pmr COMMAND graph_pmr_test)
 
+# RFC-0030 §5 — the path object: element 0, the canonical fallback, the inline chain cache.
+add_executable(path_object_test path_object_test.cpp)
+target_link_libraries(path_object_test PRIVATE libtracer)
+libtracer_test_warnings(path_object_test)
+add_test(NAME path_object COMMAND path_object_test)
+
 add_executable(graph_value_backend_test graph_value_backend_test.cpp)
 target_link_libraries(graph_value_backend_test PRIVATE libtracer)
 libtracer_test_warnings(graph_value_backend_test)
@@ -1993,6 +1999,10 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(terminus_egress_backend_test PRIVATE libtracer)
     libtracer_test_warnings(terminus_egress_backend_test)
     add_test(NAME terminus_egress_backend COMMAND terminus_egress_backend_test)
+    add_executable(terminus_rx_draws_test terminus_rx_draws_test.cpp)
+    target_link_libraries(terminus_rx_draws_test PRIVATE libtracer)
+    libtracer_test_warnings(terminus_rx_draws_test)
+    add_test(NAME terminus_rx_draws COMMAND terminus_rx_draws_test)
 endif()
 
 if(LIBTRACER_NET_PLANE)
