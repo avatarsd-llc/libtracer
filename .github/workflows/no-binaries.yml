@@ -68,10 +68,14 @@ jobs:
         # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
         run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
       # Full history: the check diffs against the MERGE BASE, so both endpoints and
-      # their common ancestor have to be present.
+      # their common ancestor have to be present. Treeless (CI time audit, ruling
+      # 24, 2026-11-01): the whole commit graph is fetched, so the merge base
+      # resolves as before, but trees and file contents arrive only when git reads
+      # them. A full clone took about 4 to 6 min of this job.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          filter: tree:0
           persist-credentials: false
       - name: Trust the checkout for git
         # The container runs as root over a workspace the host runner user owns, so git

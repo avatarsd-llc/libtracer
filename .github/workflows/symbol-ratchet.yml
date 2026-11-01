@@ -89,9 +89,14 @@ jobs:
               echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
             } >> "$GITHUB_ENV"
           fi
+      # Treeless (CI time audit, ruling 24, 2026-11-01): the whole commit graph is
+      # fetched, so the merge base and every ref below resolve as before, but trees
+      # and file contents arrive only when git reads them. A full clone took about 4
+      # to 6 min of this job.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          filter: tree:0
           persist-credentials: false
       - name: Trust the checkout for git
         # The container runs as root over a workspace the host runner user owns, so git

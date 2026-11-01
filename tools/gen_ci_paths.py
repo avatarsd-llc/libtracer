@@ -26,7 +26,8 @@ that reaches outside ``core/``. So the list is DERIVED instead:
   * a pattern that a broader pattern already covers is dropped, so the emitted list
     is the minimal one that covers every input.
 
-The workflow file itself is appended -- it is an input to its own runs and no
+``CORE_DECLARED`` adds the few inputs a core-ci job compiles outside any CMake
+project. The workflow file itself is appended -- it is an input to its own runs and no
 configure can report it.
 
 Where the list lives (#1614). It was core-ci's ``on: paths:`` trigger filter. That
@@ -136,6 +137,14 @@ DOCS_DECLARED = {
     # bench/gen_results_page.py runs tests/conformance/run-all.py for the published
     # conformance matrix; the harness and its vectors live under this tree.
     "tests/conformance": "conformance harness run by bench/gen_results_page.py",
+}
+
+# The same for core-ci: inputs that a job compiles or runs outside any CMake project, so
+# the core configure cannot report them. Keep this list short too.
+CORE_DECLARED = {
+    # tsan (fence=membarrier) compiles this seccomp launcher with `cc` and runs its second
+    # ctest pass under it, so the qsbr fenced fallback runs on Linux (#2121).
+    "tools/refuse_membarrier.c": "membarrier-refusing launcher built by tsan (fence=membarrier)",
 }
 
 
@@ -383,6 +392,8 @@ def derive_all() -> dict[str, list[str]]:
         text = (ROOT / rel).read_text("utf-8")
         roots = source_roots(text)
         files = set(refs) if CORE_PROJECT in roots else set()
+        if name == "core-ci.yml":
+            files |= {pathlib.Path(p) for p in CORE_DECLARED}
         if name == "docs.yml":
             more_dirs, more_files = docs_inputs(text)
             roots |= more_dirs

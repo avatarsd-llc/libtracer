@@ -671,12 +671,11 @@ jobs:
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
       options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
-    # One -Os component build per leg, like esp-build's esp32c6 leg (measured 6.07 min max).
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        example: [minimal, arena_sizing, single_threaded, one_link, stats_subpools]
+    # The five examples in ONE job, built one after another (CI time audit, ruling 24,
+    # 2026-11-01): one IDF container start and one runner slot instead of five, same five
+    # -Os builds. A leg took 0.2 to 2.6 min (6.07 max for esp-build's comparable esp32c6
+    # leg); 45 is five of that worst case plus headroom, an estimate to re-measure.
+    timeout-minutes: 45
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
@@ -686,14 +685,23 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build concepts/${{ matrix.example }} for esp32c6
+      - name: Build the five concepts examples for esp32c6
+        # Every example is built even after one fails (what fail-fast: false gave the
+        # matrix), and the step fails at the end naming each one that did.
         shell: bash
-        working-directory: integrations/esp-idf/examples/concepts/${{ matrix.example }}
+        working-directory: integrations/esp-idf/examples/concepts
         run: |
           . "${IDF_PATH}/export.sh"
-          idf.py set-target esp32c6
-          idf.py build
-          idf.py size
+          failed=""
+          for example in minimal arena_sizing single_threaded one_link stats_subpools; do
+            echo "::group::concepts/$example"
+            ( cd "$example" && idf.py set-target esp32c6 && idf.py build && idf.py size ) || failed="$failed $example"
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::concepts examples that failed to build for esp32c6:$failed"
+            exit 1
+          fi
       - name: Clean this job's workspace off the host runner
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
