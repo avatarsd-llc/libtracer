@@ -32,17 +32,19 @@
 #     a bootstrap 95% interval on that median that excludes 1 (#1807) — AND the arms'
 #     second-best samples past it too, so a bimodal row's slow mode cannot fail it (#2168).
 #     No Actions cache feeds the gate.
-#  3. Push ratchet (`ratchet`) — every main push re-runs the same gate on THREE
-#     independently-drawn runners (redundant testing): each replica builds HEAD and its
-#     PARENT commit and gates HEAD against the parent on its own hardware. A pullback
-#     that lands anyway is reported by every replica that sees it — and a single
-#     slow/noisy runner cannot manufacture a verdict on its own, because the replicas
-#     are ADVISORY (see the tier note below): a replica announces its comparison, it
-#     does not stop the job by itself.
+#  3. Push ratchet (`ratchet`) — every main push re-runs the same gate in THREE replicas
+#     (redundant testing): each replica builds HEAD and its PARENT commit and gates HEAD
+#     against the parent. Since #2432 the replicas run one after another on the pinned
+#     bench host's CPUs, as gate-pr does, so they are three repeats on one machine rather
+#     than three draws of hosted hardware. A pullback that lands anyway is reported by
+#     every replica that sees it — and a single noisy repeat cannot manufacture a verdict
+#     on its own, because the replicas are ADVISORY (see the tier note below): a replica
+#     announces its comparison, it does not stop the job by itself.
 #  4. History (`history`) — aggregates the three replicas' transcripts and records, per
-#     point, the BEST runner's whole tuple (lowest p50, or highest throughput on a bulk-only
-#     row; never a per-metric min across runners, never a min of p99s — #1807), so the
-#     recorded trend approximates the code's capability, not the machine lottery.
+#     point, the BEST replica's whole tuple (lowest p50, or highest throughput on a bulk-only
+#     row; never a per-metric min across replicas, never a min of p99s — #1807), so the
+#     recorded trend approximates the code's capability, not a noisy repeat. It times
+#     nothing, so it runs on a ci-local runner.
 #  5. Verdict TIER (#1251) — declared per invocation as `perf_gate.py --tier {blocking,
 #     advisory}`, so this file DECLARES the policy instead of describing it. `blocking`
 #     means a breached ratchet fails the job; `advisory` runs the identical comparison
@@ -55,8 +57,8 @@
 #     and re-runs a contended execution. Only a clean run may PASS or FAIL: a gate whose
 #     executions stayed contended prints `PERF: INCONCLUSIVE` (blocking tier: exit 3, re-run
 #     the job; advisory: a warning). A trusted gate runs on the pinned bench host
-#     (`gate-pr`, below); the hosted fallback VM (a trusted run off the bench route) is
-#     unpinned, so its conditions are read over the whole affinity set. The interleaved A/B is the primary defence on both, and
+#     (`gate-pr` and `ratchet`, below); the hosted fallback VM (a trusted run off the bench
+#     route) is unpinned, so its conditions are read over the whole affinity set. The interleaved A/B is the primary defence on both, and
 #     no gate run is compared against the perf-local pinned-host series.
 name: perf
 
@@ -485,15 +487,25 @@ jobs:
         if: always()
         run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
-  # --- main push: REDUNDANT no-pullback ratchet (3 runners, HEAD vs parent) -------
-  # Each replica is a complete same-runner experiment on independently-drawn hardware:
-  # build HEAD, build the parent commit, gate HEAD against the parent. fail-fast is
-  # off so one replica's verdict (or infrastructure hiccup) never hides the others'.
+  # --- main push: REDUNDANT no-pullback ratchet (3 replicas, HEAD vs parent) ------
+  # Each replica is a complete same-runner experiment: build HEAD, build the parent commit,
+  # gate HEAD against the parent. fail-fast is off so one replica's verdict (or
+  # infrastructure hiccup) never hides the others'.
   ratchet:
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
       (github.event_name == 'push')
-    runs-on: ubuntu-24.04
+    # The pinned bench host, like gate-pr (#2432; the 2026-10-28 ruling: local runners
+    # only). The ratchet is a timed A/B, so it needs gate-pr's quiet CPUs, not a ci-local
+    # runner that shares the workstation with up to nine other jobs: there its executions
+    # would come back contended and the advisory verdict INCONCLUSIVE. `bench-local` runs
+    # one job at a time, so the three replicas run one after another on the same CPUs,
+    # taking turns with gate-pr and perf-local; they are three repeats on one machine, not
+    # three draws of hardware. Fork code cannot reach the host: this job runs on a push to
+    # main only, and the routing guard is gate-pr's verbatim.
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","bench-local"]') || 'ubuntu-24.04' }}
+    env:
+      BENCH_CPU: "3-6" # as gate-pr: bench.slice minus CPU 2 (the runner's own processes)
     # Measured healthy max 9.92 min, p50 ~9.1, min 7.67 (16.45 on the incident day, 6.78
     # of it in checkout). The dominant step is the interleaved A/B ratchet at ~6-6.8 min,
     # which is a real measurement and must not be clipped; 8 pairs (#1807) about double it,
@@ -506,15 +518,21 @@ jobs:
       matrix:
         replica: [1, 2, 3]
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
+      # Build parallelism (#1637), as gate-pr: every CPU the job can see, which on the bench
+      # host is bench.slice's, all idle until timing starts.
       - name: Set build parallelism (BUILD_JOBS)
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          jobs="$(nproc)"
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+      # Same self-heal as gate-pr (#1538): the bench host shares `_work` with root-run
+      # container jobs.
+      - name: Reclaim any root-owned leftovers from a container job
+        run: '[ "$RUNNER_ENVIRONMENT" != self-hosted ] || docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || echo "::warning::could not hand root-owned workspace files back to the runner user; checkout may fail to clean them"'
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # need the parent commit for the ratchet baseline
@@ -536,10 +554,10 @@ jobs:
       - name: Run the bench once (this replica's history transcript)
         run: |
           # Through the condition classifier (#1676): re-run while contended, and recorded
-          # in bench/conditions.jsonl beside the transcript. CPU set (#1906): no BENCH_CPU
-          # here, so the job runs on every CPU of the hosted VM. The single-threaded families
-          # are one invocation, and each narrows itself to ONE logical CPU, the lowest of
-          # that set (as they do in the advisory gate below). The multi-threaded families are a second invocation on the
+          # in bench/conditions.jsonl beside the transcript. CPU set (#1906): BENCH_CPU, as
+          # gate-pr's. The single-threaded families are one invocation, and each narrows
+          # itself to ONE logical CPU, the first of that set (as they do in the advisory gate
+          # below). The multi-threaded families are a second invocation on the
           # whole set: they size T from its affinity mask and are judged on foreign time only
           # (`--multi`). One transcript, single first, as perf-local writes it.
           measure="python3 bench/bench_conditions.py run --record bench/conditions.jsonl"
@@ -588,6 +606,9 @@ jobs:
       - name: Build the parent commit's benchmark on this runner (ratchet baseline)
         run: |
           if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            # The bench host is persistent, unlike a hosted VM: drop any last baseline tree.
+            git worktree remove --force ../parent-baseline 2>/dev/null || true
+            rm -rf ../parent-baseline; git worktree prune
             git worktree add --detach ../parent-baseline HEAD^
             # A parent that predates bench_chain_delivery (#1951) gets this commit's copy, as
             # the gate's baseline build does.
@@ -603,6 +624,19 @@ jobs:
           else
             echo "root commit — no parent to ratchet against"
           fi
+      # Builds are done: move this runner's own processes off the bench CPUs, as gate-pr does.
+      - name: Move the runner's own processes off the bench CPUs
+        if: runner.environment == 'self-hosted'
+        run: |
+          cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
+          own="$(cat "$cg/cgroup.procs" "$cg"/*/cgroup.procs 2>/dev/null || true)"
+          : >"$RUNNER_TEMP/runner-affinity.txt"
+          for pid in $(pgrep -u "$(id -u)" -f 'Runner\.(Listener|Worker)'); do
+            if grep -qx "$pid" <<<"$own"; then
+              echo "$pid $(taskset -c -p "$pid" | sed 's/.*: //')" >>"$RUNNER_TEMP/runner-affinity.txt"
+              taskset -a -p -c 2 "$pid"
+            fi
+          done
       # TIER: advisory. Three replicas each render this verdict independently, and each
       # one used to be able to red main on its own — strictly stronger than the ruled
       # policy, and the shape that produced a CI failure later traced to the runner
@@ -631,6 +665,14 @@ jobs:
       # nothing to download. That is how #385's merge produced a chart that jumps
       # straight from its parent to the next commit, and why the regression was
       # misattributed to a later PR.
+      # Put the runner's processes back (#1890), whatever the ratchet did: see gate-pr.
+      - name: Restore the runner's own processes' CPU affinity
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          [ -s "$RUNNER_TEMP/runner-affinity.txt" ] || exit 0
+          while read -r pid cpus; do
+            taskset -a -p -c "$cpus" "$pid" || true  # a Worker may already have exited
+          done <"$RUNNER_TEMP/runner-affinity.txt"
       - name: Upload this replica's transcripts
         if: always()
         uses: actions/upload-artifact@v4
@@ -644,8 +686,18 @@ jobs:
             bench/bench_zenoh_raw.txt
             bench/conditions.jsonl
           retention-days: 90
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
-  # --- main push: persist the build-to-build history (best across runners) --------
+  # --- main push: persist the build-to-build history (best across replicas) -------
   # Aggregates whatever replicas produced transcripts (if: always() — a failing
   # ratchet verdict must still leave a history point for the offending commit) and
   # records EVERY (mode,size,fan,ep) point — latency, throughput and memory footprint
@@ -661,7 +713,11 @@ jobs:
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
       (github.event_name == 'push' && always())
     needs: ratchet
-    runs-on: ubuntu-24.04
+    # A local runner (#2432), with core-ci's self-hosted routing verbatim. This job times
+    # nothing (it aggregates transcripts and pushes the store), so it takes a ci-local
+    # runner and leaves the bench CPUs alone. It runs on a push to main only, so no fork
+    # code reaches the host.
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     # Measured healthy max 1.00 min, p50 0.85; the 6.20 outlier is one slow
     # drift-tracking step on the incident day. 20 = ~3.2x the worst observed.
     timeout-minutes: 20
@@ -670,6 +726,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
+      - name: Reclaim any root-owned leftovers from a container job
+        run: '[ "$RUNNER_ENVIRONMENT" != self-hosted ] || docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || echo "::warning::could not hand root-owned workspace files back to the runner user; checkout may fail to clean them"'
       - uses: actions/checkout@v4
       - name: Download the replicas' transcripts
         uses: actions/download-artifact@v4
@@ -733,3 +795,13 @@ jobs:
           comment-on-alert: true
           fail-on-alert: false
           alert-comment-cc-users: '@avatarsd'
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
