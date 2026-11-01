@@ -65,6 +65,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `std::vector<std::byte>` a function returns rather than viewing the temporary
   (`.descriptor = dtype_desc("f32")` dangles; `const auto d = dtype_desc("f32"); … .descriptor =
   d` does not) — and read a snapshot through `.owned()`.
+  Code size: `graph_t::dispatch_edge_remote` grows 398 → 454 B (waived, ruling 20): GCC now
+  inlines the segment release there; measured faster at every row from 1 KiB up and at fan-out
+  1024, one 10 ns tick slower at 64 B fan-out 8. Follow-up: #2428.
 - **A PAIR chain is learned with no flag (RFC-0029 §6.2/§7.1, #2245) — BREAKING (wire).** A
   successful terminus reply seeds its `src` with `PATH{<target PAIR>}`, and every relaying hop
   prepends its PAIR (else its NAME run), so the origin receives its whole chain in `src`. Every
