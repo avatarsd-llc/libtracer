@@ -428,7 +428,9 @@ ws_server_transport_t::ws_server_transport_t(std::uint16_t bind_port,
     max_frame_ = length_prefix_framer_t::configured_cap(config.max_frame);  // tighten-only (#1035)
     max_handshake_ = handshake_cap(config.max_handshake);                   // tighten-only (#934)
     if (!bind_listen(bind_port)) return;
-    start([this] { run(); }, config.recv_stack);
+    // A refused poll-loop spawn (#2288) leaves the listener inert: ok() false.
+    if (!start([this] { run(); }, config.recv_stack, config.memory.stack_or_default()))
+        close_listen();
 }
 
 ws_server_transport_t::~ws_server_transport_t() {
@@ -656,7 +658,8 @@ ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_
     : stream_endpoint_t(config.memory.io != nullptr ? *config.memory.io : mem::net_source()),
       backend_(config.memory.rx),
       pipelined_(config.memory.state_or_default()),
-      recv_stack_(config.recv_stack) {
+      recv_stack_(config.recv_stack),
+      stack_src_(&config.memory.stack_or_default()) {
     mem::block_source_t* const egress_src = config.memory.io;
     const std::size_t max_frame = config.max_frame;
     const std::uint32_t liveness_window_ms = config.liveness_window_ms;
@@ -720,15 +723,22 @@ ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_
     // bytes stay parked until then.
 }
 
-void ws_client_transport_t::start_receiving() {
-    if (!came_up_) return;  // handshake failed: there is nothing to serve
+bool ws_client_transport_t::start_receiving() {
+    if (!came_up_) return true;  // handshake failed: nothing to serve, and ok() says so
     // One-shot: `posix_endpoint_t::start` may be called at most once per endpoint, and this
     // is reachable both from the constructor (one-phase) and from an owner that calls it
     // unconditionally on every link it wires.
-    if (recv_started_.exchange(true, std::memory_order_relaxed)) return;
+    if (recv_started_.exchange(true, std::memory_order_relaxed)) return true;
     const int fd = conn_fd_.load(std::memory_order_relaxed);
     // `pipelined_` is the recv thread's from here on: `serve` takes it over.
-    start([this, fd] { serve(fd); }, recv_stack_);
+    if (start([this, fd] { serve(fd); }, recv_stack_, *stack_src_)) return true;
+    // A refused spawn (#2288) is the connection dying before its first message: closed, and
+    // ok() false. The owner hears it from the return, not from a link-down fired under
+    // whatever lock it holds while it wires the link.
+    teardown_peer(fd);
+    connected_.store(false, std::memory_order_relaxed);
+    came_up_ = false;
+    return false;
 }
 
 ws_client_transport_t::~ws_client_transport_t() {

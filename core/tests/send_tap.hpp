@@ -63,7 +63,7 @@ class send_tap_t final : public net::transport_t {
         inner_.send(frame);
     }
     [[nodiscard]] bool delivers_ropes() const override { return inner_.delivers_ropes(); }
-    void start_receiving() override { inner_.start_receiving(); }
+    [[nodiscard]] bool start_receiving() override { return inner_.start_receiving(); }
     [[nodiscard]] bool link_up() const noexcept override { return inner_.link_up(); }
 
    private:

@@ -18,8 +18,6 @@
  */
 #pragma once
 
-#include <pthread.h>
-
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -28,6 +26,7 @@
 #include <span>
 
 #include "libtracer/config.hpp"
+#include "libtracer/static_thread.hpp"
 #include "libtracer/thread_id.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_factory.hpp"
@@ -128,10 +127,13 @@ class self_heal_link_t final : public transport_t {
      *                       the ENGINE exactly once, at registration.
      * @param src            The store each dial's socket, and the engine's record of it, is
      *                       drawn from — the factory's third argument (receiver pays).
+     * @param stack          The engine's thread-stack store (`link_memory_t::stack`, #2288):
+     *                       its worker's stack and task block. Default
+     *                       `tr::mem::stack_source()`; must outlive the engine.
      */
     self_heal_link_t(transport_factory_t factory, conn_settings_t settings,
                      std::span<const std::byte> raw_config, bool inner_delivers_ropes,
-                     mem::block_source_t& src);
+                     mem::block_source_t& src, mem::block_source_t& stack = mem::stack_source());
 
     /** @brief Stops the engine (see @ref stop) and destroys any remaining socket. */
     ~self_heal_link_t();
@@ -312,8 +314,8 @@ class self_heal_link_t final : public transport_t {
      *         caller holds `m_`. */
     void ensure_worker_locked();
 
-    /** @brief `pthread_create` trampoline into `%worker_main` (the `void*` is `this`). */
-    static void* worker_entry(void* self);
+    /** @brief Thread trampoline into `%worker_main` (the `void*` is `this`). */
+    static void worker_entry(void* self);
 
     /** @brief The op-side gate: the §4 transient hold. Returns the socket to send on, or
      *         nullptr = drop (any state but `UP`; a `DORMANT` link is kicked first). */
@@ -337,6 +339,7 @@ class self_heal_link_t final : public transport_t {
                                                               (borrowed, see the ctor). */
     const bool inner_ropes_;                      /**< @brief The kind's delivery capability. */
     mem::block_source_t& src_;      /**< @brief Where each socket and its record come from. */
+    mem::block_source_t& stack_;    /**< @brief Where the worker's stack comes from (#2288). */
     liveness_publish_fn_t publish_; /**< @brief Set once, before router wiring. */
 
     link_state_t state_ = link_state_t::DORMANT; /**< @brief The machine (DIAL subset). */
@@ -351,15 +354,14 @@ class self_heal_link_t final : public transport_t {
     sock_t* corpses_ = nullptr; /**< @brief Dead sockets awaiting reap — an intrusive list
                                             through `sock_t::next_corpse`, one hold each. */
 
-    // A raw pthread rather than a `std::thread`, for the two reasons `posix_endpoint_t` and
-    // `socketcan_link_t` already are (#1470): `std::thread`'s constructor THROWS on spawn
-    // failure, which is a `std::abort()` under `-fno-exceptions`, while `pthread_create`
-    // returns an error code the engine can absorb; and `pthread_attr_setstacksize` is the
-    // only portable way to size the stack, which an RTOS target must do — IDF's pthread
-    // otherwise takes `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT` (12,288 B stock) from the
-    // heap per link. See `tr::net::kSelfHealWorkerStackBytes`.
-    pthread_t worker_{};              /**< @brief Valid only while `%worker_started_` is set. */
-    bool worker_started_ = false;     /**< @brief Lazy; joined by @ref stop. */
+    // A @ref static_thread_t (#2288) rather than a `std::thread`: the latter's constructor
+    // THROWS on spawn failure, which is a `std::abort()` under `-fno-exceptions`, and on
+    // ESP-IDF it takes its stack (`CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`, 12,288 B stock)
+    // from the platform heap per link. Here the worker's stack and control block come from
+    // @ref stack_ on ESP-IDF (one block, sized by
+    // `tr::net::kSelfHealWorkerStackBytes`), and a refused spawn is an error the engine absorbs.
+    static_thread_t worker_;          /**< @brief Joined by @ref stop. */
+    bool worker_started_ = false;     /**< @brief Lazy; claimed and cleared by @ref stop. */
     detail::thread_id_t worker_id_{}; /**< @brief Re-entrancy guard: the worker's own
                                                   publish fan-out must not kick a dial
                                                   (see `ready_socket`). */
