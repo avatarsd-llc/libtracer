@@ -231,9 +231,10 @@ class webtransport_transport_t final : public transport_t {
      * the peer pushed while the owner was installing its sinks is re-indicated and
      * delivered rather than dropped. IDEMPOTENT, and inert on an armed dialer, a
      * listener, and a dial that never came up, which have nothing to arm, because
-     * `%transport_vertex_t::make_connection` calls it on every link it wires.
+     * `%transport_vertex_t::make_connection` calls it on every link it wires. Opening the
+     * gate spawns nothing, so it never fails: true.
      */
-    void start_receiving() override;
+    bool start_receiving() override;
 
     /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042). */
     [[nodiscard]] bool delivers_ropes() const override { return true; }

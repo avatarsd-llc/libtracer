@@ -35,7 +35,7 @@ using wire::tlv_node_t;
 
 self_heal_link_t::self_heal_link_t(transport_factory_t factory, conn_settings_t settings,
                                    std::span<const std::byte> raw_config, bool inner_delivers_ropes,
-                                   mem::block_source_t& src)
+                                   mem::block_source_t& src, mem::block_source_t& stack)
     : factory_(factory),
       // Defaults resolved ONCE, at bind time, so the factory and every wait in this file
       // read the same effective values (RFC-0014 §4: config overrides the engine's own
@@ -48,7 +48,8 @@ self_heal_link_t::self_heal_link_t(transport_factory_t factory, conn_settings_t 
       }()),
       raw_config_(raw_config),
       inner_ropes_(inner_delivers_ropes),
-      src_(src) {}
+      src_(src),
+      stack_(stack) {}
 
 self_heal_link_t::~self_heal_link_t() { stop(); }
 
@@ -63,8 +64,7 @@ void self_heal_link_t::sock_ref_t::reset() noexcept {
     sock_t* const s = s_;
     s_ = nullptr;
     if (s == nullptr || s->refs.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
-    mem::block_source_t& src = s->self->src_;
-    mem::drop_in(src, s);  // destroys the socket first: joins its receive thread
+    mem::drop_in(*s->src, s);  // destroys the socket first: joins its receive thread
 }
 
 void self_heal_link_t::park_locked(sock_ref_t dead) noexcept {
@@ -77,6 +77,10 @@ void self_heal_link_t::park_locked(sock_ref_t dead) noexcept {
 void self_heal_link_t::drop_corpses(sock_t* head) noexcept {
     while (head != nullptr) {
         sock_t* const next = head->next_corpse;
+        // Shut down BEFORE the list lets go: a send in flight may hold the socket past the
+        // engine, and the join here is what stops its receive thread reaching the engine
+        // (#2288). The last hold, wherever it drops, then frees through `sock_t::src`.
+        head->link->shut_down();
         sock_ref_t{head}.reset();  // the list's hold; the last one destroys the socket
         head = next;
     }
@@ -143,33 +147,30 @@ void self_heal_link_t::release() {
 }
 
 void self_heal_link_t::stop() {
-    pthread_t w{};
     bool started = false;
     {
         const std::lock_guard l(m_);
         stop_ = true;
-        // Take the handle out under the lock and clear the flag, so a second `stop()` (the
-        // destructor after an explicit one) joins nothing rather than joining twice — the
-        // `std::move(worker_)` this replaces bought the same idempotence.
+        // Claim the worker under the lock and clear the flag, so a second `stop()` (the
+        // destructor after an explicit one) joins nothing rather than joining twice.
         started = worker_started_;
-        w = worker_;
         worker_started_ = false;
         cv_.notify_all();
     }
-    if (started) (void)::pthread_join(w, nullptr);
+    if (started) worker_.join();
     // Tear the sockets down with `m_` RELEASED: each destruction joins a receive thread
     // that may itself be blocked in on_socket_down waiting for `m_`.
+    // The live socket joins the corpses, so every socket leaves the same way: shut down here,
+    // while the engine is alive, whoever holds it last.
     sock_t* dead = nullptr;
-    sock_ref_t last;
     {
         const std::lock_guard l(m_);
+        park_locked(std::move(inner_));
         dead = std::exchange(corpses_, nullptr);
-        last = std::move(inner_);
         live_gen_ = 0;
         state_ = link_state_t::DORMANT;  // terminal resting value; nothing publishes it
     }
     drop_corpses(dead);
-    last.reset();
 }
 
 void self_heal_link_t::send(std::span<const std::byte> frame) {
@@ -215,29 +216,21 @@ self_heal_link_t::sock_ref_t self_heal_link_t::ready_socket() {
     return {};
 }
 
-void* self_heal_link_t::worker_entry(void* self) {
+void self_heal_link_t::worker_entry(void* self) {
     static_cast<self_heal_link_t*>(self)->worker_main();
-    return nullptr;
 }
 
 void self_heal_link_t::ensure_worker_locked() {
     if (stop_ || worker_started_) return;
-    pthread_attr_t attr;
-    ::pthread_attr_init(&attr);
-    // The #1470 stack knob. `if constexpr` so the default binding (0 — every host build)
-    // emits no call at all and the spawn stays the one that shipped. A hint below the
-    // platform floor makes setstacksize answer EINVAL and leaves the attr's default in
-    // place, so the spawn still happens with the default stack — the same soft behaviour
-    // `posix_endpoint_t::start` and `socketcan_link_t::start` take.
-    if constexpr (kSelfHealWorkerStackBytes != 0)
-        (void)::pthread_attr_setstacksize(&attr, kSelfHealWorkerStackBytes);
-    // Error-code return, not a throw: a `std::thread` spawn failure is a `std::abort()`
-    // under -fno-exceptions, which is not an answer a link-liveness engine may give on an
-    // out-of-heap MCU. A failed spawn simply leaves the engine unworkered — the next
-    // transition tries again.
-    worker_started_ =
-        (::pthread_create(&worker_, &attr, &self_heal_link_t::worker_entry, this) == 0);
-    ::pthread_attr_destroy(&attr);
+    // The #1470 stack knob (0 = the platform default; every host build). On ESP-IDF the
+    // stack is drawn with its control block from the engine's thread-stack store (#2288,
+    // `link_memory_t::stack`, default `mem::stack_source()`), never from `src_`, the sockets'
+    // store, which on an MCU is the shared value arena. A
+    // refused spawn, from the source or the platform, leaves the engine unworkered (counted
+    // in that source's census) and the next transition tries again. Never a throw: a
+    // `std::thread` spawn failure is a `std::abort()` under -fno-exceptions.
+    worker_started_ = worker_.start(&self_heal_link_t::worker_entry, this,
+                                    kSelfHealWorkerStackBytes, "tr_heal", stack_);
 }
 
 void self_heal_link_t::publish_unlocked(std::unique_lock<std::mutex>& l, link_state_t s) {
@@ -283,8 +276,9 @@ bool self_heal_link_t::wire_socket(sock_t& sock) {
             s->self->on_socket_down(*s);
         },
         &sock);
-    sock.link->start_receiving();
-    return went_down;
+    // A receive that could not start (#2288: its stack refused) is a socket dead on arrival:
+    // the same failed attempt as a went-down, retried on the engine's backoff.
+    return !sock.link->start_receiving() || went_down;
 }
 
 void self_heal_link_t::on_socket_down(sock_t& sock) {
@@ -323,6 +317,7 @@ bool self_heal_link_t::attempt_locked(std::unique_lock<std::mutex>& l) {
     if (sock) {
         sock->link = std::move(*built);
         sock->self = this;
+        sock->src = &src_;
         sock->gen = gen_ctr_.fetch_add(1, std::memory_order_relaxed) + 1;
         // Sinks + notifier + start, BEFORE the socket is adopted: a kind whose receive
         // thread starts in its constructor is already draining, and the sinks route into

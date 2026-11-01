@@ -1078,8 +1078,9 @@ void webtransport_transport_t::shut_down() {
     if (impl_) impl_->teardown();  // idempotent; the destructor's own teardown is then a no-op
 }
 
-void webtransport_transport_t::start_receiving() {
+bool webtransport_transport_t::start_receiving() {
     if (impl_) impl_->open_delivery_gate();
+    return true;
 }
 
 void webtransport_transport_t::send(std::span<const std::byte> frame) {
