@@ -335,18 +335,19 @@ thresholds, one hard invariant:
 | mechanism | when | comparison | threshold | effect |
 | --- | --- | --- | --- | --- |
 | **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner, interleaved A/B per family** | per row and leg, **3× the row's A/A-null spread, floor 3%** (flat p50 **+15%** · mean **+12%** · deliveries/s **−12%** where the null has no row) · per-vertex bytes **+2%** — *and* a bootstrap 95% interval on the median pair ratio that excludes 1 (a row at the flat threshold is decided by the separated-arms + majority-of-pairs rule) | fails the PR |
-| **push ratchet** | every `main` push | HEAD vs its parent, **three replicas on the pinned bench host** | same as above | **advisory** — each replica reports (see the tier note below) |
+| **ratchet** | every `main` push (one replica) and nightly (three) | HEAD vs its parent, **on the pinned bench host** | same as above | **advisory** — each replica reports (see the tier note below) |
 | **forward-hop zero-alloc gate** | every CI run | absolute | `> 0` allocations on the forward hop | fails the build |
-| **soft trend alert** | per `main` commit | vs previous point, **best of three repeats on the pinned bench host** | series drifts past **125%** | a comment, *not* a verdict |
+| **soft trend alert** | per `main` commit | vs previous point, **one repeat on the pinned bench host** | series drifts past **125%** | a comment, *not* a verdict |
 
 **Verdict tiers.** The comparison is the same wherever it runs; what a caller declares is
 whether a breached ratchet may *stop the job*. `perf_gate.py --tier blocking` fails on a
 breach, `--tier advisory` prints the identical numbers and the identical verdict line and
 exits 0 — with a `::warning::` annotation, so an unenforced breach is never quiet. The tier
 is **not** a second, looser threshold set: an advisory run reports exactly what a blocking
-run would have said. The per-PR gate is blocking; the three push replicas are advisory,
-because a single noisy runner should not carry a verdict alone and the ruled escalation
-(two of the three replicas agreeing) is not built yet. Omit the flag and you get
+run would have said. The per-PR gate is blocking; the ratchet's replicas are advisory,
+because a single noisy run should not carry a verdict alone and the ruled escalation
+(two of the nightly's three replicas agreeing) is not built yet. A push runs one replica,
+which reports and decides nothing alone. Omit the flag and you get
 **advisory** — the safe default for a maintainer's own machine, where the bar was never
 calibrated; every CI invocation declares its tier explicitly and a unit test fails the
 build if one does not.
@@ -800,9 +801,10 @@ Details that make these trustworthy:
   ([`bench/test_perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/test_perf_gate.py)),
   run in the same CI job before anything is timed, pinning both directions: the recorded
   false-failure sample sets must pass, and the recorded real regressions must still fail.
-- The **push ratchet** re-runs that gate on **three separate runner draws** and
-  requires the regression to reproduce — one noisy machine cannot fail `main`, and a
-  regression that slips through the PR gate still gets caught the moment it lands.
+- The **ratchet** re-runs that gate, HEAD against its parent, on the pinned bench host: one
+  advisory replica on every push to `main`, three nightly. A regression that slips through
+  the PR gate is reported the moment it lands; no single run can fail `main`, and the 2-of-3
+  agreement over the nightly's replicas is not built yet.
 - The **forward-hop zero-alloc gate** is the one **absolute** gate: it is a
   structural invariant, not a speed target. Steady-state forwarding must allocate
   nothing, so the threshold is literally zero.
@@ -1074,11 +1076,11 @@ it has to price the move on the bench before the pin is allowed to move with it.
   `fold-b*` rows — is the runner; a move confined to one family is the code. Read
   trends across several commits, not the third digit of one point.
 - **Per-point noise floor.** Each recorded point is the **median of the repeated
-  RESULT rows** one run emits, so per-iteration jitter does not move a series. Points
-  are then recorded from the **best of three runner draws** — that runner's whole tuple
-  (p50, p99 and throughput from one machine, never a per-metric minimum across runners,
-  and never a minimum of p99s), approximating the code's capability rather than the
-  machine lottery. Sub-microsecond points sit on a
+  RESULT rows** one run emits, so per-iteration jitter does not move a series. Until #2433
+  points were recorded from the **best of three hosted runner draws** — that runner's whole
+  tuple (p50, p99 and throughput from one machine, never a per-metric minimum across
+  runners, and never a minimum of p99s). Since then a push records one repeat on the pinned
+  bench host. Sub-microsecond points sit on a
   ~10 ns timer grain — do not over-read a 5 ns wiggle.
 - **Tail percentiles are published, not gated.** The deeper into a distribution a statistic reaches, the fewer samples
   stand behind it and the more it moves for reasons that are not the code. Running the
@@ -1328,11 +1330,11 @@ The history is two stores. **bench-local** (`dev/bench-local/data.js`, one pinne
 self-hosted CPU) is the **trend instrument**, and the trend charts open on it: every point
 is the same silicon, and both arms of each libtracer-vs-Zenoh point come from the same
 pass, so the zenoh ÷ libtracer ratio is computed there and only there. The ratchet store
-(`dev/bench/data.js`) keeps the best of three replicas per series. Until #2433 those were
-three GitHub-hosted runners, whose consecutive points swing by up to about 50%, bimodally,
-so a 2× step in one row is lost in them. Since #2433 they are three repeats, one after
-another, on the pinned bench host, so the best of three filters that host's own noise rather
-than picking the fastest machine. The series therefore shows a level shift at the commit
-that moved it; read across that commit as two series, not as a change in the code. It stays
+(`dev/bench/data.js`) kept the best of three GitHub-hosted runners per series until #2433;
+their consecutive points swing by up to about 50%, bimodally, so a 2× step in one row is
+lost in them. Since #2433 a push records one repeat on the pinned bench host (the nightly
+three-replica run reports verdicts and records no point). The series therefore shows a level
+shift at the commit that moved it; read across that commit as two series, not as a change in
+the code. It stays
 one selector away, with no ratio view, because its hosted points' two arms need not come
 from the same runner.

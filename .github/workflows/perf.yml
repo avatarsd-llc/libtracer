@@ -32,19 +32,20 @@
 #     a bootstrap 95% interval on that median that excludes 1 (#1807) — AND the arms'
 #     second-best samples past it too, so a bimodal row's slow mode cannot fail it (#2168).
 #     No Actions cache feeds the gate.
-#  3. Push ratchet (`ratchet`) — every main push re-runs the same gate in THREE replicas
-#     (redundant testing): each replica builds HEAD and its PARENT commit and gates HEAD
-#     against the parent. Since #2433 the replicas run one after another on the pinned
-#     bench host's CPUs, as gate-pr does, so they are three repeats on one machine rather
-#     than three draws of hosted hardware. A pullback that lands anyway is reported by
-#     every replica that sees it — and a single noisy repeat cannot manufacture a verdict
-#     on its own, because the replicas are ADVISORY (see the tier note below): a replica
-#     announces its comparison, it does not stop the job by itself.
-#  4. History (`history`) — aggregates the three replicas' transcripts and records, per
-#     point, the BEST replica's whole tuple (lowest p50, or highest throughput on a bulk-only
-#     row; never a per-metric min across replicas, never a min of p99s — #1807), so the
-#     recorded trend approximates the code's capability, not a noisy repeat. It times
-#     nothing, so it runs on a ci-local runner.
+#  3. Ratchet (`ratchet`) — re-runs the same gate, HEAD against its PARENT commit, on the
+#     pinned bench host's CPUs as gate-pr does (#2433). ONE replica on every main push, THREE
+#     in the nightly schedule (ruling 23, 2026-11-01), one after another on the same CPUs, so
+#     they are repeats on one machine, not draws of hosted hardware. Every replica is
+#     ADVISORY (see the tier note below): it announces its own comparison and does not stop
+#     the job. A push's lone replica therefore reports one verdict, the same comparison and
+#     thresholds gate-pr applied before the merge, and nothing aggregates it; the nightly's
+#     three report separately, and the ruled 2-of-3 escalation over them is not built yet
+#     (#1251 stage 2).
+#  4. History (`history`) — on a main push only, records the replica's transcript per point
+#     (with several transcripts it keeps the BEST one's whole tuple: lowest p50, or highest
+#     throughput on a bulk-only row; never a per-metric min, never a min of p99s — #1807). It
+#     times nothing, so it runs on a ci-local runner. The nightly records no point: its
+#     commit already has one from its push.
 #  5. Verdict TIER (#1251) — declared per invocation as `perf_gate.py --tier {blocking,
 #     advisory}`, so this file DECLARES the policy instead of describing it. `blocking`
 #     means a breached ratchet fails the job; `advisory` runs the identical comparison
@@ -83,6 +84,10 @@ on:
       - 'docs/methodology.md'
       - '.github/workflows/perf*.yml'
       - "!**/*.md" # Markdown is never an input here (core-ci.yml, DOCS-ONLY PULL REQUESTS)
+  # The nightly three-replica ratchet (ruling 23), on core-ci's nightly cron. Only `ratchet`
+  # runs on it; every other job's `if` excludes `schedule`.
+  schedule:
+    - cron: "0 0 * * *"
 
 # A newer push to a PR supersedes its running gate: its verdict would describe a head that is
 # no longer the PR's, and queued behind it it holds the bench CPUs that local benches and the
@@ -373,7 +378,7 @@ jobs:
   # The Zenoh arm is optional (bench/fetch_zenoh.sh vendors it) and is not fetched here,
   # matching how the ratchet job treats the Zenoh control series: absent is not a failure.
   compose-audit:
-    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/')) && github.event_name != 'schedule'
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
@@ -487,40 +492,41 @@ jobs:
         if: always()
         run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
-  # --- main push: REDUNDANT no-pullback ratchet (3 replicas, HEAD vs parent) ------
+  # --- main push + nightly: no-pullback ratchet (HEAD vs parent; 1 replica, 3 nightly) --
   # Each replica is a complete same-runner experiment: build HEAD, build the parent commit,
   # gate HEAD against the parent. fail-fast is off so one replica's verdict (or
   # infrastructure hiccup) never hides the others'.
   ratchet:
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (github.event_name == 'push')
+      (github.event_name == 'push' || github.event_name == 'schedule')
     # The pinned bench host, like gate-pr (#2433; the 2026-10-28 ruling: local runners
     # only). The ratchet is a timed A/B, so it needs gate-pr's quiet CPUs, not a ci-local
     # runner that shares the workstation with up to nine other jobs: there its executions
     # would come back contended and the advisory verdict INCONCLUSIVE. `bench-local` runs
-    # one job at a time, so the three replicas run one after another on the same CPUs,
-    # taking turns with gate-pr and perf-local; they are three repeats on one machine, not
-    # three draws of hardware. Fork code cannot reach the host: this job runs on a push to
-    # main only, and the routing guard is gate-pr's verbatim.
+    # one job at a time, so the nightly's three replicas run one after another on the same
+    # CPUs, taking turns with gate-pr and perf-local; they are repeats on one machine, not
+    # draws of hardware. Fork code cannot reach the host: this job runs on a push to main or
+    # on the schedule only, and the routing guard is gate-pr's verbatim.
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","bench-local"]') || 'ubuntu-24.04' }}
     env:
       BENCH_CPU: "3-6" # as gate-pr: bench.slice minus CPU 2 (the runner's own processes)
     # Sized for the bench host (#2433), not yet measured there: gate-pr's interleaved A/B on
     # the same CPUs measured ~15 min at 8 pairs (#1807); this job adds the history, network
     # and Zenoh transcripts (~3-4 min) and a second build, so ~20 min. 45 = ~2.2x that; re-size
-    # from the first local runs. The limit is per replica and counts no queue time, so three
-    # replicas run one after another (~60 min per main push) and each still fits.
-    # Advisory tier with three replicas, so a false trip is cheap to ignore and therefore
+    # from the first local runs. The limit is per replica and counts no queue time, so the
+    # nightly's three replicas run one after another (~60 min) and each still fits; a push
+    # costs one (~20 min). Advisory tier, so a false trip is cheap to ignore and therefore
     # especially corrosive — set loose on purpose.
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      # One replica at a time: the three are repeats on one host by construction, not by
-      # the accident of bench-local having one runner.
+      # One replica at a time: the nightly's three are repeats on one host by construction,
+      # not by the accident of bench-local having one runner.
       max-parallel: 1
       matrix:
-        replica: [1, 2, 3]
+        # One replica per main push, three nightly (ruling 23).
+        replica: ${{ fromJSON(github.event_name == 'schedule' && '[1,2,3]' || '[1]') }}
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
@@ -588,7 +594,7 @@ jobs:
         run: |
           set -o pipefail
           ZEROHEAP_MAX=0 ./bench/build/bench_forward_heap | tee bench/bench_forward_heap_raw.txt
-      # One full-bench transcript per replica; the history job aggregates all three.
+      # One full-bench transcript per replica; on a push the history job records it.
       # Each family prints its own `RSS family=` delta into the transcript (#1808), which
       # feeds the memory-footprint series in place of the old whole-run max RSS.
       - name: Run the bench once (this replica's history transcript)
@@ -643,14 +649,15 @@ jobs:
           # a silent non-recording, so say so rather than letting the job go green quietly.
           [ -s bench/bench_zenoh_raw.txt ] || \
             echo "::warning::no Zenoh transcript — its control series will not be recorded this commit"
-      # TIER: advisory. Three replicas each render this verdict independently, and each
-      # one used to be able to red main on its own — strictly stronger than the ruled
-      # policy, and the shape that produced a CI failure later traced to the runner
-      # environment rather than to any commit (#1261). The ruled escalation is 2-of-3
-      # agreement, which needs an aggregation job these three replicas do not have yet
-      # (#1251 stage 2); until it exists a replica REPORTS. Nothing is lost pre-merge:
-      # `gate-pr` above already gated the same commit against the same `main` baseline,
-      # blocking, before it could land.
+      # TIER: advisory. Every replica renders this verdict on its own. When three replicas
+      # each could red main alone, that was strictly stronger than the ruled policy, and the
+      # shape that produced a CI failure later traced to the runner environment rather than
+      # to any commit (#1261). The ruled escalation is 2-of-3 agreement over the nightly's
+      # three replicas, which needs an aggregation job not built yet (#1251 stage 2); until
+      # it exists each replica REPORTS. A push's single replica is not an always-pass: it
+      # prints the same verdict line, with a ::warning:: on a breach, and decides nothing
+      # alone. Nothing is lost pre-merge: `gate-pr` above already gated the same commit
+      # against the same `main` baseline, blocking, before it could land.
       - name: No-pullback ratchet (HEAD vs parent, this runner, interleaved) — ADVISORY tier
         run: |
           if [ -x ../parent-baseline/bench/build/bench_libtracer ]; then
@@ -703,7 +710,7 @@ jobs:
         if: always()
         run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
-  # --- main push: persist the build-to-build history (best across replicas) -------
+  # --- main push: persist the build-to-build history --------------------------------
   # Aggregates whatever replicas produced transcripts (if: always() — a failing
   # ratchet verdict must still leave a history point for the offending commit) and
   # records EVERY (mode,size,fan,ep) point — latency, throughput and memory footprint
