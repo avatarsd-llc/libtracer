@@ -490,6 +490,14 @@ they are the reason a new binding is small.
 :protected-members:
 ```
 
+Every library thread is a `tr::static_thread_t`: its stack and task block come from one block
+drawn from the link's `link_memory_t::stack` source, never the platform heap (#2288).
+
+```{doxygenclass} tr::static_thread_t
+:project: libtracer
+:members:
+```
+
 The full-write helpers below report how one record's write ended, so a stalled peer can be
 counted and closed rather than blocked on forever (#838):
 
