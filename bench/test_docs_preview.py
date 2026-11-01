@@ -59,6 +59,14 @@ class PreviewMode(unittest.TestCase):
         self.assertEqual(called, [])
         self.assertIn("ts-core, rust-core: not run on PR previews", out)
 
+    def test_a_preview_runs_no_comparison_sweep(self):
+        g = _load(True)
+        with mock.patch.object(g.subprocess, "run") as run, \
+             mock.patch.dict(os.environ, {"LIBTRACER_DOCS_STRICT": "1"}):
+            out = g.zenoh_compare_block()
+        run.assert_not_called()
+        self.assertIn("not run on PR previews", out)
+
     def test_the_rollup_reads_the_junit_file_and_does_not_rerun_ctest(self):
         _load(False)
         with tempfile.TemporaryDirectory() as d:
