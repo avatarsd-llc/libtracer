@@ -41,13 +41,9 @@ OUT = REPO / "docs" / "performance.md"
 BENCH = REPO / "bench" / "build" / "bench_libtracer"
 BENCH_ZENOH = REPO / "bench" / "build" / "bench_zenoh"
 CODEC = REPO / "bench" / "build" / "bench_codec"
-# How many rounds the comparison sweep ran. docs.yml runs ONE on a pull request (a preview,
-# so the page says so and nobody quotes it) and best-of-3 everywhere else.
-ROUNDS = (
-    "1 round (PR preview), not a measurement"
-    if os.environ.get("LIBTRACER_COMPARE_ROUNDS") == "1"
-    else "best of 3 rounds"
-)
+# How many rounds the comparison sweep ran: docs.yml runs it best-of-3, and not at all on a
+# pull request (a preview, see zenoh_compare_block).
+ROUNDS = "best of 3 rounds"
 # A pull request's docs build is a PREVIEW (#2348): it skips the parts of this page that
 # only render a result another workflow already gates on (the cross-core driver is
 # conformance.yml's gate, the ts and rust cores are ts.yml's and conformance.yml's, ctest is
@@ -1220,10 +1216,13 @@ def zenoh_compare_block(local: dict | None = None) -> str:
       file is the shape this failure actually takes — checking that the path exists is
       not enough to catch it, which is why the check is on the parsed rows.
     """
+    if PREVIEW:
+        return ("_(not run on PR previews: main, nightly and tags run the comparison sweep,"
+                " and perf-local measures on bench-local every night)_")
     tsv = os.environ.get("LIBTRACER_COMPARE_TSV")
     combined = ""
     if tsv and pathlib.Path(tsv).exists():
-        combined = pathlib.Path(tsv).read_text()  # CI runs the sweep once, shared with the PR comment
+        combined = pathlib.Path(tsv).read_text()  # CI runs the sweep once, in docs.yml
     if not combined.strip() and BENCH.exists():
         combined = run([str(BENCH), "grid"])
         if BENCH_ZENOH.exists():
