@@ -1125,11 +1125,16 @@ int main() {
             std::vector<tr::graph::app_field_t> table;
             table.reserve(5);
             static constexpr const char* kNames[5] = {"kp", "ki", "kd", "mode", "label"};
+            static const std::array<std::byte, 16> kRecord = [] {
+                std::array<std::byte, 16> r{};
+                r.fill(std::byte{0x11});  // a §B.1-sized record stand-in
+                return r;
+            }();
             for (const char* name : kNames) {
                 tr::graph::app_field_t f;
                 f.name = name;
                 f.access = tr::graph::app_access_t::RW;
-                f.descriptor.assign(16, std::byte{0x11});  // a §B.1-sized record stand-in
+                f.descriptor = kRecord;
                 table.push_back(std::move(f));
             }
             return table;

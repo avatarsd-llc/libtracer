@@ -236,8 +236,13 @@ vertex_handle_t plain_vertex(graph_t& g) {
 /** @brief `/s` with one declared `rw` app field `kp`, holding a written VALUE TLV. */
 vertex_handle_t vertex_with_app_field(graph_t& g) {
     const vertex_handle_t v = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    // The descriptor keeps the field-table snapshot's block (#2288), which the container reads
+    // also draw from the injected source, off the record's size: without one, its 56 + 6 B
+    // equals the `:settings.app` record's block exactly and the routing arm counts both.
+    static constexpr std::array<std::byte, 4> kDesc{std::byte{0x04}, std::byte{'u'}, std::byte{'n'},
+                                                    std::byte{'i'}};
     std::vector<app_field_t> table;
-    table.push_back(app_field_t{.name = "kp", .access = app_access_t::RW});
+    table.push_back(app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = kDesc});
     (void)g.set_policy(v, {.app_fields = std::move(table)});
     const std::array<std::byte, 2> le{std::byte{0x88}, std::byte{0x13}};  // 5000
     const tr::wire::tlv_t value{.type = tr::wire::type_t::VALUE, .payload = le};
