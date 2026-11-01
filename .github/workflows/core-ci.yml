@@ -1187,7 +1187,11 @@ jobs:
       # It counts the libtracer CI containers in runners-ci.slice plus itself, and takes
       # core-ci's adaptive rule: 4 with three or fewer running, otherwise 2, and 2 when
       # the slice cannot be read. The shared /ccache is the containers' (root-owned
-      # entries), so a host job keeps its own cache under the runner user's home: one per
+      # entries), so a host job keeps its own cache under the runner user's home, made
+      # relocatable across runners (CI time audit A4: BASEDIR is the workspace's real path,
+      # NOHASHDIR keeps the working directory out of the key; debug info then names the
+      # compiling runner's build dir as comp_dir, and file names stay workspace-relative,
+      # so sanitizer reports still print function and file:line): one per
       # sanitizer, slot and fence (2026-11-01 ruling), 4G each, so one leg's debug objects
       # never evict another's and the shared ccache-host of the other host jobs is untouched.
       # ccache already keys on the full flag set; the split only keeps the legs' LRU apart.
@@ -1206,7 +1210,8 @@ jobs:
               echo "CCACHE_DIR=$HOME/ccache-host-san/asan-${{ matrix.lkv_slot }}"
               echo "CCACHE_MAXSIZE=4G"
               echo "CCACHE_COMPILERCHECK=content"
-              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_BASEDIR=$(realpath "$GITHUB_WORKSPACE")"
+              echo "CCACHE_NOHASHDIR=1"
               echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
             } >> "$GITHUB_ENV"
             echo "ccache: ON ($HOME/ccache-host-san/asan-${{ matrix.lkv_slot }})"
@@ -1283,7 +1288,11 @@ jobs:
       # It counts the libtracer CI containers in runners-ci.slice plus itself, and takes
       # core-ci's adaptive rule: 4 with three or fewer running, otherwise 2, and 2 when
       # the slice cannot be read. The shared /ccache is the containers' (root-owned
-      # entries), so a host job keeps its own cache under the runner user's home: one per
+      # entries), so a host job keeps its own cache under the runner user's home, made
+      # relocatable across runners (CI time audit A4: BASEDIR is the workspace's real path,
+      # NOHASHDIR keeps the working directory out of the key; debug info then names the
+      # compiling runner's build dir as comp_dir, and file names stay workspace-relative,
+      # so sanitizer reports still print function and file:line): one per
       # sanitizer, slot and fence (2026-11-01 ruling), 4G each, so one leg's debug objects
       # never evict another's and the shared ccache-host of the other host jobs is untouched.
       # ccache already keys on the full flag set; the split only keeps the legs' LRU apart.
@@ -1302,7 +1311,8 @@ jobs:
               echo "CCACHE_DIR=$HOME/ccache-host-san/tsan-${{ matrix.lkv_slot }}"
               echo "CCACHE_MAXSIZE=4G"
               echo "CCACHE_COMPILERCHECK=content"
-              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_BASEDIR=$(realpath "$GITHUB_WORKSPACE")"
+              echo "CCACHE_NOHASHDIR=1"
               echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
             } >> "$GITHUB_ENV"
             echo "ccache: ON ($HOME/ccache-host-san/tsan-${{ matrix.lkv_slot }})"
@@ -1374,7 +1384,11 @@ jobs:
       # It counts the libtracer CI containers in runners-ci.slice plus itself, and takes
       # core-ci's adaptive rule: 4 with three or fewer running, otherwise 2, and 2 when
       # the slice cannot be read. The shared /ccache is the containers' (root-owned
-      # entries), so a host job keeps its own cache under the runner user's home: one per
+      # entries), so a host job keeps its own cache under the runner user's home, made
+      # relocatable across runners (CI time audit A4: BASEDIR is the workspace's real path,
+      # NOHASHDIR keeps the working directory out of the key; debug info then names the
+      # compiling runner's build dir as comp_dir, and file names stay workspace-relative,
+      # so sanitizer reports still print function and file:line): one per
       # sanitizer, slot and fence (2026-11-01 ruling), 4G each, so one leg's debug objects
       # never evict another's and the shared ccache-host of the other host jobs is untouched.
       # ccache already keys on the full flag set; the split only keeps the legs' LRU apart.
@@ -1393,7 +1407,8 @@ jobs:
               echo "CCACHE_DIR=$HOME/ccache-host-san/tsan-fence-membarrier"
               echo "CCACHE_MAXSIZE=4G"
               echo "CCACHE_COMPILERCHECK=content"
-              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_BASEDIR=$(realpath "$GITHUB_WORKSPACE")"
+              echo "CCACHE_NOHASHDIR=1"
               echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
             } >> "$GITHUB_ENV"
             echo "ccache: ON ($HOME/ccache-host-san/tsan-fence-membarrier)"
