@@ -138,8 +138,10 @@ jobs:
     # which the blocking interleaved A/B step alone was 5.7 min of TIMED measurement at 4
     # pairs. At 8 ABBA pairs per family (#1807) that step measured 12.5 min, so the job is
     # ~15 min and 30 = ~2x. This is the BLOCKING perf tier, so the ceiling is set where it
-    # can never trip on a slow-but-honest sample. See core-ci.yml's header.
-    timeout-minutes: 30
+    # can never trip on a slow-but-honest sample. See core-ci.yml's header. Raised 30 -> 45
+    # (2026-11-01): honest runs now take 29-39 min with the A/B step at 19.5 min, and a batch
+    # PR's gate-pr timed out at 30 min with no regression in it.
+    timeout-minutes: 45
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
