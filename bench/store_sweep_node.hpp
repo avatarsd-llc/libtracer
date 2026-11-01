@@ -153,8 +153,17 @@ inline constexpr std::size_t kValueBytes = 32;
  * on a degraded path. The figures a deployer sizes against are the reported ones, never these.
  */
 struct budget_t {
-    /** @brief Bytes for the graph plane's store (`ctl` + the `mr` adapter). */
-    static constexpr std::size_t kGraph = 32U * 1024U;
+    /**
+     * @brief Bytes for the graph plane's store (`ctl` + the `mr` adapter).
+     *
+     * Not a per-T figure, so it must cover the largest T. In NARROW this store also holds
+     * every link's state (two links per lane, see `build_graph`), about 1.1 KiB per lane, so
+     * NARROW at T=24 is its peak: 28,552 B before #2282 added an 8 B tenancy word to each
+     * link's mount, 29,128 B after. 32 KiB put that past the 7/8 headroom `faults()` holds
+     * every store to; 48 KiB leaves NARROW T=24 at about 60 %. The capacity is not banked:
+     * only `used()` is, and raising the slab moves no `used()` figure.
+     */
+    static constexpr std::size_t kGraph = 48U * 1024U;
     /** @brief Bytes for ONE lane's rx store, and separately for one lane's egress store. */
     static constexpr std::size_t kNetPerLane = 4U * 1024U;
     /** @brief Free-list class slots on a store several channels share. */
@@ -427,10 +436,11 @@ struct stores_t {
 
 /** @brief One receive thread's private wiring: its links, its frame and its two vertices. */
 struct lane_t {
-    rope_in_t in;                 /**< @brief The inbound link the rope arrives on. */
-    sink_out_t out;               /**< @brief The outbound link the hop forwards to. */
-    tr::view::rope_t frame;       /**< @brief The pre-built inbound frame, re-injected per op. */
-    std::vector<std::byte> value; /**< @brief Stable bytes the graph write borrows. */
+    rope_in_t in;                    /**< @brief The inbound link the rope arrives on. */
+    sink_out_t out;                  /**< @brief The outbound link the hop forwards to. */
+    tr::view::rope_t frame;          /**< @brief The pre-built inbound frame, re-injected per op. */
+    tr::view::rope_t overflow_frame; /**< @brief The same frame, one rope link per byte. */
+    std::vector<std::byte> value;    /**< @brief Stable bytes the graph write borrows. */
     std::optional<vertex_handle_t> root; /**< @brief The composed-read subtree root. */
     std::optional<vertex_handle_t> leaf; /**< @brief The vertex the write lands on. */
 };
@@ -481,14 +491,27 @@ class node_t {
     [[nodiscard]] std::size_t lanes() const noexcept { return lanes_n_; }
 
     /**
-     * @brief LEG 1 — the rope FWD forward hop. Draws the router's `rx` AND the link's egress.
+     * @brief LEG 1 — the rope FWD forward hop. Draws the link's egress, and no `rx` per frame.
      *
      * A `kRopeLinks`-link rope arrives on child `c<i>` naming child `u<i>`; the hop gathers the
-     * untouched links onward. The rx draw is the terminus arena; the egress draw is the base
-     * `send(iov)` gather temporary, reachable only because @ref sink_out_t declines to override
-     * the gather form.
+     * untouched links onward. The egress draw is the base `send(iov)` gather temporary,
+     * reachable only because @ref sink_out_t declines to override the gather form. The gather
+     * table itself fits the hop's stack array since #2329, so the router's `rx` is not drawn:
+     * @ref step_net_overflow is the frame that reaches it.
      */
     void step_net(lane_t& l) { l.in.inject(l.frame); }
+
+    /**
+     * @brief The forward hop on a frame too wide for the stack table: draws the router's `rx`.
+     *
+     * The same frame as @ref step_net with every byte its own rope link, the widest split a
+     * frame can have. The bytes the hop keeps then straddle more than `tr::net::kFwdMaxIov`
+     * links, so the gather is taken again into a block array on the inbound link's `rx`
+     * source, the per-child store in NARROW. (A 20-link split is not enough: the kept regions
+     * of this short READ still fit 10 spans.) Calibration only: the timed and hwm sweeps run
+     * the frame a node really forwards.
+     */
+    void step_net_overflow(lane_t& l) { l.in.inject(l.overflow_frame); }
 
     /**
      * @brief LEG 2 — one graph WRITE. Draws the graph's `std::pmr` traffic.
@@ -687,6 +710,7 @@ class node_t {
             const std::vector<std::byte> bytes =
                 b_fwd(fwd_op_t::READ, b_path({out_name, "sensor"}), b_path({"reply-ep"}));
             l->frame = rope_of(bytes, kRopeLinks);
+            l->overflow_frame = rope_of(bytes, bytes.size());
             l->value = b_value(kValueBytes);
 
             tr::mem::block_source_t* rx = rx_src_;  // null in NARROW => this lane's own
