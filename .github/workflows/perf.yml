@@ -34,7 +34,7 @@
 #     No Actions cache feeds the gate.
 #  3. Push ratchet (`ratchet`) — every main push re-runs the same gate in THREE replicas
 #     (redundant testing): each replica builds HEAD and its PARENT commit and gates HEAD
-#     against the parent. Since #2432 the replicas run one after another on the pinned
+#     against the parent. Since #2433 the replicas run one after another on the pinned
 #     bench host's CPUs, as gate-pr does, so they are three repeats on one machine rather
 #     than three draws of hosted hardware. A pullback that lands anyway is reported by
 #     every replica that sees it — and a single noisy repeat cannot manufacture a verdict
@@ -495,7 +495,7 @@ jobs:
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
       (github.event_name == 'push')
-    # The pinned bench host, like gate-pr (#2432; the 2026-10-28 ruling: local runners
+    # The pinned bench host, like gate-pr (#2433; the 2026-10-28 ruling: local runners
     # only). The ratchet is a timed A/B, so it needs gate-pr's quiet CPUs, not a ci-local
     # runner that shares the workstation with up to nine other jobs: there its executions
     # would come back contended and the advisory verdict INCONCLUSIVE. `bench-local` runs
@@ -506,15 +506,19 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","bench-local"]') || 'ubuntu-24.04' }}
     env:
       BENCH_CPU: "3-6" # as gate-pr: bench.slice minus CPU 2 (the runner's own processes)
-    # Measured healthy max 9.92 min, p50 ~9.1, min 7.67 (16.45 on the incident day, 6.78
-    # of it in checkout). The dominant step is the interleaved A/B ratchet at ~6-6.8 min,
-    # which is a real measurement and must not be clipped; 8 pairs (#1807) about double it,
-    # to ~16 min for the job. 35 = ~2.2x that.
+    # Sized for the bench host (#2433), not yet measured there: gate-pr's interleaved A/B on
+    # the same CPUs measured ~15 min at 8 pairs (#1807); this job adds the history, network
+    # and Zenoh transcripts (~3-4 min) and a second build, so ~20 min. 45 = ~2.2x that; re-size
+    # from the first local runs. The limit is per replica and counts no queue time, so three
+    # replicas run one after another (~60 min per main push) and each still fits.
     # Advisory tier with three replicas, so a false trip is cheap to ignore and therefore
     # especially corrosive — set loose on purpose.
-    timeout-minutes: 35
+    timeout-minutes: 45
     strategy:
       fail-fast: false
+      # One replica at a time: the three are repeats on one host by construction, not by
+      # the accident of bench-local having one runner.
+      max-parallel: 1
       matrix:
         replica: [1, 2, 3]
     steps:
@@ -542,6 +546,42 @@ jobs:
             -DCMAKE_CXX_FLAGS="$BENCH_CXX_FLAGS"
           cmake --build bench/build --target bench_libtracer bench_forward_heap \
             bench_forward_demux bench_chain_delivery bench_store_sweep --parallel "$BUILD_JOBS"
+      - name: Build the parent commit's benchmark on this runner (ratchet baseline)
+        run: |
+          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            # The bench host is persistent, unlike a hosted VM: drop any last baseline tree.
+            git worktree remove --force ../parent-baseline 2>/dev/null || true
+            rm -rf ../parent-baseline; git worktree prune
+            git worktree add --detach ../parent-baseline HEAD^
+            # A parent that predates bench_chain_delivery (#1951) gets this commit's copy, as
+            # the gate's baseline build does.
+            if ! grep -q bench_chain_delivery ../parent-baseline/bench/CMakeLists.txt; then
+              cp bench/bench_chain_delivery.cpp ../parent-baseline/bench/
+              printf '\nadd_executable(bench_chain_delivery bench_chain_delivery.cpp)\ntarget_link_libraries(bench_chain_delivery PRIVATE libtracer)\n' \
+                >>../parent-baseline/bench/CMakeLists.txt
+            fi
+            cmake -S ../parent-baseline/bench -B ../parent-baseline/bench/build -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CXX_FLAGS="$BENCH_CXX_FLAGS"
+            cmake --build ../parent-baseline/bench/build --target bench_libtracer \
+              bench_forward_heap bench_chain_delivery bench_forward_demux bench_store_sweep --parallel "$BUILD_JOBS"
+          else
+            echo "root commit — no parent to ratchet against"
+          fi
+      # Both builds are done: move this runner's own processes off the bench CPUs, as gate-pr
+      # does, BEFORE anything is timed. Every timed step below (the history transcript, the
+      # network-plane and Zenoh benches, the A/B ratchet) then runs with the runner on CPU 2.
+      - name: Move the runner's own processes off the bench CPUs
+        if: runner.environment == 'self-hosted'
+        run: |
+          cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
+          own="$(cat "$cg/cgroup.procs" "$cg"/*/cgroup.procs 2>/dev/null || true)"
+          : >"$RUNNER_TEMP/runner-affinity.txt"
+          for pid in $(pgrep -u "$(id -u)" -f 'Runner\.(Listener|Worker)'); do
+            if grep -qx "$pid" <<<"$own"; then
+              echo "$pid $(taskset -c -p "$pid" | sed 's/.*: //')" >>"$RUNNER_TEMP/runner-affinity.txt"
+              taskset -a -p -c 2 "$pid"
+            fi
+          done
       # The zero-heap gate is deterministic (allocation counts, not time) — running it
       # per replica is a free consistency check; its transcript feeds the memory series.
       - name: Zero-heap forward gate (ADR-0038 §16KB-RAM)
@@ -603,40 +643,6 @@ jobs:
           # a silent non-recording, so say so rather than letting the job go green quietly.
           [ -s bench/bench_zenoh_raw.txt ] || \
             echo "::warning::no Zenoh transcript — its control series will not be recorded this commit"
-      - name: Build the parent commit's benchmark on this runner (ratchet baseline)
-        run: |
-          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
-            # The bench host is persistent, unlike a hosted VM: drop any last baseline tree.
-            git worktree remove --force ../parent-baseline 2>/dev/null || true
-            rm -rf ../parent-baseline; git worktree prune
-            git worktree add --detach ../parent-baseline HEAD^
-            # A parent that predates bench_chain_delivery (#1951) gets this commit's copy, as
-            # the gate's baseline build does.
-            if ! grep -q bench_chain_delivery ../parent-baseline/bench/CMakeLists.txt; then
-              cp bench/bench_chain_delivery.cpp ../parent-baseline/bench/
-              printf '\nadd_executable(bench_chain_delivery bench_chain_delivery.cpp)\ntarget_link_libraries(bench_chain_delivery PRIVATE libtracer)\n' \
-                >>../parent-baseline/bench/CMakeLists.txt
-            fi
-            cmake -S ../parent-baseline/bench -B ../parent-baseline/bench/build -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_CXX_FLAGS="$BENCH_CXX_FLAGS"
-            cmake --build ../parent-baseline/bench/build --target bench_libtracer \
-              bench_forward_heap bench_chain_delivery bench_forward_demux bench_store_sweep --parallel "$BUILD_JOBS"
-          else
-            echo "root commit — no parent to ratchet against"
-          fi
-      # Builds are done: move this runner's own processes off the bench CPUs, as gate-pr does.
-      - name: Move the runner's own processes off the bench CPUs
-        if: runner.environment == 'self-hosted'
-        run: |
-          cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
-          own="$(cat "$cg/cgroup.procs" "$cg"/*/cgroup.procs 2>/dev/null || true)"
-          : >"$RUNNER_TEMP/runner-affinity.txt"
-          for pid in $(pgrep -u "$(id -u)" -f 'Runner\.(Listener|Worker)'); do
-            if grep -qx "$pid" <<<"$own"; then
-              echo "$pid $(taskset -c -p "$pid" | sed 's/.*: //')" >>"$RUNNER_TEMP/runner-affinity.txt"
-              taskset -a -p -c 2 "$pid"
-            fi
-          done
       # TIER: advisory. Three replicas each render this verdict independently, and each
       # one used to be able to red main on its own — strictly stronger than the ruled
       # policy, and the shape that produced a CI failure later traced to the runner
@@ -713,7 +719,7 @@ jobs:
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
       (github.event_name == 'push' && always())
     needs: ratchet
-    # A local runner (#2432), with core-ci's self-hosted routing verbatim. This job times
+    # A local runner (#2433), with core-ci's self-hosted routing verbatim. This job times
     # nothing (it aggregates transcripts and pushes the store), so it takes a ci-local
     # runner and leaves the bench CPUs alone. It runs on a push to main only, so no fork
     # code reaches the host.

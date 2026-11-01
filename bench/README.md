@@ -422,8 +422,11 @@ ratchet may **stop the job**:
 | `--tier blocking` | fails the job (exit 1) | `perf.yml` → `gate-pr`, the per-PR gate |
 | `--tier advisory` | printed, annotated `::warning::`, exit 0 | `perf.yml` → `ratchet`, the three push replicas |
 
-Since #2432 both run on the pinned bench host's CPUs (`bench-local`, `BENCH_CPU`); no perf
-comparison runs on a GitHub-hosted runner. The tiers are what still tells the two apart.
+Since #2433 both run on the pinned bench host's CPUs (`bench-local`, `BENCH_CPU`); no perf
+comparison runs on a GitHub-hosted runner. The tiers are what still tells the two apart. The
+three replicas run one at a time (`max-parallel: 1`), so the history's best of three now
+filters that host's own noise, and the `dev/bench` series shows a level shift at the commit
+that moved it.
 
 This lived in a `perf.yml` comment for its whole life before #1251, and the gate had no
 tier concept at all — so "the pinned host blocks, the GitHub runners warn" described a

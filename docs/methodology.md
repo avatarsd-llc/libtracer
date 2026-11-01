@@ -337,7 +337,7 @@ thresholds, one hard invariant:
 | **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner, interleaved A/B per family** | per row and leg, **3× the row's A/A-null spread, floor 3%** (flat p50 **+15%** · mean **+12%** · deliveries/s **−12%** where the null has no row) · per-vertex bytes **+2%** — *and* a bootstrap 95% interval on the median pair ratio that excludes 1 (a row at the flat threshold is decided by the separated-arms + majority-of-pairs rule) | fails the PR |
 | **push ratchet** | every `main` push | HEAD vs its parent, **three replicas on the pinned bench host** | same as above | **advisory** — each replica reports (see the tier note below) |
 | **forward-hop zero-alloc gate** | every CI run | absolute | `> 0` allocations on the forward hop | fails the build |
-| **soft trend alert** | per `main` commit | vs previous point, **cross-runner** | series drifts past **125%** | a comment, *not* a verdict |
+| **soft trend alert** | per `main` commit | vs previous point, **best of three repeats on the pinned bench host** | series drifts past **125%** | a comment, *not* a verdict |
 
 **Verdict tiers.** The comparison is the same wherever it runs; what a caller declares is
 whether a breached ratchet may *stop the job*. `perf_gate.py --tier blocking` fails on a
@@ -1328,8 +1328,11 @@ The history is two stores. **bench-local** (`dev/bench-local/data.js`, one pinne
 self-hosted CPU) is the **trend instrument**, and the trend charts open on it: every point
 is the same silicon, and both arms of each libtracer-vs-Zenoh point come from the same
 pass, so the zenoh ÷ libtracer ratio is computed there and only there. The ratchet store
-(`dev/bench/data.js`) keeps the best of three replicas per series. Until #2432 those were
+(`dev/bench/data.js`) keeps the best of three replicas per series. Until #2433 those were
 three GitHub-hosted runners, whose consecutive points swing by up to about 50%, bimodally,
-so a 2× step in one row is lost in them; since #2432 they are three repeats on the pinned
-bench host. It stays one selector away as the **portability envelope**, with no ratio view,
-because its older points' two arms need not come from the same runner.
+so a 2× step in one row is lost in them. Since #2433 they are three repeats, one after
+another, on the pinned bench host, so the best of three filters that host's own noise rather
+than picking the fastest machine. The series therefore shows a level shift at the commit
+that moved it; read across that commit as two series, not as a change in the code. It stays
+one selector away, with no ratio view, because its hosted points' two arms need not come
+from the same runner.
