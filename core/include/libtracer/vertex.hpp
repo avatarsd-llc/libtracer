@@ -2998,7 +2998,7 @@ class vertex_t {
      * vertex that never had an extension block, allocates nothing (#361 §1: a leaf with
      * no app fields pays nothing).
      */
-    [[nodiscard]] bool set_app_fields(std::vector<app_field_t> table,
+    [[nodiscard]] bool set_app_fields(std::span<const app_field_t> table,
                                       tr::mem::block_source_t& tables) {
         if (table.empty() && ext_.load(std::memory_order_acquire) == nullptr) return true;
         vertex_ext_t* const e = ensure_ext(tables);
@@ -3076,11 +3076,12 @@ class vertex_t {
         WRITE_ONLY, /**< @brief Declared `wo` — no read surface (RFC-0010 §A.4). */
         UNSET,      /**< @brief Declared but never written and no initial value. */
         OK,         /**< @brief Value copied out. */
+        REFUSED,    /**< @brief Set, but @p out's source refused the copy — BACKPRESSURE. */
     };
 
     /** @brief Read the app field @p name into @p out (the stored TLV bytes, verbatim);
-     *         @p out is written only on @ref app_read_t::OK. */
-    [[nodiscard]] app_read_t app_field_get(std::string_view name, std::vector<std::byte>& out) {
+     *         @p out is written only on @ref app_read_t::OK, drawn from its own source. */
+    [[nodiscard]] app_read_t app_field_get(std::string_view name, tr::mem::bytes_t& out) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         const std::ptrdiff_t i = find_app_slot(e, name);
@@ -3089,32 +3090,39 @@ class vertex_t {
         const std::size_t idx = static_cast<std::size_t>(i);
         if (t.slots[idx].access == app_access_t::WO) return app_read_t::WRITE_ONLY;
         if (t.values == nullptr || t.values[idx].empty()) return app_read_t::UNSET;
-        out.assign(t.values[idx].begin(), t.values[idx].end());
-        return app_read_t::OK;
+        return tr::mem::assign_bytes(out, tr::mem::as_span(t.values[idx])) ? app_read_t::OK
+                                                                           : app_read_t::REFUSED;
     }
 
-    /** @brief A consistent copy of the whole descriptor table, in install order — the
-     *         container-read / `:schema` snapshot (control-plane cold; empty ⇒ no table
-     *         installed). */
-    [[nodiscard]] std::vector<app_field_t> app_fields_snapshot() {
+    /**
+     * @brief A consistent copy of the whole descriptor table, in install order, values
+     *        included — the container-read / `:schema` snapshot (control-plane cold).
+     *
+     * The copy is ONE block drawn from @p src under the lock (#2288): the resident table is
+     * view-slots, but the emit/`:schema` path uses the snapshot AFTER releasing the lock (an
+     * owner's read seam may run there), so it must own its bytes.
+     * @return Empty when no table is installed; @ref app_fields_decl_t::failed when @p src
+     *         refused the block.
+     */
+    [[nodiscard]] app_fields_decl_t app_fields_snapshot(tr::mem::block_source_t& src) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        if (e == nullptr || e->app == nullptr) return {};
+        app_fields_decl_t out;
+        if (e == nullptr || e->app == nullptr || e->app->table.slots.empty()) return out;
         const app_field_table_t& t = e->app->table;
-        std::vector<app_field_t> out;
-        out.reserve(t.slots.size());
-        // Materialise an OWNING copy under the lock (ADR-0058): the resident table is
-        // view-slots, but the emit/`:schema` path uses the snapshot AFTER releasing the
-        // lock, so it must own its bytes. Cold control-plane copy, freed immediately —
-        // the RAM win is in the resident storage, not this transient.
+        const auto field = [&t](std::size_t i) {
+            const app_field_slot_t& s = t.slots[i];
+            return app_field_t{
+                s.name, s.access, s.retention, s.descriptor,
+                t.values != nullptr ? tr::mem::as_span(t.values[i]) : std::span<const std::byte>{}};
+        };
+        std::size_t bytes = 0;
         for (std::size_t i = 0; i < t.slots.size(); ++i) {
-            app_field_t f;
-            f.name.assign(t.slots[i].name);
-            f.access = t.slots[i].access;
-            f.descriptor.assign(t.slots[i].descriptor.begin(), t.slots[i].descriptor.end());
-            if (t.values != nullptr) f.value.assign(t.values[i].begin(), t.values[i].end());
-            out.push_back(std::move(f));
+            const app_field_t f = field(i);
+            bytes += f.name.size() + f.descriptor.size() + f.value.size();
         }
+        if (!out.reserve(t.slots.size(), bytes, src)) return out;
+        for (std::size_t i = 0; i < t.slots.size(); ++i) out.push(field(i));
         return out;
     }
 
@@ -3699,7 +3707,7 @@ class vertex_t {
      *         stable across the table's moves, so the slot views stay valid. Every block comes
      *         from @p t's source (#1778); false when it refused one, and @p t is then
      *         discarded. */
-    [[nodiscard]] static bool build_owning_table(const std::vector<app_field_t>& table,
+    [[nodiscard]] static bool build_owning_table(std::span<const app_field_t> table,
                                                  app_field_table_t& t) {
         std::size_t off = table.size() * sizeof(app_field_slot_t);
         std::size_t total = off;

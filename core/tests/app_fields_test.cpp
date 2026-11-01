@@ -165,11 +165,10 @@ void test_declare_read_write() {
     const vertex_handle_t v = g.register_vertex(path_t("/ctrl/pid"), role_t::STORED_VALUE);
 
     const std::vector<std::byte> initial = value_tlv("kp0");
+    const std::vector<std::byte> f32 = dtype_desc("f32");
     std::vector<app_field_t> table;
-    table.push_back(app_field_t{.name = "kp",
-                                .access = app_access_t::RW,
-                                .descriptor = dtype_desc("f32"),
-                                .value = initial});
+    table.push_back(
+        app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = f32, .value = initial});
     (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     check(reads_back(g.read(path_t("/ctrl/pid:settings.app.kp")), initial),
@@ -345,9 +344,9 @@ void test_schema_merge() {
               before->tlv.children[1].type == type_t::SETTINGS,
           "no table: POINT{NAME, SETTINGS} — today's synthesized shape, no app member");
 
+    const std::vector<std::byte> f32 = dtype_desc("f32");
     std::vector<app_field_t> table;
-    table.push_back(
-        app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = dtype_desc("f32")});
+    table.push_back(app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = f32});
     table.push_back(app_field_t{.name = "secret", .access = app_access_t::WO});
     (void)g.set_policy(v, {.app_fields = std::move(table)});
 
@@ -431,11 +430,13 @@ void test_storage_shape() {
     graph_t g;
     const vertex_handle_t v = g.register_vertex(path_t("/dev/n"), role_t::STORED_VALUE);
 
+    // The fields view these until the install copies them (#2288).
+    const std::vector<std::byte> u32 = dtype_desc("u32");
+    std::vector<std::string> names;
+    for (int i = 0; i < 16; ++i) names.push_back("f" + std::to_string(i));
     std::vector<app_field_t> table;
-    for (int i = 0; i < 16; ++i)
-        table.push_back(app_field_t{.name = "f" + std::to_string(i),
-                                    .access = app_access_t::RW,
-                                    .descriptor = dtype_desc("u32")});
+    for (const std::string& n : names)
+        table.push_back(app_field_t{.name = n, .access = app_access_t::RW, .descriptor = u32});
     (void)g.set_policy(v, {.app_fields = std::move(table)});
     bool all_writes_ok = true;
     for (int i = 0; i < 16; ++i) {
@@ -473,12 +474,12 @@ void test_container_reads() {
           ":settings on a table-less vertex: an EMPTY container (RFC-0022 §4) — present, "
           "not absent, and carrying no knobs");
 
+    const std::vector<std::byte> w = value_tlv("w");
+    const std::vector<std::byte> s = value_tlv("s");
     std::vector<app_field_t> table;
-    table.push_back(
-        app_field_t{.name = "written", .access = app_access_t::RW, .value = value_tlv("w")});
+    table.push_back(app_field_t{.name = "written", .access = app_access_t::RW, .value = w});
     table.push_back(app_field_t{.name = "unwritten", .access = app_access_t::RW});
-    table.push_back(
-        app_field_t{.name = "secret", .access = app_access_t::WO, .value = value_tlv("s")});
+    table.push_back(app_field_t{.name = "secret", .access = app_access_t::WO, .value = s});
     (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     const std::optional<decoded_t> app = decode_read(g.read(path_t("/dev/c:settings.app")));
@@ -565,6 +566,43 @@ void test_table_replace() {
           "its stored value is gone with the entry (values ride the table)");
     check(g.write(path_t("/dev/r:settings.app.new"), make_value(value_tlv("3"))).has_value(),
           "the replacement table's field is live");
+}
+
+/** @brief A source that refuses every block: the copy an owning declaration makes fails. */
+class refusing_source_t final : public tr::mem::block_source_t {
+   public:
+    /** @brief Name it so a census can tell it apart from the process heap. */
+    refusing_source_t() noexcept : tr::mem::block_source_t("refusing") {}
+    /** @brief Refuse. */
+    [[nodiscard]] void* try_alloc(std::size_t, std::size_t) noexcept override { return nullptr; }
+    /** @brief Nothing was ever drawn, so nothing comes back. */
+    void release(void*, std::size_t, std::size_t) noexcept override {}
+};
+
+// ---------------------------------------------------------------------------
+// #2288 part B — a declaration whose owning copy was refused is refused whole: set_policy
+// answers by value and the table already installed stays, values and all.
+void test_refused_copy_keeps_table() {
+    std::printf("refused declaration copy keeps the installed table (#2288):\n");
+    graph_t g;
+    const vertex_handle_t v = g.register_vertex(path_t("/dev/q"), role_t::STORED_VALUE);
+    std::vector<app_field_t> t1;
+    t1.push_back(app_field_t{.name = "kept", .access = app_access_t::RW});
+    (void)g.set_policy(v, {.app_fields = std::move(t1)});
+    const std::vector<std::byte> val = value_tlv("k1");
+    check(g.write(path_t("/dev/q:settings.app.kept"), make_value(val)).has_value(),
+          "the installed table's field takes a write");
+
+    refusing_source_t refuse;
+    const std::array<app_field_t, 1> t2{app_field_t{.name = "new", .access = app_access_t::RW}};
+    tr::graph::app_fields_decl_t decl(std::span<const app_field_t>(t2), &refuse);
+    check(decl.failed(), "the owning copy from a refusing source reads failed()");
+    check(!g.set_policy(v, {.app_fields = std::move(decl)}).has_value(),
+          "set_policy refuses the declaration, by value");
+    check(reads_back(g.read(path_t("/dev/q:settings.app.kept")), val),
+          "the installed field and its stored value are untouched");
+    check(fails_with(g.read(path_t("/dev/q:settings.app.new")), status_t::SCHEMA_NOT_FOUND),
+          "the refused table's field never appeared");
 }
 
 }  // namespace
@@ -680,9 +718,10 @@ void test_shape_gates_no_test_defended() {
     const vertex_handle_t v = g.register_vertex(path_t("/ctrl/pid"), role_t::STORED_VALUE);
 
     const std::vector<std::byte> good = value_tlv("kp-original");
+    const std::vector<std::byte> f32 = dtype_desc("f32");
     std::vector<app_field_t> table;
-    table.push_back(app_field_t{
-        .name = "kp", .access = app_access_t::RW, .descriptor = dtype_desc("f32"), .value = good});
+    table.push_back(
+        app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = f32, .value = good});
     (void)g.set_policy(v, {.app_fields = std::move(table)});
     check(reads_back(g.read(path_t("/ctrl/pid:settings.app.kp")), good),
           "the declared field is readable to begin with");
@@ -740,6 +779,7 @@ int main() {
     test_container_reads();
     test_apply_seam();
     test_table_replace();
+    test_refused_copy_keeps_table();
     test_borrowed_static_install();
     test_shape_gates_no_test_defended();
     return tr::testing::summary("app_fields");
