@@ -1168,9 +1168,10 @@ jobs:
     # profile denies the personality(ADDR_NO_RANDOMIZE) that `setarch -R` needs, and the
     # host allows it. core-ci's trust guard: a fork PR skips the job.
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    # Measured healthy max 7.98 min, p50 7.4-7.6, min 7.33 — a very tight distribution.
-    # 25 = ~3.1x the observed max; ASan/UBSan runtime here is stable.
-    timeout-minutes: 45
+    # Measured healthy max 7.98 min, p50 7.4-7.6 on a warm cache. 60 (2026-11-01 ruling) is a
+    # margin for a COLD cache: a new per-leg ccache dir, or one evicted, rebuilds the whole
+    # sanitized Debug tree on a shared ci-local runner before ctest starts.
+    timeout-minutes: 60
     strategy:
       matrix:
         lkv_slot: [single_writer_slot_t, hazard_slot_t]
@@ -1186,7 +1187,10 @@ jobs:
       # It counts the libtracer CI containers in runners-ci.slice plus itself, and takes
       # core-ci's adaptive rule: 4 with three or fewer running, otherwise 2, and 2 when
       # the slice cannot be read. The shared /ccache is the containers' (root-owned
-      # entries), so a host job keeps its own cache under the runner user's home.
+      # entries), so a host job keeps its own cache under the runner user's home: one per
+      # sanitizer, slot and fence (2026-11-01 ruling), 4G each, so one leg's debug objects
+      # never evict another's and the shared ccache-host of the other host jobs is untouched.
+      # ccache already keys on the full flag set; the split only keeps the legs' LRU apart.
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
@@ -1199,12 +1203,13 @@ jobs:
             {
               echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
               echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
-              echo "CCACHE_DIR=$HOME/ccache-host"
-              echo "CCACHE_MAXSIZE=10G"
+              echo "CCACHE_DIR=$HOME/ccache-host-san/asan-${{ matrix.lkv_slot }}"
+              echo "CCACHE_MAXSIZE=4G"
               echo "CCACHE_COMPILERCHECK=content"
               echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
             } >> "$GITHUB_ENV"
-            echo "ccache: ON ($HOME/ccache-host)"
+            echo "ccache: ON ($HOME/ccache-host-san/asan-${{ matrix.lkv_slot }})"
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
@@ -1233,6 +1238,10 @@ jobs:
           setarch "$(uname -m)" -R ctest --test-dir core/build-asan --output-on-failure
 
   # A host job on ci-local (header, HOST JOBS), for the same `setarch -R` reason.
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only (the stats log is per job). Absent on the hosted route.
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Clean this job's workspace off the host runner
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
@@ -1255,9 +1264,10 @@ jobs:
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     # The longest core-ci jobs and legitimately the most variable: measured healthy max
     # 12.27 min (sp_atomic) / 8.22 (hazard) against a p50 of 6.5, and 15.67 on the
-    # incident day. 35 = ~2.9x the healthy max — deliberately loose, because a false red
-    # on a sanitizer leg is read as flakiness rather than as a wedge.
-    timeout-minutes: 60
+    # incident day. 75 (2026-11-01 ruling) is a margin for a COLD cache on top of that: a
+    # new or evicted per-leg ccache dir rebuilds the whole TSan tree before ctest starts.
+    # Deliberately loose, because a false red on a sanitizer leg is read as flakiness.
+    timeout-minutes: 75
     strategy:
       matrix:
         lkv_slot: [single_writer_slot_t, hazard_slot_t]
@@ -1273,7 +1283,10 @@ jobs:
       # It counts the libtracer CI containers in runners-ci.slice plus itself, and takes
       # core-ci's adaptive rule: 4 with three or fewer running, otherwise 2, and 2 when
       # the slice cannot be read. The shared /ccache is the containers' (root-owned
-      # entries), so a host job keeps its own cache under the runner user's home.
+      # entries), so a host job keeps its own cache under the runner user's home: one per
+      # sanitizer, slot and fence (2026-11-01 ruling), 4G each, so one leg's debug objects
+      # never evict another's and the shared ccache-host of the other host jobs is untouched.
+      # ccache already keys on the full flag set; the split only keeps the legs' LRU apart.
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
@@ -1286,12 +1299,13 @@ jobs:
             {
               echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
               echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
-              echo "CCACHE_DIR=$HOME/ccache-host"
-              echo "CCACHE_MAXSIZE=10G"
+              echo "CCACHE_DIR=$HOME/ccache-host-san/tsan-${{ matrix.lkv_slot }}"
+              echo "CCACHE_MAXSIZE=4G"
               echo "CCACHE_COMPILERCHECK=content"
               echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
             } >> "$GITHUB_ENV"
-            echo "ccache: ON ($HOME/ccache-host)"
+            echo "ccache: ON ($HOME/ccache-host-san/tsan-${{ matrix.lkv_slot }})"
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
@@ -1322,6 +1336,10 @@ jobs:
   # entry is what the `tsan` matrix above runs, since `reclaim_qsbr_t` is the default on every
   # target (#2127). This leg binds core/tests/presets/reclaim-qsbr-membarrier and sets
   # LT_EXPECT_MEMBARRIER=1, so a runner that refuses membarrier(2) fails the leg loudly.
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only (the stats log is per job). Absent on the hosted route.
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Clean this job's workspace off the host runner
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
@@ -1343,7 +1361,8 @@ jobs:
     # host allows it. core-ci's trust guard: a fork PR skips the job.
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     name: tsan (fence=membarrier)
-    timeout-minutes: 60
+    # As `tsan` above: 75 is the cold-cache margin (2026-11-01 ruling).
+    timeout-minutes: 75
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
@@ -1355,7 +1374,10 @@ jobs:
       # It counts the libtracer CI containers in runners-ci.slice plus itself, and takes
       # core-ci's adaptive rule: 4 with three or fewer running, otherwise 2, and 2 when
       # the slice cannot be read. The shared /ccache is the containers' (root-owned
-      # entries), so a host job keeps its own cache under the runner user's home.
+      # entries), so a host job keeps its own cache under the runner user's home: one per
+      # sanitizer, slot and fence (2026-11-01 ruling), 4G each, so one leg's debug objects
+      # never evict another's and the shared ccache-host of the other host jobs is untouched.
+      # ccache already keys on the full flag set; the split only keeps the legs' LRU apart.
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
@@ -1368,12 +1390,13 @@ jobs:
             {
               echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
               echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
-              echo "CCACHE_DIR=$HOME/ccache-host"
-              echo "CCACHE_MAXSIZE=10G"
+              echo "CCACHE_DIR=$HOME/ccache-host-san/tsan-fence-membarrier"
+              echo "CCACHE_MAXSIZE=4G"
               echo "CCACHE_COMPILERCHECK=content"
               echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
             } >> "$GITHUB_ENV"
-            echo "ccache: ON ($HOME/ccache-host)"
+            echo "ccache: ON ($HOME/ccache-host-san/tsan-fence-membarrier)"
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
@@ -1405,6 +1428,10 @@ jobs:
   # + link libtracer::libtracer + include a public header + call a compiled symbol.
   # Catches broken install rules, a malformed package config, or a missing exported
   # target before they reach a consumer.
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only (the stats log is per job). Absent on the hosted route.
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Clean this job's workspace off the host runner
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
