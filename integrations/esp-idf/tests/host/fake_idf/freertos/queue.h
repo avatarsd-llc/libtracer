@@ -20,8 +20,16 @@
 /** @brief Opaque queue handle (FreeRTOS's incomplete-struct pointer). */
 typedef struct fake_queue_t* QueueHandle_t;
 
-/** @brief Create a queue of @p length items of @p item_size bytes, or NULL. */
-QueueHandle_t xQueueCreate(UBaseType_t length, UBaseType_t item_size);
+/** @brief Storage for a statically created queue. The fake allocates its model on the heap
+ *         and ignores this; the real one holds the whole kernel object. */
+typedef struct {
+    void* unused; /**< @brief Placeholder; never read. */
+} StaticQueue_t;
+
+/** @brief Create a queue of @p length items of @p item_size bytes over caller storage
+ *         (@p storage holds the items, @p queue_buf the control block), or NULL. */
+QueueHandle_t xQueueCreateStatic(UBaseType_t length, UBaseType_t item_size, unsigned char* storage,
+                                 StaticQueue_t* queue_buf);
 
 /** @brief Free a queue. Callers waiting on it must already be gone. */
 void vQueueDelete(QueueHandle_t queue);

@@ -457,6 +457,19 @@ struct link_memory_t {
      */
     mem::block_source_t* state = &mem::net_source();
 
+    /**
+     * @brief The link's THREAD-STACK store (#2288): where each receive or dispatch thread the
+     *        link spawns (`tr::static_thread_t`) draws its stack and task block on ESP-IDF, and
+     *        its boot record on a host. Its own plane, not @ref state, because a stack is the
+     *        largest single block a link draws: on an MCU it would starve a shared value pool,
+     *        and a bound on peers or frames must never cap whether a link can receive at all.
+     *        Default: `tr::mem::stack_source()`, which on an MCU arena build is a static region
+     *        of its own. A refused spawn while the link is built leaves it inert (`ok()`
+     *        false); one at a later bring-up step brings the link down. Either way the
+     *        source's census counts the refusal. Must outlive the link.
+     */
+    mem::block_source_t* stack = &mem::stack_source();
+
     /** @brief @ref io, or the process net sub-pool when a config left it null. */
     [[nodiscard]] mem::block_source_t& io_or_default() const noexcept {
         return io != nullptr ? *io : mem::net_source();
@@ -464,6 +477,10 @@ struct link_memory_t {
     /** @brief @ref state, or the process net sub-pool when a config left it null. */
     [[nodiscard]] mem::block_source_t& state_or_default() const noexcept {
         return state != nullptr ? *state : mem::net_source();
+    }
+    /** @brief @ref stack, or the process thread-stack source when a config left it null. */
+    [[nodiscard]] mem::block_source_t& stack_or_default() const noexcept {
+        return stack != nullptr ? *stack : mem::stack_source();
     }
 };
 
@@ -817,8 +834,15 @@ class transport_t {
      * its constructor has nothing left to do — so an owner may call it unconditionally on
      * any link. `%transport_vertex_t::make_connection` does exactly that, once the link
      * is registered and `%fwd_router_t::add_child` has installed its receiver.
+     *
+     * @return false when the receive could not start (#2288: its thread's stack or record
+     *         was refused by `link_memory_t::stack`, or the platform refused the thread). The
+     *         link is then dead: its connection is closed and `ok()` is false, and no
+     *         link-down is fired from this call, because the owner may hold its own locks
+     *         here. The owner takes the failure as a refused bring-up and rolls the link back.
+     *         A repeat call answers what the first did not change: true.
      */
-    virtual void start_receiving() {}
+    virtual bool start_receiving() { return true; }
 
     /**
      * @brief Stop for good, short of being destroyed: the counterpart of
