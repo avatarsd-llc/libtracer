@@ -183,17 +183,32 @@ jobs:
           cmake --build "$RUNNER_TEMP/msquic-src"/build --parallel "$BUILD_JOBS"
           cmake --install "$RUNNER_TEMP/msquic-src"/build
 
-      - name: Configure + build (LIBTRACER_WITH_QUIC=ON) + full ctest
+      - name: Configure + build (LIBTRACER_WITH_QUIC=ON) + the module's tests
+        # Only the module's targets and its three tests (CI time audit, ruling 24,
+        # 2026-11-01). LIBTRACER_WITH_QUIC adds the libtracer_quic target and the tests
+        # that link it and changes nothing else, so the rest of the suite built here would
+        # be the same binaries with the same flags that core-ci already runs: build-test
+        # default (release), sanitizers single_writer (asan) and tsan single_writer (tsan).
+        # wt_interop_server is built, not run, so a change that breaks it still fails
+        # here; wt-interop.yml runs it. Keep the -R list in step with the add_test() calls
+        # under `if(LIBTRACER_WITH_QUIC)` in core/tests/CMakeLists.txt.
         run: |
           cmake -S core -B core/build-quic-${{ matrix.name }} -DBUILD_TESTING=ON \
             -DLIBTRACER_WITH_QUIC=ON -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/msquic-install" \
             ${{ matrix.cmake_flags }}
-          cmake --build core/build-quic-${{ matrix.name }} --parallel "$BUILD_JOBS"
+          cmake --build core/build-quic-${{ matrix.name }} --parallel "$BUILD_JOBS" \
+            --target quic_test webtransport_test webtransport_alloc_gate_test \
+            wt_peer_driver wt_interop_server
           # ASLR can make ASan/TSan abort in this runner; pin it off (harmless
           # for the release leg). LD_LIBRARY_PATH covers the msquic shared lib.
           export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/msquic-install/lib:${LD_LIBRARY_PATH:-}"
+          # Exactly the three, so a renamed or dropped test fails here instead of quietly
+          # leaving the -R list matching fewer.
+          tests='^(quic|webtransport|webtransport_alloc_gate)$'
+          n=$(ctest --test-dir core/build-quic-${{ matrix.name }} -R "$tests" -N | sed -n 's/^Total Tests: //p')
+          [ "$n" = 3 ] || { echo "::error::expected the module's 3 tests to match, found ${n:-none}; update the -R list"; exit 1; }
           setarch "$(uname -m)" -R ctest --test-dir core/build-quic-${{ matrix.name }} \
-            --output-on-failure
+            -R "$tests" --output-on-failure
 
       - name: QUIC + WebTransport tests under kAllowInsecureTls (release only)
         # The run above is the DEFAULT build, where a SPEC carrying `insecure` = non-zero is

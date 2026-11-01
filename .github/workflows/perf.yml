@@ -169,7 +169,13 @@ jobs:
         run: '[ "$RUNNER_ENVIRONMENT" != self-hosted ] || docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || echo "::warning::could not hand root-owned workspace files back to the runner user; checkout may fail to clean them"'
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # need origin/main history to build the same-runner baseline
+          # Need origin/main history to build the same-runner baseline. Treeless
+          # (CI time audit, ruling 24, 2026-11-01): the whole commit graph is
+          # fetched, so the merge base and every ref below resolve as before,
+          # but trees and file contents arrive only when git reads them. A full
+          # clone took about 4 to 6 min of this job.
+          fetch-depth: 0
+          filter: tree:0
       - name: Build the PR (candidate) benchmark (Release)
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release \
