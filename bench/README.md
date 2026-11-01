@@ -420,7 +420,14 @@ ratchet may **stop the job**:
 | tier | a breached ratchet | declared by |
 | --- | --- | --- |
 | `--tier blocking` | fails the job (exit 1) | `perf.yml` → `gate-pr`, the per-PR gate |
-| `--tier advisory` | printed, annotated `::warning::`, exit 0 | `perf.yml` → `ratchet`, the three push replicas |
+| `--tier advisory` | printed, annotated `::warning::`, exit 0 | `perf.yml` → `ratchet`: one replica per main push, three nightly |
+
+Since #2433 both run on the pinned bench host's CPUs (`bench-local`, `BENCH_CPU`); no perf
+comparison runs on a GitHub-hosted runner. The tiers are what still tells the two apart.
+Since ruling 23 (2026-11-01) the ratchet runs one replica per push to main and three in the
+nightly schedule, one at a time (`max-parallel: 1`). The history records the push's single
+replica, so a `dev/bench` point is one repeat on that host, and the series shows a level
+shift at the commit that moved it off hosted runners.
 
 This lived in a `perf.yml` comment for its whole life before #1251, and the gate had no
 tier concept at all — so "the pinned host blocks, the GitHub runners warn" described a
@@ -430,10 +437,13 @@ mechanism that did not exist, and a policy that cannot be violated cannot be obe
 have said; it must never quietly measure something weaker, or the two tiers stop being
 comparable and the advisory output stops being worth reading.
 
-**Why the push replicas are advisory.** Three replicas each rendered an independent
+**Why the ratchet replicas are advisory.** Three replicas each rendered an independent
 blocking verdict, so any one of them could red `main` alone — stronger than the ruled
 policy, and the shape behind a CI failure later traced to the runner environment rather
-than to any commit (#1261). The ruled escalation is **2-of-3 agreement**, which needs an
+than to any commit (#1261). The replicas were then three hosted VMs; they are now repeats
+on the pinned host, and the reasoning holds for repeats as it did for VMs. A push now runs
+one replica: it reports its verdict, with the `::warning::` on a breach, and decides nothing
+alone. The ruled escalation applies to the nightly's three. The ruled escalation is **2-of-3 agreement**, which needs an
 aggregation job the matrix does not have yet; until it exists a replica *reports*. Nothing
 is lost pre-merge: `gate-pr` already gated that commit against the same `main` baseline,
 blocking, before it could land.
@@ -451,10 +461,11 @@ consumer half of the guard's rule — a suspect sample is flagged, never deleted
 flag only means something if the gating consumer stops believing it. The predicate is
 imported from `host_guard.py`, not re-derived, so writer and reader cannot drift apart.
 
-**The pinned host runs no comparison gate.** `perf-local.yml` records the absolute trend
-and invokes `perf_gate.py` nowhere. The seam for making it the blocking tier exists and is
-tested; the HEAD-vs-parent leg that would use it does not. Do not read "pinned host =
-blocking tier" off any comment until a step in that workflow calls the gate.
+**`perf-local.yml` runs no comparison gate.** It records the absolute trend and invokes
+`perf_gate.py` nowhere. The comparisons that do run on the pinned host come from `perf.yml`:
+`gate-pr` (blocking) and `ratchet` (advisory). The `--sample-note` seam that would let a
+`host_guard.py` verdict gate the trend exists and is tested; no step in `perf-local.yml`
+uses it.
 
 ### The banked series' own validity (#1301)
 
