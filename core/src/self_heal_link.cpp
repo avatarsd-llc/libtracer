@@ -64,8 +64,7 @@ void self_heal_link_t::sock_ref_t::reset() noexcept {
     sock_t* const s = s_;
     s_ = nullptr;
     if (s == nullptr || s->refs.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
-    mem::block_source_t& src = s->self->src_;
-    mem::drop_in(src, s);  // destroys the socket first: joins its receive thread
+    mem::drop_in(*s->src, s);  // destroys the socket first: joins its receive thread
 }
 
 void self_heal_link_t::park_locked(sock_ref_t dead) noexcept {
@@ -78,6 +77,10 @@ void self_heal_link_t::park_locked(sock_ref_t dead) noexcept {
 void self_heal_link_t::drop_corpses(sock_t* head) noexcept {
     while (head != nullptr) {
         sock_t* const next = head->next_corpse;
+        // Shut down BEFORE the list lets go: a send in flight may hold the socket past the
+        // engine, and the join here is what stops its receive thread reaching the engine
+        // (#2288). The last hold, wherever it drops, then frees through `sock_t::src`.
+        head->link->shut_down();
         sock_ref_t{head}.reset();  // the list's hold; the last one destroys the socket
         head = next;
     }
@@ -157,17 +160,17 @@ void self_heal_link_t::stop() {
     if (started) worker_.join();
     // Tear the sockets down with `m_` RELEASED: each destruction joins a receive thread
     // that may itself be blocked in on_socket_down waiting for `m_`.
+    // The live socket joins the corpses, so every socket leaves the same way: shut down here,
+    // while the engine is alive, whoever holds it last.
     sock_t* dead = nullptr;
-    sock_ref_t last;
     {
         const std::lock_guard l(m_);
+        park_locked(std::move(inner_));
         dead = std::exchange(corpses_, nullptr);
-        last = std::move(inner_);
         live_gen_ = 0;
         state_ = link_state_t::DORMANT;  // terminal resting value; nothing publishes it
     }
     drop_corpses(dead);
-    last.reset();
 }
 
 void self_heal_link_t::send(std::span<const std::byte> frame) {
@@ -314,6 +317,7 @@ bool self_heal_link_t::attempt_locked(std::unique_lock<std::mutex>& l) {
     if (sock) {
         sock->link = std::move(*built);
         sock->self = this;
+        sock->src = &src_;
         sock->gen = gen_ctr_.fetch_add(1, std::memory_order_relaxed) + 1;
         // Sinks + notifier + start, BEFORE the socket is adopted: a kind whose receive
         // thread starts in its constructor is already draining, and the sinks route into

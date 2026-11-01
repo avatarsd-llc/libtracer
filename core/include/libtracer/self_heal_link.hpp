@@ -229,7 +229,12 @@ class self_heal_link_t final : public transport_t {
      *  so parking a dead socket can never fail for want of memory. */
     struct sock_t {
         transport_ptr_t link;               /**< @brief The factory-constructed socket. */
-        self_heal_link_t* self = nullptr;   /**< @brief Back-pointer for the notifier. */
+        self_heal_link_t* self = nullptr;   /**< @brief Back-pointer for the receive sinks
+                                                        and the notifier: valid until the
+                                                        engine shuts the socket down. */
+        mem::block_source_t* src = nullptr; /**< @brief Where this record came from, so the
+                                                        last hold frees it without the engine,
+                                                        which may be gone by then. */
         std::uint64_t gen = 0;              /**< @brief Dial generation — a stale corpse's
                                                         late down must not kill a healed
                                                         successor. */
