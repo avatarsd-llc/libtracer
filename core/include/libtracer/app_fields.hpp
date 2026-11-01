@@ -292,25 +292,23 @@ class app_fields_decl_t {
         : borrowed_(table) {}
     /** @brief A deep copy into a block from @p o's source; @ref failed if it refused. */
     app_fields_decl_t(const app_fields_decl_t& o) noexcept;
-    /** @brief Take @p o's block; @p o is left empty. */
-    app_fields_decl_t(app_fields_decl_t&& o) noexcept
-        : src_(o.src_),
-          block_(std::exchange(o.block_, nullptr)),
-          bytes_(std::exchange(o.bytes_, 0)),
-          n_(std::exchange(o.n_, 0)),
-          failed_(std::exchange(o.failed_, false)),
-          borrowed_(std::exchange(o.borrowed_, {})) {}
+    /**
+     * @brief Take @p o's block; @p o is left empty.
+     * @note Both moves are defined OUT OF LINE (`graph_fields.cpp`), as an exchange of the
+     *       members. `graph.cpp` moves a policy through every registration and `set_policy`,
+     *       and inline bodies there (a destroy, a placement new, six exchanges) re-partitioned
+     *       GCC's inline budget for that TU: `graph_t::dispatch_edge_target` +26 B and
+     *       `vertex_t::copy_published` +75 B on the symbol ratchet, for no reason connected to
+     *       either. Keep them out of line.
+     */
+    app_fields_decl_t(app_fields_decl_t&& o) noexcept;
     /** @brief Copy-and-swap: a refused copy leaves this @ref failed. */
     app_fields_decl_t& operator=(const app_fields_decl_t& o) noexcept {
         if (this != &o) *this = app_fields_decl_t(o);
         return *this;
     }
-    /** @brief Release this declaration's block, then take @p o's. */
-    app_fields_decl_t& operator=(app_fields_decl_t&& o) noexcept {
-        if (this == &o) return *this;
-        this->~app_fields_decl_t();
-        return *::new (this) app_fields_decl_t(std::move(o));
-    }
+    /** @brief Exchange with @p o, whose destructor then returns this declaration's old block. */
+    app_fields_decl_t& operator=(app_fields_decl_t&& o) noexcept;
     /** @brief Returns the owning block to its source. */
     ~app_fields_decl_t();
 

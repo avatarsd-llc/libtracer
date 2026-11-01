@@ -1040,6 +1040,11 @@ it binds to a temporary lambda.
 :members:
 ```
 
+```{doxygenclass} tr::graph::app_fields_decl_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenclass} tr::graph::borrowed_fields_t
 :project: libtracer
 :members:
