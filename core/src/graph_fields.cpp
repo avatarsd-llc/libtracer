@@ -61,6 +61,19 @@ app_fields_decl_t::app_fields_decl_t(const app_fields_decl_t& o) noexcept
     borrowed_ = o.borrowed_;
 }
 
+app_fields_decl_t::app_fields_decl_t(app_fields_decl_t&& o) noexcept { *this = std::move(o); }
+
+app_fields_decl_t& app_fields_decl_t::operator=(app_fields_decl_t&& o) noexcept {
+    std::swap(src_, o.src_);
+    std::swap(block_, o.block_);
+    std::swap(bytes_, o.bytes_);
+    std::swap(n_, o.n_);
+    std::swap(off_, o.off_);
+    std::swap(failed_, o.failed_);
+    std::swap(borrowed_, o.borrowed_);
+    return *this;
+}
+
 app_fields_decl_t::~app_fields_decl_t() {
     if (block_ != nullptr) src_->release(block_, bytes_, alignof(app_field_t));
 }
