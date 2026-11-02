@@ -7,16 +7,7 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
-### Fixed
-
-- **A timed-out request no longer takes the next reply to the same path** (#2330). Its
-  waiter used to stay in the client's pending queue for good, so a request that was never
-  answered took the reply meant for the next request to that path, and the queue grew under
-  loss. A request that times out now leaves the queue at once. A late reply carrying a token
-  the client issued and no live request holds is dropped. For a peer that does not route its
-  reply to `src` and so sends no token, the client remembers the `dst` of the 32 most recent
-  dead requests and drops a reply whose `src` names only one of them. A reply with neither
-  now goes to the oldest live request; it used to be absorbed by the dead one.
+## [0.22.0] — 2026-11-02
 
 ### Changed
 
@@ -38,6 +29,15 @@ versioning/publish strategy.
   `dst` or `src`. The client never set bit 7.
 
 ### Fixed
+
+- **A timed-out request no longer takes the next reply to the same path** (#2330). Its
+  waiter used to stay in the client's pending queue for good, so a request that was never
+  answered took the reply meant for the next request to that path, and the queue grew under
+  loss. A request that times out now leaves the queue at once. A late reply carrying a token
+  the client issued and no live request holds is dropped. For a peer that does not route its
+  reply to `src` and so sends no token, the client remembers the `dst` of the 32 most recent
+  dead requests and drops a reply whose `src` names only one of them. A reply with neither
+  now goes to the oldest live request; it used to be absorbed by the dead one.
 
 - **`subscribe()` handlers no longer receive other subscriptions' values** (#2240). Every
   subscription shared the client's one reply endpoint, so with two subscriptions each handler
