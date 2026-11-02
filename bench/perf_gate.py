@@ -1033,9 +1033,15 @@ def fresh_copy(src: pathlib.Path, n: int | str) -> pathlib.Path:
     if not src.exists():
         return src
     d = src.parent / PAIR_COPY_DIR / str(n)  # its own directory: the name is unchanged
-    d.mkdir(parents=True, exist_ok=True)
     dst = d / src.name
-    shutil.copy2(src, dst)
+    for attempt in range(3):  # a sharded step on another CPU may rmdir the shared parent
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            return dst
+        except FileNotFoundError:
+            if attempt == 2:
+                raise
     return dst
 
 
@@ -1051,12 +1057,15 @@ def placement_spread(base: dict[str, list[dict]]) -> list[tuple[str, float, floa
 
 
 def pair_step(step: Step, arms: dict[str, tuple[int, dict[str, pathlib.Path]]],
-              pairs: int, tag: int) -> dict:
+              pairs: int, tag: int, sweep: bool = True) -> dict:
     """@brief Run @p step's ABBA pairs, both arms on @p step's own pin.
 
     Returns {"cand"|"base": {key: [per-pair metric dict, ...]}, "clean": clean pairs,
     "gated": whether either arm emitted a gated row}. @p tag names the step's copies, so
     no copy path repeats across the job, even when steps run at once on several CPUs.
+    @p sweep (every serial step) removes the whole `.pair-copies` afterwards, as before
+    sharding, which also clears copies a killed job left behind; a sharded step removes only
+    its own runs' directories, since other CPUs' steps share that parent.
     """
     got_all: dict = {"cand": {}, "base": {}, "clean": 0, "gated": False}
     copied: set[pathlib.Path] = set()
@@ -1084,6 +1093,9 @@ def pair_step(step: Step, arms: dict[str, tuple[int, dict[str, pathlib.Path]]],
                 for k, v in kv.items():
                     got_all[arm].setdefault(k, []).append(v)
     finally:
+        if sweep:
+            for d in {c.parent for c in copied}:
+                shutil.rmtree(d, ignore_errors=True)
         for d in copied:
             shutil.rmtree(d, ignore_errors=True)
         for d in {c.parent for c in copied}:
@@ -1126,7 +1138,8 @@ def _shard_worker(cpu: int, steps: list[Step], arms: dict, pairs: int, tasks, re
         del CLOCK_FLOORS[:], ALLOC_STATES[:], BENCH_ERRORS[:]
         t0 = time.monotonic()
         try:
-            r = pair_step(dataclasses.replace(steps[i], cpus=(cpu,)), arms, pairs, i)
+            r = pair_step(dataclasses.replace(steps[i], cpus=(cpu,)), arms, pairs, i,
+                          sweep=False)
         except Exception as e:  # noqa: BLE001 - reported to the parent, which fails the run
             r = {"error": f"{steps[i].label} on CPU {cpu}: {e!r}"}
         r.update(i=i, cpu=cpu, wall=time.monotonic() - t0, ledger=list(LEDGER.entries),
