@@ -257,6 +257,7 @@ jobs:
         integrations/esp-idf/tests/host/**
         tests/conformance/vectors/v1/**
         tests/packaging/**
+        tools/refuse_membarrier.c
         .github/workflows/core-ci.yml
     outputs:
       relevant: ${{ steps.decide.outputs.relevant }}
@@ -1346,6 +1347,7 @@ jobs:
   # entry is what the `tsan` matrix above runs, since `reclaim_qsbr_t` is the default on every
   # target (#2127). This leg binds core/tests/presets/reclaim-qsbr-membarrier and sets
   # LT_EXPECT_MEMBARRIER=1, so a runner that refuses membarrier(2) fails the leg loudly.
+  # Its last steps run the same build again with membarrier refused, for the fenced fallback.
       - name: Compiler cache statistics (this job)
         # Hit rate of THIS job only (the stats log is per job). Absent on the hosted route.
         if: always() && env.CCACHE_DIR != ''
@@ -1371,8 +1373,11 @@ jobs:
     # host allows it. core-ci's trust guard: a fork PR skips the job.
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     name: tsan (fence=membarrier)
-    # As `tsan` above: 75 is the cold-cache margin (2026-11-01 ruling).
-    timeout-minutes: 75
+    # 90, not `tsan`'s 75: one build plus TWO full TSan ctest passes (plain, then with
+    # membarrier refused, which was qsbr-fenced.yml's own 90-min job). 75 is the
+    # cold-cache margin for one build and one pass (2026-11-01 ruling); the second pass
+    # adds about 6 min quiet (380 s measured in qsbr-fenced) and more under load.
+    timeout-minutes: 90
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
@@ -1436,6 +1441,40 @@ jobs:
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1 -I$PWD/core/tests/presets/reclaim-qsbr-membarrier"
           cmake --build core/build-tsan-membarrier --parallel "$BUILD_JOBS"
           setarch "$(uname -m)" -R ctest --test-dir core/build-tsan-membarrier --output-on-failure
+      # The fenced fallback (#2121), on the SAME build (CI time audit, ruling 24, 2026-11-01:
+      # this was qsbr-fenced.yml, a second TSan build with identical flags). A Linux runner
+      # always accepts the membarrier registration, so the run above only takes the plain
+      # entry. The two steps below run the whole suite again under
+      # tools/refuse_membarrier.c, a seccomp filter that fails every membarrier call with
+      # EPERM, as a container or a sandbox would; reclaim_qsbr_t then keeps the fenced
+      # bracket entry for good (qsbr.hpp §qsbr_asym). Proof it took, three ways: the
+      # launcher checks that membarrier now fails before it runs anything;
+      # LT_EXPECT_MEMBARRIER=refused makes qsbr_epoch_wrap_test FAIL unless the fence is
+      # compiled in and its registration was refused; and the last step greps that test's
+      # own log line out of a verbose run.
+      - name: Build the membarrier-refusing launcher
+        run: cc -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/refuse_membarrier" tools/refuse_membarrier.c
+      - name: ctest with membarrier refused (fenced entry)
+        env:
+          LT_EXPECT_LKV_SLOT: single_writer_slot_t
+          LT_EXPECT_RECLAIM_POLICY: reclaim_qsbr_t
+          LT_EXPECT_ACL_POLICY: allow_only_policy_t
+          LT_EXPECT_MEMBARRIER: refused
+        run: |
+          "$RUNNER_TEMP/refuse_membarrier" setarch "$(uname -m)" -R \
+            ctest --test-dir core/build-tsan-membarrier --output-on-failure
+      - name: The fenced entry was the one taken
+        env:
+          LT_EXPECT_MEMBARRIER: refused
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/refuse_membarrier" setarch "$(uname -m)" -R \
+            ctest --test-dir core/build-tsan-membarrier -R '^qsbr_epoch_wrap$' -V | tee "$RUNNER_TEMP/qsbr-fenced.log"
+          if ! grep -q "membarrier registration: refused, fenced entry kept" "$RUNNER_TEMP/qsbr-fenced.log"; then
+            echo "::error::qsbr_epoch_wrap did not report the fenced entry: the leg tested the plain one"
+            exit 1
+          fi
+          echo "fenced entry confirmed: membarrier registration refused under the seccomp filter"
 
   # Regression guard for the CMake install/export (find_package packaging). Builds
   # + installs core to a staging prefix, then configures the tests/packaging fixture
