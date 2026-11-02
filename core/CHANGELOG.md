@@ -527,11 +527,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Performance
 
-- **Forwarding a rope frame is faster (#2264; #2329 and its follow-up #2469).** Against 0.21.0
-  (indicative, measured across two bench sessions), a 1-link rope forward is about 11% faster
-  (p50 234 → 208 ns on the bench host), a 2-link forward is unchanged, and a 4- to 8-link
-  forward is 2–5% faster, at every payload from 64 B to 16 KiB. A rope forward draws twice per
-  frame from the receiving link's source.
+- **Rope forwarding changes cost by link count (#2264, #2329).** Against 0.21.0 (indicative,
+  measured across two bench sessions, every payload from 64 B to 16 KiB): a 1-link rope forward
+  is about 10% faster, a terminus reply is 3–5% faster, and a 2- to 8-link rope forward is 2–8%
+  slower. Restoring the multi-link cost without slowing small forwards is planned for 0.23.0.
 - **Zero-heap costs nothing on the throughput and latency grid (#2288, #2022).** The grid is
   unchanged from 64 B to 64 KiB. A draw through the allocation seam's size classes costs 1–4 ns
   more than the platform heap did. On ESP32-C6 the thread stacks move from the heap into a static
