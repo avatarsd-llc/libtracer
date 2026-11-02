@@ -557,7 +557,13 @@ Details that make these trustworthy:
   A single-threaded family is pinned to **one logical CPU** (the first of `BENCH_CPU`, or
   `BENCH_CPU_SINGLE`; unpinned, the lowest CPU of its mask, which the family picks itself);
   a multi-threaded family runs on the whole `BENCH_CPU` set as its own invocation, sizes its
-  thread count from that affinity mask, and runs after every single-threaded one. Because
+  thread count from that affinity mask, and runs after every single-threaded one. On the
+  bench host the single-threaded steps are **sharded** across the four bench CPUs
+  (`BENCH_SHARD=4`, #2467): four steps run at once, one per CPU, and each step runs all of
+  its pairs, both arms, on its CPU, so the two sides of a comparison always share a core. An
+  A/A of the same build, sharded against all on one CPU, moved no row by more than 4.9%
+  (p75 0.47%), the rows above 1 KiB included. Multi-threaded families start only once the
+  sharded phase is over, and so still have every bench CPU to themselves. Because
   the baseline is *the same PR's `main` rebuilt on the same runner in the same pass*, the
   comparison is machine-neutral.
 - **The gate measures an aligned build (#2175).** Both arms of the PR gate, and both arms of
@@ -596,7 +602,8 @@ Details that make these trustworthy:
   disjoint ranges read that offset as real (changes that could not touch a row, and one with
   identical sources, read 15–22% under clean conditions). The null
   is banked on the gate's own host and pin (`bench.slice` CPUs 3–6, single-threaded families
-  on CPU 3, the bench runner stopped while it measures): a null first measured on a shared
+  on CPU 3, the bench runner stopped while it measures; the sharded gate's A/A on CPUs 3–6
+  false-failed no row against it, #2467): a null first measured on a shared
   runner CPU was tighter than the bench CPUs' own spread and false-failed nine rows of a
   real gate run at the 3% floor. It is re-banked there when the CPU layout changes and when
   a gated row is added. A bank is fitted on **25 or more rounds** (`aa_null.py bank` refuses

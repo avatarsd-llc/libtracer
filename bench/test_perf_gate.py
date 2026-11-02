@@ -32,6 +32,7 @@ import random
 import re
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 
@@ -1126,6 +1127,79 @@ class GateTimesFamilyByFamily(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("PERF: PASS", out)
 
+
+
+class ShardedSingleThreadedSteps(unittest.TestCase):
+    """@brief The single-threaded steps shard across the bench CPUs (#2467).
+
+    Each step runs all of its ABBA pairs, both arms, on ONE CPU of the shard set; the steps
+    spread over the set; every MULTI step still runs alone on the whole set, after the last
+    sharded one; and the samples come back exactly as an unsharded run returns them.
+    """
+
+    FAMILIES = {"inproc-fan": "single", "inproc-mt": "multi", "fold": "single",
+                "inproc-borrow": "single", "mixed": "single"}
+
+    def run_paired(self, shard: tuple[int, ...], pairs: int = 4, contended=frozenset()):
+        with tempfile.TemporaryDirectory() as d:
+            log = pathlib.Path(d) / "runs.log"
+
+            def fake(argv, timeout, score_pressure=True, cpus=None):
+                fam = argv[2] if len(argv) > 2 else pathlib.Path(argv[0]).name
+                arm = "cand" if "/c/" in argv[0] else "base"
+                with log.open("a") as f:
+                    f.write(f"{time.monotonic():.6f} {fam} {arm} {','.join(map(str, cpus))}\n")
+                time.sleep(0.01)
+                n = sum(1 for ln in log.read_text().splitlines() if f" {fam} " in ln)
+                row = _row("inproc", 64, 1, 1) if fam == "inproc-fan" else ""
+                return _measurement(argv, row + "\n", (fam, (n - 1) // 2) not in contended)
+            with unittest.mock.patch.object(pg, "list_families", lambda p: self.FAMILIES), \
+                    unittest.mock.patch.object(pg, "timed_run", fake), \
+                    unittest.mock.patch.object(pg, "CPUS", (3, 4, 5, 6)), \
+                    unittest.mock.patch.object(pg, "CPU_SINGLE", (3,)), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                fam = GateTimesFamilyByFamily()
+                s = pg.paired_samples(fam.bins(pathlib.Path(d), "c"),
+                                      fam.bins(pathlib.Path(d), "b"), pairs, shard=shard)
+            runs = [ln.split() for ln in log.read_text().splitlines()]
+        return s, sorted(runs, key=lambda r: float(r[0]))
+
+    def test_each_step_keeps_one_cpu_and_the_steps_spread(self):
+        _, runs = self.run_paired((3, 4, 5, 6))
+        by_step: dict[str, set[str]] = {}
+        for _t, fam, _arm, cpus in runs:
+            by_step.setdefault(fam, set()).add(cpus)
+        for fam, cpus in by_step.items():
+            self.assertEqual(len(cpus), 1, f"{fam} ran on {cpus}")
+        self.assertEqual(by_step["inproc-mt"], {"3,4,5,6"})
+        single = {c for f, cs in by_step.items() if f != "inproc-mt" for c in cs}
+        self.assertLessEqual(single, {"3", "4", "5", "6"})
+        self.assertGreater(len(single), 1, "the single-threaded steps did not spread")
+
+    def test_each_step_stays_abba_on_its_cpu(self):
+        _, runs = self.run_paired((3, 4, 5, 6))
+        fan = [arm for _t, fam, arm, _c in runs if fam == "inproc-fan"]
+        self.assertEqual(fan, ["base", "cand", "cand", "base"] * 2)
+
+    def test_multi_steps_run_alone_after_the_sharded_phase(self):
+        _, runs = self.run_paired((3, 4, 5, 6))
+        last_single = max(i for i, r in enumerate(runs) if r[1] != "inproc-mt")
+        first_multi = min(i for i, r in enumerate(runs) if r[1] == "inproc-mt")
+        self.assertLess(last_single, first_multi)
+
+    def test_samples_and_drops_match_an_unsharded_run(self):
+        lost = {("inproc-fan", 1)}
+        sharded, _ = self.run_paired((3, 4, 5, 6), contended=lost)
+        serial, _ = self.run_paired((), contended=lost)
+        self.assertEqual(sharded, serial)
+        self.assertEqual(len(sharded["cand"]["inproc/64/1/1"]), 3)
+        self.assertEqual(sharded["dropped"], {"inproc-fan": 1})
+
+    def test_the_shard_set_is_the_first_n_bench_cpus(self):
+        self.assertEqual(pg.shard_cpus((3, 4, 5, 6), "4"), (3, 4, 5, 6))
+        self.assertEqual(pg.shard_cpus((3, 4, 5, 6), "2"), (3, 4))
+        self.assertEqual(pg.shard_cpus((3, 4, 5, 6), "1"), ())
+        self.assertEqual(pg.shard_cpus(None, "4"), (), "an unpinned run never shards")
 
 def _row(mode: str, size: int, fan: int, ep: int) -> str:
     """@brief One 12-column RESULT line for @p mode at the given key."""
