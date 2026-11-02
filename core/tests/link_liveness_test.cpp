@@ -883,49 +883,55 @@ struct gate_rig_t {
  * @brief #2288 — a socket reference held past the engine's destruction (an in-flight send)
  *        releases the socket through the socket alone, and the engine has already shut it
  *        down: nothing reads the dead engine, and no receive can reach it.
+ *
+ * A template so that, on a `kSelfHealLinks = false` build, the discarded body names no
+ * engine symbol: that image has no engine to link against (`main` skips before the call).
  */
+template <bool kOn = tr::net::kSelfHealLinks>
 void test_socket_ref_outlives_engine() {
-    std::printf("#2288: a socket held past the engine's destruction:\n");
-    gate_rig_t rig;
-    gate_rig_t* const r = &rig;
-    tr::net::conn_settings_t settings;
-    settings.addr = "203.0.113.1";
-    settings.port = 9;
-    auto engine = std::make_unique<tr::net::self_heal_link_t>(
-        [r](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*,
-            tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
-            auto sock = tr::mem::make_poly<gated_sock_t>(src, &r->alive);
-            r->sock = sock.get();
-            return sock;
-        },
-        settings, std::span<const std::byte>{}, false, tr::mem::default_root());
-    std::promise<void> up;
-    std::atomic<bool> fired{false};
-    engine->set_liveness_publisher([&up, &fired](link_state_t s) {
-        if (s == link_state_t::UP && !fired.exchange(true)) up.set_value();
-    });
-    engine->acquire();  // a standing binding: the worker dials and reaches UP
-    check(up.get_future().wait_for(10s) == std::future_status::ready, "the engine reached UP");
+    if constexpr (kOn) {
+        std::printf("#2288: a socket held past the engine's destruction:\n");
+        gate_rig_t rig;
+        gate_rig_t* const r = &rig;
+        tr::net::conn_settings_t settings;
+        settings.addr = "203.0.113.1";
+        settings.port = 9;
+        auto engine = std::make_unique<tr::net::self_heal_link_t>(
+            [r](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*,
+                tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
+                auto sock = tr::mem::make_poly<gated_sock_t>(src, &r->alive);
+                r->sock = sock.get();
+                return sock;
+            },
+            settings, std::span<const std::byte>{}, false, tr::mem::default_root());
+        std::promise<void> up;
+        std::atomic<bool> fired{false};
+        engine->set_liveness_publisher([&up, &fired](link_state_t s) {
+            if (s == link_state_t::UP && !fired.exchange(true)) up.set_value();
+        });
+        engine->acquire();  // a standing binding: the worker dials and reaches UP
+        check(up.get_future().wait_for(10s) == std::future_status::ready, "the engine reached UP");
 
-    const std::byte frame[1] = {std::byte{0x01}};
-    std::thread sender([&] { engine.get()->send(std::span<const std::byte>(frame)); });
-    {
-        std::unique_lock l(rig.sock->m);
-        check(rig.sock->cv.wait_for(l, 10s, [&] { return rig.sock->entered; }),
-              "a send is in flight, holding the socket");
+        const std::byte frame[1] = {std::byte{0x01}};
+        std::thread sender([&] { engine.get()->send(std::span<const std::byte>(frame)); });
+        {
+            std::unique_lock l(rig.sock->m);
+            check(rig.sock->cv.wait_for(l, 10s, [&] { return rig.sock->entered; }),
+                  "a send is in flight, holding the socket");
+        }
+        gated_sock_t* const sock = rig.sock;
+        tr::net::self_heal_link_t* const raw = engine.release();
+        delete raw;  // the engine goes while the send still holds its socket
+        {
+            const std::lock_guard l(sock->m);
+            check(sock->shut, "the engine shut the held socket down before it was destroyed");
+            check(rig.alive.load(), "the in-flight send still holds the socket");
+            sock->open = true;
+            sock->cv.notify_all();
+        }
+        sender.join();  // its hold is the last: the socket goes through its own source
+        check(!rig.alive.load(), "the last hold destroyed the socket, after the engine was gone");
     }
-    gated_sock_t* const sock = rig.sock;
-    tr::net::self_heal_link_t* const raw = engine.release();
-    delete raw;  // the engine goes while the send still holds its socket
-    {
-        const std::lock_guard l(sock->m);
-        check(sock->shut, "the engine shut the held socket down before it was destroyed");
-        check(rig.alive.load(), "the in-flight send still holds the socket");
-        sock->open = true;
-        sock->cv.notify_all();
-    }
-    sender.join();  // its hold is the last: the socket goes through its own source
-    check(!rig.alive.load(), "the last hold destroyed the socket, after the engine was gone");
 }
 
 int main() {
