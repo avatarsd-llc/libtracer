@@ -137,14 +137,10 @@ jobs:
     #   - CPU 2: the runner's own processes (Runner.Listener, Runner.Worker, which streams
     #     the log), moved there by the step before the gate. They were the remaining foreign
     #     load, about 2% against a 2% limit. bench.slice is 2-6 (five CPUs).
-    #   - CPUs 3-6, one step per CPU at a time (BENCH_SHARD=4, #2467): every single-threaded
-    #     family and every sibling binary, one invocation each, pinned to ONE logical CPU.
-    #     Four worker processes, one per CPU, each take the next step off a queue and run all
-    #     of its ABBA pairs, both arms, on their own CPU, so a comparison never crosses cores.
-    #     A/A on the bench host (same build both arms, 4 CPUs against CPU 3 alone, best of
-    #     rounds): p75 0.47%, worst row 4.9%, rows above 1 KiB within 4.9%; posted on #2467.
-    #   - CPUs 3-6 (all of BENCH_CPU): every multi-threaded family, as its own invocation,
-    #     after the sharded phase has ended, so it has the four CPUs to itself.
+    #   - CPU 3 (the first of BENCH_CPU): every single-threaded family and every sibling
+    #     binary, one invocation each, pinned to that ONE logical CPU, like perf-local's
+    #     one pinned CPU.
+    #   - CPUs 3-6 (all of BENCH_CPU): every multi-threaded family, as its own invocation.
     #     It sizes T from that affinity mask (`bench::usable_cpus`), so T runs 1, 2 and 4
     #     and no T=8 row is emitted, and it is judged on foreign time only, since its own
     #     threads raise its own cgroup's pressure (#1803). The set is four CPUs because the
@@ -154,8 +150,7 @@ jobs:
     # header, FORK PULL REQUESTS RUN NOTHING).
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","bench-local"]') || 'ubuntu-24.04' }}
     env:
-      BENCH_CPU: "3-6" # bench.slice minus CPU 2 (the runner's own processes); single-threaded steps shard over 3-6, multi-threaded ones get 3-6
-      BENCH_SHARD: "4" # single-threaded steps run one per CPU of BENCH_CPU at a time (#2467)
+      BENCH_CPU: "3-6" # bench.slice minus CPU 2 (the runner's own processes); single-threaded families pin to 3, multi-threaded ones get 3-6
     # Measured healthy max 8.27 min, p50 8.12, min 7.15 (9.37 on the incident day), of
     # which the blocking interleaved A/B step alone was 5.7 min of TIMED measurement at 4
     # pairs. At 8 ABBA pairs per family (#1807) that step measured 12.5 min, so the job is
@@ -163,8 +158,6 @@ jobs:
     # can never trip on a slow-but-honest sample. See core-ci.yml's header. Raised 30 -> 45
     # (2026-11-01): honest runs now take 29-39 min with the A/B step at 19.5 min, and a batch
     # PR's gate-pr timed out at 30 min with no regression in it.
-    # Sharded (#2467) the A/B step measured 12.3 min at 8 pairs on the bench host (2026-11-02),
-    # bound by its longest single step: `bench_forward_demux`, ~44 s a run, 11.8 min alone.
     timeout-minutes: 45
     steps:
       - name: Check the runner workspace has room
@@ -538,7 +531,13 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","bench-local"]') || 'ubuntu-24.04' }}
     env:
       BENCH_CPU: "3-6" # as gate-pr: bench.slice minus CPU 2 (the runner's own processes)
-      BENCH_SHARD: "4" # as gate-pr: single-threaded steps sharded over BENCH_CPU (#2467)
+      # The ratchet ONLY (ruling on #2467): its single-threaded steps run one per CPU of
+      # BENCH_CPU at a time, each step's ABBA pairs, both arms, on one CPU. Interleaved step
+      # 19.5 -> 12.3 min at 8 pairs (bench host, 2026-11-02), bound by bench_forward_demux.
+      # Same-build A/A: worst row 4.9%, p75 0.47%, but the per-pair null spread widens from
+      # 1.00% to 1.48% median, so the ratchet is less sensitive than gate-pr. gate-pr stays
+      # serial on CPU 3 with its banked thresholds; never shard it.
+      BENCH_SHARD: "4"
     # Measured on the bench host (2026-11-02): 29-41 min, of which the interleaved A/B is
     # 19.5-20 min, the full-history checkout 3.6-15.7 and Zenoh 3.1-6.2. With the shallow
     # checkout and Zenoh nightly-only (#2466) a push replica is ~22 min; 45 = ~2x that. The
