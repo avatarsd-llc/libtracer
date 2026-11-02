@@ -531,6 +531,13 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","bench-local"]') || 'ubuntu-24.04' }}
     env:
       BENCH_CPU: "3-6" # as gate-pr: bench.slice minus CPU 2 (the runner's own processes)
+      # The ratchet ONLY (ruling on #2467): its single-threaded steps run one per CPU of
+      # BENCH_CPU at a time, each step's ABBA pairs, both arms, on one CPU. Interleaved step
+      # 19.5 -> 12.3 min at 8 pairs (bench host, 2026-11-02), bound by bench_forward_demux.
+      # Same-build A/A: worst row 4.9%, p75 0.47%, but the per-pair null spread widens from
+      # 1.00% to 1.48% median, so the ratchet is less sensitive than gate-pr. gate-pr stays
+      # serial on CPU 3 with its banked thresholds; never shard it.
+      BENCH_SHARD: "4"
     # Measured on the bench host (2026-11-02): 29-41 min, of which the interleaved A/B is
     # 19.5-20 min, the full-history checkout 3.6-15.7 and Zenoh 3.1-6.2. With the shallow
     # checkout and Zenoh nightly-only (#2466) a push replica is ~22 min; 45 = ~2x that. The
@@ -639,8 +646,9 @@ jobs:
           # Through the condition classifier (#1676): re-run while contended, and recorded
           # in bench/conditions.jsonl beside the transcript. CPU set (#1906): BENCH_CPU, as
           # gate-pr's. The single-threaded families are one invocation, and each narrows
-          # itself to ONE logical CPU, the first of that set (as they do in the advisory gate
-          # below). The multi-threaded families are a second invocation on the
+          # itself to ONE logical CPU, the first of that set (the advisory gate below pins
+          # each single-threaded step to one CPU too, sharded over the set, #2467). The
+          # multi-threaded families are a second invocation on the
           # whole set: they size T from its affinity mask and are judged on foreign time only
           # (`--multi`). One transcript, single first, as perf-local writes it.
           measure="python3 bench/bench_conditions.py run --record bench/conditions.jsonl"

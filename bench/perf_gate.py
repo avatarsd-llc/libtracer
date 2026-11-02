@@ -61,14 +61,17 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import multiprocessing
 import os
 import pathlib
+import queue
 import random
 import re
 import shutil
 import statistics
 import subprocess
 import sys
+import time
 from typing import Callable
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -694,7 +697,9 @@ def lkv_ratio_report_paired(bench: pathlib.Path, base_bench: pathlib.Path,
 #   - A SINGLE family runs pinned to ONE logical CPU (`CPU_SINGLE`: `BENCH_CPU_SINGLE`, or
 #     the first CPU of `BENCH_CPU`), judged on that CPU's foreign time and on own-cgroup
 #     pressure. Unpinned (no `BENCH_CPU`), the family still narrows itself to one CPU, the
-#     lowest of its mask (`bench::pin_to_one_cpu`, #1906), and is judged over the whole set. The methodology's own rule is one CPU per single-threaded measurement; the
+#     lowest of its mask (`bench::pin_to_one_cpu`, #1906), and is judged over the whole set.
+#     With `BENCH_SHARD` > 1 the SINGLE steps run at once, each on its own one CPU of the set
+#     (#2467, see run_sharded); a step's pairs never leave that CPU. The methodology's own rule is one CPU per single-threaded measurement; the
 #     old whole-sweep invocation needed several CPUs only because MULTI rows rode along.
 #   - A MULTI family runs on every bench CPU (`BENCH_CPU`), judged on foreign time only: its
 #     own threads raise the bench slice's pressure (#1803). It sizes T from its affinity mask
@@ -908,6 +913,8 @@ def best_of(binaries: dict[str, pathlib.Path], runs: int) -> dict[str, dict]:
 # Cost. `PAIRS_DEFAULT` pairs of every family, each arm once per pair. The sweep's families
 # total ~15 s per arm and the sibling binaries ~30 s, so 8 pairs are ~12 min of timed work.
 PAIRS_DEFAULT = 8
+# CPUs of `BENCH_CPU` the single-threaded steps shard across (#2467): see run_sharded.
+SHARD_DEFAULT = 1
 NULL_FILE = HERE / "aa_null.json"
 NULL_K = 3.0        # threshold = NULL_K x the row's robust spread ...
 NULL_FLOOR = 0.03   # ... and never below 3%
@@ -1020,15 +1027,21 @@ PAIR_COPY_DIR = ".pair-copies"
 PLACEMENT_NOTE = 1.10
 
 
-def fresh_copy(src: pathlib.Path, n: int) -> pathlib.Path:
+def fresh_copy(src: pathlib.Path, n: int | str) -> pathlib.Path:
     """@brief A new file holding @p src's bytes (#2215), the job's @p n-th; @p src
     itself when it does not exist, so `run_step` still prints its build hint."""
     if not src.exists():
         return src
     d = src.parent / PAIR_COPY_DIR / str(n)  # its own directory: the name is unchanged
-    d.mkdir(parents=True, exist_ok=True)
     dst = d / src.name
-    shutil.copy2(src, dst)
+    for attempt in range(3):  # a sharded step on another CPU may rmdir the shared parent
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            return dst
+        except FileNotFoundError:
+            if attempt == 2:
+                raise
     return dst
 
 
@@ -1043,55 +1056,177 @@ def placement_spread(base: dict[str, list[dict]]) -> list[tuple[str, float, floa
     return out
 
 
+def pair_step(step: Step, arms: dict[str, tuple[int, dict[str, pathlib.Path]]],
+              pairs: int, tag: int, sweep: bool = True) -> dict:
+    """@brief Run @p step's ABBA pairs, both arms on @p step's own pin.
+
+    Returns {"cand"|"base": {key: [per-pair metric dict, ...]}, "clean": clean pairs,
+    "gated": whether either arm emitted a gated row}. @p tag names the step's copies, so
+    no copy path repeats across the job, even when steps run at once on several CPUs.
+    @p sweep (every serial step) removes the whole `.pair-copies` afterwards, as before
+    sharding, which also clears copies a killed job left behind; a sharded step removes only
+    its own runs' directories, since other CPUs' steps share that parent.
+    """
+    got_all: dict = {"cand": {}, "base": {}, "clean": 0, "gated": False}
+    copied: set[pathlib.Path] = set()
+    n = 0
+    try:
+        for i in range(max(1, pairs)):
+            order = ["base", "cand"] if i % 2 == 0 else ["cand", "base"]
+            got, ok = {}, True
+            for arm in order:
+                idx, bins = arms[arm]
+                if idx in step.args and step.key in bins:
+                    n += 1
+                    exe = fresh_copy(bins[step.key], f"{tag}-{n}")
+                    if exe != bins[step.key]:
+                        copied.add(exe.parent)  # this run's own directory only: another
+                        # step on another CPU may be using the same `.pair-copies`
+                    rows, clean = run_step(exe, step, idx)
+                    got[arm] = step_metrics(step.key, rows)
+                    ok = ok and clean
+                    got_all["gated"] = got_all["gated"] or bool(got[arm])
+            if not ok:
+                continue  # contended through every re-run: drop the pair, both arms
+            got_all["clean"] += 1
+            for arm, kv in got.items():
+                for k, v in kv.items():
+                    got_all[arm].setdefault(k, []).append(v)
+    finally:
+        if sweep:
+            for d in {c.parent for c in copied}:
+                shutil.rmtree(d, ignore_errors=True)
+        for d in copied:
+            shutil.rmtree(d, ignore_errors=True)
+        for d in {c.parent for c in copied}:
+            try:
+                d.rmdir()  # the last step out removes `.pair-copies`; a busy one stays
+            except OSError:
+                pass
+    return got_all
+
+
+# --- SHARDING the single-threaded families across the bench CPUs (#2467) ---------------
+# The single-threaded steps run AT ONCE, one per bench CPU: `SHARD_CPUS` worker processes,
+# each owning one CPU of `BENCH_CPU`, take the next step off a shared queue and run ALL of its
+# ABBA pairs on that CPU. Both arms of every pair, and every pair of a step, run on one core,
+# so a core-to-core difference never enters a comparison; it only moves which core a family
+# lands on. Nothing else runs in parallel: the MULTI families keep the whole `BENCH_CPU` set
+# to themselves, after the sharded phase, and whole replicas or batches never overlap.
+#
+# Workers are processes, not threads: the condition check reads the bench process's own CPU
+# time from RUSAGE_CHILDREN, which is per process, so two threads would bill each other's
+# children as their own. Each worker's ledger, clock and allocator lines and exit errors go
+# back to the parent with its step's samples. A step's CPU is foreign-time judged alone;
+# the bench slice's pressure stays the scored source, and four single-threaded benches on
+# four CPUs leave nothing runnable waiting.
+#
+# `BENCH_SHARD` sets how many CPUs of `BENCH_CPU` the phase uses (its first N; 1 = every
+# single-threaded step on `CPU_SINGLE`, as before). Unpinned runs never shard.
+def shard_cpus(cpus: tuple[int, ...] | None = CPUS,
+               n: str | None = None) -> tuple[int, ...]:
+    """@brief The CPUs the single-threaded steps are sharded across; () when not sharded."""
+    n = os.environ.get("BENCH_SHARD", str(SHARD_DEFAULT)) if n is None else n
+    k = int(n) if n.strip() else SHARD_DEFAULT
+    return tuple(cpus[:k]) if cpus and k > 1 else ()
+
+
+def _shard_worker(cpu: int, steps: list[Step], arms: dict, pairs: int, tasks, results) -> None:
+    """@brief One shard: run each step index taken from @p tasks on @p cpu until None."""
+    while (i := tasks.get()) is not None:
+        LEDGER.entries.clear()
+        del CLOCK_FLOORS[:], ALLOC_STATES[:], BENCH_ERRORS[:]
+        t0 = time.monotonic()
+        try:
+            r = pair_step(dataclasses.replace(steps[i], cpus=(cpu,)), arms, pairs, i,
+                          sweep=False)
+        except Exception as e:  # noqa: BLE001 - reported to the parent, which fails the run
+            r = {"error": f"{steps[i].label} on CPU {cpu}: {e!r}"}
+        r.update(i=i, cpu=cpu, wall=time.monotonic() - t0, ledger=list(LEDGER.entries),
+                 clock=list(CLOCK_FLOORS), alloc=list(ALLOC_STATES), errors=list(BENCH_ERRORS))
+        sys.stdout.flush()
+        results.put(r)
+
+
+def run_sharded(steps: list[Step], arms: dict, pairs: int,
+                cpus: tuple[int, ...]) -> dict[int, dict]:
+    """@brief @ref pair_step for every step, one worker process per CPU of @p cpus; the
+    results by step index, each worker's side records merged into this process's."""
+    ctx = multiprocessing.get_context("fork")
+    tasks, results = ctx.Queue(), ctx.Queue()
+    for i in range(len(steps)):
+        tasks.put(i)
+    for _ in cpus:
+        tasks.put(None)
+    sys.stdout.flush()
+    procs = [ctx.Process(target=_shard_worker, args=(c, steps, arms, pairs, tasks, results))
+             for c in cpus]
+    for pr in procs:
+        pr.start()
+    out: dict[int, dict] = {}
+    try:
+        while len(out) < len(steps):
+            try:
+                r = results.get(timeout=30)
+            except queue.Empty:
+                if any(pr.exitcode not in (None, 0) for pr in procs):
+                    raise SystemExit("perf_gate: a shard worker died — no verdict")
+                continue
+            if "error" in r:
+                raise SystemExit(f"perf_gate: {r['error']}")
+            LEDGER.entries.extend(r["ledger"])
+            CLOCK_FLOORS.extend(r["clock"])
+            ALLOC_STATES.extend(r["alloc"])
+            BENCH_ERRORS.extend(r["errors"])
+            print(f"  [cpu {r['cpu']}] {steps[r['i']].label}: {r['clean']} clean pair(s), "
+                  f"{r['wall']:.1f}s")
+            out[r["i"]] = r
+    finally:
+        for pr in procs:
+            pr.join(timeout=5)
+            if pr.is_alive():
+                pr.terminate()
+    return out
+
+
 def paired_samples(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
-                   pairs: int, plan: list[Step] | None = None) -> dict:
+                   pairs: int, plan: list[Step] | None = None,
+                   shard: tuple[int, ...] | None = None) -> dict:
     """@brief Run candidate and baseline interleaved, family by family, ABBA.
 
     Returns {"cand"|"base": {key: [per-pair metric dict, …]}, "dropped": {family: n},
     "inconclusive": [reason, …]} with index `i` of both arms drawn from the SAME clean pair,
-    so the lists can be compared element-wise.
+    so the lists can be compared element-wise. The single-threaded steps are sharded across
+    @p shard (default @ref shard_cpus) when it names more than one CPU.
     """
     out: dict = {"cand": {}, "base": {}, "dropped": {}, "inconclusive": []}
     plan = gate_plan(cand, base) if plan is None else plan
+    shard = shard_cpus() if shard is None else shard
     n_multi = sum(not s.score_pressure for s in plan)
+    pin = ','.join(map(str, CPU_SINGLE)) if CPU_SINGLE else 'nothing (unpinned)'
+    where = f"sharded across CPUs {','.join(map(str, shard))}" if shard else f"pinned to {pin}"
     print(f"  {len(plan)} steps ({n_multi} multi-threaded), {max(1, pairs)} ABBA pairs each; "
-          f"single-threaded pinned to {','.join(map(str, CPU_SINGLE)) if CPU_SINGLE else 'nothing (unpinned)'}")
+          f"single-threaded {where}")
     arms = {"cand": (0, cand), "base": (1, base)}
-    n = 0  # numbers every run's copy, so no path repeats across the job
-    for step in plan:
-        clean_pairs, gated = 0, False
-        copied: set[pathlib.Path] = set()
-        try:
-            for i in range(max(1, pairs)):
-                order = ["base", "cand"] if i % 2 == 0 else ["cand", "base"]
-                got, ok = {}, True
-                for arm in order:
-                    idx, bins = arms[arm]
-                    if idx in step.args and step.key in bins:
-                        n += 1
-                        exe = fresh_copy(bins[step.key], n)
-                        if exe != bins[step.key]:
-                            copied.add(exe.parent.parent)
-                        rows, clean = run_step(exe, step, idx)
-                        got[arm] = step_metrics(step.key, rows)
-                        ok = ok and clean
-                        gated = gated or bool(got[arm])
-                if not ok:
-                    continue  # contended through every re-run: drop the pair, both arms
-                clean_pairs += 1
-                for arm, kv in got.items():
-                    for k, v in kv.items():
-                        out[arm].setdefault(k, []).append(v)
-        finally:
-            for d in copied:
-                shutil.rmtree(d, ignore_errors=True)
-        lost = max(1, pairs) - clean_pairs
+    # A step sharded is one pinned to CPU_SINGLE; the whole-sweep fallback and every MULTI
+    # step keep their own set and run after the sharded phase, one at a time.
+    sharded = [s for s in plan if shard and s.score_pressure and s.cpus == CPU_SINGLE]
+    # Longest first, so no long step starts last and runs alone: the sibling binaries (each
+    # a whole binary, `bench_forward_demux` the longest step of all) before the families.
+    sharded.sort(key=lambda s: s.key == "main")
+    results = run_sharded(sharded, arms, pairs, shard) if sharded else {}
+    done = {id(s): results[i] for i, s in enumerate(sharded)}
+    for tag, step in enumerate(plan):
+        got = done.get(id(step)) or pair_step(step, arms, pairs, tag)
+        for arm in ("cand", "base"):
+            out[arm].update(got[arm])
+        lost = max(1, pairs) - got["clean"]
         if lost:
             out["dropped"][step.label] = lost
             print(f"  {step.label}: {lost} of {max(1, pairs)} pair(s) dropped (contended)")
-            if gated and lost > MAX_DROPPED_PAIRS:
+            if got["gated"] and lost > MAX_DROPPED_PAIRS:
                 out["inconclusive"].append(
-                    f"{step.label}: only {clean_pairs}/{max(1, pairs)} pairs ran clean "
+                    f"{step.label}: only {got['clean']}/{max(1, pairs)} pairs ran clean "
                     f"(more than {MAX_DROPPED_PAIRS} contended)")
     for k, lo, hi in placement_spread(out["base"]):
         print(f"  placement A/A: {k} p50 {lo:.1f}..{hi:.1f} ns (x{hi / lo:.3f}) across "
