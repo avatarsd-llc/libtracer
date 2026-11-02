@@ -967,6 +967,11 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * out of the reusable RX scratch and such a consumer copies it out itself: the recv,
      * plus a second full copy at the seam, on every frame.
      *
+     * A FRAGMENTED message (#2483) is received the same way: each fragment straight into its
+     * own segment from this backend, chained by `ws_assembler_t` (the chain and the
+     * delivered rope's link array are drawn from it too), and handed up as one multi-link
+     * rope with no copy. A span-only sink gets it flattened once into this backend.
+     *
      * WHAT IT COSTS, and who pays. The bytes are the INTEGRATOR's — an ADR-0067
      * `tr::mem::pool_source_t` behind a `tr::mem::source_backend_t` is the shape, and it is
      * the same seam `tcp_transport_t` and its siblings have always taken. The library

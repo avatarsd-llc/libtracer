@@ -52,6 +52,7 @@
 #include <vector>
 
 #include "fake_httpd.hpp"
+#include "gated_source.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/mem_source.hpp"
@@ -425,6 +426,111 @@ void test_a_fragmented_message_arrives_owning() {
     reset(link);
 }
 
+// ---------------------------------------------------------------------------
+// 6 — a kept fragmented message holds nothing of the link's connection state.
+// ---------------------------------------------------------------------------
+/** @brief A rope sink that keeps every message and destroys the link from inside the
+ *         delivery, the #814 shape. */
+struct keep_and_destroy_t {
+    tr::mem::poly_ptr_t<httpd_ws_link_t>* link = nullptr; /**< @brief The link to destroy. */
+    std::vector<tr::view::rope_t> kept;                   /**< @brief Every rope, held. */
+    void operator()(tr::net::peer_handle_t, tr::view::rope_t r) {
+        kept.push_back(std::move(r));
+        link->reset();
+    }
+};
+
+/**
+ * @brief #2483: the fragment chain, and so the delivered rope's link array, draws from the
+ *        receive pool, never from `memory.state`.
+ *
+ * Three fragments, so the rope spills past its two inline links into a chain of its own. The
+ * sink keeps the message and destroys the link in-call. Releasing the kept message afterwards
+ * must return nothing to `memory.state`: a link array drawn from it would be returned to a
+ * store that only had to outlive the link. (The in-flight session slot stays leaked in
+ * `memory.state` by design (#814), so the measure is the release, not a zero.)
+ */
+void test_a_kept_fragmented_message_outlives_the_state_store() {
+    std::printf("a kept three-fragment message, the link destroyed mid-delivery:\n");
+    rx_pool_t pool{16384};
+    keep_and_destroy_t sink;
+    {
+        gated_source_t state;
+        auto link = tr::mem::make_poly<httpd_ws_link_t>(
+            tr::mem::net_source(), handle(), "/ws",
+            tr::net::httpd_ws_config_t{.peer_named = true,
+                                       .send_timeout_ms = kSendBoundMs,
+                                       .memory = {.rx = &pool.backend, .state = &state}});
+        sink.link = &link;
+        link->set_peer_rope_receiver(sink);
+        const std::vector<std::byte> part = body_of(100, std::byte{0xC3});
+        fake_httpd::instance().open_session(kFd);
+        (void)fake_httpd::instance().deliver_frame(kFd, part, /*final=*/false);
+        (void)fake_httpd::instance().deliver_frame(kFd, part, /*final=*/false,
+                                                   HTTPD_WS_TYPE_CONTINUE);
+        (void)fake_httpd::instance().deliver_frame(kFd, part, /*final=*/true,
+                                                   HTTPD_WS_TYPE_CONTINUE);
+        check(link == nullptr, "the link was destroyed from inside the delivery");
+        check_eq(sink.kept.size(), 1, "and the message was kept");
+        if (sink.kept.size() == 1)
+            check_eq(sink.kept.front().total_length(), 300, "whole, three fragments chained");
+        fake_httpd::instance().close_all();
+        drain();
+        const std::ptrdiff_t held = state.live.load();
+        sink.kept.clear();
+        check(state.live.load() == held,
+              "releasing the kept message returns nothing to memory.state: it held none of it");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 7 — a span-only sink on an owning link, and a pool that cannot flatten.
+// ---------------------------------------------------------------------------
+/** @brief A heap source that refuses any block wider than @ref cap. */
+class capped_source_t final : public tr::mem::block_source_t {
+   public:
+    capped_source_t() noexcept : block_source_t("capped") {}
+    /** @brief Serve from the heap, or refuse a block wider than @ref cap. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        return bytes > cap ? nullptr : tr::mem::heap_source().try_alloc(bytes, align);
+    }
+    /** @brief Return a block to the heap. */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, bytes, align);
+    }
+    std::size_t cap = 0; /**< @brief The widest block served. */
+};
+
+/**
+ * @brief #2483: a fragmented message a span-only sink needs flattened, which the pool
+ *        refuses, is a COUNTED drop (`rx_dropped_pool`), and the session lives.
+ */
+void test_a_refused_flatten_is_counted() {
+    std::printf("a span-only sink on an owning link whose pool cannot flatten:\n");
+    capped_source_t src;
+    src.cap = 450;  // a 300- or 200-byte fragment's segment fits; the 500-byte flatten does not
+    tr::mem::source_backend_t backend{src};
+    auto link = make_link(&backend);
+    span_sink_t sink;
+    link->set_peer_receiver(sink);
+    fake_httpd::instance().open_session(kFd);
+    (void)fake_httpd::instance().deliver_frame(kFd, body_of(300, std::byte{0x01}),
+                                               /*final=*/false);
+    const esp_err_t verdict = fake_httpd::instance().deliver_frame(
+        kFd, body_of(200, std::byte{0x02}), /*final=*/true, HTTPD_WS_TYPE_CONTINUE);
+    check(verdict == ESP_OK, "the session is not torn down");
+    check_eq(sink.calls, 0, "the message never reached the sink");
+    check_eq(link->stats().rx_dropped_pool, 1, "and the drop is COUNTED on rx_dropped_pool");
+
+    (void)fake_httpd::instance().deliver_frame(kFd, body_of(100, std::byte{0x03}),
+                                               /*final=*/false);
+    (void)fake_httpd::instance().deliver_frame(kFd, body_of(100, std::byte{0x04}),
+                                               /*final=*/true, HTTPD_WS_TYPE_CONTINUE);
+    check_eq(sink.calls, 1, "a message the pool can flatten is delivered");
+    check_eq(sink.last.size(), 200, "whole");
+    reset(link);
+}
+
 }  // namespace
 
 int main() {
@@ -433,6 +539,8 @@ int main() {
     test_a_named_backend_delivers_owning_from_the_pool();
     test_an_exhausted_pool_drops_and_counts();
     test_a_fragmented_message_arrives_owning();
+    test_a_kept_fragmented_message_outlives_the_state_store();
+    test_a_refused_flatten_is_counted();
     std::printf("%s\n", g_failures == 0 ? "OK" : "FAILED");
     return g_failures == 0 ? 0 : 1;
 }

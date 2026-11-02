@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <expected>
 #include <mutex>
 #include <new>
 #include <utility>
@@ -2326,7 +2327,12 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
         // A new peer past the high-water mark: one session and one table entry from
         // `memory.state` (#1880). A refusal of either is this peer's to pay — it is refused
         // exactly like a peer past `max_peers`, and the CALLER counts it the same way.
-        slot = mem::make_in<session_t>(*state_src_, *state_src_);
+        // The fragment chain draws from the receive source when the link has one (#2483): a
+        // completed message's rope holds its links in a chain from that same source, and a
+        // kept message must not hold connection state past the link, nor spend its budget.
+        slot = mem::make_in<session_t>(
+            *state_src_,
+            rx_backend_ != nullptr ? static_cast<mem::block_source_t&>(*rx_backend_) : *state_src_);
         if (slot == nullptr || !slots_.push_back(slot)) {
             mem::drop_in(*state_src_, slot);
             return nullptr;
@@ -2532,8 +2538,12 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
                 // A refused frame too large to drain through the scratch. Allocating a
                 // drain buffer here would defeat the refusal, so the only bounded answer is
                 // the one the sibling OOM arm already gives: fail the handler and let httpd
-                // close THIS session. Counted first, as its own cause.
-                note_rx_pool_refusal(frame.len);
+                // close THIS session. Counted first, as its own cause: the injected pool's, or
+                // on a borrowed link (a fragment from `memory.state`) the alloc failure's.
+                if (rx_backend_ != nullptr)
+                    note_rx_pool_refusal(frame.len);
+                else
+                    note_rx_alloc_fail(frame.len);
                 return ESP_FAIL;
             } else {
                 if (!heap_payload.assign(*state_src_, frame.len)) {
@@ -2653,7 +2663,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // per unfragmented BINARY frame (the fast path); a fragmented message chains here.
     if (!fragment) {
         // A BINARY mid-assembly drops the stale message (RFC 6455 §5.4) and is delivered.
-        slot->assembler.reset();
+        if (slot->assembler.assembling()) slot->assembler.reset();
         note_rx_message(slot, body.size());  // BEFORE the delivery — see note_rx_message
         // An unauthenticated session's message is a CREDENTIAL, never a TLV: it goes to the
         // auth hook and the graph never sees it. This is the gate that makes "admitted but
@@ -2676,16 +2686,19 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     }
     // A fragment: chained by the one RFC 6455 assembler core uses (#2483). A refused segment
     // sheds the message as a refused chain does; either way the session lives and re-syncs at
-    // the next BINARY.
+    // the next BINARY. A stray CONT whose segment was refused sheds nothing: it had no message.
     // `httpd_ws_type_t` carries the RFC 6455 opcode values (§5.2), so BINARY and CONTINUE
     // convert as they are.
-    ws_assembler_t::result_t r{ws_assembler_t::status_t::REFUSED, {}};
-    if (pool_refused)
+    ws_assembler_t::result_t r;
+    if (pool_refused) {
+        if (frame.type == HTTPD_WS_TYPE_BINARY || slot->assembler.assembling())
+            r.status = ws_assembler_t::status_t::REFUSED;
         slot->assembler.reset();
-    else
+    } else {
         r = slot->assembler.on_piece(static_cast<ws::opcode_t>(frame.type), frame.final,
                                      view::view_t{std::move(owned_seg), 0, frame.len},
                                      kMaxFrameBytes);
+    }
     if (r.status == ws_assembler_t::status_t::OVERSIZE) {
         // Fragments summing past the cap get the answer one over-cap frame gets — the peer is
         // dropped — so the fragmented route is not a way around the bound.
@@ -2699,7 +2712,18 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     note_rx_message(slot, r.message.total_length());  // last touch of `slot` — see below
     if (!pending && rx_backend_ != nullptr) {
         // OWNING: the fragments are the integrator's segments, chained — handed up with no
-        // copy at all.
+        // copy at all to a rope sink. A span-only sink needs them in one piece: flattened
+        // here, once, into the pool, so a refusal is the named drop it always was rather than
+        // the receiver slot's silent one.
+        if (!(peer_named_ ? peer_rx_.has_rope() : rx_.has_rope())) {
+            std::expected<view::view_t, view::flatten_err_t> flat =
+                r.message.try_materialize(*rx_backend_);
+            if (!flat) {
+                note_rx_pool_refusal(r.message.total_length());
+                return ESP_OK;
+            }
+            r.message = view::rope_t{std::move(*flat)};
+        }
         deliver_owned(handle, std::move(r.message));
         return ESP_OK;
     }
