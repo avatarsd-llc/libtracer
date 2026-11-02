@@ -558,14 +558,11 @@ Details that make these trustworthy:
   `BENCH_CPU_SINGLE`; unpinned, the lowest CPU of its mask, which the family picks itself);
   a multi-threaded family runs on the whole `BENCH_CPU` set as its own invocation, sizes its
   thread count from that affinity mask, and runs after every single-threaded one. On the
-  bench host the single-threaded pairs are **sharded** across the four bench CPUs
-  (`BENCH_SHARD=4`, #2467): four A/B pairs run at once, one per CPU, and each pair runs both
-  arms on its CPU, so the two sides of every per-pair ratio share a core while one family's
-  pairs may land on several. An A/A of the same build, sharded against all on one CPU, moved
-  no row by more than 4.9% (p75 0.47%), the rows above 1 KiB included, and the gate's verdict
-  on a clean sharded A/A at eight pairs failed no row. Sharding does widen the spread of the
-  per-pair ratios: the median row's spread was 1.0% on one CPU, 1.5% with whole families
-  sharded and 1.9% with pairs sharded (one eight-pair run each). Multi-threaded families start only once the
+  bench host the single-threaded steps are **sharded** across the four bench CPUs
+  (`BENCH_SHARD=4`, #2467): four steps run at once, one per CPU, and each step runs all of
+  its pairs, both arms, on its CPU, so the two sides of a comparison always share a core. An
+  A/A of the same build, sharded against all on one CPU, moved no row by more than 4.9%
+  (p75 0.47%), the rows above 1 KiB included. Multi-threaded families start only once the
   sharded phase is over, and so still have every bench CPU to themselves. Because
   the baseline is *the same PR's `main` rebuilt on the same runner in the same pass*, the
   comparison is machine-neutral.

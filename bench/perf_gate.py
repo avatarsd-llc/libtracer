@@ -698,8 +698,8 @@ def lkv_ratio_report_paired(bench: pathlib.Path, base_bench: pathlib.Path,
 #     the first CPU of `BENCH_CPU`), judged on that CPU's foreign time and on own-cgroup
 #     pressure. Unpinned (no `BENCH_CPU`), the family still narrows itself to one CPU, the
 #     lowest of its mask (`bench::pin_to_one_cpu`, #1906), and is judged over the whole set.
-#     With `BENCH_SHARD` > 1 the SINGLE steps' pairs run at once, each pair on one CPU of the
-#     set (#2467, see run_sharded); a pair's two arms never leave that CPU. The methodology's own rule is one CPU per single-threaded measurement; the
+#     With `BENCH_SHARD` > 1 the SINGLE steps run at once, each on its own one CPU of the set
+#     (#2467, see run_sharded); a step's pairs never leave that CPU. The methodology's own rule is one CPU per single-threaded measurement; the
 #     old whole-sweep invocation needed several CPUs only because MULTI rows rode along.
 #   - A MULTI family runs on every bench CPU (`BENCH_CPU`), judged on foreign time only: its
 #     own threads raise the bench slice's pressure (#1803). It sizes T from its affinity mask
@@ -1050,106 +1050,86 @@ def placement_spread(base: dict[str, list[dict]]) -> list[tuple[str, float, floa
     return out
 
 
-def run_pair(step: Step, arms: dict[str, tuple[int, dict[str, pathlib.Path]]], i: int,
-             tag: str) -> dict:
-    """@brief Run pair @p i of @p step: both arms, ABBA by @p i, on @p step's own pin.
+def pair_step(step: Step, arms: dict[str, tuple[int, dict[str, pathlib.Path]]],
+              pairs: int, tag: int) -> dict:
+    """@brief Run @p step's ABBA pairs, both arms on @p step's own pin.
 
-    Returns {"cand"|"base": {key: metric dict}, "ok": both arms ran clean, "gated": either
-    emitted a gated row, "copies": the run directories it made}. @p tag names this pair's
-    copies, so no copy path repeats across the job, even with pairs on several CPUs at once.
-    The copies are left for the caller to remove once the step is done (#2215).
+    Returns {"cand"|"base": {key: [per-pair metric dict, ...]}, "clean": clean pairs,
+    "gated": whether either arm emitted a gated row}. @p tag names the step's copies, so
+    no copy path repeats across the job, even when steps run at once on several CPUs.
     """
-    out: dict = {"cand": {}, "base": {}, "ok": True, "gated": False, "copies": []}
-    for n, arm in enumerate(["base", "cand"] if i % 2 == 0 else ["cand", "base"]):
-        idx, bins = arms[arm]
-        if idx in step.args and step.key in bins:
-            exe = fresh_copy(bins[step.key], f"{tag}-{n}")
-            if exe != bins[step.key]:
-                out["copies"].append(exe.parent)  # this run's own directory only: another
-                # pair on another CPU may be using the same `.pair-copies`
-            rows, clean = run_step(exe, step, idx)
-            out[arm] = step_metrics(step.key, rows)
-            out["ok"] = out["ok"] and clean
-            out["gated"] = out["gated"] or bool(out[arm])
-    return out
-
-
-def remove_copies(dirs: list[pathlib.Path]) -> None:
-    """@brief Remove the run directories @p dirs, then any `.pair-copies` left empty."""
-    for d in dirs:
-        shutil.rmtree(d, ignore_errors=True)
-    for d in {c.parent for c in dirs}:
-        try:
-            d.rmdir()  # the last one out removes `.pair-copies`; a busy one stays
-        except OSError:
-            pass
-
-
-def fold_pairs(got: list[dict]) -> dict:
-    """@brief One step's pairs, in pair order, as {"cand"|"base": {key: [metric, ...]},
-    "clean": clean pairs, "gated": any pair gated}. A contended pair is dropped, both arms,
-    so index `i` of both arms is the same pair."""
-    out: dict = {"cand": {}, "base": {}, "clean": 0, "gated": any(g["gated"] for g in got)}
-    for g in got:
-        if not g["ok"]:
-            continue  # contended through every re-run: drop the pair, both arms
-        out["clean"] += 1
-        for arm in ("cand", "base"):
-            for k, v in g[arm].items():
-                out[arm].setdefault(k, []).append(v)
-    return out
-
-
-def pair_step(step: Step, arms: dict, pairs: int, tag: int) -> dict:
-    """@brief Every pair of @p step back to back on its own pin, folded by @ref fold_pairs."""
-    got: list[dict] = []
+    got_all: dict = {"cand": {}, "base": {}, "clean": 0, "gated": False}
+    copied: set[pathlib.Path] = set()
+    n = 0
     try:
         for i in range(max(1, pairs)):
-            got.append(run_pair(step, arms, i, f"{tag}-{i}"))
+            order = ["base", "cand"] if i % 2 == 0 else ["cand", "base"]
+            got, ok = {}, True
+            for arm in order:
+                idx, bins = arms[arm]
+                if idx in step.args and step.key in bins:
+                    n += 1
+                    exe = fresh_copy(bins[step.key], f"{tag}-{n}")
+                    if exe != bins[step.key]:
+                        copied.add(exe.parent)  # this run's own directory only: another
+                        # step on another CPU may be using the same `.pair-copies`
+                    rows, clean = run_step(exe, step, idx)
+                    got[arm] = step_metrics(step.key, rows)
+                    ok = ok and clean
+                    got_all["gated"] = got_all["gated"] or bool(got[arm])
+            if not ok:
+                continue  # contended through every re-run: drop the pair, both arms
+            got_all["clean"] += 1
+            for arm, kv in got.items():
+                for k, v in kv.items():
+                    got_all[arm].setdefault(k, []).append(v)
     finally:
-        remove_copies([d for g in got for d in g["copies"]])
-    return fold_pairs(got)
+        for d in copied:
+            shutil.rmtree(d, ignore_errors=True)
+        for d in {c.parent for c in copied}:
+            try:
+                d.rmdir()  # the last step out removes `.pair-copies`; a busy one stays
+            except OSError:
+                pass
+    return got_all
 
 
-# --- SHARDING the single-threaded pairs across the bench CPUs (#2467) -------------------
-# The single-threaded steps' PAIRS run at once, one per bench CPU: `SHARD_CPUS` worker
-# processes, each owning one CPU of `BENCH_CPU`, take the next (step, pair) off a shared
-# queue and run that pair, both arms, ABBA by its index, on their CPU. A pair never crosses
-# cores, so a core-to-core offset cancels inside every per-pair ratio; it only moves which
-# core a pair lands on. The pair is the unit, not the step, because one step
-# (`bench_forward_demux`, ~44 s a run) alone outlasts every other step put together on a
-# core. Nothing else runs in parallel: the MULTI families keep the whole `BENCH_CPU` set to
-# themselves, after the sharded phase, and whole replicas or batches never overlap.
+# --- SHARDING the single-threaded families across the bench CPUs (#2467) ---------------
+# The single-threaded steps run AT ONCE, one per bench CPU: `SHARD_CPUS` worker processes,
+# each owning one CPU of `BENCH_CPU`, take the next step off a shared queue and run ALL of its
+# ABBA pairs on that CPU. Both arms of every pair, and every pair of a step, run on one core,
+# so a core-to-core difference never enters a comparison; it only moves which core a family
+# lands on. Nothing else runs in parallel: the MULTI families keep the whole `BENCH_CPU` set
+# to themselves, after the sharded phase, and whole replicas or batches never overlap.
 #
 # Workers are processes, not threads: the condition check reads the bench process's own CPU
 # time from RUSAGE_CHILDREN, which is per process, so two threads would bill each other's
 # children as their own. Each worker's ledger, clock and allocator lines and exit errors go
-# back to the parent with its pair's samples. A pair's CPU is foreign-time judged alone;
+# back to the parent with its step's samples. A step's CPU is foreign-time judged alone;
 # the bench slice's pressure stays the scored source, and four single-threaded benches on
-# four CPUs leave nothing runnable waiting. Every copy lives until the phase ends (#2215).
+# four CPUs leave nothing runnable waiting.
 #
 # `BENCH_SHARD` sets how many CPUs of `BENCH_CPU` the phase uses (its first N; 1 = every
-# single-threaded step on `CPU_SINGLE`, back to back, as before). Unpinned runs never shard.
+# single-threaded step on `CPU_SINGLE`, as before). Unpinned runs never shard.
 def shard_cpus(cpus: tuple[int, ...] | None = CPUS,
                n: str | None = None) -> tuple[int, ...]:
-    """@brief The CPUs the single-threaded pairs are sharded across; () when not sharded."""
+    """@brief The CPUs the single-threaded steps are sharded across; () when not sharded."""
     n = os.environ.get("BENCH_SHARD", str(SHARD_DEFAULT)) if n is None else n
     k = int(n) if n.strip() else SHARD_DEFAULT
     return tuple(cpus[:k]) if cpus and k > 1 else ()
 
 
-def _shard_worker(cpu: int, steps: list[Step], arms: dict, tasks, results) -> None:
-    """@brief One shard: run each (step, pair) taken from @p tasks on @p cpu until None."""
-    while (task := tasks.get()) is not None:
-        s, i = task
+def _shard_worker(cpu: int, steps: list[Step], arms: dict, pairs: int, tasks, results) -> None:
+    """@brief One shard: run each step index taken from @p tasks on @p cpu until None."""
+    while (i := tasks.get()) is not None:
         LEDGER.entries.clear()
         del CLOCK_FLOORS[:], ALLOC_STATES[:], BENCH_ERRORS[:]
         t0 = time.monotonic()
         try:
-            r = run_pair(dataclasses.replace(steps[s], cpus=(cpu,)), arms, i, f"{s}-{i}")
+            r = pair_step(dataclasses.replace(steps[i], cpus=(cpu,)), arms, pairs, i)
         except Exception as e:  # noqa: BLE001 - reported to the parent, which fails the run
-            r = {"error": f"{steps[s].label} pair {i} on CPU {cpu}: {e!r}"}
-        r.update(s=s, i=i, cpu=cpu, wall=time.monotonic() - t0, ledger=list(LEDGER.entries),
+            r = {"error": f"{steps[i].label} on CPU {cpu}: {e!r}"}
+        r.update(i=i, cpu=cpu, wall=time.monotonic() - t0, ledger=list(LEDGER.entries),
                  clock=list(CLOCK_FLOORS), alloc=list(ALLOC_STATES), errors=list(BENCH_ERRORS))
         sys.stdout.flush()
         results.put(r)
@@ -1157,25 +1137,22 @@ def _shard_worker(cpu: int, steps: list[Step], arms: dict, tasks, results) -> No
 
 def run_sharded(steps: list[Step], arms: dict, pairs: int,
                 cpus: tuple[int, ...]) -> dict[int, dict]:
-    """@brief Every pair of every step, one worker process per CPU of @p cpus, folded per
-    step by @ref fold_pairs; each worker's side records merged into this process's. The
-    queue runs @p steps in order, pair 0 of each before pair 1 of any, so a long step's
-    pairs start early and spread."""
+    """@brief @ref pair_step for every step, one worker process per CPU of @p cpus; the
+    results by step index, each worker's side records merged into this process's."""
     ctx = multiprocessing.get_context("fork")
     tasks, results = ctx.Queue(), ctx.Queue()
-    todo = [(s, i) for i in range(max(1, pairs)) for s in range(len(steps))]
-    for t in todo:
-        tasks.put(t)
+    for i in range(len(steps)):
+        tasks.put(i)
     for _ in cpus:
         tasks.put(None)
     sys.stdout.flush()
-    procs = [ctx.Process(target=_shard_worker, args=(c, steps, arms, tasks, results))
+    procs = [ctx.Process(target=_shard_worker, args=(c, steps, arms, pairs, tasks, results))
              for c in cpus]
     for pr in procs:
         pr.start()
-    got: dict[tuple[int, int], dict] = {}
+    out: dict[int, dict] = {}
     try:
-        while len(got) < len(todo):
+        while len(out) < len(steps):
             try:
                 r = results.get(timeout=30)
             except queue.Empty:
@@ -1188,20 +1165,14 @@ def run_sharded(steps: list[Step], arms: dict, pairs: int,
             CLOCK_FLOORS.extend(r["clock"])
             ALLOC_STATES.extend(r["alloc"])
             BENCH_ERRORS.extend(r["errors"])
-            got[(r["s"], r["i"])] = r
+            print(f"  [cpu {r['cpu']}] {steps[r['i']].label}: {r['clean']} clean pair(s), "
+                  f"{r['wall']:.1f}s")
+            out[r["i"]] = r
     finally:
         for pr in procs:
             pr.join(timeout=5)
             if pr.is_alive():
                 pr.terminate()
-        remove_copies([d for r in got.values() for d in r.get("copies", [])])
-    out = {}
-    for s, step in enumerate(steps):
-        mine = [got[(s, i)] for i in range(max(1, pairs))]
-        out[s] = fold_pairs(mine)
-        print(f"  {step.label}: {out[s]['clean']} clean pair(s) on CPU(s) "
-              f"{','.join(sorted({str(r['cpu']) for r in mine}))}, "
-              f"{sum(r['wall'] for r in mine):.1f}s of runs")
     return out
 
 
@@ -1227,8 +1198,8 @@ def paired_samples(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
     # A step sharded is one pinned to CPU_SINGLE; the whole-sweep fallback and every MULTI
     # step keep their own set and run after the sharded phase, one at a time.
     sharded = [s for s in plan if shard and s.score_pressure and s.cpus == CPU_SINGLE]
-    # Longest first, so no long pair starts last and runs alone: the sibling binaries (each
-    # a whole binary, `bench_forward_demux` the longest of all) before the families.
+    # Longest first, so no long step starts last and runs alone: the sibling binaries (each
+    # a whole binary, `bench_forward_demux` the longest step of all) before the families.
     sharded.sort(key=lambda s: s.key == "main")
     results = run_sharded(sharded, arms, pairs, shard) if sharded else {}
     done = {id(s): results[i] for i, s in enumerate(sharded)}
