@@ -533,9 +533,9 @@ jobs:
       BENCH_CPU: "3-6" # as gate-pr: bench.slice minus CPU 2 (the runner's own processes)
     # Measured on the bench host (2026-11-02): 29-41 min, of which the interleaved A/B is
     # 19.5-20 min, the full-history checkout 3.6-15.7 and Zenoh 3.1-6.2. With the shallow
-    # checkout and Zenoh nightly-only (#2466) a push replica is ~22 min; 45 = ~2x that. The limit is per replica and counts no queue time, so the
-    # nightly's three replicas run one after another (~60 min) and each still fits; a push
-    # costs one (~20 min). Advisory tier, so a false trip is cheap to ignore and therefore
+    # checkout and Zenoh nightly-only (#2466) a push replica is ~22 min; 45 = ~2x that. The
+    # limit is per replica and counts no queue time, so the nightly's three replicas run one
+    # after another (~66 min) and each still fits; a push costs one (~22 min). Advisory tier, so a false trip is cheap to ignore and therefore
     # especially corrosive — set loose on purpose.
     timeout-minutes: 45
     # The baseline lookup reads this workflow's runs and compares commits (#2466).
@@ -586,6 +586,7 @@ jobs:
           if [ -z "$base" ]; then
             base="$(git cat-file -p HEAD | sed -n 's/^parent //p' | head -n 1)"
             [ -z "$base" ] || echo "::warning::no benched ancestor found; the ratchet falls back to HEAD's first parent ${base:0:8}, and a superseded batch member before it is compared nowhere"
+            [ -z "$base" ] || echo "> **Fallback:** no benched ancestor found; batch members before \`${base:0:8}\` are compared nowhere." >>"$GITHUB_STEP_SUMMARY"
           fi
           if [ -n "$base" ]; then
             echo "ratchet baseline: $base"

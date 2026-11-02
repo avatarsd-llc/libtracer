@@ -335,7 +335,7 @@ thresholds, one hard invariant:
 | mechanism | when | comparison | threshold | effect |
 | --- | --- | --- | --- | --- |
 | **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner, interleaved A/B per family** | per row and leg, **3× the row's A/A-null spread, floor 3%** (flat p50 **+15%** · mean **+12%** · deliveries/s **−12%** where the null has no row) · per-vertex bytes **+2%** — *and* a bootstrap 95% interval on the median pair ratio that excludes 1 (a row at the flat threshold is decided by the separated-arms + majority-of-pairs rule) | fails the PR |
-| **ratchet** | every `main` push (one replica) and nightly (three) | HEAD vs its parent, **on the pinned bench host** | same as above | **advisory** — each replica reports (see the tier note below) |
+| **ratchet** | once per landing batch on `main` (one replica) and nightly (three) | HEAD vs the last benched `main` commit, **on the pinned bench host** | same as above | **advisory** — each replica reports (see the tier note below) |
 | **forward-hop zero-alloc gate** | every CI run | absolute | `> 0` allocations on the forward hop | fails the build |
 | **soft trend alert** | per `main` commit | vs previous point, **one repeat on the pinned bench host** | series drifts past **125%** | a comment, *not* a verdict |
 
@@ -801,8 +801,9 @@ Details that make these trustworthy:
   ([`bench/test_perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/test_perf_gate.py)),
   run in the same CI job before anything is timed, pinning both directions: the recorded
   false-failure sample sets must pass, and the recorded real regressions must still fail.
-- The **ratchet** re-runs that gate, HEAD against its parent, on the pinned bench host: one
-  advisory replica on every push to `main`, three nightly. A regression that slips through
+- The **ratchet** re-runs that gate on the pinned bench host, HEAD against the last benched
+  `main` commit, so a reported regression may come from any commit of the landing batch, not
+  only its last: one advisory replica per landing batch, three nightly. A regression that slips through
   the PR gate is reported the moment it lands; no single run can fail `main`, and the 2-of-3
   agreement over the nightly's replicas is not built yet.
 - The **forward-hop zero-alloc gate** is the one **absolute** gate: it is a

@@ -27,7 +27,7 @@ import urllib.request
 from typing import Callable, Iterable
 
 API = "https://api.github.com"
-MAX_CANDIDATES = 30  # a batch longer than this falls back to the first parent, loudly
+MAX_CANDIDATES = 30  # recent successful runs checked; none an ancestor -> the caller falls back, loudly
 
 
 def pick(head: str, benched: Iterable[str], is_ancestor: Callable[[str], bool]) -> str:
