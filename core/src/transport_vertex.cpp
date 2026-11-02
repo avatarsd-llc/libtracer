@@ -1395,6 +1395,8 @@ std::uint64_t transport_vertex_t::sweep(std::uint64_t now, std::uint64_t deadlin
     const graph::detail_qsbr::frame_scope_t scope;
     sweep_t sw{.now = now, .deadline = deadline};
     const std::less<const transport_t*> before;
+    // Deliberately O(N^2) in connections: each pick rescans the table, so the door keeps no
+    // snapshot buffer (no library-internal buffers) on a cold path over a handful of links.
     for (transport_t* last = nullptr;;) {
         transport_t* link = nullptr;
         {

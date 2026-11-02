@@ -250,8 +250,8 @@ accepted. It starts at 0, so the first counter must be at least 1.
    Otherwise the confirmation is empty.
 5. On a **first handshake** there is no old session. Frames the application sends before the
    acknowledgement go out on the unacknowledged session: a send is admitted whenever the initiator
-   holds a session, acknowledged or not. The link's poll seam reports when it holds one, so an
-   application that wants one request and reply in two round trips sends its request then. An
+   holds a session, acknowledged or not. The link reports when it holds one (a host seam, §2), so
+   an application that wants one request and reply in two round trips sends its request then. An
    application that waits for `up` takes three.
 6. On a **rekey**, the initiator goes on sending frames on its old current session until the
    acknowledgement arrives, and sends only the confirmation (and the retries of step 7) on the new

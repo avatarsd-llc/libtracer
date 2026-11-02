@@ -17,6 +17,7 @@
 
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -549,6 +550,7 @@ struct sweep_t {
      * @return True iff the peer is to be closed. The caller re-stamps @p since once it has.
      */
     [[nodiscard]] constexpr bool frozen(bool owing, bool stuck, std::uint64_t& since) noexcept {
+        assert(deadline <= now);  // the seam's precondition; a wrapped window yields a past due
         if (!stuck) since = now;
         if (stuck && since < deadline) return true;
         if (owing) due(since + (now - deadline) + 1);

@@ -64,7 +64,11 @@ link reports `UP` after it. Four datagrams, two round trips:
 
 ```cpp
 link.dial();                                  // or the first send, which fails and dials
-while (!link.link_up()) wait_until(link.sweep(app_now(), 0)); // the app's clock and wait
+while (!link.link_up()) {
+    const std::uint64_t now = app_now();               // the app's clock
+    const std::uint64_t due = link.sweep(now, 0);      // 0: no deadline armed
+    wait_until(due != 0 ? due : now + window);         // the app's wait, capped at one window
+}
 link.send(request);                           // the confirmation
 // ... the reply arrives on the receiver: the acknowledgement; link.state() == UP
 ```
@@ -75,7 +79,10 @@ deadline `now` has passed and returns the next one, 0 when none is armed. Noise 
 `deadline`, since its windows are its own configured spans: the initiator's retry (the stored first message, or an empty
 confirmation while unacknowledged, the interval doubling to `retry_cap`) and attempt deadlines,
 and the responder's pending expiry. A deadline of 0 is never due, and deadlines count from the
-last `now` the link was given, so an application sweeps once before its first demand.
+last `now` the link was given, so an application sweeps once before its first demand. A
+return of 0 means nothing is armed *now*: a demand, or a peer that starts owing bytes after the
+call, can arm something sooner, so an application caps its sleep at about one deadline window
+(or wakes on its own events) rather than sleeping forever.
 
 **Memory.** Everything the link holds about its sessions (the PSK state, the handshake cipher,
 the two session slots, the handshake slot and its stored messages) is one block from the

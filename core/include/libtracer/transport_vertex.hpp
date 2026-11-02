@@ -695,9 +695,12 @@ class transport_vertex_t {
      * exactly once; one created or removed during it may or may not be.
      *
      * The application calls this from its own clock and sleeps until the time it answers, with
-     * no idle wakeup; libtracer reads no clock. A link staged with @ref provide_link, or wired by
-     * hand (attached only to the router), is not reached here: the application owns it and calls
-     * its @ref transport_t::sweep directly.
+     * no idle wakeup; libtracer reads no clock. The answer reflects what is owed at the call: 0
+     * means nothing is due now, not never, since a peer that starts owing bytes afterwards (a
+     * routed forward, a new peer) can be due within one window. An application that wants
+     * frozen peers caught caps its sleep at about one window (`now - deadline`). A link staged with
+     * @ref provide_link, or wired by hand (attached only to the router), is not reached here: the
+     * application owns it and calls its @ref transport_t::sweep directly.
      *
      * Calls must not overlap each other on one node.
      * @param now      The application's clock, now, in whatever monotonic unit it picks.
