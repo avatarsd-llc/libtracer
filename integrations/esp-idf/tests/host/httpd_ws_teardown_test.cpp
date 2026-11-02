@@ -373,8 +373,8 @@ void test_teardown_inside_handler() {
     const std::size_t before = fake_httpd::instance().free_ctx_calls();
     teardown_now = true;
     task.run_on_task([] {
-        // Fragmented, so the completed message is delivered out of the slot's reassembly
-        // buffer: the destructor frees that slot mid-delivery, and anything the RX path
+        // Fragmented, so the completed message is delivered out of the slot's fragment
+        // assembler: the destructor frees that slot mid-delivery, and anything the RX path
         // wrote back into it afterwards would be a use-after-free.
         (void)deliver(600, kBody, false, HTTPD_WS_TYPE_BINARY);
         (void)deliver(600, kBody, true, HTTPD_WS_TYPE_CONTINUE);

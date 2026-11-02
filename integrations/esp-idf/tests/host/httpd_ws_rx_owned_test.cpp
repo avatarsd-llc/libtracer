@@ -34,8 +34,9 @@
  *   4. an exhausted pool is a NAMED DROP — `rx_dropped_pool`, and `dropped_rx` through the
  *      generic `transport_drop_stats_t` view — with no heap fallback, and the SESSION SURVIVES
  *      it: the stream stays framed and the next frame is served;
- *   5. a FRAGMENTED message reaches the same owning sink. Without this, turning the mode on
- *      would silently starve a rope-only sink of every message a browser split in two.
+ *   5. a FRAGMENTED message reaches the same owning sink, chained from the segments its
+ *      fragments were received into with zero copies (#2483). Without this, turning the mode
+ *      on would silently starve a rope-only sink of every message a browser split in two.
  */
 
 #include <atomic>
@@ -392,9 +393,9 @@ void test_an_exhausted_pool_drops_and_counts() {
  *
  * With `delivers_ropes()` true the router installs a ROPE sink and no span sink, and the
  * borrowed delivery path reaches neither — so a reassembled message handed up borrowed would
- * vanish without a trace. The fragmented arm therefore pays one copy into a pool segment and
- * delivers owning, which this case measures by its OUTCOME: the whole message, in one rope,
- * at the same sink the unfragmented frames arrive at.
+ * vanish without a trace. Each fragment is received straight into a pool segment and the
+ * assembler chains them (#2483), so the message arrives owning with ZERO copies: one rope of
+ * two links, the two segments the fragments were received into, at the same sink.
  */
 void test_a_fragmented_message_arrives_owning() {
     std::printf("a two-fragment message on an owning link:\n");
@@ -415,6 +416,8 @@ void test_a_fragmented_message_arrives_owning() {
         std::vector<std::byte> want = head;
         want.insert(want.end(), tail.begin(), tail.end());
         check(bytes_of(sink.kept.front()) == want, "whole, in order, and keepable");
+        check_eq(sink.kept.front().link_count(), 2,
+                 "chained from the two received segments, never copied (#2483)");
     }
     check_eq(link->stats().rx_dropped_pool, 0, "and nothing was refused");
 

@@ -18,6 +18,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   of an oversized message instead of being swallowed by it. A TEXT frame is ignored, as core
   and `httpd_ws_link_t` ignore it, instead of being delivered as data. No new buffer: the
   fixed receive buffer stays the bound.
+
 ### Changed (breaking)
 
 - **`httpd_ws_link_t::close_frozen_peers(now, deadline)` is now `sweep(now, deadline)`**, the
@@ -27,6 +28,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   TX, or an auth stamp still inside the window, is next due (0 = none) instead of a count; the
   closes are counted in `stats_t::peers_frozen` and `stats_t::auth_expired`. A link created
   through the node's transport vertex is reached by `transport_vertex_t::sweep`.
+
+### Changed
+
+- **`httpd_ws_link_t` reassembles with core's `ws_assembler_t`
+  ([#2483](https://github.com/avatarsd-llc/libtracer/issues/2483)).** Each fragment is received
+  straight into a segment (from `memory.rx` on an owning link, from `memory.state` on a
+  borrowed one) and chained, so a fragmented message on an owning link reaches the rope sink
+  with no copy (it used to take two). A borrowed link, and a fragmented credential, copy the
+  completed message once, as before. Two behaviours change with it:
+  - fragments whose charged cost passes the 32 KiB cap now close the session, as one over-cap
+    frame does and as core does, counted on `rx_dropped_oversize` (they used to drop the
+    message and keep the session);
+  - each fragment is charged its real cost, `ws_assembler_t::kFragmentCost` (about 60 B on
+    esp32c6), not 2 B, so a message cut into a few hundred fragments is refused.
+  The private copy buffer, the duplicate WS header encoder and the copy-into-pool step are
+  deleted.
 
 ## [0.22.0] — 2026-11-02
 

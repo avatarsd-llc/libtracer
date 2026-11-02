@@ -13,8 +13,8 @@
  * (egress), refused at the moment a case reaches the growth site under test:
  *   1. the session table — a new peer is refused like one past `max_peers`, counted on
  *      `peers_refused`, and the peers already admitted keep being served;
- *   2. the reassembly buffer — the fragmented message is dropped and charged to its
- *      session, which stays open;
+ *   2. a fragment's segment, on a borrowed link drawn from `memory.state` (#2483) — the
+ *      fragmented message is dropped and charged to its session, which stays open;
  *   3. a receive buffer past the RX scratch — the frame is dropped as `rx_dropped_alloc`;
  *   4. the peer resolution — `peer_link` answers "no such peer" instead of a handle;
  *   5. a TX payload past the inline capacity — the frame is an enqueue drop.
@@ -22,10 +22,10 @@
  * never a latched failure. A sixth case checks the stores balance: everything the link drew
  * from them is returned by its destructor.
  *
- * Three cases pin the reassembly buffer's growth, counted at the same store: a message cut
- * into 1-byte fragments doubles its buffer rather than regrowing per fragment, the doubling
- * stops at the 32 KiB cap, and each fragment is charged a frame header against that cap, so
- * a run of empty fragments is refused like an oversized message.
+ * Two cases pin the fragment path (#2483): each fragment is charged its real cost
+ * (`ws_assembler_t::kFragmentCost`) against the 32 KiB cap, so a run of empty fragments
+ * closes the session like one oversized frame; and a borrowed link's message arrives whole
+ * with every fragment returned to `memory.state`.
  */
 
 #include <cstddef>
@@ -38,6 +38,7 @@
 #include "gated_source.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
+#include "libtracer/ws_assembler.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -122,7 +123,7 @@ void test_session_table_refusal_sheds_the_new_peer() {
 }
 
 void test_reassembly_refusal_drops_the_message() {
-    std::printf("#1880 a refused reassembly draw drops the message, keeps the session:\n");
+    std::printf("#1880 a refused fragment draw drops the message, keeps the session:\n");
     gated_source_t state;
     auto link = make_link(&state, nullptr);
     check(claim(810) == ESP_OK, "the peer is admitted");
@@ -153,73 +154,52 @@ struct last_message_t {
     }
 };
 
-void test_tiny_fragments_regrow_geometrically() {
-    std::printf("a message cut into 1-byte fragments regrows its buffer O(log n) times:\n");
-    gated_source_t state;
-    auto link = make_link(&state, nullptr);
-    check(claim(860) == ESP_OK, "the peer is admitted");
-    last_message_t sink;
-    link->set_peer_receiver(sink);
-
-    constexpr int kFragments = 1000;
-    std::vector<std::byte> want;
-    const std::size_t draws_before = state.served;
-    for (int i = 0; i < kFragments; ++i) {
-        const std::byte b[] = {static_cast<std::byte>(i)};
-        want.push_back(b[0]);
-        (void)fake_httpd::instance().deliver_frame(
-            860, b, /*final=*/i == kFragments - 1,
-            i == 0 ? HTTPD_WS_TYPE_BINARY : HTTPD_WS_TYPE_CONTINUE);
-    }
-    const std::size_t draws = state.served - draws_before;
-    check(sink.calls == 1 && sink.bytes == want, "the message arrives whole and in order");
-    std::printf("    %zu draws for %d fragments\n", draws, kFragments);
-    check(draws <= 8, "the buffer doubled from 8 bytes: 8 draws for 1000 bytes");
-    reset(link);
-}
-
-void test_reassembly_block_stays_under_the_cap() {
-    std::printf("the doubling stops at the reassembly cap:\n");
-    gated_source_t state;
-    auto link = make_link(&state, nullptr);
-    check(claim(870) == ESP_OK, "the peer is admitted");
-    last_message_t sink;
-    link->set_peer_receiver(sink);
-
-    const std::vector<std::byte> head(20000, std::byte{0x5A});
-    const std::byte tail[] = {std::byte{1}, std::byte{2}};
-    (void)fake_httpd::instance().deliver_frame(870, head, /*final=*/false);
-    (void)fake_httpd::instance().deliver_frame(870, tail, /*final=*/true, HTTPD_WS_TYPE_CONTINUE);
-    check(sink.calls == 1 && sink.bytes.size() == head.size() + 2, "the message arrives");
-    check(state.largest <= 32768, "no block past the 32 KiB cap was drawn for it");
-    reset(link);
-}
-
 void test_fragments_are_charged_to_the_cap() {
-    std::printf("each fragment is charged a frame header against the reassembly cap:\n");
+    std::printf("#2483 each fragment is charged its real cost; past the cap the peer is closed:\n");
     gated_source_t state;
     auto link = make_link(&state, nullptr);
     check(claim(880) == ESP_OK, "the peer is admitted");
     last_message_t sink;
     link->set_peer_receiver(sink);
-    const std::uint32_t drops_before = session_rx_drops(*link);
+    const auto before = link->stats();
 
-    // 20000 empty fragments carry no bytes but 40000 bytes of headers, past the 32 KiB cap.
+    // Empty fragments carry no bytes, but each holds a segment and a chain slot: charged
+    // ws_assembler_t::kFragmentCost, a few hundred of them pass the 32 KiB cap.
     const std::byte first[] = {std::byte{0x01}};
-    (void)fake_httpd::instance().deliver_frame(880, first, /*final=*/false);
-    for (int i = 0; i < 20000; ++i)
-        (void)fake_httpd::instance().deliver_frame(880, {}, /*final=*/false,
-                                                   HTTPD_WS_TYPE_CONTINUE);
-    (void)fake_httpd::instance().deliver_frame(880, first, /*final=*/true, HTTPD_WS_TYPE_CONTINUE);
-    check(sink.calls == 0, "the message is refused at the charged cap, not delivered");
-    check(session_rx_drops(*link) == drops_before + 1, "the drop is charged to the session");
-    check(open_peers(*link) == 1, "and the session stays open");
+    esp_err_t err = fake_httpd::instance().deliver_frame(880, first, /*final=*/false);
+    int sent = 0;
+    while (err == ESP_OK && sent < 100000) {
+        err =
+            fake_httpd::instance().deliver_frame(880, {}, /*final=*/false, HTTPD_WS_TYPE_CONTINUE);
+        ++sent;
+    }
+    const int want = static_cast<int>(32767 / tr::net::ws_assembler_t::kFragmentCost);
+    check(err == ESP_FAIL, "fragments past the charged cap close the session, as core does");
+    check(sent == want, "at exactly the fragment the charge passes the cap");
+    check(sink.calls == 0, "and the message is not delivered");
+    check(link->stats().rx_dropped_oversize == before.rx_dropped_oversize + 1,
+          "counted where one over-cap frame is");
+    reset(link);
+}
 
-    check(fake_httpd::instance().deliver_frame(880, kBody, /*final=*/false) == ESP_OK &&
-              fake_httpd::instance().deliver_frame(880, kBody, /*final=*/true,
-                                                   HTTPD_WS_TYPE_CONTINUE) == ESP_OK,
-          "the next fragmented message is served");
-    check(sink.calls == 1 && sink.bytes.size() == 2 * sizeof(kBody), "and delivered whole");
+/** @brief Two fragments complete a message on a borrowed link, whole and in order. */
+void test_a_fragmented_message_arrives_borrowed() {
+    std::printf("#2483 a borrowed link receives fragments into memory.state and delivers:\n");
+    gated_source_t state;
+    auto link = make_link(&state, nullptr);
+    check(claim(890) == ESP_OK, "the peer is admitted");
+    last_message_t sink;
+    link->set_peer_receiver(sink);
+    const std::byte head[] = {std::byte{1}, std::byte{2}, std::byte{3}};
+    const std::byte tail[] = {std::byte{4}, std::byte{5}};
+    const std::ptrdiff_t live_before = state.live.load();
+    (void)fake_httpd::instance().deliver_frame(890, head, /*final=*/false);
+    check(state.live.load() > live_before, "the fragment is held in memory.state");
+    (void)fake_httpd::instance().deliver_frame(890, tail, /*final=*/true, HTTPD_WS_TYPE_CONTINUE);
+    const std::vector<std::byte> want = {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4},
+                                         std::byte{5}};
+    check(sink.calls == 1 && sink.bytes == want, "the message arrives whole and in order");
+    check(state.live.load() == live_before, "and every fragment went back to memory.state");
     reset(link);
 }
 
@@ -298,7 +278,7 @@ void test_the_stores_balance_at_teardown() {
         check(link->ok(), "an owning link came up on the fake");
         check(state.live > 0 && io.live > 0, "it drew its state and its TX pool from them");
         // Grow every connection-state site once: a session, a resolution handle and a
-        // reassembly buffer left mid-message.
+        // fragment chain left mid-message.
         check(claim(850) == ESP_OK, "a peer is admitted");
         check(link->peer_link("p0~1") != nullptr, "and resolved");
         check(fake_httpd::instance().deliver_frame(850, kBody, /*final=*/false) == ESP_OK,
@@ -316,9 +296,8 @@ int main() {
     std::printf("httpd_ws_link allocation-seam soft-fail host suite (#1880):\n");
     test_session_table_refusal_sheds_the_new_peer();
     test_reassembly_refusal_drops_the_message();
-    test_tiny_fragments_regrow_geometrically();
-    test_reassembly_block_stays_under_the_cap();
     test_fragments_are_charged_to_the_cap();
+    test_a_fragmented_message_arrives_borrowed();
     test_receive_buffer_refusal_is_rx_dropped_alloc();
     test_resolution_refusal_is_no_such_peer();
     test_tx_payload_refusal_is_an_enqueue_drop();

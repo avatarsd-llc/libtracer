@@ -272,6 +272,12 @@ target_link_libraries(ws_test PRIVATE libtracer)
 libtracer_test_warnings(ws_test)
 add_test(NAME ws COMMAND ws_test)
 
+# #2483 — ws_assembler_t, the one RFC 6455 reassembly (header-only), pinned by one table.
+add_executable(ws_assembler_test ws_assembler_test.cpp)
+target_link_libraries(ws_assembler_test PRIVATE libtracer)
+libtracer_test_warnings(ws_assembler_test)
+add_test(NAME ws_assembler COMMAND ws_assembler_test)
+
 # #55 — transport_can pure framing layer (29-bit ID codec, can_framing,
 # can_reassembly, the CAN transport's own advertise codec; no SocketCAN). Links libtracer for heap_alloc.
 add_executable(can_frames_test can_frames_test.cpp)

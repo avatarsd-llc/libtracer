@@ -120,8 +120,8 @@ The `std::optional` return exists to separate two outcomes that a bare `view_t` 
 
 The RFC 6455 fragment assembler needs no such copy any more: frame ingress receives each
 fragment straight into its own segment, drawn from the transport's injected backend, and the
-assembler chains those owning links (`ws_assembler_t::on_piece`,
-`core/src/transport_ws.cpp:ws_assembler_t::on_piece`), so the chaining is pointer-linking and the
+assembler, one module shared by core's WS links and the ESP-IDF httpd link, chains those owning links (`ws_assembler_t::on_piece`,
+`core/include/libtracer/ws_assembler.hpp:ws_assembler_t::on_piece`), so the chaining is pointer-linking and the
 receive is the only copy.
 
 ## Consequences
@@ -154,7 +154,7 @@ value is one segment, and appears the moment a real transport is attached: every
 transport whose `transport_t::delivers_ropes()` returns true
 (`core/include/libtracer/transport.hpp:transport_t::delivers_ropes`; TCP, UDP, WS, QUIC, WebTransport and CAN
 all override it) can hand up a chain. A fragmented WebSocket message chains one link per fragment
-(`ws_assembler_t::on_piece`, `core/src/transport_ws.cpp:ws_assembler_t::on_piece`). A consumer that cannot
+(`ws_assembler_t::on_piece`, `core/include/libtracer/ws_assembler.hpp:ws_assembler_t::on_piece`). A consumer that cannot
 promise contiguity calls `materialize()` (`rope.hpp:rope_t::materialize`) instead — zero copy when the
 rope happens to be single-link, one `flatten` copy otherwise. `only()` is the right call
 only where the surrounding code has already established that the rope is one link.

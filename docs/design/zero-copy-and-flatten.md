@@ -90,7 +90,7 @@ identifiers for the rest of this page.
 | ⑤ | `own_wire` mutation ownership — `sub.flatten(backend())` (`core/src/op_resolve_view.cpp:view_node::own_wire`) | no — a single link is still COPIED, through the same backend (`core/src/op_resolve_view.cpp:view_node::own_wire`, #793) | yes — flattens the multi-link subrope | Structural for *mutated* values | No — this step *is* the ownership copy; it still owns |
 | ⑥ | Per-node parse contiguity — `ensure_cache` → `wire().materialize(backend())` (`core/src/op_resolve_view.cpp:wire().materialize(backend())`) | no — a single-link node adopts | only per **straddling** node | Fallback, span-node-shaped | Yes — rope-native node accessors remove it |
 | ⑦ | `deliver_rope` span fallback (`core/include/libtracer/receiver_slot.hpp:receiver_slot_t::deliver_rope`) | no | yes — only when no rope sink is installed; a refused materialize now DROPS the frame rather than handing the sink an empty span (#917) | Fallback — the cost of a span-only sink | Yes — installing the rope sink removes it; see §4.1 |
-| ⑧ | WS RX reassembly — `asm_buf_t` regrow-and-memcpy (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`) | no — unfragmented delivers borrowed (scratch-backed, no per-frame alloc for fitting frames), or OWNING out of an injected bounded pool where an integrator named one (#1565, rank 2 below, unfragmented only) | yes — O(n²) across fragments; the owning mode adds one copy into a pool segment at the end of a fragmented message so a rope-only sink is not starved | Fallback | Enables ⑦'s removal; the copy itself is a pool-recv question, not a cursor one |
+| ⑧ | WS RX reassembly — RETIRED by #2483: each fragment is received into a segment and chained by the shared `ws_assembler_t` (`core/include/libtracer/ws_assembler.hpp`) | no — unfragmented delivers borrowed (scratch-backed, no per-frame alloc for fitting frames), or OWNING out of an injected bounded pool where an integrator named one (#1565, rank 2 below) | no copy on an owning link (the fragments are chained); a borrowed link, and a fragmented credential, copy the completed message once | — | Closed |
 | ⑨ | WS TX gather — memcpy into a pooled tx work slot in `queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`; an exhausted pool drops and counts, #949). Since #1566 an integrator may declare a second BOUNDED size class (`tx_large_bytes` × `tx_large_slots`), which takes the band above `tx_inline_bytes` and leaves only the exceptional tail past it, drawn from the link's `memory.io` store since #1880; exhausting the class is a named drop, never a heap fallback | copy per frame per peer; alloc only past the declared classes | yes | Structural within the `esp_http_server` seam | **No** — TX-side; the cursor is irrelevant |
 | ⑫ | Reply-route synthesis — `tlv_sliced` (`core/src/fwd_reply.hpp:emit_cursor_t::tlv_sliced`, called at `core/src/fwd_reply.cpp:assemble_reply`) | yes | yes | Bounded frame synthesis: the route wires are rewritten | No — these are emitted bytes, not a copy of payload |
 
@@ -332,10 +332,10 @@ flatten questions:
   payload in a bounded rx pool, adopting it and delivering owning — the TCP/UDP shape — would, by
   feeding the rope tier an owned segment, let the branch and field decode collapse to refcount
   bumps once the sink is rope-native.
-- **WS reassembly (⑧)** regrows exact-size per fragment
-  (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:asm_buf_t::append`), which is O(n²) in total bytes
-  copied. Chaining each fragment as an owning rope link makes it O(n) owning copies — the CAN model,
-  which is what the host `transport_ws.cpp` does.
+- **WS reassembly (⑧)** used to regrow a copy buffer per fragment, O(n²) in total bytes copied.
+  Since #2483 the httpd link receives each fragment straight into a segment and chains it with
+  the shared assembler (`core/include/libtracer/ws_assembler.hpp:ws_assembler_t::on_piece`), the CAN
+  model and what core's WS links do: no copy on an owning link.
 
 **The DEVICE-link constraint never conflicts with pool-recv.** Receive targets are always host
 memory, so a host pool slot is a legal recv-and-adopt target; only a CPU-side *flatten* of a DEVICE
@@ -374,7 +374,7 @@ the gate.
 | **2** | WS receive into a pooled segment, deliver owning — **LANDED for the ESP `esp_http_server` link, opt-in** (#1565: `httpd_ws_link_t`'s `rx_backend`, unfragmented frames; borrowed stays the default) | ⑧'s per-frame `new[]`; the borrowed-then-store copy | One allocation per WS frame per session removed, and the rope tier gets an owned segment | yes — every WS frame | Changes the WS delivery contract, which is why it is opt-in and per link rather than a flip; the pool is the INTEGRATOR's injection, not a library buffer |
 | **3** | Rope-native branch and field node type | ②③, the multi-link branch/field flatten | Nothing on single-link, which is a refcount bump; one flatten becomes a refcount bump on fragmented POINT writes | **no — multi-link only** | Ratification-gated sink type (ADR-0041 §2); needs rank 1 to matter |
 | **4** | Rope-native walk accessors plus a scatter-gather reply head | ⑥, the per-straddling-node `ensure_cache` | On straddling route TLVs, fuses flatten and memcpy into one gather | **no — multi-link only** | Converts the shared span-based `resolve_node` concept — non-local |
-| **5** | Rope-chaining WS reassembler (the host `ws_assembler_t` shape) | ⑧'s O(n²) regrow | O(n²) → O(n) owning copies; no 2×n transient heap peak. Not zero-copy, and fragmentation may worsen (k small segments). | **no — fragmented only** | Needs rank 2 or the rope sink wired, or ⑦ re-materializes |
+| **5** | Rope-chaining WS reassembler — **LANDED** (#2483: the httpd link shares core's `ws_assembler_t`) | ⑧'s O(n²) regrow | O(n²) → zero copies on an owning link, one on a borrowed one; no 2×n transient heap peak. Fragmentation may worsen (k small segments), and each fragment is charged its segment and chain slot against the cap. | **no — fragmented only** | — |
 | — | `LWIP_NETCONN` pbuf-as-rope-link | ①, the ingress ownership copy | Collapses even the structural copy | yes | Non-portable (no pbuf on a Linux host); incompatible with `esp_http_server` framing |
 | — | Raw `sendmsg` WS TX, leaving `esp_http_server` | ⑨, the TX gather | One full-payload allocation and memcpy per frame per peer | yes | Abandons the threadless HTTP-server seam; breaks the `send_fn` indirection; lwIP still copies at the socket |
 

@@ -37,6 +37,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   returns the next armed deadline. The session and the liveness `poll` reported are
   `link_up()` and `state()`.
 
+### Added
+
+- **`ws_assembler_t` is a public header, `libtracer/ws_assembler.hpp` (#2483).** The RFC 6455
+  fragmented-message assembler that core's WS server and dial-out client use moves out of
+  `transport_ws.cpp` unchanged, so every WebSocket link shares one reassembly: each fragment is
+  an owning rope link, chained without a copy, and charged its bytes plus `kFragmentCost` (its
+  segment and chain slot) against the receive cap. Its outcome types are nested
+  (`ws_assembler_t::status_t`, `ws_assembler_t::result_t`). The ESP-IDF httpd link is its
+  first user outside core.
+
 ## [0.22.0] — 2026-11-02
 
 ### Added

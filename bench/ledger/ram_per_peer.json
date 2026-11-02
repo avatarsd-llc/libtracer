@@ -170,7 +170,7 @@
       "value": 288,
       "goal": 85,
       "moved_by": "#2137 (seeded from the peer-cost study)",
-      "basis": "sizeof(httpd_ws_link_t::session_t) on riscv32: subject[128] + endpoint_str[52] + name[23] (203 B of strings), link_counters_t, asm_buf. Goal from #2136 user story 27."
+      "basis": "sizeof(httpd_ws_link_t::session_t) on riscv32: subject[128] + endpoint_str[52] + name[23] (203 B of strings), link_counters_t, the fragment assembler (#2483). Goal from #2136 user story 27."
     },
     {
       "id": "client link task stack",
