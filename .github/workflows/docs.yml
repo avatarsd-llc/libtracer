@@ -42,7 +42,6 @@ permissions:
   contents: read
   pages: write
   id-token: write
-  pull-requests: write # post the libtracer-vs-Zenoh absolute comparison as a PR comment
 
 # Deploys serialize on one group; PR builds do NOT belong in it.
 #
@@ -337,21 +336,33 @@ jobs:
       # cpp-core (bench_codec), ts-core (node perf.mjs — runs directly under node 22,
       # no install/build needed; it imports src/*.mjs, not the dist build), and
       # rust-core (cargo --example perf, via the rust-toolchain step above).
+      #
+      # A PR preview builds the bench harnesses only (CI time audit, ruling 24, 2026-11-01).
+      # The core test tree feeds the live ctest report and the cross-core driver, and a
+      # preview runs neither (build-test runs every suite and is the gate; conformance.yml
+      # runs the driver), and the Zenoh vendor feeds only the comparison sweep, which a
+      # preview skips too. main, nightly and tags build all of it.
       - name: Build harnesses for the results page
         run: |
-          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
-          cmake --build core/build --parallel "$BUILD_JOBS"   # all test targets, for the live test report
-          bash bench/fetch_zenoh.sh || echo "zenoh fetch failed — comparison will be omitted"
+          if [ -z "$LIBTRACER_DOCS_PREVIEW" ]; then
+            cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+            cmake --build core/build --parallel "$BUILD_JOBS"   # all test targets, for the live test report
+            bash bench/fetch_zenoh.sh || echo "zenoh fetch failed — comparison will be omitted"
+          fi
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap bench_transports bench_forward_demux bench_chain_delivery --parallel "$BUILD_JOBS"
           # zenoh is optional: build it separately so a missing/failed vendor never breaks
           # the docs deploy (the comparison degrades to a note; libtracer numbers stand).
           cmake --build bench/build --target bench_zenoh bench_zenoh_net bench_zenoh_compose --parallel "$BUILD_JOBS" || echo "bench_zenoh unavailable — comparison omitted"
-      # Run the libtracer-vs-Zenoh sweep ONCE here; both the docs page and the PR comment
-      # consume this file (LIBTRACER_COMPARE_TSV) so the sweep isn't paid twice. It is
-      # the job's longest step: 11-22 minutes for three rounds before the endpoint rows'
-      # budget was scaled (bench_common.hpp's endpoint_budget), several minutes less after.
+      # Run the libtracer-vs-Zenoh sweep ONCE here; the docs page reads this file
+      # (LIBTRACER_COMPARE_TSV). It is the job's longest step: 11-22 minutes for three
+      # rounds before the endpoint rows' budget was scaled (bench_common.hpp's
+      # endpoint_budget), several minutes less after. Not on a pull request (CI time
+      # audit, ruling 24, 2026-11-01): there it ran one round labelled "not a measurement"
+      # and fed only a preview page and a PR comment. main, nightly and tags run it, and
+      # perf-local measures on bench-local every night.
       - name: Run the libtracer-vs-Zenoh comparison sweep
+        if: github.event_name != 'pull_request'
         run: |
           out="${RUNNER_TEMP}/compare.tsv"
           raw="${RUNNER_TEMP}/compare-rounds.tsv"
@@ -362,12 +373,7 @@ jobs:
           # the SAME loop the same number of times — reducing one arm over rounds while
           # the other gets one shot would be a thumb on the scale, not a measurement.
           : >"$raw"
-          # A pull request runs ONE round: its numbers feed only the sticky PR comment and
-          # the preview page, both labelled "1 round (PR preview), not a measurement".
-          # main, nightly and tags keep best-of-3, the published measurement.
-          rounds=3; [ "$GITHUB_EVENT_NAME" = pull_request ] && rounds=1
-          echo "LIBTRACER_COMPARE_ROUNDS=$rounds" >> "$GITHUB_ENV"
-          for r in $(seq "$rounds"); do
+          for r in 1 2 3; do
             { ./bench/build/bench_libtracer grid; ./bench/build/bench_zenoh grid; } >>"$raw" 2>/dev/null || true
           done
           python3 bench/best_of_rounds.py <"$raw" >"$out" || cp "$raw" "$out"
@@ -418,34 +424,6 @@ jobs:
           # what happened to the forward-demux section). Local previews still degrade.
           LIBTRACER_DOCS_STRICT: "1"
         run: python3 bench/gen_results_page.py
-      # Absolute-number comparison table, upserted as a single sticky PR comment (option
-      # "publish result to pr"). Absolute values only — the full interactive charts land
-      # on the Performance page after merge.
-      - name: Post the absolute comparison on the PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const { execSync } = require('child_process');
-            const tsv = process.env.RUNNER_TEMP + '/compare.tsv';
-            let table;
-            try {
-              table = execSync('python3 bench/render_compare.py --md', { input: fs.readFileSync(tsv), encoding: 'utf8' });
-            } catch (e) { core.warning('comparison sweep produced no data; skipping PR comment'); return; }
-            const marker = '<!-- ltz-compare -->';
-            const body = `${marker}\n### 📊 libtracer vs Zenoh — absolute (this run)\n\n`
-              + (process.env.LIBTRACER_COMPARE_ROUNDS === '1' ? `**1 round (PR preview), not a measurement:** do not quote these numbers; main publishes best of 3.\n\n` : '')
-              + `Measured on this CI runner in the same pass. libtracer built from source at \`-O3\`; Zenoh is the upstream zenoh-c 1.9.0 prebuilt release. Absolute values, no ratios — `
-              + `shared-runner variance is real, read trends not the third digit. Interactive charts land on the `
-              + `[Performance page](https://libtracer.avatarsd.com/docs/performance.html) after merge.\n\n`
-              + table;
-            const { owner, repo } = context.repo;
-            const issue_number = context.issue.number;
-            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number });
-            const existing = comments.find(c => c.body.includes(marker));
-            if (existing) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
-            else await github.rest.issues.createComment({ owner, repo, issue_number, body });
       # -n -W --keep-going: nitpicky, warnings are errors, and report them all rather
       # than stopping at the first. This is the link-integrity gate — a broken
       # cross-reference, a dead toctree entry or an @ref that no page publishes fails

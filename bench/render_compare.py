@@ -493,8 +493,8 @@ def raw_table(rows: list[dict]) -> list[dict]:
     and which the generated one-line reading (endpoints only) does not name — so an
     in-page duplicate of the same numbers is weight. That hover is a precondition for
     dropping the table, not a happy accident: without it a five-point sweep would publish
-    three numbers and hide two. `docs.yml` shells out to `--md` for the sticky PR comment,
-    which has no JavaScript and therefore does still need the table.
+    three numbers and hide two. `--md` emits the table for a PR comment, which has no
+    JavaScript and therefore does still need it.
     """
     fan = {"mode": "inproc", "fixed": {"size": REF_SIZE, "ep": 1}, "axis": "fan"}
     pay = {"mode": "inproc", "fixed": {"fan": 1, "ep": 1}, "axis": "size"}
