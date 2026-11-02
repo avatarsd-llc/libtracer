@@ -969,7 +969,7 @@ void esp_ws_client_link_t::recv_loop() {
     // mistaken for a message of its own. This is what makes the drop-don't-truncate
     // contract actually hold (#901).
     bool discarding = false;
-    // Set while a MESSAGE is open — i.e. a BINARY/TEXT frame arrived without FIN and its
+    // Set while a MESSAGE is open — i.e. a BINARY frame arrived without FIN and its
     // CONT frames are still expected. This cannot be inferred from `off`: a message whose
     // first fragment carries a zero-length payload (legal per RFC 6455 §5.4, and what a
     // peer emits when it starts a message before its first chunk is ready) leaves `off`
@@ -1157,9 +1157,12 @@ void esp_ws_client_link_t::recv_loop() {
         // because `off` was likewise left standing.
         if (n == 0) continue;
         const bool fin = esp_transport_ws_get_fin_flag(ws_);
-        if (op != WS_TRANSPORT_OPCODES_BINARY && op != WS_TRANSPORT_OPCODES_TEXT &&
-            op != WS_TRANSPORT_OPCODES_CONT) {
-            continue;  // a leaked control/NONE opcode: not a data frame — keep `off`
+        // Only BINARY and CONT carry a TLV. A TEXT frame is ignored the way core and the httpd
+        // sibling ignore it (#2478): its bytes landed at `off` and are overwritten by the next
+        // read, the assembly around it is left as it was, and `frame_left` stays 0 because a
+        // TEXT read that does not finish its frame is followed by more TEXT reads of it.
+        if (op != WS_TRANSPORT_OPCODES_BINARY && op != WS_TRANSPORT_OPCODES_CONT) {
+            continue;  // TEXT, PONG or a leaked control/NONE opcode: not data — keep `off`
         }
 
         // Frame bookkeeping. A read with nothing outstanding starts a new frame, so its
@@ -1167,6 +1170,17 @@ void esp_ws_client_link_t::recv_loop() {
         // absent one) falls back to "this read was the whole frame" — the historical
         // assumption, kept as the conservative answer.
         const std::size_t consumed = static_cast<std::size_t>(n);
+        if (op == WS_TRANSPORT_OPCODES_BINARY && frame_left == 0) {
+            // A NEW BINARY frame starts a new message, whatever was open (#2478): RFC 6455
+            // forbids it mid-assembly, and core and the httpd sibling drop the stale part
+            // and keep the new message. Its bytes were read at `off`; move them to the front
+            // of the same buffer. This also ends a discard, so the new message is not
+            // swallowed as the tail of an oversized one.
+            std::memmove(rx_buf_.data(), rx_buf_.data() + off, consumed);
+            off = 0;
+            discarding = false;
+            assembling = true;
+        }
         if (frame_left == 0) {
             const int plen = esp_transport_ws_get_read_payload_len(ws_);
             frame_left = plen > n ? static_cast<std::size_t>(plen) : consumed;
@@ -1180,9 +1194,6 @@ void esp_ws_client_link_t::recv_loop() {
             // The discard ends with that message, not with this frame.
             if (message_done) discarding = false;
             continue;
-        }
-        if (op != WS_TRANSPORT_OPCODES_CONT) {
-            assembling = !message_done;  // a data opcode opens a message unless it ends it
         }
         if (op == WS_TRANSPORT_OPCODES_CONT && !assembling) {
             // A CONTINUATION with no assembly open — the peer's stream is out of step and
