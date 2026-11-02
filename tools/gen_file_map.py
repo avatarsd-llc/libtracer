@@ -70,7 +70,7 @@ PAGES = {
         "transport_quic.hpp",
         "transport_webtransport.hpp", "posix_endpoint.hpp", "iov_table.hpp", "egress.hpp",
         "receiver_slot.hpp", "self_heal_link.hpp", "builtin_transports.hpp",
-        "transport_factory.hpp",
+        "transport_factory.hpp", "static_thread.hpp",
     ],
     "connection-config.md": ["conn_spec.hpp", "config_reader.hpp", "tls_profile.hpp"],
     "can.md": [

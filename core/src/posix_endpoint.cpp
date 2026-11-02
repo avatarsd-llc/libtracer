@@ -205,35 +205,16 @@ write_fault_stats_t write_fault_stats() noexcept {
 
 posix_endpoint_t::~posix_endpoint_t() { stop_and_join(); }
 
-void* posix_endpoint_t::thread_entry(void* self) {
-    static_cast<posix_endpoint_t*>(self)->body_();
-    return nullptr;
-}
+void posix_endpoint_t::thread_entry(void* self) { static_cast<posix_endpoint_t*>(self)->body_(); }
 
-void posix_endpoint_t::start(thread_body_t body, std::size_t stack_size) {
+bool posix_endpoint_t::start(thread_body_t body, std::size_t stack_size, mem::block_source_t& src) {
     body_ = body;
-
-    pthread_attr_t attr;
-    ::pthread_attr_init(&attr);
-    if (stack_size != 0) {
-        // A hint below the platform floor makes setstacksize return EINVAL and
-        // leaves the attr's default stacksize in place — we fall back to the
-        // default stack rather than fail the spawn.
-        (void)::pthread_attr_setstacksize(&attr, stack_size);
-    }
-
-    // Error-code return, not a throw: see start()'s header contract (a std::thread
-    // spawn failure would std::abort under -fno-exceptions).
-    started_ = (::pthread_create(&thread_, &attr, &posix_endpoint_t::thread_entry, this) == 0);
-    ::pthread_attr_destroy(&attr);
+    return thread_.start(&posix_endpoint_t::thread_entry, this, stack_size, "tr_recv", src);
 }
 
 void posix_endpoint_t::stop_and_join() {
     stop_.store(true, std::memory_order_relaxed);
-    if (started_) {
-        ::pthread_join(thread_, nullptr);
-        started_ = false;
-    }
+    thread_.join();
 }
 
 void posix_endpoint_t::set_rcv_timeout(int fd) {
@@ -522,8 +503,7 @@ bool slot_server_t::bind_listen(std::uint16_t bind_port) {
     // accept_peer (the max_peers deployment cap), never a synthetic backlog.
     if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&local), sizeof(local)) < 0 ||
         ::listen(listen_fd_, SOMAXCONN) < 0) {
-        ::close(listen_fd_);
-        listen_fd_ = -1;
+        close_listen();
         return false;
     }
     sockaddr_in bound{};
@@ -531,6 +511,11 @@ bool slot_server_t::bind_listen(std::uint16_t bind_port) {
     if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
         bound_port_ = ntohs(bound.sin_port);
     return true;
+}
+
+void slot_server_t::close_listen() noexcept {
+    ::close(listen_fd_);
+    listen_fd_ = -1;
 }
 
 void slot_server_t::enumerate_peers(const peer_visitor_t& visit) const {

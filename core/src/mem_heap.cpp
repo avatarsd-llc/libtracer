@@ -48,6 +48,18 @@ static_assert(!kMcuArena || kArenaBytes >= graph::config_t::kSizeClasses[0],
               "kArenaBytes is 0 (no arena, the heap is the default root) or holds the smallest "
               "size class");
 
+/** @brief Whether this build has the static thread-stack arena (#2288). */
+constexpr bool kStackArena = !kSlabPool && kThreadStackArenaBytes != 0;
+
+/** @brief The stack pool's one size class. Every stack is larger, so each is an oversize
+ *         block, reused only by a request of the same rounded size: stacks of one kind of
+ *         thread recycle among themselves and the region is never split finer. */
+constexpr std::size_t kStackClasses[1] = {alignof(std::max_align_t)};
+
+/** @brief The thread-stack region (#2288), in `.bss` like the default root's. */
+alignas(
+    64) constinit std::array<std::byte, kStackArena ? kThreadStackArenaBytes : 0> g_stack_region{};
+
 }  // namespace
 
 namespace detail {
@@ -130,6 +142,37 @@ constinit detail::host_storage_t<kSlabPool> g_host{};
 
 /** @brief The MCU arena root, where the build has one (#1783). */
 constinit detail::mcu_storage_t<kMcuArena> g_mcu{};
+
+/** @brief The thread-stack pool over @ref g_stack_region (#2288): constant-initialized and
+ *         never destroyed, for the reason the roots are not. Empty where there is no region. */
+template <bool>
+struct stack_storage_t {
+    /** @brief Unreachable on this build. */
+    [[noreturn]] block_source_t& pool() noexcept { std::abort(); }
+};
+
+/** @brief The build with a thread-stack region. */
+template <>
+struct stack_storage_t<true> {
+    using pool_t = arena_pool_t<graph::guard_t, 1>;
+    arena_t<graph::guard_t> arena{std::span<std::byte>(g_stack_region)};
+    std::array<void*, 1> heads{};
+    union {
+        pool_t pool_; /**< @brief The pool. */
+    };
+    constexpr stack_storage_t() noexcept
+        : pool_("stack", std::span<const std::size_t, 1>(kStackClasses), std::span<void*, 1>(heads),
+                arena) {}
+    /** @brief Deliberately does not destroy the pool. */
+    ~stack_storage_t() {}
+    stack_storage_t(const stack_storage_t&) = delete;
+    stack_storage_t& operator=(const stack_storage_t&) = delete;
+    /** @brief The pool. */
+    block_source_t& pool() noexcept { return pool_; }
+};
+
+/** @brief The thread-stack pool, where the build has one. */
+constinit stack_storage_t<kStackArena> g_stack{};
 
 /** @brief Rows of the host size-class table. */
 constexpr std::size_t kClasses = host_pool_t::classes();
@@ -376,6 +419,16 @@ block_source_t& net_source() noexcept {
         return heap_source();
     } else {
         return g_mcu.root().net();
+    }
+}
+
+block_source_t& stack_source() noexcept {
+    if constexpr (kSlabPool) {
+        return g_host.root().net();
+    } else if constexpr (kStackArena) {
+        return g_stack.pool();
+    } else {
+        return default_root();
     }
 }
 
