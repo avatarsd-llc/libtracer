@@ -14,6 +14,49 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-11-02
+
+### Added
+
+- **`fwd_router_t::link_down(link_name, peer)`**: evicts one bus peer's subscriber edges by its
+  handle (#2237). Since #2103, `link_down(name)` reaches only a registered child's edges, and a
+  bus peer's left only through the bus's own peer-down seam. An announce-census CAN bus never
+  fires that seam. With this overload the application can name the mount and the peer's handle
+  (`{node id, transport_can::kAnnouncedPeerGeneration}` on CAN), and the router runs the same
+  departure the seam runs. It returns false, and evicts nothing, for an unknown mount, a flat
+  link or an invalid handle.
+- **`transport_can::peer_link_of`** resolves a peer handle by its node id, so a remote delivery
+  to a CAN peer no longer formats the peer's name and parses it back (#2237).
+- **The path object (RFC-0030 §5, #1943).** `tr::graph::path_object_t` (`path_object.hpp`) is
+  made by `graph_t::make_path` from a canonical string, or from a canonical `PATH` payload it
+  borrows without copying (v1 §3.1.2, read-only memory). It holds the canonical bytes, the local
+  pair they last resolved to (`element0()`), and an inline chain cache (`learn`, `chain`,
+  `clear_chain`) sized at compile time by the new `default_config_t::kPathChainBytes` (default
+  40). `graph_t::read`, `write` (each also with a `field_path_t`), `subscribe` (callback form),
+  `retire` and `resolve` take one. A door dereferences the pair and, when the target was retired,
+  resolves the canonical bytes again with the same answer. The object is one block drawn from
+  the graph's table source, and `make_path` answers `BACKPRESSURE` when the source refuses. The
+  `vertex_handle_t` doors are unchanged in this release step.
+
+- **`tr::net::session_slot_index(name)`** (`pair.hpp`) — the slot index a `p<slot>[~<gen>]`
+  session name spells, nullopt for any other name: the inverse of the one spelling both slot
+  servers write, which the router uses to find a slot's tenancy (#2234).
+
+- **`view::rope_t` draws its spilled link table from a block source, not the process heap
+  (#2284).** Past two links the chain lived in a `std::vector<view_t>`; it now lives in a block
+  from a `mem::block_source_t`: the one passed to the new `explicit rope_t(mem::block_source_t&)`,
+  else `mem::table_source()` (the static arena on an MCU build, the host table pool otherwise).
+  A receive path that builds a multi-link rope can pass the receiving link's own source, so the
+  receiver pays for the chain. `try_reserve` now refuses exactly on every profile: the block
+  comes from `try_alloc`, so there is no probe window for another task to take it (#850).
+  `append` and the copy constructor keep their old failure behaviour (`std::bad_alloc`, or
+  `std::abort()` without exceptions), and `sizeof(rope_t)` shrinks by one word on 64-bit
+  targets and is unchanged on 32-bit ones. A fragmented WebSocket message is delivered as a rope
+  whose chain is drawn from the link's `memory.rx` source; a refusal there sheds the message as
+  `dropped_rx`, as a refused fragment chain already did. On esp32c6 the no-heap census drops from
+  1834 to 1598 references and from 593 to 556 functions; the Cortex-M0 required-module flash
+  drops from 15,544 B to 15,220 B.
+
 ### Changed
 
 - **The MCU `libtracer.a` reaches no heap at all, and the link check is a hard zero gate
@@ -149,6 +192,32 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   longer delivered: a caller that needs it delivered awaits `up` on `/net/<module>/<name>`, then
   sends. `connect_timeout` is still handed to the kind's factory; no op waits on it.
 
+- **`ws_client_transport_t` keeps no send buffer, and masks each frame once (#2267).** Its
+  `tx_buf_` member, a masked-frame buffer reused across sends, kept its high water for the
+  link's life: about 16 KiB stayed drawn after one 16 KiB send. A send now masks its payload
+  once, into one frame drawn from the link's `memory.io` source, and returns that frame when it
+  is written; a write the socket holds keeps the same frame on the wire instead of masking a
+  second copy. `sizeof(ws_client_transport_t)` shrinks by 32 B on a 64-bit host. The trade is
+  one block drawn and returned per send. An exhausted source still drops the frame and counts
+  it. No signature changes.
+- **`webtransport_config_t::defer_rx` is removed; every `webtransport` DIAL link holds inbound
+  frames until `start_receiving()`
+  ([#2249](https://github.com/avatarsd-llc/libtracer/issues/2249)).** The default (`false`)
+  delivered from the constructor on, so a frame the server pushed the instant the session came
+  up could be decoded into an empty sink and dropped with no counter moving. The factory
+  already passed `true`. **Migration:** drop `.defer_rx = ...` from the config; a directly
+  constructed DIAL link installs its receivers and then calls `start_receiving()`. Sending
+  needs no arming. The LISTEN constructor is unchanged.
+
+- **A TCP or WS server's broadcast holds no lock across its writes (#2263).**
+  `slot_server_t::broadcast` walked the slot table under `peers_m_`, one write per peer, so at
+  N peers accept, teardown, name resolution, directed replies and every other broadcast waited
+  out N syscalls. The walk now follows a lock-free chain of slots
+  (`slot_server_t::session_base_t::next`, 8 B per slot); `peers_m_` guards only names and the
+  table's growth, and the poll thread rebuilds its poll set without it. A session leaving
+  mid-walk is refused by its closed egress; one admitted mid-walk may take the record. No
+  signature changes.
+
 ### Removed
 
 - **The RFC-0024 mint mechanism (#2245):** `graph::kFwdOpFlagMintRequest`,
@@ -187,31 +256,81 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   open the peer once, hand each send its `delivery_lane_t`, and write through the `direct` and
   `write` steps; a frame that meets a write in flight waits in its lane's ring instead of a slot.
 
-### Added
+### Fixed
 
-- **`fwd_router_t::link_down(link_name, peer)`**: evicts one bus peer's subscriber edges by its
-  handle (#2237). Since #2103, `link_down(name)` reaches only a registered child's edges, and a
-  bus peer's left only through the bus's own peer-down seam. An announce-census CAN bus never
-  fires that seam. With this overload the application can name the mount and the peer's handle
-  (`{node id, transport_can::kAnnouncedPeerGeneration}` on CAN), and the router runs the same
-  departure the seam runs. It returns false, and evicts nothing, for an unknown mount, a flat
-  link or an invalid handle.
-- **`transport_can::peer_link_of`** resolves a peer handle by its node id, so a remote delivery
-  to a CAN peer no longer formats the peer's name and parses it back (#2237).
-- **The path object (RFC-0030 §5, #1943).** `tr::graph::path_object_t` (`path_object.hpp`) is
-  made by `graph_t::make_path` from a canonical string, or from a canonical `PATH` payload it
-  borrows without copying (v1 §3.1.2, read-only memory). It holds the canonical bytes, the local
-  pair they last resolved to (`element0()`), and an inline chain cache (`learn`, `chain`,
-  `clear_chain`) sized at compile time by the new `default_config_t::kPathChainBytes` (default
-  40). `graph_t::read`, `write` (each also with a `field_path_t`), `subscribe` (callback form),
-  `retire` and `resolve` take one. A door dereferences the pair and, when the target was retired,
-  resolves the canonical bytes again with the same answer. The object is one block drawn from
-  the graph's table source, and `make_path` answers `BACKPRESSURE` when the source refuses. The
-  `vertex_handle_t` doors are unchanged in this release step.
+- **`fwd_router_t` drops a frame from a removed child (#2302).** After `remove_child`, a FWD
+  frame still delivered through the receiver `add_child` installed, or pushed through
+  `on_frame` under the removed name, was forwarded (by name with `src` grown by the whole
+  mount name as ONE segment, a route no reply resolves) or applied at the terminus. It is now
+  dropped at the ingress, uncounted, the way the reply side already treats a removed child. A
+  name the registry never held keeps the by-name fallback. New
+  `child_registry_t::tombstoned(name)` tells the two apart.
+- **A borrowed segment's control block comes from the default value source, not the heap**
+  (#2283). `view::borrow`, `borrow_const` and `borrow_device` drew the `segment_t` with
+  `new (std::nothrow)` and the borrowed backends returned it with `delete`, so every segment
+  release reached the heap through `mem::destroy_dispatch`. The block is now drawn from and
+  returned to `mem::value_source()`; a refused draw still yields a null handle. The two
+  borrowed backends are one class, `borrowed_backend_t`, whose address space is a member. On
+  ESP32-C6 the no-heap gate falls from 1765 references in 580 functions to 914 in 353.
+- **`udp_transport_t::dropped_tx` counts a datagram the socket refuses (#2279).** A `sendto` or
+  `sendmsg` that failed or sent short (a full socket buffer, `EMSGSIZE`, a shut socket) used
+  to lose the frame without counting it, on all three send paths (`send(span)`, `send(iov)`,
+  `send_to`). It is now counted in `dropped_tx`, and so in `drop_stats()`. It is not retried:
+  the UDP link carries no acks, and the next value supersedes a lost frame.
 
-- **`tr::net::session_slot_index(name)`** (`pair.hpp`) — the slot index a `p<slot>[~<gen>]`
-  session name spells, nullopt for any other name: the inverse of the one spelling both slot
-  servers write, which the router uses to find a slot's tenancy (#2234).
+- **WebSocket: the reassembly cap now counts each fragment's segment, not just its payload.**
+  A fragmented message is charged, per fragment, its payload plus the segment it was received
+  into and its chain slot, so `max_frame` (and the rx backend's capacity) bounds what the
+  message holds while it is assembled, however small its fragments. A fragmented message whose
+  payload sits just under the cap can now be refused as malformed; an unfragmented one is
+  judged as before. The fragment chain is drawn from the link's `memory.rx` source instead of
+  the process heap, and a refusal there sheds the message as `dropped_rx` and keeps the
+  connection. A span-only sink materializes a fragmented message from the same source.
+  `bus_slot_server_t::deliver_to_peer_rope` takes that source as a third argument.
+- **A self-healing link keeps each delivery's lane and value** (#2238). `self_heal_link_t` did
+  not override the retained send, `send(head, value, lane)`, so every delivery through it took
+  the base lowering: flattened into an iov and handed to the inner link's control lane. All
+  vertices then shared one 8-deep FIFO toward the peer (one vertex's flood shed another's
+  frames), a SAMPLE vertex queued a backlog instead of keeping only its newest frame, and a
+  waiting frame copied its payload. The engine now forwards the delivery to the inner link
+  unchanged, so it behaves as the link it wraps. The link seam suite gains a SAMPLE case and a
+  per-vertex STREAM case, run over the fake link and over a self-healing link that wraps it.
+  The wait for one dial attempt on a `DORMANT` link is unchanged.
+- **Each graph seam is installed on its own, and its installer clears it
+  ([#2239](https://github.com/avatarsd-llc/libtracer/issues/2239)).** `graph_t::set_hooks` and
+  `graph_t::hooks()` are removed. `graph_t::set_hook(&graph_hooks_t::<seam>, {fn, ctx})`
+  installs one seam and leaves every other one as it was (a null `fn` clears it);
+  `graph_t::hook(&graph_hooks_t::<seam>)` reads one back, and
+  `graph_t::clear_hook(&graph_hooks_t::<seam>, owner)` clears a seam only if `owner` is its
+  `ctx`. Before, `set_hooks` replaced every seam at once, so an application that installed
+  its subject seam after building a router (`g.set_hooks({.subject_lookup = …})`) unplugged
+  remote delivery without any report. `~fwd_router_t` now clears `remote_delivery`,
+  `wire_target`, `stats_sampler` and `link_name`, and `~transport_vertex_t` clears `link_hold`, each only
+  if it is still theirs: a write that reaches a remote edge after its router is destroyed finds
+  no sink, where before it called into freed memory. The constructor still takes the whole
+  `graph_hooks_t`. This partly reverses RFC-0028 §4.12 D12, which had folded the five
+  `configure_*` verbs into the one aggregate verb.
+- **`graph_t::set_policy` changes only the members the caller names (#2239).** Every
+  `vertex_policy_t` member is now a `std::optional`: an unset member keeps what the vertex
+  holds, where before it reset that property to its default. At registration an unset member
+  still takes the default, so `register_vertex` behaves as it did. `retention_t::N` named
+  without a `depth` keeps the current depth.
+- **The returning-form subject resolver is deleted; `subject_lookup` is the one ACL subject
+  seam (ADR-0083 Decision 11, #1781 step 3).** `subject_resolver_fn_t`, `subject_token_t` and
+  `graph_hooks_t::subject_resolver` are removed, with the adapter that stood in for them and the
+  rule that made `subject_lookup` win when both were installed. A gated operation no longer
+  allocates a `std::vector` for its subject. The three owning-`std` twins go with it:
+  `read_subscribers` returning `std::vector<view_t>` and `drain_unflushed(std::vector&)` (the
+  `block_array_t` overloads stay), and `child_factory_t` now takes its child key as a
+  `std::span<const std::byte>`, borrowed for the call. `graph.hpp` names no owning `std` type.
+
+- **An unacknowledged delivery is no longer counted as a dropped reply (#2256).** The terminus
+  resolver answered "nothing to send" (an empty-`src` WRITE, as every stream delivery is) and
+  "the reply could not be assembled" with the same empty rope, so each delivered sample bumped
+  `router_stats_t::assemble_dropped` and ran the stack refusal path. A refused reply assembly
+  is now `BACKPRESSURE` by value, and only that counts. A refused flatten of the request's own
+  `src` is answered `BACKPRESSURE` from the request's bytes and counted the same way, where it
+  was a silent `malformed_rx` drop.
 
 ### Changed (breaking)
 
@@ -382,90 +501,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   constructed DIAL link installs its receivers and then calls `start_receiving()`, as
   `transport_vertex_t` and the self-heal engine already do. A link that is never armed never
   receives. LISTEN links are unchanged.
-### Added
-
-- **`view::rope_t` draws its spilled link table from a block source, not the process heap
-  (#2284).** Past two links the chain lived in a `std::vector<view_t>`; it now lives in a block
-  from a `mem::block_source_t`: the one passed to the new `explicit rope_t(mem::block_source_t&)`,
-  else `mem::table_source()` (the static arena on an MCU build, the host table pool otherwise).
-  A receive path that builds a multi-link rope can pass the receiving link's own source, so the
-  receiver pays for the chain. `try_reserve` now refuses exactly on every profile: the block
-  comes from `try_alloc`, so there is no probe window for another task to take it (#850).
-  `append` and the copy constructor keep their old failure behaviour (`std::bad_alloc`, or
-  `std::abort()` without exceptions), and `sizeof(rope_t)` shrinks by one word on 64-bit
-  targets and is unchanged on 32-bit ones. A fragmented WebSocket message is delivered as a rope
-  whose chain is drawn from the link's `memory.rx` source; a refusal there sheds the message as
-  `dropped_rx`, as a refused fragment chain already did. On esp32c6 the no-heap census drops from
-  1834 to 1598 references and from 593 to 556 functions; the Cortex-M0 required-module flash
-  drops from 15,544 B to 15,220 B.
-
-### Fixed
-
-- **`fwd_router_t` drops a frame from a removed child (#2302).** After `remove_child`, a FWD
-  frame still delivered through the receiver `add_child` installed, or pushed through
-  `on_frame` under the removed name, was forwarded (by name with `src` grown by the whole
-  mount name as ONE segment, a route no reply resolves) or applied at the terminus. It is now
-  dropped at the ingress, uncounted, the way the reply side already treats a removed child. A
-  name the registry never held keeps the by-name fallback. New
-  `child_registry_t::tombstoned(name)` tells the two apart.
-- **A borrowed segment's control block comes from the default value source, not the heap**
-  (#2283). `view::borrow`, `borrow_const` and `borrow_device` drew the `segment_t` with
-  `new (std::nothrow)` and the borrowed backends returned it with `delete`, so every segment
-  release reached the heap through `mem::destroy_dispatch`. The block is now drawn from and
-  returned to `mem::value_source()`; a refused draw still yields a null handle. The two
-  borrowed backends are one class, `borrowed_backend_t`, whose address space is a member. On
-  ESP32-C6 the no-heap gate falls from 1765 references in 580 functions to 914 in 353.
-- **`udp_transport_t::dropped_tx` counts a datagram the socket refuses (#2279).** A `sendto` or
-  `sendmsg` that failed or sent short (a full socket buffer, `EMSGSIZE`, a shut socket) used
-  to lose the frame without counting it, on all three send paths (`send(span)`, `send(iov)`,
-  `send_to`). It is now counted in `dropped_tx`, and so in `drop_stats()`. It is not retried:
-  the UDP link carries no acks, and the next value supersedes a lost frame.
-
-- **WebSocket: the reassembly cap now counts each fragment's segment, not just its payload.**
-  A fragmented message is charged, per fragment, its payload plus the segment it was received
-  into and its chain slot, so `max_frame` (and the rx backend's capacity) bounds what the
-  message holds while it is assembled, however small its fragments. A fragmented message whose
-  payload sits just under the cap can now be refused as malformed; an unfragmented one is
-  judged as before. The fragment chain is drawn from the link's `memory.rx` source instead of
-  the process heap, and a refusal there sheds the message as `dropped_rx` and keeps the
-  connection. A span-only sink materializes a fragmented message from the same source.
-  `bus_slot_server_t::deliver_to_peer_rope` takes that source as a third argument.
-- **A self-healing link keeps each delivery's lane and value** (#2238). `self_heal_link_t` did
-  not override the retained send, `send(head, value, lane)`, so every delivery through it took
-  the base lowering: flattened into an iov and handed to the inner link's control lane. All
-  vertices then shared one 8-deep FIFO toward the peer (one vertex's flood shed another's
-  frames), a SAMPLE vertex queued a backlog instead of keeping only its newest frame, and a
-  waiting frame copied its payload. The engine now forwards the delivery to the inner link
-  unchanged, so it behaves as the link it wraps. The link seam suite gains a SAMPLE case and a
-  per-vertex STREAM case, run over the fake link and over a self-healing link that wraps it.
-  The wait for one dial attempt on a `DORMANT` link is unchanged.
-- **Each graph seam is installed on its own, and its installer clears it
-  ([#2239](https://github.com/avatarsd-llc/libtracer/issues/2239)).** `graph_t::set_hooks` and
-  `graph_t::hooks()` are removed. `graph_t::set_hook(&graph_hooks_t::<seam>, {fn, ctx})`
-  installs one seam and leaves every other one as it was (a null `fn` clears it);
-  `graph_t::hook(&graph_hooks_t::<seam>)` reads one back, and
-  `graph_t::clear_hook(&graph_hooks_t::<seam>, owner)` clears a seam only if `owner` is its
-  `ctx`. Before, `set_hooks` replaced every seam at once, so an application that installed
-  its subject seam after building a router (`g.set_hooks({.subject_lookup = …})`) unplugged
-  remote delivery without any report. `~fwd_router_t` now clears `remote_delivery`,
-  `wire_target`, `stats_sampler` and `link_name`, and `~transport_vertex_t` clears `link_hold`, each only
-  if it is still theirs: a write that reaches a remote edge after its router is destroyed finds
-  no sink, where before it called into freed memory. The constructor still takes the whole
-  `graph_hooks_t`. This partly reverses RFC-0028 §4.12 D12, which had folded the five
-  `configure_*` verbs into the one aggregate verb.
-- **`graph_t::set_policy` changes only the members the caller names (#2239).** Every
-  `vertex_policy_t` member is now a `std::optional`: an unset member keeps what the vertex
-  holds, where before it reset that property to its default. At registration an unset member
-  still takes the default, so `register_vertex` behaves as it did. `retention_t::N` named
-  without a `depth` keeps the current depth.
-- **The returning-form subject resolver is deleted; `subject_lookup` is the one ACL subject
-  seam (ADR-0083 Decision 11, #1781 step 3).** `subject_resolver_fn_t`, `subject_token_t` and
-  `graph_hooks_t::subject_resolver` are removed, with the adapter that stood in for them and the
-  rule that made `subject_lookup` win when both were installed. A gated operation no longer
-  allocates a `std::vector` for its subject. The three owning-`std` twins go with it:
-  `read_subscribers` returning `std::vector<view_t>` and `drain_unflushed(std::vector&)` (the
-  `block_array_t` overloads stay), and `child_factory_t` now takes its child key as a
-  `std::span<const std::byte>`, borrowed for the call. `graph.hpp` names no owning `std` type.
 
 ### Upgrading
 
@@ -490,45 +525,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   your choice. A child factory takes `std::span<const std::byte> child_key` and copies the key
   if it keeps it.
 
-### Changed
+### Performance
 
-- **`ws_client_transport_t` keeps no send buffer, and masks each frame once (#2267).** Its
-  `tx_buf_` member, a masked-frame buffer reused across sends, kept its high water for the
-  link's life: about 16 KiB stayed drawn after one 16 KiB send. A send now masks its payload
-  once, into one frame drawn from the link's `memory.io` source, and returns that frame when it
-  is written; a write the socket holds keeps the same frame on the wire instead of masking a
-  second copy. `sizeof(ws_client_transport_t)` shrinks by 32 B on a 64-bit host. The trade is
-  one block drawn and returned per send. An exhausted source still drops the frame and counts
-  it. No signature changes.
-- **`webtransport_config_t::defer_rx` is removed; every `webtransport` DIAL link holds inbound
-  frames until `start_receiving()`
-  ([#2249](https://github.com/avatarsd-llc/libtracer/issues/2249)).** The default (`false`)
-  delivered from the constructor on, so a frame the server pushed the instant the session came
-  up could be decoded into an empty sink and dropped with no counter moving. The factory
-  already passed `true`. **Migration:** drop `.defer_rx = ...` from the config; a directly
-  constructed DIAL link installs its receivers and then calls `start_receiving()`. Sending
-  needs no arming. The LISTEN constructor is unchanged.
-
-### Fixed
-
-- **An unacknowledged delivery is no longer counted as a dropped reply (#2256).** The terminus
-  resolver answered "nothing to send" (an empty-`src` WRITE, as every stream delivery is) and
-  "the reply could not be assembled" with the same empty rope, so each delivered sample bumped
-  `router_stats_t::assemble_dropped` and ran the stack refusal path. A refused reply assembly
-  is now `BACKPRESSURE` by value, and only that counts. A refused flatten of the request's own
-  `src` is answered `BACKPRESSURE` from the request's bytes and counted the same way, where it
-  was a silent `malformed_rx` drop.
-
-### Changed
-
-- **A TCP or WS server's broadcast holds no lock across its writes (#2263).**
-  `slot_server_t::broadcast` walked the slot table under `peers_m_`, one write per peer, so at
-  N peers accept, teardown, name resolution, directed replies and every other broadcast waited
-  out N syscalls. The walk now follows a lock-free chain of slots
-  (`slot_server_t::session_base_t::next`, 8 B per slot); `peers_m_` guards only names and the
-  table's growth, and the poll thread rebuilds its poll set without it. A session leaving
-  mid-walk is refused by its closed egress; one admitted mid-walk may take the record. No
-  signature changes.
+- **Forwarding a rope frame is faster (#2264; #2329 and its follow-up #2469).** Against 0.21.0
+  (indicative, measured across two bench sessions), a 1-link rope forward is about 11% faster
+  (p50 234 → 208 ns on the bench host), a 2-link forward is unchanged, and a 4- to 8-link
+  forward is 2–5% faster, at every payload from 64 B to 16 KiB. A rope forward draws twice per
+  frame from the receiving link's source.
+- **Zero-heap costs nothing on the throughput and latency grid (#2288, #2022).** The grid is
+  unchanged from 64 B to 64 KiB. A draw through the allocation seam's size classes costs 1–4 ns
+  more than the platform heap did. On ESP32-C6 the thread stacks move from the heap into a static
+  region, so `.bss` grows by about 51 KiB and the heap use it replaces is gone. The no-heap check
+  counts 0 references on esp32c6 and cortex-m0.
 
 ### Known limitation
 

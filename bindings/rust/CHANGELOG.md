@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-11-02
+
 ### Changed
 
 - `is_path_ref_type` is true for `0x14 PATH_REF` only (#2245): a `0x15 PATH_REF_REVERSE` body is a `PATH` body of PAIR and NAME records (RFC-0029 §7.1) and decodes at any length; before, an 11-byte PAIR record was refused as `FrameInvalid`.
