@@ -19,8 +19,7 @@ carved for it.
 - **No transport is compiled.** `sdkconfig.defaults` turns `CONFIG_LIBTRACER_TRANSPORT_UDP`,
   `_TCP` and `_WS` off: an in-process node sheds those translation units from `libtracer.a`.
 - **"No heap" is checked at link time, not here.** CI's no-heap link check reads `libtracer.a`
-  with `nm` and fails on any heap call not pinned in `tools/no_heap_baseline.json`, a list that
-  only shrinks.
+  with `objdump` and fails on any heap reference at all.
 
 ## Source
 

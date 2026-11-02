@@ -446,8 +446,7 @@ that breaks one of them is a finding; cite the rule.
   publishing jobs (docs build and deploy, the CI image publish, the perf ratchet and
   history, the release) keep their own groups, which a newer `main` push does not cancel.
 - **Batch independent PRs into one CI run.** PRs that do not touch each other are
-  verified together in one run. A PR that touches the no-heap baseline
-  (`tools/no_heap_baseline.json`) goes through on its own.
+  verified together in one run.
 - **A PR push runs a quick set; the full matrix runs on batches.** A push to a
   pull request, like a push to `main`, runs only the quick set: core-ci's
   `build-test` default leg (the other legs are the `build-test-variants` job),
