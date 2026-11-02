@@ -8,10 +8,11 @@
  *
  * Since #2174 a SAMPLE lane never strikes, so a peer that keeps its socket open and reads
  * nothing is no longer dropped by the link on its own. The application closes it instead:
- * it calls `transport_t::close_frozen_peers(now, deadline)` with `now` from its own clock,
- * and the vertex closes each peer that owed the wire progress (a frame held on it, or a
- * frame or handshake the peer began) and made none since its record fell below `deadline`.
- * libtracer reads no clock, so the test drives `now` as plain numbers.
+ * it calls `transport_t::sweep(now, deadline)` with `now` from its own clock (#2481), and
+ * the vertex closes each peer that owed the wire progress (a frame held on it, or a frame or
+ * handshake the peer began) and made none since its record fell below `deadline`, and
+ * answers when an owing peer is next due. libtracer reads no clock, so the test drives `now`
+ * as plain numbers.
  *
  * Per transport, three arms: a frozen peer is closed past the deadline and counted, never
  * before it; a draining peer is not; an idle peer, owing nothing, is not.
@@ -124,15 +125,19 @@ bool wait_peers(Server& server, std::size_t n) {
 
 /**
  * @brief The verdict sequence every arm shares: one check stamps the record at `now` 1; a
- *        stuck peer is still kept while its record is not older than the deadline; past it,
- *        a frozen one is closed.
- * @return What the final check closed.
+ *        stuck peer is still kept while its record is not older than the deadline, and is
+ *        due one window after it; past it, a frozen one is closed.
+ * @return How many closes the final check counted.
  */
-std::size_t judge(tr::net::transport_t& link) {
-    std::size_t closed = link.close_frozen_peers(1, 0);  // stamps the record (moved since)
-    closed += link.close_frozen_peers(2, 1);             // stuck, record 1 >= 1: kept
-    check(closed == 0, "  nothing is closed while its record is within the deadline");
-    return link.close_frozen_peers(10, 5);  // stuck, record 1 < 5: frozen
+template <class Link>
+std::size_t judge(Link& link) {
+    const std::size_t before = link.frozen_closed();
+    (void)link.sweep(1, 0);  // stamps the record (moved since)
+    check(link.sweep(2, 1) == 3, "  a stuck peer is due one window after its record");
+    check(link.frozen_closed() == before,
+          "  nothing is closed while its record is within the deadline");
+    check(link.sweep(10, 5) == 0, "  a closed peer owes nothing more");  // record 1 < 5
+    return link.frozen_closed() - before;
 }
 
 const std::vector<std::byte> kBig(8 * 1024 * 1024, std::byte{0x5a});
@@ -148,7 +153,8 @@ void test_tcp_dialer() {
         link.start_receiving();
         const int peer = ::accept(l.fd, nullptr, nullptr);
         check(link.ok() && peer >= 0, "dialed, and the peer never reads");
-        check(link.close_frozen_peers(100, 50) == 0, "an idle peer owes nothing: kept");
+        check(link.sweep(100, 50) == 0 && link.frozen_closed() == 0,
+              "an idle peer owes nothing: kept, and nothing is due");
         link.send(std::span(kBig));  // cut short: the rest is held on the wire
         check(judge(link) == 1, "a frozen peer is closed past the deadline");
         check(link.frozen_closed() == 1, "and the close is counted");
@@ -163,16 +169,14 @@ void test_tcp_dialer() {
         const int peer = ::accept(l.fd, nullptr, nullptr);
         std::atomic<bool> stop{false};
         std::thread reader([&] { drain(peer, stop); });
-        std::size_t closed = 0;
         for (std::uint64_t now = 1; now <= 20; ++now) {
             link.send(std::span(kSmall));
             std::this_thread::sleep_for(20ms);
-            closed += link.close_frozen_peers(now * 10, now * 10 - 5);
+            (void)link.sweep(now * 10, now * 10 - 5);
         }
         stop = true;
         reader.join();
-        check(closed == 0 && link.frozen_closed() == 0 && link.link_up(),
-              "a draining peer is never closed");
+        check(link.frozen_closed() == 0 && link.link_up(), "a draining peer is never closed");
         ::close(peer);
     }
 }
@@ -184,7 +188,8 @@ void test_tcp_server() {
     // TX owed: the client never reads, and a broadcast is held on its wire.
     const int tx = dial_raw(server.local_port());
     check(wait_peers(server, 1), "the frozen-TX peer is accepted");
-    check(server.close_frozen_peers(100, 50) == 0, "an idle peer owes nothing: kept");
+    check(server.sweep(100, 50) == 0 && server.frozen_closed() == 0,
+          "an idle peer owes nothing: kept, and nothing is due");
     server.send(std::span(kBig));
     check(judge(server) == 1, "a peer frozen with a frame held on its wire is closed");
     check(sees_close(tx), "it sees the connection go");
@@ -205,15 +210,14 @@ void test_tcp_server() {
     check(wait_peers(server, 1), "the draining peer is accepted");
     std::atomic<bool> stop{false};
     std::thread reader([&] { drain(ok, stop); });
-    std::size_t closed = 0;
     for (std::uint64_t now = 1; now <= 20; ++now) {
         server.send(std::span(kSmall));
         std::this_thread::sleep_for(20ms);
-        closed += server.close_frozen_peers(now * 10, now * 10 - 5);
+        (void)server.sweep(now * 10, now * 10 - 5);
     }
     stop = true;
     reader.join();
-    check(closed == 0 && server.frozen_closed() == 2, "a draining peer is never closed");
+    check(server.frozen_closed() == 2, "a draining peer is never closed");
     ::close(ok);
 }
 
@@ -248,15 +252,14 @@ void test_ws_server() {
     for (int i = 0; i < 200 && delivered.load(std::memory_order_acquire) == 0; ++i)
         std::this_thread::sleep_for(10ms);
     check(delivered.load(std::memory_order_acquire) == 1, "the server has read past the handshake");
-    check(server.close_frozen_peers(100, 50) == 0 && server.close_frozen_peers(200, 150) == 0,
-          "an idle, open peer owes nothing: kept");
-    std::size_t closed = 0;
+    check(server.sweep(100, 50) == 0 && server.sweep(200, 150) == 0 && server.frozen_closed() == 1,
+          "an idle, open peer owes nothing: kept, and nothing is due");
     for (std::uint64_t now = 1; now <= 10; ++now) {
         server.send(std::span(kSmall));
         std::this_thread::sleep_for(30ms);
-        closed += server.close_frozen_peers(1000 + now * 10, 1000 + now * 10 - 5);
+        (void)server.sweep(1000 + now * 10, 1000 + now * 10 - 5);
     }
-    check(closed == 0 && client.link_up(), "a draining peer is never closed");
+    check(server.frozen_closed() == 1 && client.link_up(), "a draining peer is never closed");
     check(server.frozen_closed() == 1, "the one close is counted");
 }
 
@@ -284,7 +287,8 @@ void test_ws_client() {
     client.start_receiving();
     srv.join();
     check(client.ok() && peer >= 0, "the handshake completed, and the server never reads");
-    check(client.close_frozen_peers(100, 50) == 0, "an idle peer owes nothing: kept");
+    check(client.sweep(100, 50) == 0 && client.frozen_closed() == 0,
+          "an idle peer owes nothing: kept, and nothing is due");
     client.send(std::span(kBig));
     check(judge(client) == 1, "a frozen server is closed past the deadline");
     check(client.frozen_closed() == 1, "and the close is counted");

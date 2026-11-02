@@ -8,6 +8,7 @@
 #include <array>
 #include <cassert>
 #include <cstring>
+#include <functional>
 #include <initializer_list>
 #include <span>
 #include <thread>
@@ -1385,6 +1386,30 @@ bool transport_vertex_t::with_link(std::string_view name, link_fn_t fn, void* ct
     if (link == nullptr) return false;
     fn(ctx, *link);
     return true;
+}
+
+std::uint64_t transport_vertex_t::sweep(std::uint64_t now, std::uint64_t deadline) {
+    // Held across the walk: a link whose connection is removed mid-walk is parked at an epoch
+    // this bracket holds back, so the pointers below stay valid and are never reused for a new
+    // link, which is what lets the walk go in address order with nothing stored but the last.
+    const graph::detail_qsbr::frame_scope_t scope;
+    sweep_t sw{.now = now, .deadline = deadline};
+    const std::less<const transport_t*> before;
+    for (transport_t* last = nullptr;;) {
+        transport_t* link = nullptr;
+        {
+            const ctl_txn_t txn(*this);  // ADR-0063 §3; dropped before the link runs
+            for (const auto& conn : conns_) {
+                transport_t* const l = conn.value.owned.get();
+                if (l != nullptr && (last == nullptr || before(last, l)) &&
+                    (link == nullptr || before(l, link)))
+                    link = l;
+            }
+        }
+        if (link == nullptr) return sw.next;
+        sw.due(link->sweep(now, deadline));
+        last = link;
+    }
 }
 
 transport_t* transport_vertex_t::link_of(std::string_view name) const {

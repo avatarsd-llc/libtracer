@@ -2167,6 +2167,21 @@ if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
     set_tests_properties(frozen_peer PROPERTIES TIMEOUT 60)
 endif()
 
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
+    # #2481 — the node's one door for the application's clock: transport_vertex_t::sweep
+    # drives a TCP dialer, a TCP server, a CAN stand-in and (with a Noise backend) a Noise
+    # initiator from a fake clock, and answers the earliest next-due time.
+    add_executable(now_door_test now_door_test.cpp)
+    target_link_libraries(now_door_test PRIVATE libtracer)
+    if(TARGET libtracer_noise)
+        target_link_libraries(now_door_test PRIVATE libtracer_noise)
+        target_compile_definitions(now_door_test PRIVATE LIBTRACER_NOW_DOOR_NOISE=1)
+    endif()
+    libtracer_test_warnings(now_door_test)
+    add_test(NAME now_door COMMAND now_door_test)
+    set_tests_properties(now_door PROPERTIES TIMEOUT 60)
+endif()
+
 if(LIBTRACER_ANY_SOCKET_TRANSPORT)
     # #903 — the stream_endpoint_t full-write helpers under a REAL signal storm: a
     # socketpair with a small SO_SNDBUF, a deliberately slow reader, and SIGUSR1

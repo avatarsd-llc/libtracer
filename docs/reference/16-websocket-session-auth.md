@@ -147,7 +147,7 @@ is spent.
 
 So the window is bounded. A session that has not been accepted by the application's deadline
 is closed. The link reads no clock and runs no timer for it: the application's liveness check
-(`close_frozen_peers(now, deadline)`, the same call that closes frozen peers) stamps each
+(`sweep(now, deadline)`, the same call that closes frozen peers) stamps each
 unauthenticated session with the first `now` that sees it, and a later check whose `deadline`
 is past that stamp closes it. A node whose application never makes the check leaves such a
 session until it departs. These properties matter more than the exact number:
@@ -227,7 +227,7 @@ count; the link-level tallies above are the right altitude.
 
 The ESP-IDF WebSocket server link (`httpd_ws_link_t`,
 [`integrations/esp-idf/libtracer/`](https://github.com/avatarsd-llc/libtracer/blob/main/integrations/esp-idf/libtracer/httpd_ws_link.cpp))
-implements this: `set_auth_cb` installs the check, `close_frozen_peers` carries the deadline,
+implements this: `set_auth_cb` installs the check, `sweep` carries the deadline,
 and the close codes are `kCloseAuthFailed` / `kCloseAuthTimeout`. The three-valued handshake
 verdict is `set_admission_verdict_cb` with `admission_verdict_t::ADMIT_AUTHENTICATED`. Its
 host suite (`httpd_ws_auth_test`) pins each property above against the real translation unit.

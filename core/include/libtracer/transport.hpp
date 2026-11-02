@@ -514,22 +514,47 @@ struct transport_drop_stats_t {
 };
 
 /**
- * @brief One verdict of the application's liveness check (#2198,
- *        @ref transport_t::close_frozen_peers), the rule every kind applies per peer.
+ * @brief One pass of the application's clock over a link (#2481, @ref transport_t::sweep):
+ *        the `now` and `deadline` it was given, and the earliest next-due time it found.
  *
- * @param stuck    The peer owed a direction progress, and that direction moved no byte since
- *                 the previous check.
- * @param since    The peer's record: the application's `now` at the last check that found it
- *                 moving or owing nothing. A peer that is not stuck is stamped @p now here.
- * @param now      The application's clock reading, as passed to the seam.
- * @param deadline The oldest record that still counts as alive.
- * @return True iff the peer is to be closed. The caller re-stamps @p since once it has.
+ * Kind-neutral: a kind builds one per @ref transport_t::sweep call, judges each peer through
+ * @ref frozen, adds any deadline of its own through @ref due, and returns @ref next.
  */
-[[nodiscard]] constexpr bool judge_frozen(bool stuck, std::uint64_t& since, std::uint64_t now,
-                                          std::uint64_t deadline) noexcept {
-    if (!stuck) since = now;
-    return stuck && since < deadline;
-}
+struct sweep_t {
+    /** @brief The application's clock reading, as passed to the seam. */
+    std::uint64_t now = 0;
+    /** @brief The oldest record that still counts as alive (at most @ref now). */
+    std::uint64_t deadline = 0;
+    /** @brief The earliest next-due time found so far, 0 when none. */
+    std::uint64_t next = 0;
+
+    /** @brief Fold @p at into @ref next, the earliest wins; 0 (nothing due) is ignored. */
+    constexpr void due(std::uint64_t at) noexcept {
+        if (at != 0 && (next == 0 || at < next)) next = at;
+    }
+
+    /**
+     * @brief One verdict of the liveness check (#2198), the rule every kind applies per peer.
+     *
+     * A peer that owes bytes and is kept is due again one window (`now - deadline`) after its
+     * record: the first `now` at which, with the same window, it can be judged frozen. A peer
+     * that owes nothing adds nothing, and neither does one this verdict closes.
+     *
+     * @param owing The peer owes a direction progress (a frame of ours it has not taken, or one
+     *              of its own it has begun and not finished).
+     * @param stuck It owed a direction progress, and that direction moved no byte since the
+     *              previous check.
+     * @param since The peer's record: the `now` of the last check that found it moving or owing
+     *              nothing. A peer that is not stuck is stamped @ref now here.
+     * @return True iff the peer is to be closed. The caller re-stamps @p since once it has.
+     */
+    [[nodiscard]] constexpr bool frozen(bool owing, bool stuck, std::uint64_t& since) noexcept {
+        if (!stuck) since = now;
+        if (stuck && since < deadline) return true;
+        if (owing) due(since + (now - deadline) + 1);
+        return false;
+    }
+};
 
 /**
  * @brief A point-to-point (or bus-facet-exposing) transport link: the byte seam
@@ -866,30 +891,39 @@ class transport_t {
     virtual void shut_down() {}
 
     /**
-     * @brief The application's liveness check (#2198): close every peer of this link that
-     *        has owed bytes, and moved none of them, since @p deadline.
+     * @brief The application's clock reached @p now (#2481): run every deadline it passed and
+     *        answer the next one.
      *
-     * A peer OWES bytes in a direction where something waits on it: a frame of ours it has not
-     * taken (TX), or a frame or handshake of its own it has begun and not finished (RX, where
-     * the link tracks one). A peer that owes nothing is idle, and an idle peer is never closed
-     * here. The link records, per peer, the @p now of the last call that found it moving or
-     * owing nothing; a call that finds it owing in a direction with no byte moved since the
-     * previous call, and recorded before @p deadline, closes it as a remote hangup would and
-     * counts the close (each kind names its counter).
+     * The one seam through which a link learns time; @ref transport_vertex_t::sweep calls it on
+     * every connection's link, and the application calls it directly on a link it wired by hand
+     * (one attached only to the router). What runs is the kind's own:
+     *
+     * - **Frozen peers (#2198).** A peer OWES bytes in a direction where something waits on it: a
+     *   frame of ours it has not taken (TX), or a frame or handshake of its own it has begun and
+     *   not finished (RX, where the link tracks one). A peer that owes nothing is idle, and an idle
+     *   peer is never closed here. The link records, per peer, the @p now of the last call that
+     *   found it moving or owing nothing; a call that finds it owing in a direction with no byte
+     *   moved since the previous call, and recorded before @p deadline, closes it as a remote
+     *   hangup would and counts the close in the kind's own counter (@ref sweep_t::frozen).
+     * - **Other windows.** A kind with a window of its own (an auth handshake, a Noise retry or
+     *   attempt) runs it here too, against @p deadline or its own configured spans.
      *
      * libtracer reads no clock and runs no timer for this: @p now and @p deadline are the
-     * application's, in whatever monotonic unit it picks, and how often it calls is its
-     * cadence. A link whose application never calls this behaves exactly as before. Calls
-     * must not overlap each other on one link; they may race the link's own threads.
+     * application's, in whatever monotonic unit it picks. The return value tells it when to
+     * call next, so it sleeps until then with no idle wakeup; a link that later starts owing
+     * (a send, a new peer) can be due earlier, so an application that wants that bounded also
+     * calls after such events or on a cadence of its own. A link whose application never calls
+     * this behaves exactly as before. Calls must not overlap each other on one link; they may
+     * race the link's own threads.
      *
-     * The DEFAULT closes nothing, which is right for a link with no per-peer connection to
-     * hold (an in-process link, a datagram link); a link that holds one overrides it.
+     * The DEFAULT runs nothing and answers 0, which is right for a link with no per-peer
+     * connection and no window (an in-process link, a datagram link).
      *
      * @param now      The application's clock, now.
      * @param deadline The oldest progress the application accepts (at most @p now).
-     * @return How many peers this call closed.
+     * @return The earliest time, in @p now's units, at which a call has work; 0 when none.
      */
-    virtual std::size_t close_frozen_peers(std::uint64_t now, std::uint64_t deadline) {
+    virtual std::uint64_t sweep(std::uint64_t now, std::uint64_t deadline) {
         (void)now;
         (void)deadline;
         return 0;

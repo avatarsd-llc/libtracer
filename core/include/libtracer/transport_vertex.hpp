@@ -683,6 +683,30 @@ class transport_vertex_t {
      */
     [[nodiscard]] bool with_link(std::string_view name, link_fn_t fn, void* ctx) const;
 
+    /**
+     * @brief The node's one door for the application's clock (#2481): hand @p now and
+     *        @p deadline to every connection's link and answer the earliest next-due time.
+     *
+     * Calls @ref transport_t::sweep on each OWNED link, on this thread, inside one router frame
+     * bracket, so every link it reaches stays valid until it returns even if its connection is
+     * removed meanwhile (the removal parks it until a `graph_t::collect()` no open bracket
+     * holds back). The table lock is held only to pick each link, never across its call, so a
+     * link may call back into this class. Each link present for the whole call is reached
+     * exactly once; one created or removed during it may or may not be.
+     *
+     * The application calls this from its own clock and sleeps until the time it answers, with
+     * no idle wakeup; libtracer reads no clock. A link staged with @ref provide_link, or wired by
+     * hand (attached only to the router), is not reached here: the application owns it and calls
+     * its @ref transport_t::sweep directly.
+     *
+     * Calls must not overlap each other on one node.
+     * @param now      The application's clock, now, in whatever monotonic unit it picks.
+     * @param deadline The oldest progress the application accepts (at most @p now): the window a
+     *                 frozen peer, an auth handshake or a silent peer is judged against.
+     * @return The minimum next-due time over every link reached, 0 when none has work.
+     */
+    std::uint64_t sweep(std::uint64_t now, std::uint64_t deadline);
+
    private:
     /** @brief Test access to %link_of; defined only by the tests. */
     friend struct transport_vertex_test_access;

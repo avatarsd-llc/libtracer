@@ -28,20 +28,21 @@
  * @section noise_link_time Time
  *
  * The link reads no clock and arms no timer (reference/23 §7). Every deadline is checked when
- * the application calls @ref tr::net::noise_link_t::poll with its own `now`, and `poll` answers
- * the next deadline. A deadline configured as 0 is never due; without `poll` calls nothing
- * expires by time and nothing is retransmitted.
+ * the application's clock reaches the link through @ref tr::net::noise_link_t::sweep (directly,
+ * or through the node's @ref tr::net::transport_vertex_t::sweep), and `sweep` answers the next
+ * deadline. A deadline configured as 0 is never due; without `sweep` calls nothing expires by
+ * time and nothing is retransmitted.
  *
  * @section noise_link_rtt One request and its reply
  *
  * A send on a link with no session fails at once, counted in `dropped_tx`, and on the DIAL side
  * it starts a handshake (a demand; @ref tr::net::noise_link_t::dial demands without a frame).
- * When the second message arrives the initiator holds an unacknowledged session and `poll`
- * reports `session`; a request sent then is the confirmation, and the responder's reply is the
- * acknowledgement, after which the link reports `UP`. One request and reply take two round
- * trips (reference/23 §4). While the session stays unacknowledged, each retry deadline `poll`
- * passes sends an empty confirmation on it (§4 step 7), so an application that sends nothing
- * is confirmed too.
+ * When the second message arrives the initiator holds an unacknowledged session and
+ * @ref tr::net::noise_link_t::link_up reports it; a request sent then is the confirmation, and
+ * the responder's reply is the acknowledgement, after which the link reports `UP`. One request
+ * and reply take two round trips (reference/23 §4). While the session stays unacknowledged,
+ * each retry deadline `sweep` passes sends an empty confirmation on it (§4 step 7), so an
+ * application that sends nothing is confirmed too.
  *
  * @section noise_link_memory Memory
  *
@@ -247,16 +248,6 @@ struct noise_config_t {
     link_memory_t memory{};
 };
 
-/** @brief What @ref noise_link_t::poll answers. */
-struct noise_poll_t {
-    /** @brief The next deadline in `now` units, 0 when none is armed: call again by then. */
-    std::uint64_t next = 0;
-    /** @brief A send is admitted now: the link holds a session, acknowledged or not. */
-    bool session = false;
-    /** @brief The connection's RFC-0014 liveness (reference/23 §10). */
-    link_state_t state = link_state_t::DORMANT;
-};
-
 /**
  * @brief A Noise link (RFC-0033, reference/23) over a datagram carrier it owns.
  *
@@ -268,7 +259,7 @@ struct noise_poll_t {
  * tr::net::noise::link_host).
  * @tparam Carrier The datagram link underneath (@ref tr::net::noise::datagram_carrier).
  *
- * @note Thread-safety: the carrier's receive thread, senders and `poll` may run concurrently.
+ * @note Thread-safety: the carrier's receive thread, senders and `sweep` may run concurrently.
  *       One lock guards the session state. A frame is delivered with the lock released, so a
  *       receiver may send (an echo, a reply) from inside its callback.
  */
@@ -379,18 +370,23 @@ class noise_link_t final : public transport_t {
     }
 
     /**
-     * @brief Run every deadline that @p now has passed, and report the link (reference/23 §7).
+     * @brief Run every deadline that @p now has passed, and answer the next (reference/23 §7).
      *
      * Retransmits a first message, sends an empty confirmation on a session still
      * unacknowledged at its retry deadline, ends an attempt at its deadline, or expires a
-     * pending session.
-     * @param now The application's monotonic clock, in the config's units.
+     * pending session. The session and the liveness it leaves are @ref link_up and @ref state.
+     * @param now      The application's monotonic clock, in the config's units.
+     * @param deadline Unused: every Noise window is its own configured span (§7).
+     * @return The next armed deadline, 0 when none is: call again by then.
      */
-    noise_poll_t poll(std::uint64_t now) {
+    std::uint64_t sweep(std::uint64_t now, std::uint64_t deadline) override {
+        (void)deadline;
         const std::lock_guard lock(mu_);
         now_ = now;
         if (st_ != nullptr) run_deadlines();
-        return {next_deadline(), sending_session() != nullptr, state_locked()};
+        sweep_t sw;
+        for (const std::uint64_t t : {retry_at_, attempt_at_, pending_at_}) sw.due(t);
+        return sw.next;
     }
 
     /** @brief The connection's RFC-0014 liveness (reference/23 §10). */
@@ -729,14 +725,6 @@ class noise_link_t final : public transport_t {
         retry_at_ = attempt_at_ = 0;
     }
 
-    /** @brief The earliest armed deadline, 0 when none is. */
-    [[nodiscard]] std::uint64_t next_deadline() const noexcept {
-        std::uint64_t next = 0;
-        for (const std::uint64_t t : {retry_at_, attempt_at_, pending_at_})
-            if (t != 0 && (next == 0 || t < next)) next = t;
-        return next;
-    }
-
     /** @brief The liveness byte (§10): a DIAL link is `UP` once its session is acknowledged. */
     [[nodiscard]] link_state_t state_locked() const noexcept {
         if (role_ == conn_role_t::LISTEN)
@@ -794,7 +782,7 @@ class noise_link_t final : public transport_t {
     stage_t stage_ = stage_t::IDLE;          /**< @brief The handshake slot's stage. */
     std::uint64_t mark_ = 0;       /**< @brief Responder: the highest counter accepted (§4). */
     std::uint64_t peer_ = 0;       /**< @brief Initiator: the configured peer. */
-    std::uint64_t now_ = 0;        /**< @brief The last `now` @ref poll was given. */
+    std::uint64_t now_ = 0;        /**< @brief The last `now` @ref sweep was given. */
     std::uint64_t retry_step_ = 0; /**< @brief The current retry interval. */
     std::uint64_t retry_at_ = 0;   /**< @brief The retry deadline; 0 none. */
     std::uint64_t attempt_at_ = 0; /**< @brief The attempt deadline; 0 none. */

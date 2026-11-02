@@ -215,9 +215,9 @@ class self_heal_link_t final : public transport_t {
      *         (`dropped_tx`). A healed link's previous socket takes its counts with it. */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override;
 
-    /** @brief The application's liveness check, forwarded to the CURRENT socket (#2198).
+    /** @brief The application's clock, forwarded to the CURRENT socket (#2198, #2481).
      *         A frozen peer it closes goes down as any other, so the engine heals it. */
-    std::size_t close_frozen_peers(std::uint64_t now, std::uint64_t deadline) override;
+    std::uint64_t sweep(std::uint64_t now, std::uint64_t deadline) override;
 
    private:
     /** @brief One constructed socket plus the identity its down-notifier reports with:

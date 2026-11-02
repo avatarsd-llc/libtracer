@@ -886,7 +886,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
         /**
          * @brief Sessions — and, since #1247, un-spoken upgraded SOCKETS — closed because they
          *        were still unauthenticated past the deadline of the application's
-         *        liveness check (@ref close_frozen_peers, #2257).
+         *        liveness check (@ref sweep, #2257).
          *
          * The squatter count, and it now counts BOTH shapes of squatter: the peer that spoke
          * and then stalled (it holds a `session_t`) and the peer that completed the 101 and
@@ -913,7 +913,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
          */
         std::uint32_t rx_drain_waits = 0;
         /** @brief Sessions the application's liveness check condemned as frozen (#2198,
-         *         @ref close_frozen_peers): they owed TX and moved no byte past the
+         *         @ref sweep): they owed TX and moved no byte past the
          *         application's deadline. A subset of @ref sessions_condemned. */
         std::uint32_t peers_frozen = 0;
     };
@@ -1056,8 +1056,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     void flush_held();
 
     /**
-     * @brief The application's liveness check (#2198, @ref transport_t::close_frozen_peers):
-     *        a session owes TX while a frame waits for its socket, and one that owed it and
+     * @brief The application's liveness check (#2198, #2481, @ref transport_t::sweep): a
+     *        session owes TX while a frame waits for its socket, and one that owed it and
      *        moved no byte since its record fell below @p deadline is condemned.
      *
      * The verdict is reached here, on the caller's task, under each session's own `tx_m`;
@@ -1072,10 +1072,11 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * falls below @p deadline it is closed with @ref kCloseAuthTimeout, through a sweep this
      * call posts to the httpd task, and counted in @ref stats_t::auth_expired.
      *
-     * @return How many sessions and silent sockets this call found frozen or past the auth
-     *         deadline.
+     * @return The earliest time a session that owes TX, or a stamp still inside the auth
+     *         window, is next due (one window, `now - deadline`, after its record); 0 when
+     *         none is.
      */
-    std::size_t close_frozen_peers(std::uint64_t now, std::uint64_t deadline) override;
+    std::uint64_t sweep(std::uint64_t now, std::uint64_t deadline) override;
 
     /**
      * @brief Admission predicate: given the parsed opening GET, return true to admit the
@@ -1298,7 +1299,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * @ref peer_link, and a broadcast @ref send skips it. It cannot read a vertex, write
      * one, subscribe, or be discovered by a peer that can.
      *
-     * WHAT BOUNDS IT: the application's liveness check, @ref close_frozen_peers (#2257). The
+     * WHAT BOUNDS IT: the application's liveness check, @ref sweep (#2257). The
      * link reads no clock and runs no timer for it: the first check that sees an
      * unauthenticated session stamps it with the check's `now`, and a later check whose
      * `deadline` is past that stamp closes it with @ref kCloseAuthTimeout. The stamp is never
@@ -2061,7 +2062,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *         before each flat delivery on the httpd task; unused when `peer_named`. */
     peer_handle_t rx_peer_{};
     /** @brief The `deadline` of the last liveness check (#2257): written by
-     *         @ref close_frozen_peers, read by the @ref sweep_auth_deadlines it posts. */
+     *         @ref sweep, read by the @ref sweep_auth_deadlines it posts. */
     std::atomic<std::uint64_t> auth_cutoff_{0};
     std::atomic<std::uint32_t> auth_rejected_{0};
     std::atomic<std::uint32_t> auth_expired_{0};
@@ -2073,7 +2074,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /**
      * @brief Close every session, and every un-spoken upgraded SOCKET, whose authentication
      *        record is older than the last liveness check's deadline, @ref auth_cutoff_
-     *        (httpd task only; posted by @ref close_frozen_peers).
+     *        (httpd task only; posted by @ref sweep).
      *
      * TWO SETS, because the resource is claimed lazily and the scarce one is the socket
      * (#1247). `slots_` holds the peers that spoke and then stalled; @ref pending_ holds the

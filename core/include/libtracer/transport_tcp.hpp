@@ -316,11 +316,11 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
      *         (`0` ⇒ `kDefaultLivenessWindowMs`) (#838). */
     [[nodiscard]] std::uint32_t liveness_window_ms() const noexcept { return liveness_window_ms_; }
 
-    /** @brief The application's liveness check (#2198, @ref transport_t::close_frozen_peers):
+    /** @brief The application's liveness check (#2198, @ref transport_t::sweep):
      *         a frame held on the wire that moved no byte since @p deadline shuts the
      *         connection down, counted in @ref frozen_closed. A dialer owes TX only. */
-    std::size_t close_frozen_peers(std::uint64_t now, std::uint64_t deadline) override {
-        return close_frozen_one(now, deadline);
+    std::uint64_t sweep(std::uint64_t now, std::uint64_t deadline) override {
+        return sweep_one(now, deadline);
     }
 
     /** @brief Connections the application's liveness check closed as frozen (#2198). */

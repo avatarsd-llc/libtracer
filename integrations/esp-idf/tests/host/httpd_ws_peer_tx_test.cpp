@@ -1031,24 +1031,24 @@ void test_the_liveness_check_closes_a_frozen_peer() {
     claim(kStalled);
     claim(kHealthy);
     drain();
-    check_eq(link->close_frozen_peers(100, 50), 0, "idle peers owe nothing: both kept");
+    check_eq(link->sweep(100, 50), 0, "idle peers owe nothing: both kept, nothing due");
     fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
     link->send(std::span<const std::byte>(kBody));
     drain();
     const std::uint32_t condemned = link->stats().sessions_condemned;
     // The idle check stamped both records at 100; the stalled peer has owed since.
-    check_eq(link->close_frozen_peers(101, 100), 0, "a record at the deadline is kept");
-    check_eq(link->close_frozen_peers(102, 100), 0, "and kept again: nothing re-stamps it");
+    check_eq(link->sweep(101, 100), 102, "a record at the deadline is kept, due one window on");
+    check_eq(link->sweep(102, 100), 103, "and kept again: nothing re-stamps it");
     drain();
     check(fake_httpd::instance().has_session(kStalled), "so the stalled peer is still up");
-    check_eq(link->close_frozen_peers(110, 105), 1, "past the deadline the frozen peer is found");
+    check_eq(link->sweep(110, 105), 0, "past the deadline the frozen peer is found");
     drain();
     check(!fake_httpd::instance().has_session(kStalled), "and condemned on the httpd task");
     check(fake_httpd::instance().has_session(kHealthy), "the draining peer is kept");
     check_eq(link->stats().peers_frozen, 1, "the close is counted in peers_frozen");
     check_eq(link->stats().sessions_condemned - condemned, 1, "and in sessions_condemned");
     check_eq(link->stats().tx_send_failed, 0, "not as a failed send");
-    check_eq(link->close_frozen_peers(200, 150), 0, "a later check finds nobody owing");
+    check_eq(link->sweep(200, 150), 0, "a later check finds nobody owing");
     reset(link);
 }
 

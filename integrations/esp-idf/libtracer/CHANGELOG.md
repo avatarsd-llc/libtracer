@@ -18,6 +18,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   of an oversized message instead of being swallowed by it. A TEXT frame is ignored, as core
   and `httpd_ws_link_t` ignore it, instead of being delivered as data. No new buffer: the
   fixed receive buffer stays the bound.
+### Changed (breaking)
+
+- **`httpd_ws_link_t::close_frozen_peers(now, deadline)` is now `sweep(now, deadline)`**, the
+  one seam through which a link takes the application's clock
+  ([#2481](https://github.com/avatarsd-llc/libtracer/issues/2481)). The frozen-peer verdict and
+  the auth deadline it carries are unchanged. It returns the earliest time a session that owes
+  TX, or an auth stamp still inside the window, is next due (0 = none) instead of a count; the
+  closes are counted in `stats_t::peers_frozen` and `stats_t::auth_expired`. A link created
+  through the node's transport vertex is reached by `transport_vertex_t::sweep`.
 
 ## [0.22.0] — 2026-11-02
 

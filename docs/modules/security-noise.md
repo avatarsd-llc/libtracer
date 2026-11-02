@@ -58,22 +58,24 @@ built. The library holds no key, no entropy and no clock.
 
 **One request and its reply.** DIAL initiates and LISTEN answers. A send on a link with no
 session fails at once, counted in `dropped_tx`, and on DIAL it starts a handshake (`dial()`
-demands without a frame). Once the second message arrives, `poll` reports `session`: the
+demands without a frame). Once the second message arrives, `link_up()` reports it: the
 request sent then is the confirmation, the responder's reply is the acknowledgement, and the
 link reports `UP` after it. Four datagrams, two round trips:
 
 ```cpp
 link.dial();                                  // or the first send, which fails and dials
-while (!link.poll(app_now()).session) wait(); // the app's clock, the app's wait
+while (!link.link_up()) wait_until(link.sweep(app_now(), 0)); // the app's clock and wait
 link.send(request);                           // the confirmation
 // ... the reply arrives on the receiver: the acknowledgement; link.state() == UP
 ```
 
-**Time.** `poll(now)` runs every deadline `now` has passed and returns the next one
-(`noise_poll_t::next`): the initiator's retry (the stored first message, or an empty
+**Time.** `sweep(now, deadline)`, the one seam every link takes the application's clock
+through (a node's `transport_vertex_t::sweep` calls it on each connection's link), runs every
+deadline `now` has passed and returns the next one, 0 when none is armed. Noise ignores
+`deadline`, since its windows are its own configured spans: the initiator's retry (the stored first message, or an empty
 confirmation while unacknowledged, the interval doubling to `retry_cap`) and attempt deadlines,
 and the responder's pending expiry. A deadline of 0 is never due, and deadlines count from the
-last `now` the link was given, so an application polls once before its first demand.
+last `now` the link was given, so an application sweeps once before its first demand.
 
 **Memory.** Everything the link holds about its sessions (the PSK state, the handshake cipher,
 the two session slots, the handshake slot and its stored messages) is one block from the
@@ -262,11 +264,6 @@ reproduce it too, as the RFC's §15 Q6 ruling requires: `noiseprotocol` (Python)
 ```
 
 ```{doxygenstruct} tr::net::noise_config_t
-:project: libtracer
-:members:
-```
-
-```{doxygenstruct} tr::net::noise_poll_t
 :project: libtracer
 :members:
 ```
