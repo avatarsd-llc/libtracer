@@ -840,6 +840,100 @@ void test_conformance_vectors() {
 
 }  // namespace
 
+namespace {
+
+/**
+ * @brief A socket whose send BLOCKS until the test opens the gate, so a caller in flight
+ *        holds the engine's socket reference for as long as the test wants.
+ */
+struct gated_sock_t final : tr::net::transport_t {
+    std::mutex m;
+    std::condition_variable cv;
+    bool entered = false; /**< @brief A send is parked on the gate. */
+    bool open = false;    /**< @brief The gate: sends return once it is set. */
+    bool shut = false;    /**< @brief shut_down() has run (the receive side is joined). */
+    std::atomic<bool>* alive = nullptr;
+
+    explicit gated_sock_t(std::atomic<bool>* a) : alive(a) { alive->store(true); }
+    ~gated_sock_t() { alive->store(false); }
+    gated_sock_t(const gated_sock_t&) = delete;
+    gated_sock_t& operator=(const gated_sock_t&) = delete;
+
+    void send(std::span<const std::byte>) override {
+        std::unique_lock l(m);
+        entered = true;
+        cv.notify_all();
+        cv.wait(l, [&] { return open; });
+    }
+    void shut_down() override {
+        const std::lock_guard l(m);
+        shut = true;
+    }
+};
+
+/** @brief What the gated factory and the test share. */
+struct gate_rig_t {
+    gated_sock_t* sock = nullptr;
+    std::atomic<bool> alive{false};
+};
+
+}  // namespace
+
+/**
+ * @brief #2288 — a socket reference held past the engine's destruction (an in-flight send)
+ *        releases the socket through the socket alone, and the engine has already shut it
+ *        down: nothing reads the dead engine, and no receive can reach it.
+ *
+ * A template so that, on a `kSelfHealLinks = false` build, the discarded body names no
+ * engine symbol: that image has no engine to link against (`main` skips before the call).
+ */
+template <bool kOn = tr::net::kSelfHealLinks>
+void test_socket_ref_outlives_engine() {
+    if constexpr (kOn) {
+        std::printf("#2288: a socket held past the engine's destruction:\n");
+        gate_rig_t rig;
+        gate_rig_t* const r = &rig;
+        tr::net::conn_settings_t settings;
+        settings.addr = "203.0.113.1";
+        settings.port = 9;
+        auto engine = std::make_unique<tr::net::self_heal_link_t>(
+            [r](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*,
+                tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
+                auto sock = tr::mem::make_poly<gated_sock_t>(src, &r->alive);
+                r->sock = sock.get();
+                return sock;
+            },
+            settings, std::span<const std::byte>{}, false, tr::mem::default_root());
+        std::promise<void> up;
+        std::atomic<bool> fired{false};
+        engine->set_liveness_publisher([&up, &fired](link_state_t s) {
+            if (s == link_state_t::UP && !fired.exchange(true)) up.set_value();
+        });
+        engine->acquire();  // a standing binding: the worker dials and reaches UP
+        check(up.get_future().wait_for(10s) == std::future_status::ready, "the engine reached UP");
+
+        const std::byte frame[1] = {std::byte{0x01}};
+        std::thread sender([&] { engine.get()->send(std::span<const std::byte>(frame)); });
+        {
+            std::unique_lock l(rig.sock->m);
+            check(rig.sock->cv.wait_for(l, 10s, [&] { return rig.sock->entered; }),
+                  "a send is in flight, holding the socket");
+        }
+        gated_sock_t* const sock = rig.sock;
+        tr::net::self_heal_link_t* const raw = engine.release();
+        delete raw;  // the engine goes while the send still holds its socket
+        {
+            const std::lock_guard l(sock->m);
+            check(sock->shut, "the engine shut the held socket down before it was destroyed");
+            check(rig.alive.load(), "the in-flight send still holds the socket");
+            sock->open = true;
+            sock->cv.notify_all();
+        }
+        sender.join();  // its hold is the last: the socket goes through its own source
+        check(!rig.alive.load(), "the last hold destroyed the socket, after the engine was gone");
+    }
+}
+
 int main() {
     // The subject is a MODULE (#1470): with `kSelfHealLinks = false` the engine is not in
     // this image and `register_transport_type` refuses the `self_heal_dial` kind every case
@@ -862,5 +956,6 @@ int main() {
     test_retiring_the_producer_releases_its_holds();
     test_builtin_tcp_kind_runs_through_the_engine();
     test_conformance_vectors();
+    test_socket_ref_outlives_engine();
     return tr::testing::summary("link_liveness");
 }

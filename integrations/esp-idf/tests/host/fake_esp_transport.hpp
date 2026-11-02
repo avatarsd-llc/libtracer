@@ -8,8 +8,8 @@
  *
  * The declarations the chip TU compiles against live in `fake_idf/esp_transport*.h`;
  * this is the model behind them, plus the levers a test needs: script the frames the
- * peer sends, wait for them to be drained, and read back what `esp_pthread_set_cfg` was
- * armed with.
+ * peer sends, wait for them to be drained, and read back the stack of the thread that
+ * dialed.
  *
  * The ONE behaviour it reproduces exactly, because both bugs under test live on it
  * (transcribed from `components/tcp_transport/transport_ws.c`):
@@ -112,22 +112,14 @@ void push_frames(std::vector<frame_t> frames);
 void set_socket_fd(int fd);
 
 /**
- * @brief The `stack_size` the last ARMING `esp_pthread_set_cfg` carried, 0 if none.
+ * @brief The stack size of the thread that made the FIRST `esp_transport_connect` since
+ *        @ref reset, read by `pthread_getattr_np` inside the call; 0 if none dialed yet.
  *
- * The #900 observable: on IDF this is the only way a `std::thread` gets a stack other
- * than `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`, so a knob that never reaches here is a
- * knob that never reaches the FreeRTOS task.
+ * The #900 observable: the recv thread dials, so this is the stack the `recv_stack` knob
+ * actually reached. On the host the link's `tr::static_thread_t` is a pthread sized through
+ * its attr (#2288), which is what this reads back.
  */
-[[nodiscard]] std::size_t armed_stack();
-
-/** @brief The `thread_name` that arming config carried, empty if none. */
-[[nodiscard]] std::string armed_name();
-
-/**
- * @brief True iff the armed config was RESTORED afterwards (the last `set_cfg` put back
- *        a zero stack size) — the leak-onto-later-spawns half of the recipe.
- */
-[[nodiscard]] bool cfg_restored();
+[[nodiscard]] std::size_t dial_stack();
 
 /** @name The blocking-discipline levers (#952). */
 /** @{ */

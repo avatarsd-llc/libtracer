@@ -266,6 +266,10 @@ draws from that source alone. A build that binds `kSlabPool = false` (the MCU de
 :project: libtracer
 ```
 
+```{doxygenfunction} tr::mem::stack_source
+:project: libtracer
+```
+
 ```{doxygenfunction} tr::mem::net_backend
 :project: libtracer
 ```
