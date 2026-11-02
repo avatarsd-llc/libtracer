@@ -267,6 +267,11 @@ void run() {
     int no_departure = 0;
     std::optional<gen_regression_t> regression;
     for (int i = 0; i < 20; ++i) {
+        // Dial only into a FREE slot (#2459). A skipped cycle below drops its client without
+        // the departure gate, and the slot server frees `p0` on its poll thread, after the
+        // anchor may already have retired: a dial that beats it lands in `p1` and mints a
+        // second anchor, growing the very map this section bounds.
+        (void)wait_until([&] { return peers_of(server).empty(); });
         auto c = std::make_unique<client_t>(port);
         if (!c->ok()) continue;
         // A cycle whose anchor never came up DID NOT HAPPEN, and is skipped whole: no sample
@@ -301,7 +306,11 @@ void run() {
             ++vanished;
         }
         c.reset();
-        if (!wait_until([&] { return !node.find_session_anchor(id0).has_value(); })) {
+        // Departed means BOTH halves, as S1's departure check above: the anchor retired AND
+        // the slot server let the slot go (#2459).
+        if (!wait_until([&] {
+                return peers_of(server).empty() && !node.find_session_anchor(id0).has_value();
+            })) {
             ++no_departure;
             continue;
         }
