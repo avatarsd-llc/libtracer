@@ -16,6 +16,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **The MCU `libtracer.a` reaches no heap at all, and the link check is a hard zero gate
+  (#2288, #2022).** On Cortex-M0 and ESP32-C6 the archive references no heap entry point:
+  no `malloc`/`free`, no `operator new`/`delete`, no `heap_caps_*`, no heap-allocating thread
+  or queue creator. `tools/check_no_heap.py` now fails on any such reference, and
+  `tools/no_heap_baseline.json` with its `--repin`, `--rebaseline`, `--seed` and `--strict`
+  modes is gone: there is no list a reference could be pinned in. The heap-rooted build
+  (#2090) stays outside the gate by design. `static_thread_t`'s ESP-IDF branch now has a host
+  test, `static_thread_freertos` (#2416): the spawn is a static task on one block from the
+  source, a refused block or task is a failed spawn, and join returns the block.
 - **Library threads draw from a block source, never the platform heap (#2288).** New
   `tr::static_thread_t` (`libtracer/static_thread.hpp`) is the one thread spawn the library uses.
   On ESP-IDF it is a static FreeRTOS task whose control block and stack are ONE block drawn from
@@ -520,6 +529,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   table's growth, and the poll thread rebuilds its poll set without it. A session leaving
   mid-walk is refused by its closed egress; one admitted mid-walk may take the record. No
   signature changes.
+
+### Known limitation
+
+- **On ESP-IDF, a `std::mutex`'s first lock still allocates (#2454).** The FreeRTOS mutex
+  behind it is created lazily, from the IDF heap, on first lock. `tools/check_no_heap.py` does
+  not see this allocation, because it happens inside the IDF's own code and not in
+  `libtracer.a`. Tracked in #2454 for v0.23.0.
 
 ## [0.21.0] — 2026-10-22
 

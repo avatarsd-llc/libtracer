@@ -1027,6 +1027,26 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # One case parks the dispatch thread on purpose and then waits out a stragglers'
     # window; the rest are sub-second. Generous against a loaded runner.
     set_tests_properties(twai_rx_ingress PROPERTIES TIMEOUT 60)
+
+    # #2416 — static_thread_t's ESP-IDF branch: the REAL core/src/static_thread.cpp compiled
+    # with ESP_PLATFORM against fake_idf's FreeRTOS declarations and an empty sdkconfig.h, so
+    # the static-task spawn (one block from the source, xTaskCreateStaticPinnedToCore) runs on
+    # a host. It links NO libtracer: with ESP_PLATFORM set, static_thread_t has its FreeRTOS
+    # layout, which the library's POSIX objects do not share. It takes the library's include
+    # directories and definitions only.
+    add_executable(static_thread_freertos_test
+        "${LIBTRACER_ESP_DIR}/tests/host/static_thread_freertos_test.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../src/static_thread.cpp")
+    target_include_directories(static_thread_freertos_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_sdkconfig"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        $<TARGET_PROPERTY:libtracer,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_compile_definitions(static_thread_freertos_test PRIVATE ESP_PLATFORM=1
+        $<TARGET_PROPERTY:libtracer,INTERFACE_COMPILE_DEFINITIONS>)
+    target_link_libraries(static_thread_freertos_test PRIVATE Threads::Threads)
+    libtracer_test_warnings(static_thread_freertos_test)
+    add_test(NAME static_thread_freertos COMMAND static_thread_freertos_test)
+    set_tests_properties(static_thread_freertos PROPERTIES TIMEOUT 60)
 else()
     message(STATUS "httpd_ws_teardown_test skipped: integrations/esp-idf is not in this tree")
 endif()
