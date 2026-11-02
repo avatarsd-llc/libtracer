@@ -9,8 +9,9 @@
  * Before #2264 a span-tier READ cost three draws on the receiving link's source: the decode
  * arena's node table, its open-node stack, and the reply's iov table. The open-node stack now
  * threads through the node table itself, and the reply gathers into the caller's inline table,
- * so the request costs exactly ONE draw (the node table) and a rope-tier request or forward of
- * a few links costs none. Only a reply wider than `kMaxInlineIov` links spills into the source,
+ * so the request costs exactly ONE draw (the node table) and a rope-tier request of a few links
+ * costs none. A rope-tier forward still gathers straight into the block-array spill, two draws a
+ * frame. Only a reply wider than `kMaxInlineIov` links spills into the source,
  * which `try_probe_window_test` pins.
  *
  * The instrument counts every `try_alloc` the router's `rx` plane serves. The link's state
@@ -129,7 +130,7 @@ void test_read_draws(bool ropes, int expected) {
     }
 }
 
-/** @brief A rope-tier WRITE forwarded to another link: no gather draw for a few links. */
+/** @brief A rope-tier WRITE forwarded to another link: the spill table's two draws a frame. */
 void test_forward_draws() {
     for (const std::size_t n : kSizes) {
         counting_source_t rx;
@@ -150,7 +151,7 @@ void test_forward_draws() {
         const int draws = rx.take();
         std::printf("  rope forward, %5zu B value: %d rx draws / %d frames\n", n, draws, kFrames);
         check(out.sent == kFrames, "every frame was forwarded");
-        check(draws == 0, "a 4-link rope forward gathers on the stack: no rx draw");
+        check(draws == 2 * kFrames, "a rope forward gathers into the spill table: two rx draws");
     }
 }
 

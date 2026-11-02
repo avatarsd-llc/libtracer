@@ -2281,17 +2281,16 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     // regions (remaining dst, selector, original src bytes, payload) — no payload copy. The
     // gather is written ONCE over the cursor seam (fwd_rebuild_t::gather); each region is
     // emitted via `for_each_span`, which yields exactly one sub-span for a contiguous source
-    // and one per straddled link for a rope. Both gather into one stack `std::array` first
-    // (ZERO heap, ADR-0038 inv. #2), and only a gather that overflows it is taken again into
-    // a `mem::block_array_t` over the failable byte seam (#596): a rope frame whose regions
-    // straddle a few links fits the stack as a contiguous one does (#2264).
-    {
-        // Each region is one sub-span per link it straddles — a stack array sized by
+    // and one per straddled link for a rope. So the container is the only thing that varies:
+    // a stack `std::array` for the span path (ZERO heap, ADR-0038 inv. #2) vs a
+    // `mem::block_array_t` over the failable byte seam (#596) for the rope path (a link
+    // count is only known at run time).
+    if constexpr (std::is_same_v<Cursor, wire::grammar::span_cursor>) {
+        // Contiguous source: each region is a single sub-span — a stack array sized by
         // kFwdMaxIov, which is COUNTED from gather's emit sequence (see its docs), not a chosen
-        // budget. Every contiguous frame but one fits it: a relayed SUBSCRIBE request's reverse
-        // child (RFC-0029 §7.1) can emit up to 15 regions, and that cold frame, like a rope
-        // frame split across many links, is gathered again into the growable table below
-        // rather than sizing the hot arm's array for it.
+        // budget. Every frame but one fits it: a relayed SUBSCRIBE request's reverse child
+        // (RFC-0029 §7.1) can emit up to 15 regions, and that cold frame is gathered again
+        // into the growable table below rather than sizing the hot arm's array for it.
         std::array<std::span<const std::byte>, kFwdMaxIov> iov;
         std::size_t n = 0;
         rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
@@ -2309,14 +2308,14 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
             return;
         }
     }
-    // The stack array's overflow (a rope's regions across many links, or the cold relayed
-    // subscribe): the sub-span count is only known at run time — gather into a NOTHROW block
-    // array drawn from the failable seam (#596). A `std::pmr::vector` here was a peer-reachable
-    // abort(): the element count is chosen by the sender (link count x region count), the
-    // growth is `operator new`, and on -fno-exceptions the throw is a reboot. This is the
-    // FORWARD path: it sits behind no ACL, exactly like the RX decode (#588). Both TERMINUS REPLY
-    // tables took the same migration in #1570 (see `gather_reply_iov` and its call sites), so
-    // no egress iov in this file is on the throwing `reserve` any more.
+    // Rope source (or the span arm's overflow): a region may cross several links, so the
+    // sub-span count is only known at run time — gather into a NOTHROW block array drawn from
+    // the failable seam (#596). A `std::pmr::vector` here was a peer-reachable abort(): the
+    // element count is chosen by the sender (link count x region count), the growth is
+    // `operator new`, and on -fno-exceptions the throw is a reboot. This is the FORWARD path —
+    // it sits behind no ACL, exactly like the RX decode (#588). Both TERMINUS REPLY tables took
+    // the same migration in #1570 — see `gather_reply_iov` and its two call sites — so no
+    // egress iov in this file is on the throwing `reserve` any more.
     //
     // Exhaustion drops the frame. That is the correct answer for a forward hop: FWD is not
     // delivery-guaranteed, the sender retries, and emitting a partial iov would put a
