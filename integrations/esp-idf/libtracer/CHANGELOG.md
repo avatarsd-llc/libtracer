@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`esp_ws_client_link_t` follows core's reassembly rule (#2478).** A new BINARY frame that
+  arrives while a fragmented message is open now starts a new message and drops the stale
+  part, instead of having the stale bytes glued on in front of it; it also ends the discard
+  of an oversized message instead of being swallowed by it. A TEXT frame is ignored, as core
+  and `httpd_ws_link_t` ignore it, instead of being delivered as data. No new buffer: the
+  fixed receive buffer stays the bound.
+
 ## [0.22.0] — 2026-11-02
 
 ### Changed

@@ -45,6 +45,9 @@
  *      ingress-loan reserve at the share threshold), a refusing source is a counted drop
  *      the next message survives, and the TX scratch is reserved from the named `io`.
  *
+ *   6. #2478 — a new BINARY mid-assembly drops the stale part, and a TEXT frame is
+ *      ignored, on core's rule.
+ *
  * Each drop case also proves RECOVERY — a well-formed message sent right after parses
  * correctly — and that is what makes the assertions ordering-based rather than
  * sleep-based: a bogus tail would reach the receiver BEFORE the good message, so
@@ -367,6 +370,69 @@ void test_fragmented_fitting_message_reassembles() {
 }
 
 /**
+ * @brief #2478 — a new BINARY frame mid-assembly starts a new message and drops the stale
+ *        part, on core's rule (`core/src/transport_ws.cpp`) and the httpd sibling's.
+ *
+ * BINARY(fin=0) then BINARY(fin=1) used to deliver both payloads glued together. The second
+ * half pins the same rule while an oversized message is being discarded: the new BINARY ends
+ * the discard instead of being swallowed as part of it.
+ */
+void test_binary_mid_assembly_drops_the_stale_part() {
+    std::printf("#2478 a BINARY mid-assembly drops the stale part:\n");
+    fake_ws::reset();
+    sink_t sink;
+    auto link = dialed_link(sink);
+    const fake_ws::frame_t fresh =
+        fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, /*fin=*/true, 2, 0xB0);
+    fake_ws::push_frames(
+        {fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, /*fin=*/false, 3, 0xA0), fresh});
+    check(wait_until([&] { return sink.count() >= 1; }, 5s), "a message was delivered");
+    check(sink.count() == 1, "exactly once");
+    check(same_bytes(sink.at(0), fresh), "and it is only the new BINARY, no stale bytes");
+
+    const fake_ws::frame_t after = good_message();
+    fake_ws::push_frames(
+        {fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, /*fin=*/false, kRxBytes + 16, 1), after});
+    check(wait_until([&] { return sink.count() >= 2; }, 5s),
+          "a BINARY after an oversized open message was delivered");
+    check(sink.count() == 2 && same_bytes(sink.at(1), after),
+          "whole — it ended the discard instead of being swallowed by it");
+    check(link->dropped_rx() == 1, "only the oversized message was counted as dropped");
+    link.reset();
+    check_drained();
+}
+
+/**
+ * @brief #2478 — a TEXT frame is ignored, never delivered as data, as core and the httpd
+ *        sibling ignore it; an assembly open around it is left as it was.
+ */
+void test_text_frame_is_ignored() {
+    std::printf("#2478 a TEXT frame is ignored:\n");
+    fake_ws::reset();
+    sink_t sink;
+    auto link = dialed_link(sink);
+    const fake_ws::frame_t good = good_message();
+    fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_TEXT, true, 16, 0x50),
+                          fake_ws::make_frame(WS_TRANSPORT_OPCODES_TEXT, true, kRxBytes + 8, 0x60),
+                          good});
+    check(wait_until([&] { return sink.count() >= 1; }, 5s), "a message was delivered");
+    check(sink.count() == 1, "EXACTLY one — no TEXT frame was delivered");
+    check(same_bytes(sink.at(0), good), "and it is the BINARY message that followed");
+
+    const fake_ws::frame_t a = fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, false, 10, 0x10);
+    const fake_ws::frame_t b = fake_ws::make_frame(WS_TRANSPORT_OPCODES_CONT, true, 6, 0x30);
+    fake_ws::push_frames({a, fake_ws::make_frame(WS_TRANSPORT_OPCODES_TEXT, true, 20, 0x70), b});
+    check(wait_until([&] { return sink.count() >= 2; }, 5s), "the fragmented message delivered");
+    std::vector<std::byte> want = a.payload;
+    want.insert(want.end(), b.payload.begin(), b.payload.end());
+    check(sink.count() == 2 && sink.at(1) == want,
+          "with both fragments and none of the TEXT between them");
+    check(link->dropped_rx() == 0, "and nothing was counted as dropped");
+    link.reset();
+    check_drained();
+}
+
+/**
  * @brief #1102 — a link holds the FIRST dial until `start_receiving()`, and the
  *        latch is one-shot across reconnects (ADR-0081's defer-the-dial arm).
  *
@@ -656,6 +722,8 @@ int main() {
     test_exact_fit_message_delivers();
     test_stray_continuation_is_dropped();
     test_fragmented_fitting_message_reassembles();
+    test_binary_mid_assembly_drops_the_stale_part();
+    test_text_frame_is_ignored();
     test_unarmed_link_holds_the_dial();
     test_drop_stats_projects_through_the_base_interface();
     test_default_memory_is_borrowed();
