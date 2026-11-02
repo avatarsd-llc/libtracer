@@ -78,7 +78,12 @@ jobs:
       # It counts the libtracer CI containers in runners-ci.slice plus itself, and takes
       # core-ci's adaptive rule: 4 with three or fewer running, otherwise 2, and 2 when
       # the slice cannot be read. The shared /ccache is the containers' (root-owned
-      # entries), so a host job keeps its own cache under the runner user's home.
+      # entries), so a host job keeps its own cache under the runner user's home. The cache
+      # is relocatable across runners (CI time audit A4): BASEDIR is the workspace's real path
+      # and NOHASHDIR keeps the working directory out of the key, so a hit on runner B
+      # reuses runner A's object. Debug info then names the compiling runner's build dir as
+      # comp_dir; file names are workspace-relative, so sanitizer reports still print
+      # function and file:line.
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
@@ -94,7 +99,9 @@ jobs:
               echo "CCACHE_DIR=$HOME/ccache-host"
               echo "CCACHE_MAXSIZE=10G"
               echo "CCACHE_COMPILERCHECK=content"
-              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_BASEDIR=$(realpath "$GITHUB_WORKSPACE")"
+              echo "CCACHE_NOHASHDIR=1"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
             } >> "$GITHUB_ENV"
             echo "ccache: ON ($HOME/ccache-host)"
           else jobs="$(nproc)"; fi
@@ -138,6 +145,10 @@ jobs:
             exit 1
           fi
           echo "fenced entry confirmed: membarrier registration refused under the seccomp filter"
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only (the stats log is per job). Absent on the hosted route.
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Clean this job's workspace off the host runner
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
