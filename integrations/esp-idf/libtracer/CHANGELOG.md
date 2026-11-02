@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-11-02
+
 ### Changed
 
 - **`httpd_ws_link_t`: an adopted teardown no longer waits for its session detach
@@ -91,6 +93,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   416 ms). With `CONFIG_LIBTRACER_LINK_TRAFFIC_STATS`, `tx_frames` and `tx_bytes` now include
   the PONG and CLOSE replies.
 
+### Fixed
+
+- **`httpd_ws_link_t` grows its reassembly buffer geometrically and charges each fragment to
+  the reassembly cap.** The buffer doubles from 8 bytes up to the 32 KiB cap and never draws
+  a block past it, so a message cut into many small fragments costs O(log n) regrows rather
+  than a block sized past the cap. Each fragment is now charged its payload plus a 2-byte
+  frame header against the cap, so a run of empty fragments is dropped like an oversized
+  message, counted in the session's `rx_drops`. A fragmented message now carries a little
+  less than 32 KiB of payload: 2 bytes per fragment go to the charge.
+
+- **`httpd_ws_link_t::slot_link` is removed (#2234).** The router now records which session
+  holds each slot and egresses through `peer_link_of`, so a late departure no longer retires
+  the anchor of a successor still pending authentication (see core's changelog).
+
 ### Changed (breaking)
 
 - **`esp_ws_client_link_t` sends through the shared egress module; the
@@ -121,20 +137,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   then calls `start_receiving()`, which spawns the recv thread; the creating write to the
   module's `conn` endpoint already does this. A link that is never armed never dials and holds
   no recv thread.
-
-### Fixed
-
-- **`httpd_ws_link_t` grows its reassembly buffer geometrically and charges each fragment to
-  the reassembly cap.** The buffer doubles from 8 bytes up to the 32 KiB cap and never draws
-  a block past it, so a message cut into many small fragments costs O(log n) regrows rather
-  than a block sized past the cap. Each fragment is now charged its payload plus a 2-byte
-  frame header against the cap, so a run of empty fragments is dropped like an oversized
-  message, counted in the session's `rx_drops`. A fragmented message now carries a little
-  less than 32 KiB of payload: 2 bytes per fragment go to the charge.
-
-- **`httpd_ws_link_t::slot_link` is removed (#2234).** The router now records which session
-  holds each slot and egresses through `peer_link_of`, so a late departure no longer retires
-  the anchor of a successor still pending authentication (see core's changelog).
 
 ## [0.21.0] — 2026-10-22
 
