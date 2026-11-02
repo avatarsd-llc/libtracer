@@ -56,16 +56,18 @@
 # enough to bisect. Contaminated points do not count as coverage — a sample the A/A
 # pair flagged answers "what was the machine doing", not "what did the code cost".
 #
-# A POINT PER PUSH (2026-10-07). The page draws one slot per first-parent `main` commit,
-# not one per stored sample (`render_history.onto_main_axis`). A push the `paths:` filter
-# drops built byte-identical bench binaries to its nearest bench-relevant ancestor, so the
-# page carries that commit's point forward, marked "no code change, same as <sha>", instead
-# of spending a bench window to re-measure the same binary. Every push that passes the
-# filter queues its own run (the per-sha concurrency group below), so no bench-relevant
-# commit loses its point to a newer push; the busy-host guard FLAGS a sample instead of
-# skipping it. A release tag gets its own run (`tags:`), skipped when its commit already
-# has a point, and `workflow_dispatch` with `commit` backfills one past commit. docs.yml
-# rebuilds the page when this workflow completes (its `workflow_run:` trigger).
+# A POINT PER BENCHED PUSH (2026-10-07; #2466). The page draws one slot per first-parent
+# `main` commit, not one per stored sample (`render_history.onto_main_axis`). A push the
+# `paths:` filter drops built byte-identical bench binaries to its nearest bench-relevant
+# ancestor, so the page carries that commit's point forward, marked "no code change, same
+# as <sha>", instead of spending a bench window to re-measure the same binary. Every push
+# that passes the filter queues a run, but a landing batch measures once (#2466, the
+# concurrency note below): a member whose run was superseded while pending has no point,
+# and the page marks it "unmeasured", never "same as", so the batch is a short range; the
+# density leg bounds it. The busy-host guard FLAGS a sample instead of skipping it. A
+# release tag gets its own run (`tags:`), skipped when its commit already has a point, and
+# `workflow_dispatch` with `commit` backfills one past commit. docs.yml rebuilds the page
+# when this workflow completes (its `workflow_run:` trigger).
 #
 # STORE SWEEP (#1428): the ADR-0079 per-configuration sweep banks its DETERMINISTIC
 # columns here — the `hwm` store `used()` occupancy per (arm, T), which additionally
@@ -135,14 +137,18 @@ on:
         default: ''
 
 # Never cancel a measurement mid-run (a half-measured point is worse than a late one).
-# A push gets a group of its OWN sha: GitHub keeps one QUEUED run per group and cancels
-# the older one when a newer run queues, which with one shared group cost 26 queued push
-# runs their point between 2026-09-23 and 2026-10-07 (merge bursts on 10-03 and 10-04).
-# Runs still measure one at a time, because one runner (`studio-bench`) carries the
-# `bench-local` label and takes one job at a time. Scheduled and manual runs share one
+# BENCH ONCE PER BATCH (#2466): pushes to one ref share ONE group, and GitHub keeps only the
+# newest PENDING run of a group, superseding the older pending ones. A landing batch of N
+# merges then costs the one bench machine its first push's run and its last, not N runs of
+# ~17 min each; that the members in between get no point is the trade, ruled in #2466, and
+# the density leg still bounds the gap. (From 2026-10-07 to #2466 the group was per sha, so
+# every push measured; before that a shared group cost 26 queued runs their point.) This is
+# a group of its own, not perf.yml's: one group shared by both workflows would keep one
+# pending run across the two. Runs measure one at a time because one runner
+# (`studio-bench`) carries the `bench-local` label. Scheduled and manual runs share one
 # group: a catch-up superseded by a newer catch-up loses nothing.
 concurrency:
-  group: perf-local-${{ github.event_name == 'push' && github.sha || 'catchup' }}
+  group: perf-local-${{ github.event_name == 'push' && github.ref_name || 'catchup' }}
   cancel-in-progress: false
 
 jobs:
@@ -428,7 +434,11 @@ jobs:
       # the HOST changing (thermal, neighbour), not the code — on a fixed machine the
       # control is what turns "the series moved" into a diagnosis. Optional: a failed
       # vendor fetch must never cost the commit its history point.
+      # NIGHTLY ONLY (#2466): the scheduled catch-up and a manual dispatch run it, a push
+      # does not (3 min of the bench machine per push). The zenoh ÷ libtracer ratio view
+      # therefore draws only the points those runs bank.
       - name: Run the Zenoh comparison bench (control series, optional)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           if bash bench/fetch_zenoh.sh; then
             cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release

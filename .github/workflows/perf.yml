@@ -32,8 +32,10 @@
 #     a bootstrap 95% interval on that median that excludes 1 (#1807) — AND the arms'
 #     second-best samples past it too, so a bimodal row's slow mode cannot fail it (#2168).
 #     No Actions cache feeds the gate.
-#  3. Ratchet (`ratchet`) — re-runs the same gate, HEAD against its PARENT commit, on the
-#     pinned bench host's CPUs as gate-pr does (#2433). ONE replica on every main push, THREE
+#  3. Ratchet (`ratchet`) — re-runs the same gate, HEAD against the LAST BENCHED main commit
+#     (bench/ratchet_baseline.py, #2466; HEAD's parent only when the lookup fails), on the
+#     pinned bench host's CPUs as gate-pr does (#2433). ONE replica per benched main push
+#     (a landing batch benches once, see the concurrency note below), THREE
 #     in the nightly schedule (ruling 23, 2026-11-01), one after another on the same CPUs, so
 #     they are repeats on one machine, not draws of hosted hardware. Every replica is
 #     ADVISORY (see the tier note below): it announces its own comparison and does not stop
@@ -91,14 +93,22 @@ on:
 
 # A newer push to a PR supersedes its running gate: its verdict would describe a head that is
 # no longer the PR's, and queued behind it it holds the bench CPUs that local benches and the
-# merge queue wait on. Push-to-main runs never cancel each other: each is a commit's ratchet
-# and history point, so a push is grouped by its SHA (one run per group). A ref-wide group
-# would not do: GitHub keeps one PENDING run per group and drops the rest even with
-# cancel-in-progress off, which would cost queued commits their points. A cancelled gate-pr
-# still runs its `if: always()` affinity-restore step, and this workflow takes no host-side
-# bench lock, so cancelling leaves nothing held.
+# merge queue wait on. A cancelled gate-pr still runs its `if: always()` affinity-restore step,
+# and this workflow takes no host-side bench lock, so cancelling leaves nothing held.
+#
+# BENCH ONCE PER BATCH (#2466). Push-to-main runs share ONE group per branch and never cancel a
+# running one; GitHub keeps only the newest PENDING run of a group and supersedes the older
+# pending ones. A landing batch of N merges therefore benches its first push (already running)
+# and its last, not all N, and the ratchet costs one replica per batch instead of N. Nothing
+# goes unmeasured: the ratchet's baseline is the last commit whose push run succeeded, not
+# `HEAD^`, so the superseded members sit inside the newest run's comparison (and a regression
+# in any of them fails it exactly as it would have failed its own). The page marks them
+# "unmeasured" (render_history.onto_main_axis), never "same as". perf-local.yml groups its
+# pushes the same way in a group of its own: one group shared by both workflows would keep one
+# pending run across the two, and a burst would drop one workflow's run for the batch.
+# The nightly has its own group, so it never supersedes a push.
 concurrency:
-  group: perf-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name }}
+  group: perf-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref_name }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # The gate's and the ratchet's bench builds align every function to 64 B (#2175), both arms
@@ -167,15 +177,9 @@ jobs:
       # cannot repair.
       - name: Reclaim any root-owned leftovers from a container job
         run: '[ "$RUNNER_ENVIRONMENT" != self-hosted ] || docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || echo "::warning::could not hand root-owned workspace files back to the runner user; checkout may fail to clean them"'
+      # Shallow (#2466): HEAD only. The baseline step below fetches the one other commit it
+      # needs, at depth 1. A full-history clone took about 4 to 6 min of this job.
       - uses: actions/checkout@v4
-        with:
-          # Need origin/main history to build the same-runner baseline. Treeless
-          # (CI time audit, ruling 24, 2026-11-01): the whole commit graph is
-          # fetched, so the merge base and every ref below resolve as before,
-          # but trees and file contents arrive only when git reads them. A full
-          # clone took about 4 to 6 min of this job.
-          fetch-depth: 0
-          filter: tree:0
       - name: Build the PR (candidate) benchmark (Release)
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release \
@@ -200,13 +204,19 @@ jobs:
       # job -> absolute-ns runner speed cancels; only a real regression fails.
       - name: Build main's benchmark on this runner (baseline)
         run: |
-          git fetch --no-tags origin main
+          git fetch --no-tags --depth=1 origin main
           # The baseline is the main this PR was MERGED ONTO (#1864): the merge ref's first
           # parent, fixed when the run was queued. origin/main at run time can be up to a
           # queue's length newer, and then any speed-up that landed meanwhile reads as a
-          # regression in the PR. A non-merge HEAD (push to main) keeps origin/main.
+          # regression in the PR. A non-merge HEAD (push to main) keeps origin/main. The
+          # checkout is shallow, so the parents are read off HEAD's commit object (which
+          # names them even when they are not fetched) and the first one is fetched alone.
           base=origin/main
-          if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 3 ]; then base="$(git rev-parse HEAD^1)"; fi
+          parents="$(git cat-file -p HEAD | sed -n 's/^parent //p')"
+          if [ "$(wc -w <<<"$parents")" -eq 2 ]; then
+            base="$(head -n 1 <<<"$parents")"
+            git fetch --no-tags --depth=1 origin "$base"
+          fi
           echo "baseline: $(git rev-parse "$base") (origin/main is $(git rev-parse origin/main))"
           # The bench host is persistent, unlike a hosted VM: drop the last run's baseline tree.
           git worktree remove --force ../main-baseline 2>/dev/null || true
@@ -229,6 +239,10 @@ jobs:
       # against the recorded false-failure and true-regression sample sets.
       - name: Perf-gate decision-rule tests
         run: python3 bench/test_perf_gate.py
+      # The ratchet's baseline rule (#2466): the last benched ancestor, never a superseded
+      # batch member, and the once-per-batch wiring of both perf workflows.
+      - name: Ratchet-baseline rule tests
+        run: python3 bench/test_ratchet_baseline.py
       # The pinned host's quiescence rules (#1236), tested here because the guard decides
       # whether a sample is banked AT ALL, and because its verdicts are what the BLOCKING
       # tier consumes: `perf_gate.py --sample-note` refuses to render a blocking verdict
@@ -498,9 +512,9 @@ jobs:
         if: always()
         run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
-  # --- main push + nightly: no-pullback ratchet (HEAD vs parent; 1 replica, 3 nightly) --
-  # Each replica is a complete same-runner experiment: build HEAD, build the parent commit,
-  # gate HEAD against the parent. fail-fast is off so one replica's verdict (or
+  # --- main push + nightly: no-pullback ratchet (HEAD vs last benched; 1 replica, 3 nightly) --
+  # Each replica is a complete same-runner experiment: build HEAD, build the last benched
+  # main commit (#2466), gate HEAD against it. fail-fast is off so one replica's verdict (or
   # infrastructure hiccup) never hides the others'.
   ratchet:
     if: >-
@@ -517,14 +531,17 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","bench-local"]') || 'ubuntu-24.04' }}
     env:
       BENCH_CPU: "3-6" # as gate-pr: bench.slice minus CPU 2 (the runner's own processes)
-    # Sized for the bench host (#2433), not yet measured there: gate-pr's interleaved A/B on
-    # the same CPUs measured ~15 min at 8 pairs (#1807); this job adds the history, network
-    # and Zenoh transcripts (~3-4 min) and a second build, so ~20 min. 45 = ~2.2x that; re-size
-    # from the first local runs. The limit is per replica and counts no queue time, so the
-    # nightly's three replicas run one after another (~60 min) and each still fits; a push
-    # costs one (~20 min). Advisory tier, so a false trip is cheap to ignore and therefore
+    # Measured on the bench host (2026-11-02): 29-41 min, of which the interleaved A/B is
+    # 19.5-20 min, the full-history checkout 3.6-15.7 and Zenoh 3.1-6.2. With the shallow
+    # checkout and Zenoh nightly-only (#2466) a push replica is ~22 min; 45 = ~2x that. The
+    # limit is per replica and counts no queue time, so the nightly's three replicas run one
+    # after another (~66 min) and each still fits; a push costs one (~22 min). Advisory tier, so a false trip is cheap to ignore and therefore
     # especially corrosive — set loose on purpose.
     timeout-minutes: 45
+    # The baseline lookup reads this workflow's runs and compares commits (#2466).
+    permissions:
+      actions: read
+      contents: read
     strategy:
       fail-fast: false
       # One replica at a time: the nightly's three are repeats on one host by construction,
@@ -549,35 +566,49 @@ jobs:
       # container jobs.
       - name: Reclaim any root-owned leftovers from a container job
         run: '[ "$RUNNER_ENVIRONMENT" != self-hosted ] || docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || echo "::warning::could not hand root-owned workspace files back to the runner user; checkout may fail to clean them"'
+      # Shallow (#2466): HEAD only; the baseline step fetches the baseline commit alone.
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # need the parent commit for the ratchet baseline
       - name: Build HEAD's benchmark (Release)
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_FLAGS="$BENCH_CXX_FLAGS"
           cmake --build bench/build --target bench_libtracer bench_forward_heap \
             bench_forward_demux bench_chain_delivery bench_store_sweep --parallel "$BUILD_JOBS"
-      - name: Build the parent commit's benchmark on this runner (ratchet baseline)
+      # The baseline is the LAST BENCHED main commit (#2466): the newest ancestor whose own
+      # push run succeeded, so the members of a batch whose runs were superseded are inside
+      # this comparison. Only when that lookup fails does it fall back to the first parent,
+      # with a warning, because then a superseded member is compared nowhere.
+      - name: Build the last benched commit's benchmark on this runner (ratchet baseline)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+          base="$(python3 bench/ratchet_baseline.py --repo "$GITHUB_REPOSITORY" --head "$(git rev-parse HEAD)")"
+          if [ -z "$base" ]; then
+            base="$(git cat-file -p HEAD | sed -n 's/^parent //p' | head -n 1)"
+            [ -z "$base" ] || echo "::warning::no benched ancestor found; the ratchet falls back to HEAD's first parent ${base:0:8}, and a superseded batch member before it is compared nowhere"
+            [ -z "$base" ] || echo "> **Fallback:** no benched ancestor found; batch members before \`${base:0:8}\` are compared nowhere." >>"$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -n "$base" ]; then
+            echo "ratchet baseline: $base"
+            echo "### ratchet baseline: \`${base:0:8}\` (HEAD \`${GITHUB_SHA:0:8}\`)" >>"$GITHUB_STEP_SUMMARY"
+            git fetch --no-tags --depth=1 origin "$base"
             # The bench host is persistent, unlike a hosted VM: drop any last baseline tree.
-            git worktree remove --force ../parent-baseline 2>/dev/null || true
-            rm -rf ../parent-baseline; git worktree prune
-            git worktree add --detach ../parent-baseline HEAD^
-            # A parent that predates bench_chain_delivery (#1951) gets this commit's copy, as
+            git worktree remove --force ../ratchet-baseline 2>/dev/null || true
+            rm -rf ../ratchet-baseline; git worktree prune
+            git worktree add --detach ../ratchet-baseline "$base"
+            # A baseline that predates bench_chain_delivery (#1951) gets this commit's copy, as
             # the gate's baseline build does.
-            if ! grep -q bench_chain_delivery ../parent-baseline/bench/CMakeLists.txt; then
-              cp bench/bench_chain_delivery.cpp ../parent-baseline/bench/
+            if ! grep -q bench_chain_delivery ../ratchet-baseline/bench/CMakeLists.txt; then
+              cp bench/bench_chain_delivery.cpp ../ratchet-baseline/bench/
               printf '\nadd_executable(bench_chain_delivery bench_chain_delivery.cpp)\ntarget_link_libraries(bench_chain_delivery PRIVATE libtracer)\n' \
-                >>../parent-baseline/bench/CMakeLists.txt
+                >>../ratchet-baseline/bench/CMakeLists.txt
             fi
-            cmake -S ../parent-baseline/bench -B ../parent-baseline/bench/build -DCMAKE_BUILD_TYPE=Release \
+            cmake -S ../ratchet-baseline/bench -B ../ratchet-baseline/bench/build -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_CXX_FLAGS="$BENCH_CXX_FLAGS"
-            cmake --build ../parent-baseline/bench/build --target bench_libtracer \
+            cmake --build ../ratchet-baseline/bench/build --target bench_libtracer \
               bench_forward_heap bench_chain_delivery bench_forward_demux bench_store_sweep --parallel "$BUILD_JOBS"
           else
-            echo "root commit — no parent to ratchet against"
+            echo "root commit — no baseline to ratchet against"
           fi
       # Both builds are done: move this runner's own processes off the bench CPUs, as gate-pr
       # does, BEFORE anything is timed. Every timed step below (the history transcript, the
@@ -635,6 +666,9 @@ jobs:
           for f in bench/bench_forward_demux_raw.txt bench/bench_chain_delivery_raw.txt; do
             [ -s "$f" ] || echo "::warning::$f is empty — its series will not be recorded"
           done
+      # NIGHTLY ONLY, first replica only (#2466): 3-6 min of bench host per run, and a control
+      # needs no point per push. A push records no Zenoh row; the nightly records no history
+      # point either (see `history`), so its transcript is this run's artifact.
       # Zenoh, on the SAME runner and in the same pass. Its version is pinned, so its line
       # is expected to be FLAT — which is the point: it is a control. A libtracer series
       # that moves while Zenoh's stays put is the code changing; both moving together is
@@ -643,6 +677,7 @@ jobs:
       # all. Entirely optional — a failed vendor download must never cost this commit its
       # history point.
       - name: Run the Zenoh comparison bench (control series, optional)
+        if: github.event_name == 'schedule' && matrix.replica == 1
         run: |
           if bash bench/fetch_zenoh.sh; then
             cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
@@ -664,15 +699,15 @@ jobs:
       # prints the same verdict line, with a ::warning:: on a breach, and decides nothing
       # alone. Nothing is lost pre-merge: `gate-pr` above already gated the same commit
       # against the same `main` baseline, blocking, before it could land.
-      - name: No-pullback ratchet (HEAD vs parent, this runner, interleaved) — ADVISORY tier
+      - name: No-pullback ratchet (HEAD vs last benched commit, this runner, interleaved) — ADVISORY tier
         run: |
-          if [ -x ../parent-baseline/bench/build/bench_libtracer ]; then
-            echo "== gate HEAD against its parent, interleaved on this runner =="
+          if [ -x ../ratchet-baseline/bench/build/bench_libtracer ]; then
+            echo "== gate HEAD against the last benched commit, interleaved on this runner =="
             python3 bench/perf_gate.py --tier advisory \
-              --baseline-bench ../parent-baseline/bench/build/bench_libtracer \
-              --baseline-bench-fwd ../parent-baseline/bench/build/bench_forward_heap
+              --baseline-bench ../ratchet-baseline/bench/build/bench_libtracer \
+              --baseline-bench-fwd ../ratchet-baseline/bench/build/bench_forward_heap
           else
-            echo "== no parent build — absolute floors only =="
+            echo "== no baseline build — absolute floors only =="
             python3 bench/perf_gate.py --tier advisory --update-baseline
           fi
       # if: always() is load-bearing, not defensive. Under the ADVISORY tier the ratchet
