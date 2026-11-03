@@ -21,7 +21,7 @@
  *    names it. A Noise link delivers only complete Tracer frames (reference/23 §3), so this arm
  *    wraps each harness payload in a 4-byte VALUE header and strips it at the other end: its
  *    largest payload is the IPv4 bound less the 25-byte transport overhead and that header.
- *    The application drives it with `now` (`poll`), as the harness does while it waits. Every
+ *    The application drives it with `now` (`sweep`), as the harness does while it waits. Every
  *    row, label and reading is shared with `udp`.
  *
  * The crypto floor under the Noise arm (seal/open per frame, the handshake on its own) is
@@ -158,10 +158,8 @@ class pair_t final : public link_pair_t {
 
 #if defined(LIBTRACER_BENCH_NOISE_LINK)
     void tick(std::uint64_t now) override {
-        if constexpr (requires(T& t) { t.poll(now); }) {
-            (void)server_->poll(now);
-            (void)client_->poll(now);
-        }
+        (void)server_->sweep(now, 0);
+        (void)client_->sweep(now, 0);
     }
 #endif
 
@@ -224,7 +222,7 @@ using noise_t =
 
 /**
  * @brief The Noise link's config, in the harness's nanoseconds: retransmit after 1 ms (doubling
- *        to 50 ms), give an attempt 2 s. The harness polls while it waits, so these run.
+ *        to 50 ms), give an attempt 2 s. The harness sweeps while it waits, so these run.
  */
 [[nodiscard]] tr::net::noise_config_t noise_config() {
     return {.psk_ref = "bench",
@@ -250,8 +248,8 @@ using noise_t =
         tr::net::conn_role_t::DIAL, g_noise_host, noise_config(), std::uint16_t{0},
         std::string_view{"127.0.0.1"}, server->carrier().local_port());
     if (!client->ok()) return nullptr;
-    (void)server->poll(now);  // deadlines count from the last `now` a link was given
-    (void)client->poll(now);
+    (void)server->sweep(now, 0);  // deadlines count from the last `now` a link was given
+    (void)client->sweep(now, 0);
     return std::make_unique<pair_t<noise_t, true>>(rx, std::move(server), std::move(client));
 }
 #endif

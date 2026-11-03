@@ -1197,7 +1197,7 @@ struct httpd_ws_link_t::session_t {
     /** @brief The last write of this session's wire frame took zero bytes (tx_m). */
     bool tx_refused = false;
     /** @brief A byte of this session's frames went out since the last liveness check
-     *         (#2198, tx_m). Set by the flush, taken by `close_frozen_peers`. */
+     *         (#2198, tx_m). Set by the flush, taken by `sweep`. */
     bool tx_moved = true;
     /** @brief The liveness check found this session frozen; the next flush condemns it
      *         (#2198, tx_m). */
@@ -2843,7 +2843,7 @@ void httpd_ws_link_t::auth_sweep_work(void* arg) {
 }
 
 void httpd_ws_link_t::sweep_auth_deadlines() {
-    // The verdict close_frozen_peers reached, on the caller's task, against its own `deadline`
+    // The verdict sweep reached, on the caller's task, against its own `deadline`
     // (#2257). Records only ever move from unseen to a `now` no later than that, so a session
     // claimed after the check is never caught here.
     const std::uint64_t cutoff = auth_cutoff_.load(std::memory_order_relaxed);
@@ -4258,14 +4258,17 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
     return progress;
 }
 
-std::size_t httpd_ws_link_t::close_frozen_peers(std::uint64_t now, std::uint64_t deadline) {
+std::uint64_t httpd_ws_link_t::sweep(std::uint64_t now, std::uint64_t deadline) {
     // The verdict here, under each session's tx_m (never with peers_m_ under it); the close
     // on the httpd task, through one posted flush. No clock is read: `now` is the caller's.
     //
     // The same call bounds the auth handshake, the RX a session owes before it is served
     // (#2257): every unauthenticated session and silent upgrade is stamped with the first `now`
     // that sees it, and one recorded before @p deadline is closed with `kCloseAuthTimeout` by
-    // the sweep this posts to the httpd task. Never extended by the peer's own traffic.
+    // the sweep this posts to the httpd task. Never extended by the peer's own traffic, so a
+    // record is judged as stuck at every check, and one still inside the window is due again
+    // one window after its stamp.
+    sweep_t sw{.now = now, .deadline = deadline};
     session_t* batch[kFanoutChunk];
     std::size_t next = 0;
     std::size_t frozen = 0;
@@ -4274,7 +4277,7 @@ std::size_t httpd_ws_link_t::close_frozen_peers(std::uint64_t now, std::uint64_t
         const std::lock_guard lock(peers_m_);
         for (std::size_t i = 0; i < pending_n_; ++i) {
             pending_[i].since = std::min(pending_[i].since, now);
-            expired += pending_[i].since < deadline;
+            expired += sw.frozen(true, true, pending_[i].since);
         }
     }
     for (bool more = true; more;) {
@@ -4284,7 +4287,8 @@ std::size_t httpd_ws_link_t::close_frozen_peers(std::uint64_t now, std::uint64_t
             while (next < slots_.size() && n < kFanoutChunk) {
                 session_t* const s = slots_[next++];
                 s->auth_since = std::min(s->auth_since, now);
-                expired += s->open && !s->dead && s->auth_pending && s->auth_since < deadline;
+                expired +=
+                    s->open && !s->dead && s->auth_pending && sw.frozen(true, true, s->auth_since);
                 batch[n++] = s;
             }
             more = next < slots_.size();
@@ -4294,7 +4298,7 @@ std::size_t httpd_ws_link_t::close_frozen_peers(std::uint64_t now, std::uint64_t
             const std::lock_guard lock(s->tx_m);
             const bool moved = std::exchange(s->tx_moved, false);
             const bool owed = s->tx.held() || s->tx_head != nullptr;
-            if (!judge_frozen(!moved && owed, s->live_since, now, deadline)) continue;
+            if (!sw.frozen(owed, !moved && owed, s->live_since)) continue;
             s->tx_frozen = true;
             s->live_since = now;
             ++frozen;
@@ -4306,7 +4310,7 @@ std::size_t httpd_ws_link_t::close_frozen_peers(std::uint64_t now, std::uint64_t
     if (expired != 0 && h != nullptr)
         (void)httpd_queue_work(h, &httpd_ws_link_t::auth_sweep_work,
                                gate_.load(std::memory_order_relaxed));
-    return frozen + expired;
+    return sw.next;
 }
 
 void httpd_ws_link_t::close_frozen(const session_ref_t& to) {

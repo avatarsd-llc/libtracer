@@ -391,17 +391,19 @@ egress_frame_t* stream_endpoint_t::frame_of(std::span<const ::iovec> rec,
         value);
 }
 
-std::size_t stream_endpoint_t::close_frozen_one(std::uint64_t now, std::uint64_t deadline) {
+std::uint64_t stream_endpoint_t::sweep_one(std::uint64_t now, std::uint64_t deadline) {
+    sweep_t sw{.now = now, .deadline = deadline};
     const bool moved = tx_moved_.exchange(false, std::memory_order_relaxed);
-    if (!judge_frozen(!moved && peer_.wants_write(), live_since_, now, deadline)) return 0;
+    const bool owing = peer_.wants_write();
+    if (!sw.frozen(owing, !moved && owing, live_since_)) return sw.next;
     // Inside the writer role, so the fd it shuts down is still the peer's; a role somebody
-    // holds is a write in progress, and the next check asks again.
+    // holds is a write in progress, and the check one window on asks again.
     if (!egress_.condemn_held(peer_,
                               [this] { condemn_fd(conn_fd_.load(std::memory_order_acquire)); }))
-        return 0;
+        return now + (now - deadline) + 1;
     live_since_ = now;
     frozen_closed_.fetch_add(1, std::memory_order_relaxed);
-    return 1;
+    return 0;
 }
 
 void stream_endpoint_t::note_egress(const egress_result_t& r) noexcept {
@@ -601,9 +603,10 @@ bool slot_server_t::close_peer(std::string_view peer) {
     return false;
 }
 
-std::size_t slot_server_t::close_frozen_peers(std::uint64_t now, std::uint64_t deadline) {
+std::uint64_t slot_server_t::sweep(std::uint64_t now, std::uint64_t deadline) {
     // Under peers_m_, the close_peer discipline: teardown un-names a slot under this lock
     // before it closes the fd, so a named slot's fd is still its own here.
+    sweep_t sw{.now = now, .deadline = deadline};
     std::size_t closed = 0;
     const std::lock_guard lock(peers_m_);
     for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
@@ -613,15 +616,16 @@ std::size_t slot_server_t::close_frozen_peers(std::uint64_t now, std::uint64_t d
         if (fd < 0 || s->name[0] == '\0') continue;
         const bool tx = s->tx_moved.exchange(false, std::memory_order_relaxed);
         const bool rx = s->rx_moved.exchange(false, std::memory_order_relaxed);
-        const bool stuck =
-            (!tx && s->egress.wants_write()) || (!rx && s->rx_owed.load(std::memory_order_relaxed));
-        if (!judge_frozen(stuck, s->live_since, now, deadline)) continue;
+        const bool tx_owed = s->egress.wants_write();
+        const bool rx_owed = s->rx_owed.load(std::memory_order_relaxed);
+        if (!sw.frozen(tx_owed || rx_owed, (!tx && tx_owed) || (!rx && rx_owed), s->live_since))
+            continue;
         condemn_fd(fd);  // the poll thread's next pass runs the remote-FIN teardown
         s->live_since = now;
         ++closed;
     }
     frozen_closed_.fetch_add(closed, std::memory_order_relaxed);
-    return closed;
+    return sw.next;
 }
 
 void slot_server_t::send_one(session_base_t& s, function_ref_t<egress_frame_t*()> frame,

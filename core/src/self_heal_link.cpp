@@ -107,13 +107,13 @@ transport_drop_stats_t self_heal_link_t::drop_stats() const noexcept {
     return stats;
 }
 
-std::size_t self_heal_link_t::close_frozen_peers(std::uint64_t now, std::uint64_t deadline) {
+std::uint64_t self_heal_link_t::sweep(std::uint64_t now, std::uint64_t deadline) {
     sock_ref_t s;
     {
         const std::lock_guard l(m_);
         s = inner_;
     }
-    return s ? s->link->close_frozen_peers(now, deadline) : 0;
+    return s ? s->link->sweep(now, deadline) : 0;
 }
 
 void self_heal_link_t::acquire() {

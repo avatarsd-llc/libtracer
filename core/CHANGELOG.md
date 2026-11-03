@@ -14,6 +14,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **One node-level door for the application's clock (#2481).** `transport_vertex_t::sweep(now,
+  deadline)` hands the application's `now` and its one deadline to every connection's owned
+  link, inside one router frame bracket, and returns the earliest next-due time over all of them
+  (0 = none), so the application sleeps exactly until then with no idle wakeup. libtracer still
+  reads no clock. Each link learns time through one cold virtual, `transport_t::sweep(now,
+  deadline)`, which returns that link's next-due time; a link staged with `provide_link`, or
+  wired by hand to the router, is called by the application directly.
+- **`transport_t::close_frozen_peers` is replaced by `transport_t::sweep`.** The frozen-peer
+  rule is unchanged; the return value is now the next-due time (an owing peer is due one window,
+  `now - deadline`, after its record) instead of a close count. Closes are read from each kind's
+  counter (`frozen_closed()`, `httpd_ws_link_t::stats_t::peers_frozen` / `auth_expired`).
+  `tcp_transport_t`, `tcp_server_transport_t`, `ws_client_transport_t`, `ws_server_transport_t`
+  and `self_heal_link_t` override it.
+- **`tr::net::judge_frozen` is replaced by `tr::net::sweep_t`**, the kind-neutral value a
+  `sweep` override builds: `frozen(owing, stuck, since)` is the same verdict, and also records
+  when a kept owing peer is next due; `due(at)` folds in any other deadline.
+- **`noise_link_t::poll(now)` and `noise_poll_t` are removed.** `noise_link_t` overrides
+  `sweep(now, deadline)` (it ignores `deadline`; its windows are its own configured spans) and
+  returns the next armed deadline. The session and the liveness `poll` reported are
+  `link_up()` and `state()`.
+
 ## [0.22.0] — 2026-11-02
 
 ### Added

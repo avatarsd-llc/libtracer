@@ -561,14 +561,14 @@ class stream_endpoint_t : protected posix_endpoint_t {
     static void condemn_fd(int fd) noexcept;
 
     /**
-     * @brief The one-peer @ref transport_t::close_frozen_peers (#2198): a dialer's, or a
-     *        one-peer listener's. Only the TX direction is owed here: a frame held on the wire
-     *        that moved no byte since the last check. A frozen peer is shut down inside its
-     *        writer role, so the recv thread runs the ordinary teardown, and counted in
+     * @brief The one-peer @ref transport_t::sweep (#2198, #2481): a dialer's, or a one-peer
+     *        listener's. Only the TX direction is owed here: a frame held on the wire that
+     *        moved no byte since the last check. A frozen peer is shut down inside its writer
+     *        role, so the recv thread runs the ordinary teardown, and counted in
      *        @ref frozen_closed_.
-     * @return 1 if the peer was closed, else 0.
+     * @return When the peer is next due, 0 when it owes nothing or was closed.
      */
-    std::size_t close_frozen_one(std::uint64_t now, std::uint64_t deadline);
+    std::uint64_t sweep_one(std::uint64_t now, std::uint64_t deadline);
 
     /** @brief Record @p s 's bytes in @p moved, a peer's TX progress flag (#2198); returns
      *         @p s. */
@@ -669,7 +669,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
     std::uint32_t liveness_window_ms_ = 0;
     /** @brief A byte of ours went out to the ONE peer since the last liveness check (#2198), in
      *         the hole after @ref liveness_window_ms_.
-     *         Set by the writer, taken by @ref close_frozen_one; a new session sets it. */
+     *         Set by the writer, taken by @ref sweep_one; a new session sets it. */
     std::atomic<bool> tx_moved_{true};
     /** @brief Write turns that found the peer's socket full and moved nothing (#838, #2144)
      *         — the "how often did a stalled peer refuse us" counter, each one a strike.
@@ -684,7 +684,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *         counted. Relaxed: a diagnostic tally. */
     std::atomic<std::size_t> frozen_closed_{0};
     /** @brief The application's `now` at the last liveness check that found the ONE peer
-     *         moving or owing nothing (#2198). Written only by @ref close_frozen_one. */
+     *         moving or owing nothing (#2198). Written only by @ref sweep_one. */
     std::uint64_t live_since_ = 0;
     /** @brief This link's egress store: shared frames, rings, a frame's gather overflow
      *         (@ref write_frame), and a derived class's own link buffers (#1780). */
@@ -891,15 +891,16 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
 
     /**
      * @brief The application's liveness check over every open peer (#2198,
-     *        @ref transport_t::close_frozen_peers).
+     *        @ref transport_t::sweep).
      *
      * A peer owes TX while a frame waits on its wire, and RX while it has begun a frame or
      * a handshake and not finished it (@ref mid_frame). One that owed a direction and moved
      * no byte in it since its record fell below @p deadline is shut down exactly as
      * @ref close_peer does it, under @ref peers_m_, and counted in @ref frozen_closed. An
      * idle peer — owing nothing — is never closed.
+     * @return When the earliest owing peer is next due, 0 when none owes.
      */
-    std::size_t close_frozen_peers(std::uint64_t now, std::uint64_t deadline) override;
+    std::uint64_t sweep(std::uint64_t now, std::uint64_t deadline) override;
 
     /** @brief Peers the application's liveness check closed as frozen, summed over every
      *         peer this server has carried (#2198). */
@@ -931,10 +932,10 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
         std::atomic<int> fd{-1};       /**< @brief The peer socket; -1 ⇒ free slot. */
         std::atomic<bool> open{false}; /**< @brief True while the session may carry frames. */
         /** @brief A byte of ours went out since the last liveness check (#2198). Set by the
-         *         writer, taken by @ref close_frozen_peers; an accept sets it. */
+         *         writer, taken by @ref sweep; an accept sets it. */
         std::atomic<bool> tx_moved{false};
         /** @brief The peer's socket was readable since the last liveness check (#2198). Set
-         *         by the poll thread, taken by @ref close_frozen_peers; an accept sets it. */
+         *         by the poll thread, taken by @ref sweep; an accept sets it. */
         std::atomic<bool> rx_moved{false};
         /** @brief The peer has begun a frame or a handshake and not finished it (#2198):
          *         @ref mid_frame as of the poll thread's last pass over it. */
@@ -972,7 +973,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
          *         by its successor in the slot. */
         egress_peer_t egress;
         /** @brief The application's `now` at the last liveness check that found this peer
-         *         moving, or owing nothing (#2198). Written only by @ref close_frozen_peers,
+         *         moving, or owing nothing (#2198). Written only by @ref sweep,
          *         under @ref peers_m_. */
         std::uint64_t live_since = 0;
         /** @brief The slot admitted before this one, or null: the chain @ref broadcast walks

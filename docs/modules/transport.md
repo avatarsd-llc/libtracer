@@ -418,6 +418,11 @@ they are the reason a new binding is small.
 :protected-members:
 ```
 
+```{doxygenstruct} tr::net::sweep_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenstruct} tr::net::peer_handle_t
 :project: libtracer
 :members:

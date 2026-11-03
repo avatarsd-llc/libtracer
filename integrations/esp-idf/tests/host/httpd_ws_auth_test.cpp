@@ -13,8 +13,8 @@
  *   - the fake records every frame the link puts on the wire WITH ITS TYPE AND PAYLOAD, so a
  *     close CODE is an observable — and the code is the entire difference between "your
  *     credential was refused" and "you were too slow";
- *   - the deadline is the application's (#2257): a test calls `close_frozen_peers(now,
- *     deadline)` with numbers it picks, so a deadline test is deterministic instead of a
+ *   - the deadline is the application's (#2257): a test calls `sweep(now, deadline)` (#2481)
+ *     with numbers it picks, so a deadline test is deterministic instead of a
  *     sleep against a wall clock, and the check runs on the TEST thread — which is the split
  *     the link is written against (the sweep must marshal itself onto the httpd task, and
  *     the fake's control queue is what proves it did).
@@ -161,11 +161,17 @@ void run_server() {
 }
 
 /** @brief The application's first liveness check: stamps every unseen auth record with `now`
- *         = 100 and closes nothing, since no record is older than a `deadline` of 0. */
-std::size_t check_inside(httpd_ws_link_t& link) { return link.close_frozen_peers(100, 0); }
+ *         = 100 and closes nothing, since no record is older than a `deadline` of 0.
+ * @return The next-due time: @ref kStampedDue when it stamped a record, else 0. */
+std::uint64_t check_inside(httpd_ws_link_t& link) { return link.sweep(100, 0); }
 
-/** @brief A later check whose `deadline` (200) is past the first check's stamp (100). */
-std::size_t check_past(httpd_ws_link_t& link) { return link.close_frozen_peers(300, 200); }
+/** @brief What @ref check_inside answers for a record it stamped: the stamp (100) plus one
+ *         window (`now - deadline` = 100), plus one. */
+constexpr std::uint64_t kStampedDue = 201;
+
+/** @brief A later check whose `deadline` (200) is past the first check's stamp (100). What it
+ *         finds is closed by the sweep it posts, so nothing is left due: it answers 0. */
+std::uint64_t check_past(httpd_ws_link_t& link) { return link.sweep(300, 200); }
 
 /** @brief Start every test from a known-empty fake. */
 void reset_server() {
@@ -337,13 +343,14 @@ void test_deadline_closes_a_squatter() {
     fake_httpd::instance().clear_sent_frames();
 
     // A check that stamps the session must do nothing else.
-    check(check_inside(*link) == 0, "the first check stamps the session and finds nothing");
+    check(check_inside(*link) == kStampedDue,
+          "the first check stamps the session, finds nothing, and is due one window on");
     run_server();
     check(frames_for(kFd).empty(), "a check inside the window closes nothing");
     check(link->stats().auth_expired == 0, "and counts nothing");
 
     // Past the deadline it must close, with its own code.
-    check(check_past(*link) == 1, "a check whose deadline is past the stamp finds it");
+    check(check_past(*link) == 0, "a check whose deadline is past the stamp finds it");
     // ONE queued item — the sweep the check posted — and no reap, so the socket's shut state
     // is still observable. run_pending() would close and drop the session in the same call,
     // which is httpd's own select arm doing its job and would hide the evidence.
@@ -387,8 +394,8 @@ void test_expired_squatter_cannot_consume_the_cap() {
 
     // The application's check is the one event that reaps it: the link reads no clock, so a
     // squatter past its deadline holds the slot until the next check (#2257).
-    check(check_inside(*link) == 0, "the first check stamps the squatter");
-    check(check_past(*link) == 1, "the next one finds it past the deadline");
+    check(check_inside(*link) == kStampedDue, "the first check stamps the squatter");
+    check(check_past(*link) == 0, "the next one finds it past the deadline");
     check(fake_httpd::instance().run_one(), "and posted the sweep to the httpd task");
     run_server();
     check(fake_httpd::instance().open_session(kReal + 1), "a later peer's handshake was answered");
@@ -649,7 +656,7 @@ void test_preauthenticated_silence_outlives_the_deadline() {
 
     // A second window, because the reported symptom is a LOOP: the first sweep is the one that
     // used to kill it, and a row re-armed by a reconnect would kill it again on the next.
-    check(link->close_frozen_peers(500, 400) == 0, "a later check finds nothing either");
+    check(link->sweep(500, 400) == 0, "a later check finds nothing either");
     run_server();
     check(link->stats().auth_expired == 0, "and still expires nothing");
     check(peer_count(*link) == 1, "the idle authenticated link is simply idle");
@@ -760,12 +767,13 @@ void test_silent_upgrade_is_closed_at_the_deadline() {
     // NO deliver_frame. That is the whole case.
     check(peer_count(*link) == 0, "it holds no session — nothing claimed it");
 
-    check(check_inside(*link) == 0, "the first check stamps the socket and finds nothing");
+    check(check_inside(*link) == kStampedDue,
+          "the first check stamps the socket, finds nothing, and is due one window on");
     run_server();
     check(frames_for(kSilent).empty(), "a check inside the window closes nothing");
     check(link->stats().auth_expired == 0, "and counts nothing");
 
-    check(check_past(*link) == 1, "a check whose deadline is past the stamp finds it");
+    check(check_past(*link) == 0, "a check whose deadline is past the stamp finds it");
     check(fake_httpd::instance().run_one(), "the check marshalled a sweep onto the httpd task");
     const auto sent = frames_for(kSilent);
     check(sent.size() == 1 && sent[0].type == HTTPD_WS_TYPE_CLOSE,
@@ -779,7 +787,7 @@ void test_silent_upgrade_is_closed_at_the_deadline() {
 
     // Once only: the row is retired before its close runs, so a second check has nothing left.
     fake_httpd::instance().clear_sent_frames();
-    check(link->close_frozen_peers(500, 400) == 0, "a later check finds nothing left");
+    check(link->sweep(500, 400) == 0, "a later check finds nothing left");
     run_server();
     check(link->stats().auth_expired == 1, "and the same socket is not expired twice");
     run_server();
@@ -840,8 +848,8 @@ void test_full_ledger_refuses_the_handshake() {
     // Self-clearing: the rows are freed by the sweep the application's check posts, and the
     // link takes handshakes again. A bound that never recovered would be a denial of service
     // of its own.
-    check(check_inside(*link) == 0, "the first check stamps every row");
-    check(check_past(*link) == kBound, "the next one finds every row past the deadline");
+    check(check_inside(*link) == kStampedDue, "the first check stamps every row");
+    check(check_past(*link) == 0, "the next one finds every row past the deadline");
     check(fake_httpd::instance().run_one(), "and marshalled a sweep onto the httpd task");
     check(link->stats().auth_expired == kBound, "every silent socket was expired");
     check(fake_httpd::instance().open_session(over + 1),

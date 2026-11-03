@@ -369,11 +369,12 @@ void request_reply_two_round_trips() {
     check(n.wire.log.size() == 2 && type_of(n.wire, 1) == 0x02 &&
               n.wire.log[1].bytes.size() == 50 && n.wire.log[1].to == kAddrA,
           "  the responder answers at the first message's source with 50 bytes");
-    check(n.b.poll(0).session == false, "  the responder sends nothing on a pending session");
+    (void)n.b.sweep(0, 0);
+    check(!n.b.link_up(), "  the responder sends nothing on a pending session");
 
     n.a.carrier().pump();
-    const auto p = n.a.poll(0);
-    check(p.session && p.state == link_state_t::DIALING,
+    (void)n.a.sweep(0, 0);
+    check(n.a.link_up() && n.a.state() == link_state_t::DIALING,
           "  the initiator holds an unacknowledged session: send admitted, not yet UP");
     check(n.wire.log.size() == 2, "  nothing is sent until the application sends");
 
@@ -425,8 +426,8 @@ void appendix_a_through_the_link() {
     sink_t sink_b;
     a.set_receiver(sink_a);
     b.set_receiver(sink_b);
-    (void)a.poll(0);
-    (void)b.poll(0);
+    (void)a.sweep(0, 0);
+    (void)b.sweep(0, 0);
 
     a.dial();
     check(wire.log.size() == 1 &&
@@ -441,7 +442,7 @@ void appendix_a_through_the_link() {
                         "94 5968a975a98d942d263ea658be0b1b91"),
           "  msg2 is A.3's 50 bytes");
     a.carrier().pump();
-    (void)a.poll(10);  // the retry deadline: the empty confirmation
+    (void)a.sweep(10, 0);  // the retry deadline: the empty confirmation
     check(wire.log.size() == 3 &&
               wire.log[2].bytes == unhex("04 0000000000000000 b215c81b607068db3638292cc0825965"),
           "  the empty confirmation is A.3's (n=0)");
@@ -487,12 +488,14 @@ void wrong_key_is_refused_silently() {
     const std::size_t allocated = g_allocations.load() - before;
     check(b2.count(counter_t::HANDSHAKE_FAILED) == 2, "  each refused first message is counted");
     check(n.wire.log.size() == 1, "  the responder sends nothing: no reply in clear, no reply");
-    check(b2.state() == link_state_t::LISTENING && !b2.poll(0).session, "  and holds no session");
+    (void)b2.sweep(0, 0);
+    check(b2.state() == link_state_t::LISTENING && !b2.link_up(), "  and holds no session");
     if (kCountsAllocations)
         check(allocated == 0, "  reading a first message under a wrong PSK allocates nothing");
     else
         std::printf("  (allocation row skipped: not counted on this build)\n");
-    check(n.a.poll(0).state == link_state_t::DIALING && !n.a.poll(0).session,
+    (void)n.a.sweep(0, 0);
+    check(n.a.state() == link_state_t::DIALING && !n.a.link_up(),
           "  the initiator sees only a handshake that never completes");
     check(n.a.drop_stats().malformed_rx == 0 && n.a.count(counter_t::STALE) == 0,
           "  ... and learns nothing from the responder");
@@ -505,7 +508,7 @@ void wrong_key_is_refused_silently() {
 void retransmit_on_now() {
     std::printf("retransmission runs on the application's now:\n");
     mem_pair_t n;
-    (void)n.a.poll(0);
+    (void)n.a.sweep(0, 0);
     int lost = 0;
     n.wire.drop = [&lost](const datagram_t& d) {
         return d.from == 1 && std::to_integer<std::uint8_t>(d.bytes[0]) == 0x02 && lost++ == 0;
@@ -513,11 +516,12 @@ void retransmit_on_now() {
     n.a.dial();
     n.b.carrier().pump();  // msg2 is lost
     n.a.carrier().pump();
-    check(!n.a.poll(9).session && n.wire.log.size() == 2, "  before the retry deadline: nothing");
-    const auto p = n.a.poll(10);
+    check(n.a.sweep(9, 0) == 10 && !n.a.link_up() && n.wire.log.size() == 2,
+          "  before the retry deadline: nothing, and the retry is the next deadline");
+    const std::uint64_t next = n.a.sweep(10, 0);
     check(n.wire.log.size() == 3 && n.wire.log[2].bytes == n.wire.log[0].bytes,
           "  at the deadline the first message is resent, byte-identical");
-    check(p.next == 30, "  the next retry is at twice the interval");
+    check(next == 30, "  the next retry is at twice the interval");
     check(n.a.count(counter_t::RETRANSMITS) == 1, "  counted in noise_retransmits (initiator)");
     n.b.carrier().pump();
     check(n.wire.log.size() == 4 && n.wire.log[3].bytes == n.wire.log[1].bytes,
@@ -525,7 +529,8 @@ void retransmit_on_now() {
     check(n.b.count(counter_t::RETRANSMITS) == 1 && n.b.count(counter_t::HANDSHAKE_REPLAYED) == 0,
           "  counted in noise_retransmits (responder), never as a replay");
     n.a.carrier().pump();
-    check(n.a.poll(11).session, "  the initiator now holds a session");
+    (void)n.a.sweep(11, 0);
+    check(n.a.link_up(), "  the initiator now holds a session");
     const auto request = value_frame("ping");
     n.sink_b.then = [&](std::span<const std::byte> f) { n.b.send(f); };
     n.a.send(std::span(request));
@@ -538,16 +543,18 @@ void retransmit_on_now() {
 void attempt_deadline() {
     std::printf("the attempt deadline, and an unacknowledged session's empty confirmations:\n");
     mem_pair_t n;
-    (void)n.a.poll(0);
+    (void)n.a.sweep(0, 0);
     n.a.dial();
-    (void)n.a.poll(10);  // retransmit 1, next at 30
-    (void)n.a.poll(30);  // retransmit 2, next at 70 (cap 40)
-    (void)n.a.poll(70);  // retransmit 3, next at 110
+    (void)n.a.sweep(10, 0);  // retransmit 1, next at 30
+    (void)n.a.sweep(30, 0);  // retransmit 2, next at 70 (cap 40)
+    (void)n.a.sweep(70, 0);  // retransmit 3, next at 110
     check(n.a.count(counter_t::RETRANSMITS) == 3, "  the interval doubles up to its cap");
-    check(n.a.poll(999).state == link_state_t::DIALING, "  still dialing before the deadline");
-    check(n.a.poll(1000).state == link_state_t::DORMANT, "  dormant at the attempt deadline");
+    (void)n.a.sweep(999, 0);
+    check(n.a.state() == link_state_t::DIALING, "  still dialing before the deadline");
+    (void)n.a.sweep(1000, 0);
+    check(n.a.state() == link_state_t::DORMANT, "  dormant at the attempt deadline");
     const std::size_t sent = n.wire.log.size();
-    check(n.a.poll(5000).next == 0 && n.wire.log.size() == sent,
+    check(n.a.sweep(5000, 0) == 0 && n.wire.log.size() == sent,
           "  an unheld link starts nothing on its own");
     n.a.dial();
     check(n.wire.log.size() == sent + 1 && n.wire.log.back().bytes != n.wire.log[0].bytes,
@@ -558,7 +565,7 @@ void attempt_deadline() {
     n.a.carrier().pump();
     // Unacknowledged and the application sends nothing: each retry sends an empty confirmation.
     const std::size_t before = n.wire.log.size();
-    (void)n.a.poll(5010);
+    (void)n.a.sweep(5010, 0);
     check(n.wire.log.size() == before + 1 && n.wire.log.back().bytes.size() == 25,
           "  an unacknowledged session gets an empty confirmation at its retry deadline");
     n.b.carrier().pump();
@@ -572,12 +579,12 @@ void attempt_deadline() {
 void pending_expiry() {
     std::printf("a pending session expires on the responder's now:\n");
     mem_pair_t n;
-    (void)n.b.poll(100);
+    (void)n.b.sweep(100, 0);
     n.a.dial();
     n.b.carrier().pump();
     n.a.carrier().pump();
-    check(n.b.poll(599).next == 600, "  the pending session's expiry is the next deadline");
-    (void)n.b.poll(600);
+    check(n.b.sweep(599, 0) == 600, "  the pending session's expiry is the next deadline");
+    (void)n.b.sweep(600, 0);
     check(n.b.count(counter_t::PENDING_EXPIRED) == 1, "  counted in noise_pending_expired");
     n.a.send(std::span<const std::byte>(value_frame("late")));
     n.b.carrier().pump();
@@ -731,8 +738,8 @@ bool drive(udp_link_t& a, udp_link_t& b, Pred pred, std::chrono::milliseconds bu
     const auto start = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - start < budget) {
         const std::uint64_t now = now_ns();
-        (void)a.poll(now);
-        (void)b.poll(now);
+        (void)a.sweep(now, 0);
+        (void)b.sweep(now, 0);
         if (pred()) return true;
         std::this_thread::sleep_for(std::chrono::microseconds(200));
     }
@@ -817,8 +824,8 @@ void two_nodes_over_udp() {
     udp_link_t a(conn_role_t::DIAL, host_a, udp_config(), std::uint16_t{0},
                  std::string_view{"127.0.0.1"}, b.carrier().local_port());
     check(a.ok() && b.ok(), "  both links came up");
-    (void)a.poll(now_ns());  // deadlines count from the last `now` a link was given
-    (void)b.poll(now_ns());
+    (void)a.sweep(now_ns(), 0);  // deadlines count from the last `now` a link was given
+    (void)b.sweep(now_ns(), 0);
     const auto temp = gb.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     (void)gb.write(temp, tr::testing::make_value(value_frame("21.5")));
     (void)ra.attach_link("b", a);
@@ -877,8 +884,8 @@ void wrong_key_over_udp() {
                  std::uint16_t{0});
     udp_link_t a(conn_role_t::DIAL, host_a, udp_config(), std::uint16_t{0},
                  std::string_view{"127.0.0.1"}, b.carrier().local_port());
-    (void)a.poll(now_ns());
-    (void)b.poll(now_ns());
+    (void)a.sweep(now_ns(), 0);
+    (void)b.sweep(now_ns(), 0);
     a.dial();
     check(drive(
               a, b, [&] { return b.count(counter_t::HANDSHAKE_FAILED) >= 2; },
