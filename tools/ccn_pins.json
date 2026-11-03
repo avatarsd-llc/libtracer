@@ -93,7 +93,7 @@
     },
     "tr::net::self_heal_link_t::worker_main": {
       "ccn": [
-        19
+        18
       ],
       "file": "core/src/self_heal_link.cpp"
     },

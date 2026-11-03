@@ -703,7 +703,9 @@ class transport_vertex_t {
      * application owns it and calls its @ref transport_t::sweep directly.
      *
      * Calls must not overlap each other on one node.
-     * @param now      The application's clock, now, in whatever monotonic unit it picks.
+     * @param now      The application's clock, now, in whatever monotonic unit it picks. Each
+     *                 kind reads its configured spans in that unit, so a node with self-heal
+     *                 links passes milliseconds, the unit of `backoff`.
      * @param deadline The oldest progress the application accepts (at most @p now): the window a
      *                 frozen peer, an auth handshake or a silent peer is judged against.
      * @return The minimum next-due time over every link reached, 0 when none has work.

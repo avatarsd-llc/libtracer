@@ -288,7 +288,7 @@ link **ignores refcount** — its listen socket stays bound and accepting until 
   whose dial fails drops refcount to 0 and the link re-dormants with **no** background retry; only a
   standing binding (refcount > 0 after the op returns) triggers self-heal.
 - **Self-heal is the retry loop toward the target, and runs iff refcount > 0.** Loss while in use →
-  background retry with `backoff`. A link **MUST NOT** background-retry at refcount 0; loss — or a
+  retry with `backoff`, timed by the application's clock (see §Erratum 2026-11-03). A link **MUST NOT** background-retry at refcount 0; loss — or a
   failed wake-dial — at refcount 0 re-dormants with **no** retry; and the **last standing release
   MUST close the socket and re-dormant**. Whether an *op-woken* socket that never acquired a
   standing binding is closed eagerly when its transient hold releases, or left **up until loss**, is
@@ -298,7 +298,8 @@ link **ignores refcount** — its listen socket stays bound and accepting until 
   peer.
 - **A permanently-unreachable `DIAL` peer with a standing binding retries indefinitely** while
   refcount > 0 (the no-synthetic-limits consequence — no max-attempt constant, **no give-up bound,
-  and no terminal-failure state**: a declared link retries until it connects or is `NAME`-removed).
+  and no terminal-failure state**: a declared link keeps retrying, on the application's clock or on its next op or acquire, until it
+  connects or is `NAME`-removed; see §Erratum 2026-11-03).
   `backoff` and `connect_timeout` are `:settings` config, never hardcoded (RFC-0006/0007 / ADR-0051).
   A consumer distinguishes "transiently retrying" from "unreachable" by applying its **own** display
   threshold to the propagated `reconnecting` state — the wire stays honestly `reconnecting`.
@@ -898,3 +899,27 @@ half of item 2 remains open.
 
 **Instrument: erratum, not amendment.** No wire surface moves: §4 already counted a routed
 subscription as a binding, and the status blockquote is brought back to what the code does.
+
+## Erratum (2026-11-03) — self-heal retries are timed by the application's `now`, not in the background ([#2304](https://github.com/avatarsd-llc/libtracer/issues/2304))
+
+**What the text said.** §4: *"Loss while in use → background retry with `backoff`"*, and *"a
+declared link retries until it connects or is `NAME`-removed"*. Both read as the engine retrying on
+its own schedule, with no help from the application.
+
+**What the behaviour is.** libtracer reads no clock and runs no timer (the standing design rule
+that #2304 applied to self-heal, ruled 2026-10-24). Since
+[PR #2506](https://github.com/avatarsd-llc/libtracer/pull/2506) a loss while in use starts one
+attempt at once. Each later attempt starts when the application's `now`, passed through the
+node's one clock seam (`transport_t::sweep`, reached by `transport_vertex_t::sweep` in the
+reference core), reaches `backoff` past the previous one. A pending reconnect reports that time as
+its next-due, so an application that sleeps until the answer wakes for it. An application that
+never calls the seam gets a retry on the link's next op or acquire, and none otherwise. The link
+still retries for as long as refcount > 0 and still has no give-up bound or terminal state.
+
+**The correction.** The two sentences now say the retry is timed by the application's clock, or
+rides the next op or acquire. Nothing else in §4 changes: the `reconnecting` row of the liveness
+enum, the refcount rules, and Amendment 1's three MUSTs and its MAY are untouched.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). No wire
+surface moves: no state is added or removed, no MUST changes, the propagated `reconnecting` state
+is unchanged, and the behaviour the text now describes is the one #2304 ruled.

@@ -911,12 +911,16 @@ class transport_t {
      *   attempt) runs it here too, against @p deadline or its own configured spans.
      *
      * libtracer reads no clock and runs no timer for this: @p now and @p deadline are the
-     * application's, in whatever monotonic unit it picks. The return value tells it when to
+     * application's, in whatever monotonic unit it picks; a kind's configured spans (a Noise
+     * deadline, a self-heal `backoff`) are read in that same unit, so a node with self-heal links
+     * passes `now` in milliseconds, the unit of their keys. The return value tells it when to
      * call next, so it sleeps until then with no idle wakeup; a link that later starts owing
      * (a send, a new peer) can be due earlier, so an application that wants that bounded also
      * calls after such events or on a cadence of its own. A link whose application never calls
-     * this behaves exactly as before. Calls must not overlap each other on one link; they may
-     * race the link's own threads.
+     * this runs no window and closes no frozen peer; a self-heal link then makes the one
+     * attempt the loss starts, and after that retries only on an op or an `acquire`, never in
+     * the background (#2304). Calls must not overlap
+     * each other on one link; they may race the link's own threads.
      *
      * The DEFAULT runs nothing and answers 0, which is right for a link with no per-peer
      * connection and no window (an in-process link, a datagram link).
