@@ -116,11 +116,12 @@ std::uint64_t self_heal_link_t::sweep(std::uint64_t now, std::uint64_t deadline)
         s = inner_;
         // A heal waits for `backoff` on the app's clock (#2304). The first call that finds the
         // wait stamps it; one at or past the stamp releases the attempt and stamps the next, so
-        // a pending reconnect always answers a time strictly after `now`.
+        // a pending reconnect always answers a time strictly after `now`, even while the worker
+        // has not yet taken an attempt released earlier (or could not be started: retried here).
         if (state_ == link_state_t::RECONNECTING && refs_ > 0) {
             if (retry_at_ == 0) {
                 retry_at_ = now + settings_.backoff_ms;
-            } else if (!attempt_due_ && now >= retry_at_) {
+            } else if (now >= retry_at_) {
                 retry_at_ = now + settings_.backoff_ms;
                 attempt_due_ = true;
                 ensure_worker_locked();

@@ -482,7 +482,7 @@ void test_remove_while_healing_tears_down() {
  *        always answers a non-zero next-due time.
  */
 void test_backoff_runs_on_the_app_now() {
-    std::printf("#2304: backoff is compared against the app's now through sweep:\n");
+    std::printf("#2304: backoff is compared against the app's now through the node door:\n");
     dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
     graph_t node;
     fwd_router_t router(node);
@@ -491,12 +491,9 @@ void test_backoff_runs_on_the_app_now() {
     const script_guard_t guard{script};  // bounded teardown even on a failing test
     (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", /*backoff_ms=*/100));
     tr::net::transport_t* const link = tr::testing::link_of(net, "net/fake-client/a");
-    const auto attempts = [&] {
-        const std::lock_guard l(script.m);
-        return script.attempts;
-    };
 
-    check(link->sweep(1000, 1000) == 0, "a dormant link answers nothing due");
+    // Every call below goes through the door an application uses, transport_vertex_t::sweep.
+    check(net.sweep(1000, 1000) == 0, "a dormant link answers nothing due");
     check(net.acquire_link("net/fake-client/a").has_value(), "acquire_link takes the hold");
     script.script(true);
     check(await_state(node, "/net/fake-client/a", link_state_t::UP), "the link comes UP");
@@ -505,32 +502,34 @@ void test_backoff_runs_on_the_app_now() {
     script.script(false);
     if (!script.built.empty()) script.built[0]->die();
     check(script.await_attempts(2), "the loss started the first retry");
-    check(await_state(node, "/net/fake-client/a", link_state_t::RECONNECTING),
-          "the failed retry leaves the link RECONNECTING");
-
-    check(link->sweep(1000, 1000) == 1100, "the first sweep stamps the wait: now + backoff");
-    check(link->sweep(1099, 1099) == 1100, "one tick short of backoff: still due at the stamp");
-    // The app drives the clock now, so traffic no longer starts retries.
+    check(net.sweep(1000, 1000) == 1100, "the first sweep stamps the wait: now + backoff");
+    check(net.sweep(1099, 1099) == 1100, "one tick short of backoff: still due at the stamp");
+    // Retry #2 is released by the clock and HELD in the factory (no outcome queued), so the
+    // worker cannot take the next release: the answer must still lie strictly after `now`.
+    check(net.sweep(1100, 1100) == 1200,
+          "backoff elapsed on the app's clock: the retry starts, the next is stamped");
+    check(script.await_attempts(3), "...and the factory runs the retry (held there)");
+    // The app drives the clock now, so traffic no longer starts retries. An op or acquire that
+    // did would also restart the wait's stamp, which the next answer would show at once.
     const std::byte frame[1] = {std::byte{0x00}};
     link->send(frame);
     check(net.acquire_link("net/fake-client/a").has_value(), "a second standing binding");
-    check(attempts() == 2, "neither the op nor the acquire started an attempt mid-backoff");
+    check(net.sweep(1150, 1150) == 1200,
+          "neither the op nor the acquire touched the clock's stamp");
+    check(net.sweep(1200, 1200) == 1300, "a release the busy worker has not taken yet...");
+    check(net.sweep(1300, 1300) == 1400, "...still answers a time after now, never <= now");
+    check(net.sweep(1350, 1350) == 1400, "and nothing is due before the stamp");
 
+    // The held retry fails; the release pending behind it runs and comes UP.
     script.script(false);
-    check(link->sweep(1100, 1100) == 1200,
-          "backoff elapsed on the app's clock: the retry starts, the next is stamped");
-    check(script.await_attempts(3), "...and the factory ran the retry");
-    check(await_state(node, "/net/fake-client/a", link_state_t::RECONNECTING),
-          "the retry failed: still RECONNECTING");
-    check(link->sweep(1150, 1150) == 1200, "the next retry waits for its own backoff");
-    check(attempts() == 3, "no attempt before it");
-
     script.script(true);
-    check(link->sweep(5000, 5000) == 5100,
-          "a late sweep starts the retry at once and still answers a time after now");
     check(await_state(node, "/net/fake-client/a", link_state_t::UP), "the heal reaches UP");
-    check(link->sweep(5100, 5100) == 0, "an UP link with an idle socket answers nothing due");
-    check(attempts() == 4, "four attempts in all: no retry ran outside the app's clock");
+    check(net.sweep(5000, 5000) == 0, "an UP link with an idle socket answers nothing due");
+    {
+        const std::lock_guard l(script.m);
+        check(script.attempts == 4,
+              "four attempts: the acquire's, the loss's, and two the app's clock released");
+    }
     (void)net.release_link("net/fake-client/a");
     (void)net.release_link("net/fake-client/a");
 }

@@ -92,8 +92,9 @@ inline constexpr std::uint32_t kDefaultConnectTimeoutMs = 5000;
  * `now` the application passes to @ref sweep, and the retry spacing is `backoff` compared
  * against it. A link whose application never calls @ref sweep still heals, on events
  * instead of time: each op, each @ref acquire, starts one attempt while the link is
- * `RECONNECTING`. Once @ref sweep has run, those events no longer start retries, so
- * traffic cannot bypass the spacing.
+ * `RECONNECTING`, and absent traffic nothing does (no spin, no background retry). Once
+ * @ref sweep has run, those events no longer start retries, so traffic cannot bypass the
+ * spacing.
  *
  * **Threading.** One worker thread per engine, started lazily on the first transition
  * and joined by @ref stop / the destructor; it is the only thread that dials and the only
@@ -241,7 +242,9 @@ class self_heal_link_t final : public transport_t {
      * application that wants a lost link retried within a bound caps its sleep at that
      * bound, as it does for a peer that starts owing bytes (@ref transport_vertex_t::sweep).
      * `backoff` is read in @p now's units: the key is spelled in milliseconds, so a node
-     * with self-heal links passes `now` in milliseconds.
+     * with self-heal links passes `now` in milliseconds. Attempts are spaced start to start:
+     * a dial that blocks longer than `backoff` (up to the kind's own connect bound) is
+     * followed by the next with no gap.
      *
      * The first call also hands the retry spacing to the application for good: from then on
      * an op or an @ref acquire no longer starts a retry on a `RECONNECTING` link.
