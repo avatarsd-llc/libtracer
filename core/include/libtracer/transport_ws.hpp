@@ -33,9 +33,9 @@
  *
  * INGRESS IS BOUNDED BY AN INJECTED SEAM, not by the peer. Both roles take the same
  * `(mem::mem_backend_t*, max_frame)` pair tcp/quic/webtransport take, and both expose the
- * same `dropped_rx()`/`malformed_rx()` counters, so one operator vocabulary reads across
- * every framed transport. The cap is checked against the DECLARED length in the WS frame
- * header — before a body byte is buffered — and against the charged cost of a fragmented
+ * same `drop_stats().dropped_rx`/`drop_stats().malformed_rx` counters, so one operator vocabulary
+ * reads across every framed transport. The cap is checked against the DECLARED length in the WS
+ * frame header — before a body byte is buffered — and against the charged cost of a fragmented
  * message: each fragment counts its payload plus the segment it was received into and its
  * chain slot, all drawn from the link's rx source. So neither a 64-bit length nor a million
  * CONTs, however small, can make the receiver hold more than the deployment allowed.
@@ -124,7 +124,7 @@ struct ws_server_config_t {
     /**
      * @brief The link's memory (@ref link_memory_t). `rx`: every inbound message fragment is
      *        copied into a fresh segment drawn from it (ADR-0042 §2); exhaustion is
-     *        backpressure — the message is shed and `dropped_rx()` ticks; never an OOM.
+     *        backpressure — the message is shed and `drop_stats().dropped_rx` ticks; never an OOM.
      */
     link_memory_t memory{};
     /**
@@ -224,7 +224,7 @@ class ws_server_transport_t final : public stream_server_base_t {
      * tcp/quic/webtransport apply to their length prefix — it just reads off a WS frame
      * header instead. A frame claiming more, or a fragmented message whose fragments cost
      * more (each one's payload plus its segment and chain slot), is malformed:
-     * @ref malformed_rx ticks and the connection is failed, RFC 6455 §7.1.7. */
+     * `drop_stats().malformed_rx` ticks and the connection is failed, RFC 6455 §7.1.7. */
     static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
     /**
@@ -236,8 +236,8 @@ class ws_server_transport_t final : public stream_server_base_t {
      * request arrives from a host that has done nothing but complete a TCP connect — no
      * ACL, no subscription, no router, nothing authenticated. Pre-auth work is REFUSED
      * EARLY, not carefully allocated: an accumulation that would pass this budget is
-     * refused BEFORE the byte that would exceed it is copied, @ref malformed_rx ticks, and
-     * the link is closed (the count-then-close disposition, #838's shape).
+     * refused BEFORE the byte that would exceed it is copied, `drop_stats().malformed_rx` ticks,
+     * and the link is closed (the count-then-close disposition, #838's shape).
      */
     static constexpr std::size_t kMaxHandshakeBytes = 16u * 1024u;
 
@@ -321,32 +321,6 @@ class ws_server_transport_t final : public stream_server_base_t {
      *         reassembly, never memcpy'd flat. Covers both the transport_t and
      *         bus_link_t facets (one override, same contract). */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
-
-    /** @brief Messages dropped because the RX backend was exhausted (backpressure,
-     *         ADR-0039 §4 / ADR-0042 §2) — shed mid-reassembly, never an OOM. Summed
-     *         over every peer this server has served. */
-    [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
-        return dropped_rx_.load(std::memory_order_relaxed);
-    }
-
-    /** @brief RFC 6455 violations seen: an over-cap declared length (see @ref kMaxFrame),
-     *         a reassembled message past the cap, a §5.5 control-frame breach, or an
-     *         opening handshake past its pre-auth budget (see @ref kMaxHandshakeBytes,
-     *         #934). Each one fails its connection (§7.1.7). Summed over every peer. */
-    [[nodiscard]] std::uint64_t malformed_rx() const noexcept {
-        return malformed_rx_.load(std::memory_order_relaxed);
-    }
-
-    /** @brief Messages shed on the way OUT (#932): a refused gather store, or no open peer
-     *         slot to write to — each one used to be a bare return no observer could see. */
-    [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
-        return dropped_tx_.load(std::memory_order_relaxed);
-    }
-
-    /** @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads. */
-    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-        return {dropped_rx(), malformed_rx(), dropped_tx()};
-    }
 
     /** @brief The cap actually honored: `min(max_frame, backend.max_segment_size())` — what
      *         a declared frame length is compared against, resolved from the two injected
@@ -454,11 +428,6 @@ class ws_server_transport_t final : public stream_server_base_t {
     // The PRE-AUTH handshake budget (#934): a separate bound from max_frame_ because it
     // guards a separate phase — bytes from a host that has authenticated nothing.
     std::size_t max_handshake_ = kMaxHandshakeBytes;
-    // Drop counters: word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697) —
-    // a 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit
-    // accessors widen on read; a 32-bit target wraps after 2^32.
-    std::atomic<std::size_t> dropped_rx_{0};
-    std::atomic<std::size_t> malformed_rx_{0};
 };
 
 /** @brief The pre-v0.18.0 spelling of @ref ws_server_transport_t; removed in v0.19.0 (#1723). */
@@ -568,25 +537,6 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
         return connected_.load(std::memory_order_relaxed);
     }
 
-    /** @brief Messages dropped to RX-backend exhaustion (backpressure) — the server-side
-     *         counter's twin, same name, same meaning. */
-    [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
-        return dropped_rx_.load(std::memory_order_relaxed);
-    }
-
-    /** @brief RFC 6455 violations seen — an over-cap declared length, an over-cap
-     *         reassembled message, a §5.5 control breach, or an opening-handshake RESPONSE
-     *         past its budget (#934). Each fails the connection. */
-    [[nodiscard]] std::uint64_t malformed_rx() const noexcept {
-        return malformed_rx_.load(std::memory_order_relaxed);
-    }
-
-    /** @brief Messages shed on the way OUT (#932) — the client frame could not be encoded
-     *         (gather store refused) or there is no live connection to write to. */
-    [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
-        return dropped_tx_.load(std::memory_order_relaxed);
-    }
-
     /** @brief Strikes a STALLED server cost (#838, #2144): offers past a full STREAM lane
      *         whose turn moved nothing, each one a frame shed. `kMaxConsecutiveStalls` rings of
      * them in a row close the connection. */
@@ -610,9 +560,17 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
         return frozen_closed_.load(std::memory_order_relaxed);
     }
 
-    /** @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads. */
+    /**
+     * @brief This link's shed-frame counters (#932, #2482).
+     *
+     * `dropped_rx`: messages shed mid-reassembly because the RX backend was exhausted
+     * (backpressure, ADR-0039 §4 / ADR-0042 §2), never an OOM. `malformed_rx`: RFC 6455
+     * violations (an over-cap declared length or reassembled message, a §5.5 control breach,
+     * an opening-handshake response past its budget, #934); each fails the connection.
+     * `dropped_tx`: a frame the gather store refused, or no live connection to write to.
+     */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-        return {dropped_rx(), malformed_rx(), dropped_tx()};
+        return drops_.snapshot();
     }
 
     /** @brief The cap actually honored: `min(max_frame, backend.max_segment_size())`. */
@@ -650,7 +608,7 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
     void send_masked(std::span<const std::span<const std::byte>> frame,
                      const graph::delivery_lane_t& lane);
 
-    // conn_fd_, dropped_tx_ and the egress (and their teardown discipline) live in
+    // conn_fd_, drops_ and the egress (and their teardown discipline) live in
     // stream_endpoint_t.
     // 64-bit on purpose (#1697): the splitmix64 state behind the per-frame masking key. This
     // portable client is never compiled for a chip target (the ESP-IDF build uses its native
@@ -661,11 +619,6 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
     std::size_t max_frame_ = ws_server_transport_t::kMaxFrame;
     /** @brief The pre-auth handshake budget (#934) — the server-side member's twin. */
     std::size_t max_handshake_ = ws_server_transport_t::kMaxHandshakeBytes;
-    // Drop counters: word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697) —
-    // a 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit
-    // accessors widen on read; a 32-bit target wraps after 2^32.
-    std::atomic<std::size_t> dropped_rx_{0};
-    std::atomic<std::size_t> malformed_rx_{0};
     /** @brief The came-up fact `ok()` reports: written once, in the constructor, on
      *         handshake success — before any thread this object owns exists — and never
      *         again, so a plain bool is race-free here. */

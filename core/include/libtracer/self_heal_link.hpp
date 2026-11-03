@@ -420,9 +420,9 @@ class self_heal_link_t final : public transport_t {
      *        DIAL is cold — the rv32 libatomic call it costs is paid once per reconnect.
      */
     std::atomic<std::uint64_t> gen_ctr_{0};
-    /** @brief Fail-fast drops. Word-wide, as every drop counter is (core/STYLE.md
-     *         §Introspection clause 5, #1697): a 64-bit atomic is a libatomic call on rv32. */
-    std::atomic<std::size_t> engine_dropped_tx_{0};
+    /** @brief The engine's own fail-fast drops (#2482): outbound only, added to the current
+     *         socket's counters by @ref drop_stats. */
+    drop_tally_t<drop_classes_t{.dropped_rx = false, .malformed_rx = false}> engine_drops_;
 };
 
 }  // namespace tr::net

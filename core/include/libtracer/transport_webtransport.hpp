@@ -67,8 +67,8 @@ struct webtransport_dial_tls_t {
  */
 struct webtransport_config_t {
     /** @brief The link's memory (@ref link_memory_t). `rx`: each inbound frame lands in a
-     *         fresh exactly-sized segment from it; exhaustion is backpressure (`dropped_rx()`),
-     *         never an OOM. */
+     *         fresh exactly-sized segment from it; exhaustion is backpressure
+     * (`drop_stats().dropped_rx`), never an OOM. */
     link_memory_t memory{};
     /** @brief Per-link RX cap (`:settings max_frame`); 0 = the default. */
     std::size_t max_frame = 0;
@@ -100,7 +100,7 @@ class webtransport_transport_t final : public transport_t {
     /** @brief The largest frame the length prefix may announce — the shared
      *         length_prefix_framer_t::kDefaultMaxFrame (16 MiB) unless `:settings
      *         max_frame` tightens it. A larger prefix is malformed: counted via
-     *         @ref malformed_rx and the session's connection is shut down. */
+     *         `drop_stats().malformed_rx` and the session's connection is shut down. */
     static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
     /**
@@ -286,21 +286,6 @@ class webtransport_transport_t final : public transport_t {
      */
     [[nodiscard]] std::size_t session_path(std::span<char> out) const;
 
-    /** @brief Frames dropped because the RX backend was exhausted (backpressure,
-     *         ADR-0042 §2) — drained off the stream, never an OOM. */
-    [[nodiscard]] std::uint64_t dropped_rx() const noexcept;
-
-    /** @brief Malformed length prefixes seen (announced length > @ref kMaxFrame).
-     *         Each one shuts the connection down (framing sync is lost). */
-    [[nodiscard]] std::uint64_t malformed_rx() const noexcept;
-
-    /** @brief Frames shed on the way OUT (#932): a record over THIS CONNECTION's cap
-     *         (`:settings max_frame`, resolved tighten-only against @ref kMaxFrame — it is
-     *         the same number the peer measures the arriving prefix by, #1409), no live
-     *         peer stream to write to (dialing / torn down), or a `StreamSend` msquic
-     *         refused. H3 handshake material is not counted — it is not a frame. */
-    [[nodiscard]] std::uint64_t dropped_tx() const noexcept;
-
     /**
      * @brief Extended CONNECT handshakes REFUSED because the node could not afford to
      *        answer them ([#934](https://github.com/avatarsd-llc/libtracer/issues/934)).
@@ -315,17 +300,23 @@ class webtransport_transport_t final : public transport_t {
      * "no peer-provoked path may abort the node" commitment
      * (docs/reference/07-host-embedding.md) makes observable rather than fatal.
      *
-     * Distinct from @ref dropped_rx (a FRAME shed for backpressure on an established
+     * Distinct from `drop_stats().dropped_rx` (a FRAME shed for backpressure on an established
      * session) and from the stream-scoped handshake-buffer refusal, which aborts one
      * stream and leaves an already-established session alone (#919).
      */
     [[nodiscard]] std::uint64_t refused_sessions() const noexcept;
 
-    /** @brief The interface-level snapshot (#932) — the concrete accessors above, as the
-     *         one shape a generic `transport_t*` holder reads. */
-    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-        return {dropped_rx(), malformed_rx(), dropped_tx()};
-    }
+    /**
+     * @brief This link's shed-frame counters (#932, #2482).
+     *
+     * `dropped_rx`: frames dropped because the RX backend was exhausted (backpressure,
+     * ADR-0042 §2), drained off the stream, never an OOM. `malformed_rx`: length prefixes
+     * announcing more than the frame cap; each shuts the session's connection down.
+     * `dropped_tx`: a record over THIS CONNECTION's cap (`:settings max_frame`, resolved
+     * tighten-only against @ref kMaxFrame, #1409), no live peer stream to write to, or a
+     * `StreamSend` msquic refused. H3 handshake material is not counted: it is not a frame.
+     */
+    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override;
 
     /**
      * @brief Stream contexts the live session currently holds — the leak observable (#1163).
@@ -337,8 +328,8 @@ class webtransport_transport_t final : public transport_t {
      * one: nothing reclaimed a finished stream, so open/close cycling grew this without limit.
      *
      * Exposed because a count that only ever rises is the signature of that class of bug and a
-     * deployment cannot see it otherwise — the same reason @ref dropped_rx and @ref
-     * malformed_rx are public. It is a live gauge, not a monotonic counter: it falls.
+     * deployment cannot see it otherwise — the same reason @ref drop_stats is
+     * public. It is a live gauge, not a monotonic counter: it falls.
      */
     [[nodiscard]] std::size_t live_streams() const noexcept;
 

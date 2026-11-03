@@ -62,7 +62,7 @@ struct quic_config_t {
     /**
      * @brief The link's memory (@ref link_memory_t). `rx`: each inbound frame is reassembled
      *        into a fresh exactly-`len`-byte segment from it (ADR-0042 §2); exhaustion is
-     *        backpressure — the frame is drained, dropped, and `dropped_rx()` ticks.
+     *        backpressure — the frame is drained, dropped, and `drop_stats().dropped_rx` ticks.
      */
     link_memory_t memory{};
     /** @brief Receive cap (`:settings max_frame`); 0 → `quic_transport_t::kMaxFrame`.
@@ -89,7 +89,7 @@ class quic_transport_t final : public transport_t {
     /** @brief The largest frame the length prefix may announce — the shared
      *         length_prefix_framer_t::kDefaultMaxFrame (16 MiB) unless `:settings
      *         max_frame` tightens it. A larger prefix is malformed: counted via
-     *         @ref malformed_rx and the connection is shut down (a desynced
+     *         `drop_stats().malformed_rx` and the connection is shut down (a desynced
      *         stream cannot be trusted again). */
     static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
@@ -190,26 +190,18 @@ class quic_transport_t final : public transport_t {
      *         one (#2306). Set just before the link-down fire. LISTEN: always false. */
     [[nodiscard]] bool dial_ended() const noexcept;
 
-    /** @brief Frames dropped because the RX backend was exhausted (backpressure,
-     *         ADR-0039 §4 / ADR-0042 §2) — drained off the stream, never an OOM. */
-    [[nodiscard]] std::uint64_t dropped_rx() const noexcept;
-
-    /** @brief Malformed length prefixes seen (announced length > @ref kMaxFrame).
-     *         Each one shuts the connection down — the stream has lost framing sync. */
-    [[nodiscard]] std::uint64_t malformed_rx() const noexcept;
-
-    /** @brief Frames shed on the way OUT (#932): a record over THIS CONNECTION's cap
-     *         (`:settings max_frame`, resolved tighten-only against @ref kMaxFrame — it is
-     *         the same number the peer measures the arriving prefix by, #1409), no live
-     *         peer stream to write to (dialing / torn down), or a `StreamSend` msquic
-     *         refused. H3 handshake material is not counted — it is not a frame. */
-    [[nodiscard]] std::uint64_t dropped_tx() const noexcept;
-
-    /** @brief The interface-level snapshot (#932) — the concrete accessors above, as the
-     *         one shape a generic `transport_t*` holder reads. */
-    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-        return {dropped_rx(), malformed_rx(), dropped_tx()};
-    }
+    /**
+     * @brief This link's shed-frame counters (#932, #2482).
+     *
+     * `dropped_rx`: frames dropped because the RX backend was exhausted (backpressure,
+     * ADR-0039 §4 / ADR-0042 §2), drained off the stream, never an OOM. `malformed_rx`: length
+     * prefixes announcing more than the frame cap; each shuts the connection down.
+     * `dropped_tx`: a record over THIS CONNECTION's cap (`:settings max_frame`, resolved
+     * tighten-only against @ref kMaxFrame, the number the peer measures the arriving prefix
+     * by, #1409), no live peer stream to write to (dialing / torn down), or a `StreamSend`
+     * msquic refused. H3 handshake material is not counted: it is not a frame.
+     */
+    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override;
 
    private:
     struct impl_t;  // all msquic types live in the .cpp (no msquic in public headers)

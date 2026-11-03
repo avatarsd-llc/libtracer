@@ -275,9 +275,9 @@ void test_oversize_prefix() {
     client.write(prefix);
 
     const auto deadline = std::chrono::steady_clock::now() + 2s;
-    while (listener.malformed_rx() == 0 && std::chrono::steady_clock::now() < deadline)
+    while (listener.drop_stats().malformed_rx == 0 && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(5ms);
-    check(listener.malformed_rx() == 1, "the oversize prefix counted as malformed");
+    check(listener.drop_stats().malformed_rx == 1, "the oversize prefix counted as malformed");
     check(delivered.load() == 0, "nothing delivered");
 
     // A desynced stream cannot be re-framed — the transport tears the connection
@@ -305,9 +305,9 @@ void test_settings_max_frame() {
     client.write(prefix);
 
     const auto deadline = std::chrono::steady_clock::now() + 2s;
-    while (listener.malformed_rx() == 0 && std::chrono::steady_clock::now() < deadline)
+    while (listener.drop_stats().malformed_rx == 0 && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(5ms);
-    check(listener.malformed_rx() == 1, "a frame above the :settings cap is malformed");
+    check(listener.drop_stats().malformed_rx == 1, "a frame above the :settings cap is malformed");
     check(delivered.load() == 0, "nothing delivered");
     std::array<std::byte, 1> b;
     check(::recv(client.fd, b.data(), 1, 0) == 0, "the connection was closed (EOF at the peer)");
@@ -318,7 +318,7 @@ void test_settings_max_frame() {
  *        clamped to it, so a prefix just past the 16 MiB protocol default stays malformed even
  *        under a 32 MiB config — a config-writable key cannot widen the ingress buffering bound.
  *        Non-vacuous: without the clamp the 32 MiB cap ACCEPTS the prefix (the heap backend's
- *        max_segment_size is unbounded) and malformed_rx() never ticks.
+ *        max_segment_size is unbounded) and drop_stats().malformed_rx never ticks.
  */
 void test_settings_max_frame_cannot_raise_the_cap() {
     std::printf("TCP transport — a :settings max_frame above the default is clamped:\n");
@@ -333,9 +333,9 @@ void test_settings_max_frame_cannot_raise_the_cap() {
     client.write(prefix);
 
     const auto deadline = std::chrono::steady_clock::now() + 2s;
-    while (listener.malformed_rx() == 0 && std::chrono::steady_clock::now() < deadline)
+    while (listener.drop_stats().malformed_rx == 0 && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(5ms);
-    check(listener.malformed_rx() == 1,
+    check(listener.drop_stats().malformed_rx == 1,
           "a prefix above kMaxFrame is malformed even under a wider config (tighten-only)");
     check(delivered.load() == 0, "nothing delivered");
     // Bounded read: without the clamp the transport ACCEPTS the prefix and waits for a body,
@@ -349,7 +349,7 @@ void test_settings_max_frame_cannot_raise_the_cap() {
 /**
  * @brief A heap-delegating backend that RECORDS the size of every allocation asked of it — the
  *        instrument for "the refusal happened BEFORE any allocation proportional to the declared
- *        length", which a `malformed_rx()` count alone cannot show.
+ *        length", which a `drop_stats().malformed_rx` count alone cannot show.
  *
  * @note `alloc` runs on the transport's recv thread while the test reads the counters, so both are
  *       atomics rather than a plain size/count pair.
@@ -422,8 +422,8 @@ void test_settings_max_frame_boundary() {
     client.write(record(at_cap));
     check(sink.wait_for_count(1, 4000ms), "a frame of EXACTLY max_frame is delivered");
     check(sink.count() == 1 && sink.at(0) == at_cap, "and arrives byte-identical, whole");
-    check(listener.malformed_rx() == 0, "an at-cap frame is not malformed");
-    check(listener.dropped_rx() == 0, "nor shed as backpressure");
+    check(listener.drop_stats().malformed_rx == 0, "an at-cap frame is not malformed");
+    check(listener.drop_stats().dropped_rx == 0, "nor shed as backpressure");
     // Where the reserve is free in the frame's size class the block carries the ingress-loan
     // reserve in front of the frame (RFC-0028 §6.9) — a fixed, frame-independent header, never
     // a function of the declared length.
@@ -439,9 +439,9 @@ void test_settings_max_frame_boundary() {
     client.write(over_prefix);  // the prefix alone — no body ever follows
 
     const auto deadline = std::chrono::steady_clock::now() + 4s;
-    while (listener.malformed_rx() == 0 && std::chrono::steady_clock::now() < deadline)
+    while (listener.drop_stats().malformed_rx == 0 && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(5ms);
-    check(listener.malformed_rx() == 1, "ONE byte over the cap is malformed");
+    check(listener.drop_stats().malformed_rx == 1, "ONE byte over the cap is malformed");
     check(sink.count() == 1, "and nothing further was delivered");
     check(watch.calls() == calls_before,
           "the refusal cost ZERO allocations — the cap is checked before backend.alloc (#934)");
@@ -535,7 +535,7 @@ void test_view_delivery_segment_identity() {
               "the segment was allocated at exactly the frame length");
         check(v.owner.use_count() == 1, "the receiver holds the ONLY reference (no library copy)");
     }
-    check(listener.dropped_rx() == 0, "no backpressure drops on the heap backend");
+    check(listener.drop_stats().dropped_rx == 0, "no backpressure drops on the heap backend");
 }
 
 /**
@@ -560,10 +560,12 @@ void test_backpressure_drain() {
     dialer.send(f3);
 
     check(sink.wait_for_count(1, 3000ms), "the third frame still delivers after two drops");
-    check(listener.dropped_rx() == 2, "both exhausted frames counted as backpressure drops");
+    check(listener.drop_stats().dropped_rx == 2,
+          "both exhausted frames counted as backpressure drops");
     check(sink.count() == 1 && sink.at(0) == f3,
           "framing sync survived the drained frames (byte-identical delivery)");
-    check(listener.malformed_rx() == 0, "no malformed prefixes — the stream never desynced");
+    check(listener.drop_stats().malformed_rx == 0,
+          "no malformed prefixes — the stream never desynced");
 }
 
 void test_scatter_gather() {
@@ -1415,9 +1417,9 @@ struct raw_listener_t {
  * has that frame in flight before the constructor returns, and whether it beats the caller's next
  * statement is decided by nothing but scheduling: the recv thread reaching its first
  * read versus the calling thread performing one store. Lose that race and
- * `receiver_slot_t`'s empty slot drops the frame — no `dropped_rx()`, no `malformed_rx()`, a
- * healthy-looking connection. Measured at `ce5e902b` with a 300 ms sink-install delay: peer
- * pushed 1, sink received 0, both counters 0.
+ * `receiver_slot_t`'s empty slot drops the frame — no `drop_stats().dropped_rx`, no
+ * `drop_stats().malformed_rx`, a healthy-looking connection. Measured at `ce5e902b` with a 300 ms
+ * sink-install delay: peer pushed 1, sink received 0, both counters 0.
  *
  * The guard does not race it. The peer writes ONE complete length-prefixed record the moment
  * it accepts and then goes quiet; the link is constructed (unarmed) and its sink is
@@ -1478,14 +1480,14 @@ void test_push_on_connect_waits_for_start_receiving() {
         std::this_thread::sleep_for(500ms);
         check(sink.count() == 0,
               "the deferred link delivered NOTHING for the whole window: nothing was read");
-        check(dialer.dropped_rx() == 0 && dialer.malformed_rx() == 0,
+        check(dialer.drop_stats().dropped_rx == 0 && dialer.drop_stats().malformed_rx == 0,
               "and it was not shed under another name either (both counters still 0)");
 
         dialer.start_receiving();
         check(sink.wait_for_count(1, 4s),
               "after start_receiving() the pushed frame was DELIVERED, not dropped");
         check(sink.count() == 1 && sink.at(0) == pushed, "carrying the pushed frame's own bytes");
-        check(dialer.dropped_rx() == 0 && dialer.malformed_rx() == 0,
+        check(dialer.drop_stats().dropped_rx == 0 && dialer.drop_stats().malformed_rx == 0,
               "delivered with both counters still 0");
         test_done.set_value();
     }
@@ -1546,7 +1548,7 @@ void test_start_receiving_is_idempotent() {
               "each frame exactly once at the listener (no second serve loop on its peer)");
         check(at_dialer.count() == 1 && at_dialer.at(0) == f2,
               "exactly once at the dialer (no second recv thread)");
-        check(listener.malformed_rx() == 0 && dialer.malformed_rx() == 0,
+        check(listener.drop_stats().malformed_rx == 0 && dialer.drop_stats().malformed_rx == 0,
               "and neither stream lost framing sync");
     }
 

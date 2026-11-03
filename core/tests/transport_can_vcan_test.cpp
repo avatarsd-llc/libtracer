@@ -368,7 +368,7 @@ int main() {
     }
     check(tx_d.dropped_presink() == 1,
           "the pre-sink window drop ticked the NAMED counter over the real bus");
-    check(tx_d.dropped_rx() == 0, "and it was not folded into dropped_rx");
+    check(tx_d.drop_stats().dropped_rx == 0, "and it was not folded into dropped_rx");
 
     return tr::testing::summary("transport_can_vcan");
 }

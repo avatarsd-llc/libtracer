@@ -265,12 +265,12 @@ void test_view_delivery() {
               "frame segment was drawn one byte past the default cap, not at 64 KiB (#2132)");
         check(v.owner.use_count() == 1, "the receiver holds the ONLY reference (no library copy)");
     }
-    check(b.dropped_rx() == 0, "no backpressure drops on the heap backend");
+    check(b.drop_stats().dropped_rx == 0, "no backpressure drops on the heap backend");
 }
 
 /**
  * @brief ADR-0042 §2 — pool exhaustion is backpressure: alloc == nullptr drops the datagram and
- *        ticks dropped_rx(); never an OOM, never a crash.
+ *        ticks drop_stats().dropped_rx; never an OOM, never a crash.
  */
 void test_view_pool_exhaustion() {
     std::printf("UDP transport — exhausted pool backend drops cleanly (backpressure):\n");
@@ -294,9 +294,9 @@ void test_view_pool_exhaustion() {
     a.send(frame);
 
     const auto deadline = std::chrono::steady_clock::now() + 3s;
-    while (b.dropped_rx() < 2 && std::chrono::steady_clock::now() < deadline)
+    while (b.drop_stats().dropped_rx < 2 && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(10ms);
-    check(b.dropped_rx() >= 2, "both datagrams counted as backpressure drops");
+    check(b.drop_stats().dropped_rx >= 2, "both datagrams counted as backpressure drops");
     check(delivered.load() == 0, "nothing delivered while the pool is exhausted");
 }
 
@@ -311,7 +311,8 @@ void test_view_pool_exhaustion() {
  *  - the accessor reports the CONFIGURED value, and a value above `kMaxDatagram` is inert
  *    (a datagram cannot be larger, so this key can only tighten on this kind);
  *  - an over-cap datagram is REFUSED on both the owning and the borrowed receive path —
- *    never delivered, counted in `malformed_rx()`, and the socket still serves the next one;
+ *    never delivered, counted in `drop_stats().malformed_rx`, and the socket still serves the next
+ * one;
  *  - the RX segment is drawn at the cap, not at `kMaxDatagram` — so a tight cap is a RAM
  *    lever on a bounded node, not only an admission rule.
  *
@@ -351,20 +352,20 @@ void test_settings_max_frame() {
     check(a.ok() && b.ok(), "both UDP sockets bound");
     b.set_rope_receiver(rope_rx);
 
-    const std::uint64_t before = b.malformed_rx();
+    const std::uint64_t before = b.drop_stats().malformed_rx;
     const std::vector<std::byte> just_over(kCap + 1, std::byte{0xAA});
     a.send(std::span<const std::byte>(just_over));
-    check(wait_until([&] { return b.malformed_rx() > before; }, 3s),
+    check(wait_until([&] { return b.drop_stats().malformed_rx > before; }, 3s),
           "a datagram ONE BYTE over the cap is refused and counted (owning path)");
     const std::vector<std::byte> far_over(16u * 1024u, std::byte{0xBB});
     a.send(std::span<const std::byte>(far_over));
-    check(wait_until([&] { return b.malformed_rx() > before + 1; }, 3s),
+    check(wait_until([&] { return b.drop_stats().malformed_rx > before + 1; }, 3s),
           "and so is a 16 KiB one (it is not merely truncated to the cap)");
     {
         const std::lock_guard lock(m);
         check(lens.empty(), "nothing over the cap reached the receiver");
     }
-    check(b.dropped_rx() == 0, "a refusal is NOT counted as backend backpressure");
+    check(b.drop_stats().dropped_rx == 0, "a refusal is NOT counted as backend backpressure");
 
     const std::vector<std::byte> under(64, std::byte{0xCC});
     a.send(std::span<const std::byte>(under));
@@ -390,7 +391,7 @@ void test_settings_max_frame() {
     //       and this is the boundary the deliberate `alloc_cap = min(rx_cap, frame_cap + 1)`
     //       sizing exists to serve: a segment bounded at the cap itself would truncate the
     //       at-cap datagram before its length could be judged (#1074).
-    const std::uint64_t malformed_before_boundary = b.malformed_rx();
+    const std::uint64_t malformed_before_boundary = b.drop_stats().malformed_rx;
     const std::vector<std::byte> exactly(kCap, std::byte{0xDD});
     a.send(std::span<const std::byte>(exactly));
     check(wait_until(
@@ -404,8 +405,9 @@ void test_settings_max_frame() {
         const std::lock_guard lock(m);
         if (lens.size() >= 2) check(lens.back() == kCap, "and arrives whole, all kCap bytes of it");
     }
-    check(b.malformed_rx() == malformed_before_boundary, "an at-cap datagram counts no refusal");
-    check(b.dropped_rx() == 0, "and no backpressure drop");
+    check(b.drop_stats().malformed_rx == malformed_before_boundary,
+          "an at-cap datagram counts no refusal");
+    check(b.drop_stats().dropped_rx == 0, "and no backpressure drop");
 
     // ----- the borrowed path: no segment is involved, and the cap still holds. -----
     std::atomic<int> spans{0};
@@ -419,9 +421,9 @@ void test_settings_max_frame() {
     check(c.ok() && d.ok(), "the borrowed-path socket pair bound");
     d.set_receiver(span_rx);
 
-    const std::uint64_t span_before = d.malformed_rx();
+    const std::uint64_t span_before = d.drop_stats().malformed_rx;
     c.send(std::span<const std::byte>(far_over));
-    check(wait_until([&] { return d.malformed_rx() > span_before; }, 3s),
+    check(wait_until([&] { return d.drop_stats().malformed_rx > span_before; }, 3s),
           "an over-cap datagram is refused on the borrowed path too");
     check(spans.load() == 0, "and nothing was handed to the span receiver");
     c.send(std::span<const std::byte>(under));
@@ -429,19 +431,19 @@ void test_settings_max_frame() {
           "an under-cap datagram still reaches the span receiver");
 
     // ----- and the same boundary on the borrowed path (#934). -----
-    const std::uint64_t span_malformed_at_cap = d.malformed_rx();
+    const std::uint64_t span_malformed_at_cap = d.drop_stats().malformed_rx;
     c.send(std::span<const std::byte>(exactly));
     check(wait_until([&] { return spans.load() > 1; }, 3s),
           "a datagram of EXACTLY the cap reaches the span receiver too (borrowed path)");
     check(last_span_len.load(std::memory_order_relaxed) == kCap,
           "and the borrowed span is the whole kCap bytes, not one short");
-    check(d.malformed_rx() == span_malformed_at_cap,
+    check(d.drop_stats().malformed_rx == span_malformed_at_cap,
           "the at-cap datagram counted no refusal on the borrowed path either");
 
     // The refusal side, restated one byte over on this path: the pair, not the far-over
     // datagram alone, is what an off-by-one would fail.
     c.send(std::span<const std::byte>(just_over));
-    check(wait_until([&] { return d.malformed_rx() > span_malformed_at_cap; }, 3s),
+    check(wait_until([&] { return d.drop_stats().malformed_rx > span_malformed_at_cap; }, 3s),
           "and ONE byte over it is still refused (borrowed path)");
     check(spans.load() == 2, "nothing over the cap was handed to the span receiver");
 }
@@ -585,7 +587,7 @@ void test_two_nodes_zero_copy_store() {
  *
  * A peer-less listener has nobody to send to, so every `send` sheds the frame. That
  * used to be a bare return: no counter moved, and a consumer holding only a
- * `transport_t*` could not observe any drop from any transport. Now `dropped_tx()`
+ * `transport_t*` could not observe any drop from any transport. Now `drop_stats().dropped_tx`
  * ticks and `drop_stats()` carries it across the interface.
  */
 void test_tx_drop_counted() {
@@ -594,13 +596,13 @@ void test_tx_drop_counted() {
     // unset, so nothing is addressable until a datagram teaches it a source.
     tr::net::udp_transport_t peerless(0, "", 0);
     check(peerless.ok(), "peer-less listener bound");
-    check(peerless.dropped_tx() == 0, "a fresh link has shed nothing");
+    check(peerless.drop_stats().dropped_tx == 0, "a fresh link has shed nothing");
 
     const std::vector<std::byte> frame = value_tlv({0x01, 0x02});
     peerless.send(std::span<const std::byte>(frame));
     const std::span<const std::byte> one[1] = {frame};
     peerless.send(std::span<const std::span<const std::byte>>(one));
-    check(peerless.dropped_tx() == 2, "both sends with no peer are counted, not silent");
+    check(peerless.drop_stats().dropped_tx == 2, "both sends with no peer are counted, not silent");
 
     // The point of the hoist: a generic transport_t* holder sees the same number.
     tr::net::transport_t* generic = &peerless;
@@ -626,20 +628,21 @@ void test_refused_sendto_counted() {
 
     const std::vector<std::byte> fits = value_tlv({0x01, 0x02});
     a.send(std::span<const std::byte>(fits));
-    check(a.dropped_tx() == 0, "control: a datagram that fits is not counted");
+    check(a.drop_stats().dropped_tx == 0, "control: a datagram that fits is not counted");
 
     const std::vector<std::byte> huge(70000, std::byte{0x5A});
     const std::span<const std::byte> one[1] = {huge};
     a.send(std::span<const std::byte>(huge));
-    check(a.dropped_tx() == 1, "send(span): a refused sendto is counted");
+    check(a.drop_stats().dropped_tx == 1, "send(span): a refused sendto is counted");
     a.send(std::span<const std::span<const std::byte>>(one));
-    check(a.dropped_tx() == 2, "send(iov): a refused sendmsg is counted");
+    check(a.drop_stats().dropped_tx == 2, "send(iov): a refused sendmsg is counted");
     a.send_to(a.peer_address(), std::span<const std::span<const std::byte>>(one));
-    check(a.dropped_tx() == 3, "send_to: a refused sendmsg is counted");
+    check(a.drop_stats().dropped_tx == 3, "send_to: a refused sendmsg is counted");
 
     a.shut_down();
     a.send(std::span<const std::byte>(fits));
-    check(a.dropped_tx() == 4, "after shut_down a send the socket refuses is counted too");
+    check(a.drop_stats().dropped_tx == 4,
+          "after shut_down a send the socket refuses is counted too");
     check(a.drop_stats().dropped_tx == 4, "and drop_stats() carries it across the interface");
 }
 
@@ -681,11 +684,11 @@ void test_span_scratch_bounded_by_backend() {
     check(wait_until([&] { return spans.load() > 0; }, 3s),
           "a slot-sized datagram reaches the span receiver from a 1 KiB state store");
     check(last_len.load(std::memory_order_relaxed) == kSlot, "and arrives whole");
-    check(b.dropped_rx() == 0, "the scratch was not refused: no backpressure drop");
+    check(b.drop_stats().dropped_rx == 0, "the scratch was not refused: no backpressure drop");
 
     const std::vector<std::byte> over(kSlot + 1, std::byte{0xA5});
     a.send(std::span<const std::byte>(over));
-    check(wait_until([&] { return b.malformed_rx() > 0; }, 3s),
+    check(wait_until([&] { return b.drop_stats().malformed_rx > 0; }, 3s),
           "one byte past the slot is refused, counted in malformed_rx");
     check(spans.load() == 1, "and nothing truncated was handed to the span receiver");
 }
@@ -718,11 +721,11 @@ void test_default_cap_is_one_mtu() {
 
     const std::vector<std::byte> over(kDef + 1, std::byte{0x11});
     a.send(std::span<const std::byte>(over));
-    check(wait_until([&] { return b.malformed_rx() == 1; }, 3s),
+    check(wait_until([&] { return b.drop_stats().malformed_rx == 1; }, 3s),
           "a datagram one byte over the default cap is refused and counted");
     const std::vector<std::byte> wide(16u * 1024u, std::byte{0x22});
     a.send(std::span<const std::byte>(wide));
-    check(wait_until([&] { return b.malformed_rx() == 2; }, 3s),
+    check(wait_until([&] { return b.drop_stats().malformed_rx == 2; }, 3s),
           "and so is a 16 KiB one, not truncated to the cap");
     const std::vector<std::byte> exactly(kDef, std::byte{0x33});
     a.send(std::span<const std::byte>(exactly));
@@ -741,7 +744,7 @@ void test_default_cap_is_one_mtu() {
             check(seg_lens.front() == kDef + 1, "its segment is one byte past the cap");
         }
     }
-    check(b.dropped_rx() == 0, "a refusal is not counted as backpressure");
+    check(b.drop_stats().dropped_rx == 0, "a refusal is not counted as backpressure");
 
     // Widening past the default is a configuration, bounded by the datagram ceiling.
     std::atomic<std::size_t> wide_len{0};
@@ -808,7 +811,7 @@ void test_span_link_draws_nothing() {
     check(last_len.load() == kDef, "whole");
     const std::vector<std::byte> over(kDef + 1, std::byte{0x55});
     a.send(std::span<const std::byte>(over));
-    check(wait_until([&] { return b.malformed_rx() == 1; }, 3s),
+    check(wait_until([&] { return b.drop_stats().malformed_rx == 1; }, 3s),
           "one byte over the cap is refused, counted in malformed_rx");
     check(spans.load() == 1, "and nothing truncated was delivered");
     check((!kStack || rx.draws() == 0) && state.draws() == 0,

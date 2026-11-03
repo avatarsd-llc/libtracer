@@ -157,9 +157,9 @@ struct ws_server_transport_t::framing_t {
         return length_prefix_framer_t::effective_cap(*link.backend_, link.max_frame_);
     }
     /** @brief Count a frame that broke the rules. */
-    void malformed() const { link.malformed_rx_.fetch_add(1, std::memory_order_relaxed); }
+    void malformed() const { link.drops_.count_malformed_rx(); }
     /** @brief Count a body the source refused. */
-    void dropped() const { link.dropped_rx_.fetch_add(1, std::memory_order_relaxed); }
+    void dropped() const { link.drops_.count_dropped_rx(); }
 
     /** @brief Answer a PING with a PONG built on the STACK: the payload is <= 125 bytes, so
      *         the reply cannot fail to be built (#848). */
@@ -318,7 +318,7 @@ void ws_server_transport_t::send_record(session_base_t* to,
     iov_table_t<::iovec> gather_table(gather_inline, egress_source());
     const auto [vec, n] = build_server_iov(gather_table, header, hlen, parts);
     if (vec == nullptr) {  // gather store exhausted => drop the frame, and count it (#932)
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_tx();
         return;
     }
 
@@ -373,12 +373,12 @@ bool ws_server_transport_t::read_handshake(session_t& s, int fd) {
         // shape, ruled for this path 2026-08-15): backpressure would let the attacker's own
         // stall hold the slot, and a silent drop would leave the attack invisible to every
         // counter.
-        malformed_rx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_malformed_rx();
         return false;
     }
     const std::size_t room = std::min(max_handshake_ - have, kHandshakeReadBytes);
     if (!s.hs_buf.resize_for_overwrite(have + room)) {  // the session store refused: shed
-        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_rx();
         return false;
     }
     const ssize_t n = ::recv(fd, s.hs_buf.data() + have, room, 0);
@@ -642,7 +642,7 @@ bool ws_client_transport_t::handshake(int fd, std::string_view host, std::uint16
         // count it and fail the dial (the count-then-close disposition).
         const std::size_t room = max_handshake_ - resp.size();
         if (room == 0) {
-            malformed_rx_.fetch_add(1, std::memory_order_relaxed);
+            drops_.count_malformed_rx();
             return false;
         }
         const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
@@ -685,9 +685,9 @@ struct ws_client_transport_t::framing_t {
         return length_prefix_framer_t::effective_cap(*link.backend_, link.max_frame_);
     }
     /** @brief Count a frame that broke the rules (#872, #1060). */
-    void malformed() const { link.malformed_rx_.fetch_add(1, std::memory_order_relaxed); }
+    void malformed() const { link.drops_.count_malformed_rx(); }
     /** @brief Count a body the source refused (receiver pays). */
-    void dropped() const { link.dropped_rx_.fetch_add(1, std::memory_order_relaxed); }
+    void dropped() const { link.drops_.count_dropped_rx(); }
 
     /** @brief Answer a PING: a client PONG is masked like client data frames, and built on
      *         the STACK, so the reply cannot fail to be built (#848). */

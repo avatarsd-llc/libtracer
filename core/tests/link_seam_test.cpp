@@ -71,6 +71,7 @@ namespace {
 
 using namespace std::chrono_literals;
 using namespace tr::testing::link_seam;
+using tr::testing::check;
 
 /**
  * @brief The raw localhost peer a real link dials: a listening socket, then the one accepted
@@ -304,6 +305,12 @@ class tcp_server_rig_t final : public link_rig_t {
     }
     void peer_leave() override { peer_.leave(); }
 
+    [[nodiscard]] tr::net::transport_t* peer_facade() override {
+        std::string_view name;
+        link_.enumerate_peers([&](std::string_view p) { name = p; });
+        return name.empty() ? nullptr : link_.peer_link(name);
+    }
+
    private:
     counting_backend_t rx_;
     socket_peer_t peer_;
@@ -514,6 +521,12 @@ class ws_server_rig_t final : public link_rig_t {
     }
     void peer_leave() override { peer_.leave(); }
 
+    [[nodiscard]] tr::net::transport_t* peer_facade() override {
+        std::string_view name;
+        link_.enumerate_peers([&](std::string_view p) { name = p; });
+        return name.empty() ? nullptr : link_.peer_link(name);
+    }
+
    private:
     /** @brief Send the upgrade request and read the `101` back. */
     bool handshake() {
@@ -638,6 +651,40 @@ std::unique_ptr<link_rig_t> make_ws() { return std::make_unique<ws_rig_t>(); }
 std::unique_ptr<link_rig_t> make_ws_server() { return std::make_unique<ws_server_rig_t>(); }
 
 /**
+ * @brief The drop tally every counting link embeds (#2482): three independent counters, all
+ *        zero at start, and a class a build leaves out costs no word and reads zero.
+ */
+void tally_counts_three_independent_words() {
+    std::printf("[drop tally] three independent counters\n");
+    using tr::net::drop_classes_t;
+    using tr::net::drop_tally_t;
+    drop_tally_t<> t;
+    const tr::net::transport_drop_stats_t zero = t.snapshot();
+    check(zero.dropped_rx == 0 && zero.malformed_rx == 0 && zero.dropped_tx == 0,
+          "all three counters start at zero");
+    t.count_dropped_rx();
+    t.count_malformed_rx(2);
+    t.count_dropped_tx(3);
+    t.count_dropped_rx(4);
+    const tr::net::transport_drop_stats_t s = t.snapshot();
+    check(s.dropped_rx == 5 && s.malformed_rx == 2 && s.dropped_tx == 3,
+          "each count lands on its own counter and no other");
+
+    static_assert(sizeof(drop_tally_t<>) == 3 * sizeof(std::size_t));
+    static_assert(sizeof(drop_tally_t<drop_classes_t{.malformed_rx = false}>) ==
+                  2 * sizeof(std::size_t));
+    static_assert(
+        sizeof(drop_tally_t<drop_classes_t{.dropped_rx = false, .malformed_rx = false}>) ==
+        sizeof(std::size_t));
+    drop_tally_t<drop_classes_t{.malformed_rx = false}> no_malformed;
+    no_malformed.count_dropped_rx();
+    no_malformed.count_dropped_tx();
+    const tr::net::transport_drop_stats_t n = no_malformed.snapshot();
+    check(n.dropped_rx == 1 && n.malformed_rx == 0 && n.dropped_tx == 1,
+          "a class left out has no word and reads zero");
+}
+
+/**
  * @brief The lane cases over the self-healing link, or a skip on a build without the engine:
  *        a template, so that build instantiates nothing that names it.
  */
@@ -656,6 +703,7 @@ void run_self_heal() {
 
 int main() {
     std::printf("link seam suite: one case set over the fake link and today's stream links\n");
+    tally_counts_three_independent_words();
     run_suite(make_fake);
     run_suite(make_tcp);
     run_suite(make_tcp_server);

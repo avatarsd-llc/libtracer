@@ -250,7 +250,7 @@ struct esp_ws_client_config_t {
      *
      * A cap, not a buffer: nothing of this size is held. A frame that announces more, or a
      * message whose fragments sum past it, closes the connection and is counted on
-     * @ref esp_ws_client_link_t::malformed_rx — core's answer to a peer that breaks the
+     * `drop_stats().malformed_rx` — core's answer to a peer that breaks the
      * agreed bound (RFC 6455 §7.1.7) — and the link re-dials.
      */
     std::size_t rx_bytes = 2048;
@@ -272,10 +272,9 @@ struct esp_ws_client_config_t {
      * free in the source's size class, so a terminus that shares it builds its record in the
      * block — and each message is delivered as a rope the sink may keep (a fragmented one as
      * the chain of its fragments). An exhausted source is backpressure: the message is
-     * dropped and counted on @ref esp_ws_client_link_t::dropped_rx, never satisfied from the
-     * heap. `nullptr` (THIS kind's default) keeps borrowed delivery: each frame is received
-     * into a block from `state` and handed up borrowed, and a fragmented message is flattened
-     * once into one.
+     * dropped and counted on `drop_stats().dropped_rx`, never satisfied from the heap. `nullptr`
+     * (THIS kind's default) keeps borrowed delivery: each frame is received into a block from
+     * `state` and handed up borrowed, and a fragmented message is flattened once into one.
      *
      * `io` is the send side's store: each send's masked frame (drawn per send and returned
      * when the write is done; a refusal drops the frame and counts it on `tx_drops`), the
@@ -496,31 +495,6 @@ class esp_ws_client_link_t final : public transport_t {
     }
 
     /**
-     * @brief Inbound MESSAGES dropped by the receive path since construction — the
-     *        `dropped_rx()` convention core's transports already spell this way.
-     *
-     * A message the receiving source refused (a frame's block, a fragment chain, or the
-     * flatten of a fragmented message for a span-only sink): shed whole, the connection
-     * lives and re-syncs at the next BINARY (receiver pays). A message over `rx_bytes` is
-     * NOT counted here — it closes the connection and is counted on @ref malformed_rx
-     * (#2484) — and neither is a frame lost to a connection drop, nor a stray CONTINUATION,
-     * which core's assembler drops as carrying no message.
-     */
-    [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
-        return dropped_rx_.load(std::memory_order_relaxed);
-    }
-
-    /**
-     * @brief Frames that broke RFC 6455 or the receive cap since construction, each of which
-     *        closed its connection (#2484): an announced length over `rx_bytes`, fragments
-     *        whose charged cost passed it, a control-frame breach (§5.5) or a reserved
-     *        opcode (§5.2). The link re-dials after each.
-     */
-    [[nodiscard]] std::uint32_t malformed_rx() const noexcept {
-        return malformed_rx_.load(std::memory_order_relaxed);
-    }
-
-    /**
      * @brief One coherent snapshot of this link's passive counters plus the two
      *        dial facts only the link can know.
      *
@@ -536,7 +510,7 @@ class esp_ws_client_link_t final : public transport_t {
      * on roughly two round-trips, sampled only at (re)dial — it can be days stale and
      * it is NOT an RTT measurement. A host surfacing it should label it "handshake".
      *
-     * `c.rx_drops` is NOT a second tally: it is read straight from @ref dropped_rx, so
+     * `c.rx_drops` is NOT a second tally: it is read straight from `drop_stats().dropped_rx`, so
      * this link has exactly one inbound-drop truth and both spellings always agree.
      *
      * `dial_attempts` / `dial_failures` make the failure arm visible (#1606 ask 1). They
@@ -574,8 +548,8 @@ class esp_ws_client_link_t final : public transport_t {
     [[nodiscard]] stats_t stats() const;
 
     /** @brief Effective RX cap, bytes — the ctor's `rx_bytes` (#2484). A message past it
-     *         closes its connection (@ref malformed_rx), so a node reporting those can report
-     *         the ceiling that produced them instead of quoting a constant (#1160). */
+     *         closes its connection (`drop_stats().malformed_rx`), so a node reporting those can
+     * report the ceiling that produced them instead of quoting a constant (#1160). */
     [[nodiscard]] std::size_t rx_bytes() const noexcept { return rx_bytes_; }
 
     /** @brief Effective TX capacity, bytes — the ctor's `tx_bytes`, the largest payload a
@@ -602,13 +576,27 @@ class esp_ws_client_link_t final : public transport_t {
      *
      * A PROJECTION, never a second tally, on the rule this link already states for
      * `c.rx_drops`: every field here is READ from the counter that already owns the truth,
-     * so the two spellings can never drift. `malformed_rx` is @ref malformed_rx: since the
-     * link frames its own stream (#2484) it does classify a frame as protocol-malformed.
+     * so the two spellings can never drift.
+     *
+     * `dropped_rx`: inbound MESSAGES the receiving source refused (a frame's block, a
+     * fragment chain, or the flatten of a fragmented message for a span-only sink), each shed
+     * whole while the connection lives and re-syncs at the next BINARY (receiver pays); the
+     * same number as `stats().c.rx_drops`. A message over `rx_bytes` is NOT counted here, and
+     * neither is a frame lost to a connection drop, nor a stray CONTINUATION, which core's
+     * assembler drops as carrying no message.
+     *
+     * `malformed_rx`: frames that broke RFC 6455 or the receive cap, each of which closed its
+     * connection (#2484): an announced length over `rx_bytes`, fragments whose charged cost
+     * passed it, a control-frame breach (§5.5) or a reserved opcode (§5.2). The link re-dials
+     * after each. Since the link frames its own stream it does classify a frame as
+     * protocol-malformed.
+     *
+     * `dropped_tx`: `stats().c.tx_drops`, the send side's per-connection count.
      */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-        return {.dropped_rx = dropped_rx(),
-                .malformed_rx = malformed_rx(),
-                .dropped_tx = stats().c.tx_drops};
+        transport_drop_stats_t d = drops_.snapshot();
+        d.dropped_tx = tx_drops_.load(std::memory_order_relaxed);
+        return d;
     }
 
     /**
@@ -894,12 +882,11 @@ class esp_ws_client_link_t final : public transport_t {
     /** @brief @ref shut_down condemned a dial in flight, so that dial — not the destructor
      *         — returns the dial slot. Owner thread only. */
     bool dial_orphaned_ = false;
-    /** @brief Receive-path message drops — see @ref dropped_rx. Written only by the recv
-     *         thread, read by anyone, so relaxed is enough (it is a statistic). */
-    std::atomic<std::uint64_t> dropped_rx_{0};
-    /** @brief Frames that closed their connection — see @ref malformed_rx. Recv thread
-     *         writes, word-sized and relaxed (`core/STYLE.md` §Introspection). */
-    std::atomic<std::uint32_t> malformed_rx_{0};
+    /** @brief The receive path's shed-frame counters (#2482), read through @ref drop_stats:
+     *         `dropped_rx` (a refused segment) and `malformed_rx` (a frame that closed its
+     *         connection). Written only by the recv thread, read by anyone, relaxed. The send
+     *         side's drops stay in `tx_drops_`, which resets per connection. */
+    drop_tally_t<drop_classes_t{.dropped_tx = false}> drops_;
     /** @brief The recv thread: a static task drawn from `tr::mem::default_root()` (#2288),
      *         never the link's own source, because @ref shut_down may DETACH it mid-dial and
      *         a detached thread's block is released only after this link is gone. */

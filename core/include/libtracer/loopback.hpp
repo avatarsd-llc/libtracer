@@ -57,7 +57,7 @@ class loopback_endpoint_t final : public transport_t {
     /** @brief The frames this endpoint's @ref send dropped (`dropped_tx`); the other fields
      *         stay zero. */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-        return {.dropped_tx = dropped_tx_.load(std::memory_order_relaxed)};
+        return drops_.snapshot();
     }
 
    private:
@@ -85,7 +85,8 @@ class loopback_endpoint_t final : public transport_t {
     std::condition_variable cv_;
     bool stop_ = false;
     bool running_ = false;  // the receive thread started and is not yet stopped (guarded by m_)
-    std::atomic<std::uint64_t> dropped_tx_{0};
+    /** @brief The frames @ref send dropped (#2482); this endpoint drops nothing inbound. */
+    drop_tally_t<drop_classes_t{.dropped_rx = false, .malformed_rx = false}> drops_;
     static_thread_t thread_;
 };
 

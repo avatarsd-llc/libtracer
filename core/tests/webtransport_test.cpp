@@ -420,12 +420,13 @@ void test_send_overload_parity() {
           "gathered send delivers the SAME payload byte-identically");
     check(sink.count() == 2 && sink.at(0) == sink.at(1),
           "both overloads framed the record identically");
-    check(listener.malformed_rx() == 0 && listener.dropped_rx() == 0,
+    check(listener.drop_stats().malformed_rx == 0 && listener.drop_stats().dropped_rx == 0,
           "neither record desynced the length-prefix reassembler");
     // The counting half of #932 that a peerless link cannot show: a send that
     // REACHED the wire must not count. Both overloads delivered above, so an
     // over-counting egress is caught here rather than inflating the metric.
-    check(dialer.dropped_tx() == 0, "a delivered send counts no TX drop, on either overload");
+    check(dialer.drop_stats().dropped_tx == 0,
+          "a delivered send counts no TX drop, on either overload");
 }
 
 /**
@@ -439,15 +440,15 @@ void test_send_overload_parity() {
 void test_tx_drop_counters() {
     std::printf("WebTransport — outbound sheds are counted (#932):\n");
     webtransport_transport_t idle(std::uint16_t{0}, g_cert, g_key);
-    check(idle.dropped_tx() == 0, "a fresh link has shed nothing");
+    check(idle.drop_stats().dropped_tx == 0, "a fresh link has shed nothing");
 
     const auto small = test_frame(4, 0x41);
     idle.send(small);
-    check(idle.dropped_tx() == 1, "a send with no peer session counted one TX drop");
+    check(idle.drop_stats().dropped_tx == 1, "a send with no peer session counted one TX drop");
 
     std::vector<std::byte> huge(webtransport_transport_t::kMaxFrame + 1, std::byte{0xCD});
     idle.send(std::span<const std::byte>(huge));
-    check(idle.dropped_tx() == 2, "an oversize frame counted a TX drop");
+    check(idle.drop_stats().dropped_tx == 2, "an oversize frame counted a TX drop");
 
     const tr::net::transport_t& generic = idle;
     check(generic.drop_stats().dropped_tx == 2,
@@ -520,7 +521,7 @@ void test_view_delivery_and_backpressure() {
         check(v.owner && v.owner->bytes.size() == frame.size(),
               "the segment was allocated at exactly the frame length");
     }
-    check(listener.dropped_rx() == 0, "no backpressure drops on the healthy backend");
+    check(listener.drop_stats().dropped_rx == 0, "no backpressure drops on the healthy backend");
 
     // Backpressure: the first two allocations fail; the third frame delivers.
     recording_backend_t starved(2);
@@ -538,10 +539,12 @@ void test_view_delivery_and_backpressure() {
     dialer2.send(d2);
     dialer2.send(d3);
     check(sink.wait_for_count(1, 4000ms), "the third frame still delivers after two drops");
-    check(listener2.dropped_rx() == 2, "both exhausted frames counted as backpressure drops");
+    check(listener2.drop_stats().dropped_rx == 2,
+          "both exhausted frames counted as backpressure drops");
     check(sink.count() == 1 && sink.at(0) == d3,
           "framing sync survived the drained frames (byte-identical delivery)");
-    check(listener2.malformed_rx() == 0, "no malformed prefixes — the stream never desynced");
+    check(listener2.drop_stats().malformed_rx == 0,
+          "no malformed prefixes — the stream never desynced");
 }
 
 // FWD{ op=READ, dst, src } — a remote read whose REPLY source-routes back.
@@ -1130,7 +1133,7 @@ void test_frame_stream_adoption_gate() {
         check(sink.count() == 3 && same(sink.at(0), r1) && same(sink.at(1), r2) &&
                   same(sink.at(2), r3),
               "guard 3: the three frames are the first stream's, byte-identical and in order");
-        check(listener.malformed_rx() == 0,
+        check(listener.drop_stats().malformed_rx == 0,
               "guard 3: the length-prefix reassembler never desynced (no interleaving)");
     }
 }
@@ -1215,7 +1218,8 @@ void test_second_connect_is_refused() {
               "a 0x41 channel naming the FIRST CONNECT stream is still adopted — the id was "
               "not re-armed");
         check(sink.count() == 1 && same(sink.at(0), good), "and its record arrives byte-identical");
-        check(listener.malformed_rx() == 0, "the length-prefix reassembler never desynced");
+        check(listener.drop_stats().malformed_rx == 0,
+              "the length-prefix reassembler never desynced");
     }
 
     // The consequence of putting the guard BEFORE the field-section decode, pinned rather
@@ -1510,8 +1514,8 @@ void test_peer_stream_cycling_is_bounded() {
  * after the link object exists, and this transport owns no receive thread to withhold —
  * msquic's worker drives every RECEIVE, and the DIAL constructor opens the frame channel
  * itself, so a server writing back on it reaches `rx->deliver` before the constructor even
- * returns. An empty `receiver_slot_t` drops that frame silently: no `dropped_rx()`, no
- * `malformed_rx()`, a healthy-looking session.
+ * returns. An empty `receiver_slot_t` drops that frame silently: no `drop_stats().dropped_rx`, no
+ * `drop_stats().malformed_rx`, a healthy-looking session.
  *
  * The hold is msquic's own per-stream receive window (ADR-0081 §2) — nothing is parked
  * library-side, which is the standing no-library-internal-buffers commitment (ADR-0042 §2).
@@ -1567,7 +1571,7 @@ void test_push_on_session_waits_for_start_receiving() {
         check(at_dialer.count() == 0,
               "the deferred link delivered NOTHING for the whole window: the bytes wait in "
               "msquic's flow-control window");
-        check(dialer.dropped_rx() == 0 && dialer.malformed_rx() == 0,
+        check(dialer.drop_stats().dropped_rx == 0 && dialer.drop_stats().malformed_rx == 0,
               "and they were not shed under another name either (both counters still 0)");
 
         dialer.start_receiving();
@@ -1575,7 +1579,7 @@ void test_push_on_session_waits_for_start_receiving() {
               "after start_receiving() the pushed frame was DELIVERED, not dropped");
         check(at_dialer.count() == 1 && at_dialer.at(0) == pushed,
               "carrying the pushed frame's own bytes");
-        check(dialer.dropped_rx() == 0 && dialer.malformed_rx() == 0,
+        check(dialer.drop_stats().dropped_rx == 0 && dialer.drop_stats().malformed_rx == 0,
               "delivered with both counters still 0");
 
         // Idempotent: a second arming on an armed link leaves it delivering.

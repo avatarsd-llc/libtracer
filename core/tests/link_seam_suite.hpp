@@ -41,6 +41,9 @@
  *  6. **peer leaving mid-send**: sends reach a present peer intact; a peer that leaves while a
  *     sender is busy releases the sender, the link reports itself down, and one later send is
  *     counted as exactly one drop.
+ *  6b. **facade reports its owner**: a per-peer facade answers `drop_stats()` with its owning
+ *     link's tally, never a fabricated zero (#2482). Only for a kind with facades
+ *     (@ref link_rig_t::peer_facade).
  *
  * The lane cases (ADR-0087 §2, #2238) drive the retained send, `send(head, value, lane)`, the
  * one a subscription edge's delivery takes:
@@ -208,6 +211,9 @@ class link_rig_t {
     [[nodiscard]] virtual bool egress_cases() const { return true; }
     /** @brief True for a kind whose peer window fills deterministically (the lane cases). */
     [[nodiscard]] virtual bool lane_cases() const { return false; }
+    /** @brief The directed per-peer facade the link hands out for its connected peer, or
+     *         null for a kind with none (a dialled link is its own one peer). */
+    [[nodiscard]] virtual net::transport_t* peer_facade() { return nullptr; }
 };
 
 /** @brief A factory for a fresh rig: each case gets its own link, since several end it. */
@@ -659,6 +665,40 @@ inline void case_one_lane_per_vertex(rig_factory_t make) {
     check(before_newest == 0, "and the frames it displaced never reach the peer");
 }
 
+/**
+ * @brief Case 6b: a per-peer facade reports its owner's drop tally (#2482).
+ *
+ * The facade counts nothing of its own (a tally there would cost every peer a word per
+ * class), so the only honest answer it can give is its owner's: after the owner counts a
+ * refused frame, both read the same three numbers, and the facade's are not zero.
+ */
+inline void case_facade_reports_owner(rig_factory_t make) {
+    frame_sink_t sink;
+    const std::unique_ptr<link_rig_t> rig = make();
+    banner(*rig, "facade reports its owner's drops");
+    check(rig->ready(), "the rig came up");
+    if (!rig->ready()) return;
+    attach(*rig, sink);
+
+    net::transport_t& l = rig->link();
+    rig->rx_backend().refuse(true);
+    rig->peer_write(rig->encode(payload(64, 90)));
+    check(eventually([&] { return l.drop_stats().dropped_rx > 0; }, kWait),
+          "the owner counted the refused frame");
+    rig->rx_backend().refuse(false);
+    net::transport_t* const facade = rig->peer_facade();
+    if (facade == nullptr) {
+        std::printf("  N/A: this kind hands out no per-peer facade\n");
+        return;
+    }
+    const net::transport_drop_stats_t owner = l.drop_stats();
+    const net::transport_drop_stats_t seen = facade->drop_stats();
+    check(facade != &l && seen.dropped_rx == owner.dropped_rx && seen.dropped_rx > 0,
+          "the facade reports the owner's dropped_rx, not a fabricated zero");
+    check(seen.malformed_rx == owner.malformed_rx && seen.dropped_tx == owner.dropped_tx,
+          "and the owner's other two counters");
+}
+
 /** @brief Run the lane cases against one link kind. */
 inline void run_lane_cases(rig_factory_t make) {
     case_sample_latest_wins(make);
@@ -675,6 +715,7 @@ inline void run_suite(rig_factory_t make) {
     case_fragmented_message(make);
     case_stalled_peer(make);
     case_peer_leaves_mid_send(make);
+    case_facade_reports_owner(make);
     run_lane_cases(make);
 }
 

@@ -393,9 +393,11 @@ void request_reply_two_round_trips() {
     check(n.sink_a.frames.size() == 1 && n.sink_a.frames[0] == reply, "  the reply is delivered");
     check(n.a.state() == link_state_t::UP, "  UP only after the acknowledgement");
     check(n.wire.log.size() == 4, "  four datagrams: two round trips, nothing else");
-    for (const counter_t c : {counter_t::HANDSHAKE_FAILED, counter_t::STALE, counter_t::RETRANSMITS,
-                              counter_t::MALFORMED_RX})
+    for (const counter_t c :
+         {counter_t::HANDSHAKE_FAILED, counter_t::STALE, counter_t::RETRANSMITS})
         check(n.a.count(c) == 0 && n.b.count(c) == 0, "  no failure counter moved");
+    check(n.a.drop_stats().malformed_rx == 0 && n.b.drop_stats().malformed_rx == 0,
+          "  nothing counted as malformed");
 
     // The session stays up for more traffic, both ways.
     n.a.send(std::span(request));

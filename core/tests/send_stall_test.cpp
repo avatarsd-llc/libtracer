@@ -79,7 +79,7 @@ using clock_t_ = std::chrono::steady_clock;
  */
 struct stall_probe_t : tr::net::stream_endpoint_t {
     using tr::net::stream_endpoint_t::conn_fd_;
-    using tr::net::stream_endpoint_t::dropped_tx_;
+    using tr::net::stream_endpoint_t::drops_;
     using tr::net::stream_endpoint_t::liveness_window_ms_;
     using tr::net::stream_endpoint_t::set_snd_timeout;
     using tr::net::stream_endpoint_t::stalled_tx_;
@@ -209,7 +209,7 @@ void test_streak_closes_the_peer() {
     const std::array<std::byte, 64> rec{};
 
     fill_lane(probe, rec);
-    check(probe.stalled_tx_.load() == 0 && probe.dropped_tx_.load() == 0,
+    check(probe.stalled_tx_.load() == 0 && probe.drops_.snapshot().dropped_tx == 0,
           "inside the lane's depth a turn that moves nothing waits: no strike, nothing shed");
     strike_rings(probe, rec, 1);
     check(probe.stalled_tx_.load() == kRing && !is_shut_down(p.a),
@@ -221,7 +221,7 @@ void test_streak_closes_the_peer() {
     check(is_shut_down(p.a), "the third consecutive ring closes the peer");
     check(probe.stalled_tx_.load(std::memory_order_relaxed) == 3 * kRing,
           "every stalled turn is COUNTED — a timed-out peer is never a silent drop");
-    check(probe.dropped_tx_.load() == 3 * kRing,
+    check(probe.drops_.snapshot().dropped_tx == 3 * kRing,
           "each strike cost the lane its oldest frame, counted (#2144)");
 }
 
@@ -246,7 +246,7 @@ void test_partial_record_finishes() {
     for (std::size_t i = 0; i < big.size(); ++i) big[i] = std::byte(i % 251);
     probe.send(big);  // takes what fits, then runs its bound out with the rest unwritten
     check(!is_shut_down(sv[0]), "the part-written record does not condemn the peer");
-    check(probe.dropped_tx_.load() == 0, "and is not shed");
+    check(probe.drops_.snapshot().dropped_tx == 0, "and is not shed");
 
     // The peer reads again; the next send resumes the held record, then writes its own.
     std::vector<std::byte> got;
@@ -436,7 +436,7 @@ void test_tcp_link_sheds_and_drops_a_stalled_peer() {
     check(took < (sent + 1) * static_cast<std::int64_t>(window),
           "and no single send blocked past its bound");
     for (int i = 0; i < 4; ++i) link.send(std::span(frame));
-    check(link.dropped_tx() > 0,
+    check(link.drop_stats().dropped_tx > 0,
           "a send to the condemned peer is shed and counted — never a silent drop");
 
     // The verdict reaches the connection: shutdown makes the recv loop see EOF, which runs
@@ -446,7 +446,8 @@ void test_tcp_link_sheds_and_drops_a_stalled_peer() {
     check(!link.link_up(), "the peer that would not take bytes is dropped, not blocked on");
     std::printf("  stalled=%llu dropped=%llu after %lld ms\n",
                 static_cast<unsigned long long>(link.stalled_tx()),
-                static_cast<unsigned long long>(link.dropped_tx()), static_cast<long long>(took));
+                static_cast<unsigned long long>(link.drop_stats().dropped_tx),
+                static_cast<long long>(took));
 
     ::close(peer);
     ::close(listener);
@@ -528,7 +529,7 @@ void test_concurrent_directed_sends_share_one_window() {
     for (std::thread& t : senders) t.join();
     const std::int64_t took = ms_since(t0);
 
-    check(server.dropped_tx() >= peers,
+    check(server.drop_stats().dropped_tx >= peers,
           "every peer did stall — the batch ran into full sockets and overflowed the rings, "
           "it did not just fit in the socket buffers");
     // A sender that waited on a stalled socket would pay a directed bound per send:
@@ -541,7 +542,7 @@ void test_concurrent_directed_sends_share_one_window() {
         "  peers=%zu window=%u ms directed bound=%u ms — the concurrent batch took "
         "%lld ms, dropped=%llu\n",
         peers, window, server.directed_send_bound_ms(), static_cast<long long>(took),
-        static_cast<unsigned long long>(server.dropped_tx()));
+        static_cast<unsigned long long>(server.drop_stats().dropped_tx));
 
     for (const int c : clients) ::close(c);
 }
@@ -725,7 +726,7 @@ void test_queued_records_are_all_delivered_in_order() {
         check(got[1].len == 64 && got[1].mark == 0xA1, "then the first queued record");
         check(got[2].len == 64 && got[2].mark == 0xA2, "then the second, in admission order");
     }
-    check(p.link->dropped_tx() == 0, "and nothing was dropped");
+    check(p.link->drop_stats().dropped_tx == 0, "and nothing was dropped");
 }
 
 /**
@@ -755,13 +756,13 @@ void full_ring_case(bool reliable) {
     });
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     check(!first_done.load(std::memory_order_acquire), "the first write is parked on the peer");
-    const std::uint64_t before = p.link->dropped_tx();
+    const std::uint64_t before = p.link->drop_stats().dropped_tx;
     for (std::size_t i = 0; i < depth; ++i) deliver(static_cast<std::uint8_t>(0xB0 + i));
-    check(p.link->dropped_tx() == before, "the vertex's ring took all of its depth");
+    check(p.link->drop_stats().dropped_tx == before, "the vertex's ring took all of its depth");
     const auto t0 = clock_t_::now();
     deliver(0xEE);
     check(ms_since(t0) < 100, "the record past the depth returned at once");
-    check(p.link->dropped_tx() == before + 1, "and one record was lost and counted");
+    check(p.link->drop_stats().dropped_tx == before + 1, "and one record was lost and counted");
     check(!first_done.load(std::memory_order_acquire), "while the first write was still parked");
 
     const std::vector<parked_peer_t::record_t> got = p.read_records(depth + 2);
@@ -792,7 +793,7 @@ void test_dialer_resumes_a_cut_record() {
     const auto t0 = clock_t_::now();
     p.link->send(std::span(big));
     check(ms_since(t0) < 2000, "the send returned at its bound with the record cut short");
-    check(p.link->dropped_tx() == 0, "the rest is held, not shed");
+    check(p.link->drop_stats().dropped_tx == 0, "the rest is held, not shed");
     const std::vector<parked_peer_t::record_t> got = p.read_records(1);
     check(got.size() == 1 && got[0].len == big.size() && got[0].mark == 0x33,
           "the peer read the whole record: the link's own wait resumed it");

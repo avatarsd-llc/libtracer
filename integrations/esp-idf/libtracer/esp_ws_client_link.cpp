@@ -426,9 +426,9 @@ struct esp_ws_client_link_t::framing_end_t {
      *         charged cost. */
     [[nodiscard]] std::size_t cap() const { return link.rx_bytes_; }
     /** @brief Count a frame that broke the rules; the connection is closed (#872, #1060). */
-    void malformed() const { link.malformed_rx_.fetch_add(1, std::memory_order_relaxed); }
+    void malformed() const { link.drops_.count_malformed_rx(); }
     /** @brief Count a message shed: a refused body or chain (receiver pays). */
-    void dropped() const { link.dropped_rx_.fetch_add(1, std::memory_order_relaxed); }
+    void dropped() const { link.drops_.count_dropped_rx(); }
     /** @brief Answer a PING with a PONG echoing its payload. */
     void pong(std::span<const std::byte> payload) const { reply(ws::opcode_t::PONG, payload); }
     /** @brief Answer a CLOSE with a CLOSE echoing its payload (RFC 6455 §5.5.1); the
@@ -473,7 +473,7 @@ struct esp_ws_client_link_t::framing_end_t {
         }
         const std::expected<view::view_t, view::flatten_err_t> flat = message.try_materialize(rx);
         if (!flat) {
-            link.dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+            link.drops_.count_dropped_rx();
             return;
         }
         link.rx_.deliver_borrowed(flat->bytes());
@@ -854,13 +854,13 @@ esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
     out.dial_failures = dial_failures_.load(std::memory_order_relaxed);
 #endif
     out.connect_ms = connect_ms_.load(std::memory_order_relaxed);
-    // Filled from `dropped_rx_`, not kept in a second counter: the receive path already tallies
-    // every inbound discard there (#953/#901), and a second counter bumped at the same sites could
-    // only drift from it. `c.rx_drops` and `dropped_rx()` are therefore two spellings of one
-    // number, never two numbers. Saturating, because the block is 32-bit and the atomic is 64-bit —
-    // a link that really dropped 4 billion messages reports the cap here and the exact figure
-    // through `dropped_rx()`.
-    const std::uint64_t rx_dropped = dropped_rx_.load(std::memory_order_relaxed);
+    // Filled from the tally's `dropped_rx`, not kept in a second counter: the receive path already
+    // tallies every inbound discard there (#953/#901), and a second counter bumped at the same
+    // sites could only drift from it. `c.rx_drops` and `drop_stats().dropped_rx` are therefore two
+    // spellings of one number, never two numbers. Saturating, because the block is 32-bit and the
+    // tally is word-wide — on a 64-bit host a link that really dropped 4 billion messages reports
+    // the cap here and the exact figure through `drop_stats().dropped_rx`.
+    const std::uint64_t rx_dropped = drops_.snapshot().dropped_rx;
     out.c.rx_drops = static_cast<std::uint32_t>(
         std::min<std::uint64_t>(rx_dropped, std::numeric_limits<std::uint32_t>::max()));
     // Read OUTSIDE the mutex: `connected_` is atomic and `drop()` clears it while

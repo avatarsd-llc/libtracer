@@ -144,13 +144,13 @@ void run_row(bool fd, std::size_t payload, std::size_t n, std::size_t rounds) {
 
     // Warm-up: a whole lap of the receiver's endpoint window, so its binding table is at the
     // steady state a long-lived link reaches (the table only shrinks when a run is re-issued).
-    const std::uint64_t refused0 = p.a->dropped_tx();
+    const std::uint64_t refused0 = p.a->drop_stats().dropped_tx;
     const std::size_t warm = std::max<std::size_t>(n, 4096);
     for (std::size_t i = 0; i < warm; ++i) {
         p.a->send(frame);
         p.pump();
     }
-    const bool refused = p.a->dropped_tx() != refused0;
+    const bool refused = p.a->drop_stats().dropped_tx != refused0;
     p.rx_store.peak = p.rx_store.live;
     const long long rx_live = p.rx_store.live;
 

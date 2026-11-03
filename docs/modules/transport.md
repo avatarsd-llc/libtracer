@@ -423,6 +423,21 @@ they are the reason a new binding is small.
 :members:
 ```
 
+```{doxygenstruct} tr::net::transport_drop_stats_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::drop_tally_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::drop_classes_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenstruct} tr::net::peer_handle_t
 :project: libtracer
 :members:

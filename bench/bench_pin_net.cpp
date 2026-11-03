@@ -18,9 +18,9 @@
  * the second: `heap_backend` never refuses, so no arm can ever show the cost of holding a
  * segment. Backing the receiver with `synchronized_pool_t<>` over a fixed slab makes the first
  * observable on the host too: a shared value holds its whole RX slot for its lifetime, so
- * `available()` is a free-slot floor and `dropped_rx()` is backpressure onset, both sampled
- * while the load runs. It also puts the RX segment size under the bench's control, because the
- * transport sizes it at `min(kMaxDatagram, backend->max_segment_size())` — on the default heap
+ * `available()` is a free-slot floor and `drop_stats().dropped_rx` is backpressure onset, both
+ * sampled while the load runs. It also puts the RX segment size under the bench's control, because
+ * the transport sizes it at `min(kMaxDatagram, backend->max_segment_size())` — on the default heap
  * backend it is 65,536 B whatever the datagram's length, which is the hold a share of even a
  * small payload costs (RFC-0028 §5.3's retention hazard, the consumer's number to price).
  *
@@ -275,7 +275,7 @@ int run_sub(int argc, char** argv) {
         static_cast<unsigned long long>(n), secs > 0 ? static_cast<double>(n) / secs : 0.0,
         static_cast<unsigned long long>(pins.load()),
         static_cast<unsigned long long>(copies.load()), free_floor,
-        static_cast<unsigned long long>(t.dropped_rx()), vertices, pool.capacity());
+        static_cast<unsigned long long>(t.drop_stats().dropped_rx), vertices, pool.capacity());
     std::fflush(stdout);
     return 0;
 }

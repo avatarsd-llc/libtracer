@@ -154,7 +154,7 @@ int main() {
     // The bound is the datagram's: `max_frame` never raises it past kMaxDatagram.
     check(ok, listener.effective_max_frame() <= udp_transport_t::kMaxDatagram,
           "the receive cap never exceeds what a datagram can carry");
-    check(ok, listener.malformed_rx() == 0 && listener.dropped_rx() == 0,
+    check(ok, listener.drop_stats().malformed_rx == 0 && listener.drop_stats().dropped_rx == 0,
           "nothing was refused and nothing was shed on this run");
 
     std::printf("udp: %zu frames at the listener, %zu at the dialer, 0 bytes of framing\n",

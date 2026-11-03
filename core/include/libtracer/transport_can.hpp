@@ -371,7 +371,7 @@ struct transport_can_config_t {
     std::size_t max_pending = 0; /**< @brief Ceiling on data slices parked awaiting their
                                       advertise; `0` = unbounded (host-bounded per
                                       RFC-0006). Overflow evicts the oldest parked slice
-                                      and ticks @ref can_transport_t::dropped_rx. */
+                                      and ticks `drop_stats().dropped_rx`. */
     std::chrono::milliseconds rx_ttl =
         kCanRxTtlFromPeerTtl; /**< @brief RX staleness window: a parked slice or an
                                    incomplete reassembly group untouched this long is
@@ -501,23 +501,6 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // --- drop counters (#912) — the sibling-transport convention -----------------
 
     /**
-     * @brief Inbound frames dropped rather than delivered (the tcp/quic/udp
-     *        `dropped_rx()` convention).
-     *
-     * Ticks once per parked data slice reclaimed because @ref
-     * transport_can_config_t::max_pending was reached or because it aged past
-     * `rx_ttl` — a bounded, counted drop instead of the unbounded park this
-     * replaces — and once per inbound slice its group could not take: no group admitted
-     * (its advertise was refused or lost), or a data field shorter than its place (#911,
-     * #2258). It counts SLICES, not groups; a group reclaimed as a unit is @ref
-     * dropped_groups, which the refusal also ticks because the group it belonged
-     * to is abandoned rather than completed with a fabricated slice.
-     */
-    [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
-        return dropped_rx_.load(std::memory_order_relaxed);
-    }
-
-    /**
      * @brief Reassembled groups dropped because they completed inside the
      *        sink-install window — the transport existed (link receiving, RX
      *        callback registered) but no receiver sink was installed yet
@@ -533,7 +516,7 @@ class can_transport_t final : public transport_t, public bus_link_t {
      * sweeps); parking the group inside the library is banned outright. So a
      * group that completes while both receiver slots are empty is dropped at the
      * delivery seam and counted HERE — a distinctly named cause, never folded
-     * into @ref dropped_rx or @ref dropped_groups and never silent. Counts
+     * into `drop_stats().dropped_rx` or @ref dropped_groups and never silent. Counts
      * GROUPS. A deployment that sees it moving is watching the sink-install
      * window, not guessing.
      */
@@ -563,8 +546,8 @@ class can_transport_t final : public transport_t, public bus_link_t {
      * dropped_groups, as every other pre-delivery reclamation does) and the slice is
      * counted HERE.
      *
-     * Counts SLICES, like @ref dropped_rx — one per refused slice, not one per group.
-     * A distinctly named cause, never folded into @ref dropped_rx (which is
+     * Counts SLICES, like `drop_stats().dropped_rx` — one per refused slice, not one per group.
+     * A distinctly named cause, never folded into `drop_stats().dropped_rx` (which is
      * backpressure and age-out) and never silent: a deployment that sees this moving
      * is watching lost advertises on a lapping bus, not guessing.
      */
@@ -580,25 +563,11 @@ class can_transport_t final : public transport_t, public bus_link_t {
      * past the cap is refused here, its data slices then park and age out like any slice
      * whose advertise was lost. A re-issue that retires overlapping bindings first, or
      * rewrites its own slot, never reaches the cap. Counts ADVERTISES, one per refusal. A
-     * distinctly named cause, never folded into @ref dropped_rx, and a moving count means the
-     * build's cap is smaller than the bus this link hears.
+     * distinctly named cause, never folded into `drop_stats().dropped_rx`, and a moving count means
+     * the build's cap is smaller than the bus this link hears.
      */
     [[nodiscard]] std::uint64_t dropped_binding_cap() const noexcept {
         return dropped_binding_cap_.load(std::memory_order_relaxed);
-    }
-
-    /**
-     * @brief Outbound frames the caller believed sent that never reached the bus
-     *        (the twai `tx_dropped()` convention, spelled to match `dropped_rx`).
-     *
-     * Ticks when a `send` cannot own its bytes (allocation failure — the
-     * backpressure case), when the payload splits into no window at all, when the
-     * group needs more consecutive endpoint slots than @ref kCanMaxGroupSlices
-     * (refused WHOLE, before any manifest goes out — #910), and when the group's
-     * advertise manifest cannot be encoded.
-     */
-    [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
-        return dropped_tx_.load(std::memory_order_relaxed);
     }
 
     /**
@@ -625,14 +594,25 @@ class can_transport_t final : public transport_t, public bus_link_t {
     [[nodiscard]] std::size_t pending_slices() const;
 
     /**
-     * @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads.
+     * @brief This link's shed-frame counters (#932, #2482).
      *
-     * `malformed_rx` stays zero: this bus has no framing-desync class to report — an
-     * ingress slice is either owned and reassembled or shed into @ref dropped_rx — so
-     * it reports nothing rather than folding a different meaning into that field.
+     * `dropped_rx` ticks once per parked data slice reclaimed because
+     * @ref transport_can_config_t::max_pending was reached or it aged past `rx_ttl`, and once
+     * per inbound slice its group could not take: no group admitted (its advertise was refused
+     * or lost), or a data field shorter than its place (#911, #2258). It counts SLICES; a group
+     * reclaimed as a unit is @ref dropped_groups, which the refusal also ticks.
+     *
+     * `dropped_tx` ticks when a `send` cannot own its bytes (backpressure), when the payload
+     * splits into no window at all, when the group needs more consecutive endpoint slots than
+     * @ref kCanMaxGroupSlices (refused WHOLE, before any manifest goes out, #910), and when the
+     * group's advertise manifest cannot be encoded.
+     *
+     * `malformed_rx` is always zero, and the tally has no word for it: this bus has no
+     * framing-desync class. An ingress slice is either owned and reassembled or shed into
+     * `dropped_rx`.
      */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-        return {dropped_rx(), 0, dropped_tx()};
+        return drops_.snapshot();
     }
 
     // --- the bus capability (ADR-0044) ------------------------------------------
@@ -857,12 +837,9 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // process net sub-pool once in the constructor).
     mem::mem_backend_t* rx_backend_ = nullptr;
 
-    // Drop counters (#912, #1103, #1011). Written on the RX/TX threads, read by anyone.
-    // Word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697): a 64-bit atomic
-    // is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit accessors widen
-    // on read; a 32-bit target wraps after 2^32.
-    std::atomic<std::size_t> dropped_rx_{0};
-    std::atomic<std::size_t> dropped_tx_{0};
+    /** @brief Shed-frame counters (#912, #1103, #1011, #2482), written on the RX/TX threads,
+     *         read by anyone. No `malformed_rx` word: this bus has no such class. */
+    drop_tally_t<drop_classes_t{.malformed_rx = false}> drops_;
     // Parks at the lap fence; read only by the test door below (#2262), never a metric.
     std::atomic<std::size_t> tx_fence_waits_{0};
     friend struct can_transport_test_door_t;  // test-only: reads tx_fence_waits_.
