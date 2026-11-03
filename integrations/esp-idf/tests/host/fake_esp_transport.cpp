@@ -554,12 +554,16 @@ int esp_transport_read(esp_transport_handle_t t, char* buffer, int len, int time
     const std::size_t room = len > 0 ? static_cast<std::size_t>(len) : std::size_t{0};
     std::size_t got = 0;
     const std::size_t from_resp = std::min(room, c.resp.size() - c.resp_off);
-    std::memcpy(buffer, c.resp.data() + c.resp_off, from_resp);
+    if (from_resp != 0) {  // an empty vector's data() may be null: memcpy(_, nullptr, 0) is UB
+        std::memcpy(buffer, c.resp.data() + c.resp_off, from_resp);
+    }
     c.resp_off += from_resp;
     got += from_resp;
     if (c.upgraded && st().stream == t) {
         const std::size_t from_wire = std::min(room - got, st().wire.size() - st().wire_off);
-        std::memcpy(buffer + got, st().wire.data() + st().wire_off, from_wire);
+        if (from_wire != 0) {
+            std::memcpy(buffer + got, st().wire.data() + st().wire_off, from_wire);
+        }
         st().wire_off += from_wire;
         got += from_wire;
     }
