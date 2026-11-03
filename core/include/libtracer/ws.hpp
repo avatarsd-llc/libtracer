@@ -247,6 +247,54 @@ struct accept_key_t {
     return out;
 }
 
+/**
+ * @brief Case-insensitive lookup of one HTTP header in a raw header block; its value,
+ *        trimmed of spaces and tabs, as a view into @p block (empty when absent).
+ *
+ * Each line is matched in place, so nothing is lowered into a copy (#1780). HTTP header names
+ * are ASCII (RFC 9110 §5.1).
+ *
+ * @param block The header block, request or status line first, CRLF-separated.
+ * @param name  The header's name in lower case, e.g. `"sec-websocket-key"`.
+ */
+[[nodiscard]] inline std::string_view header_value(std::string_view block,
+                                                   std::string_view name) noexcept {
+    const auto lower = [](char c) {
+        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    };
+    for (std::size_t line = 0; line < block.size();) {
+        std::size_t eol = block.find("\r\n", line);
+        if (eol == std::string_view::npos) eol = block.size();
+        const std::string_view text = block.substr(line, eol - line);
+        line = eol + 2;
+        if (text.size() <= name.size() || text[name.size()] != ':') continue;
+        bool same = true;
+        for (std::size_t i = 0; same && i < name.size(); ++i) same = name[i] == lower(text[i]);
+        if (!same) continue;
+        const std::string_view val = text.substr(name.size() + 1);
+        const std::size_t b = val.find_first_not_of(" \t");
+        if (b == std::string_view::npos) return {};
+        return val.substr(b, val.find_last_not_of(" \t") - b + 1);
+    }
+    return {};
+}
+
+/**
+ * @brief Whether a server's opening-handshake response accepts the client key @p key: a `101`
+ *        status and the Sec-WebSocket-Accept value that key derives (RFC 6455 §4.1).
+ *
+ * The one client-side check, shared by core's dial-out client and the ESP-IDF client link.
+ *
+ * @param header The response's header block alone, up to and including its CRLFCRLF: frame
+ *               bytes a server pipelined behind it must not be searched.
+ * @param key    The Sec-WebSocket-Key the request carried.
+ */
+[[nodiscard]] inline bool upgrade_accepted(std::string_view header, std::string_view key) noexcept {
+    if (header.find("101") == std::string_view::npos) return false;
+    const std::string_view accept = header_value(header, "sec-websocket-accept");
+    return !accept.empty() && accept_key(key) == accept;
+}
+
 /** @brief RFC 6455 frame opcodes (the subset libtracer cares about). */
 enum class opcode_t : std::uint8_t {
     CONT = 0x0,   /**< Continuation frame. */

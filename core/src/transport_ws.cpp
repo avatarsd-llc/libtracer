@@ -28,135 +28,11 @@
 #include "libtracer/rope.hpp"
 #include "libtracer/ws.hpp"
 #include "libtracer/ws_assembler.hpp"
+#include "libtracer/ws_framing.hpp"
 
 namespace tr::net {
 
 namespace {
-
-/** @brief What the body of the frame being received needs from its header (the length is
- *         frame ingress's own). */
-struct ws_rx_frame_t {
-    ws::opcode_t op = ws::opcode_t::CONT;   /**< @brief Its opcode. */
-    bool fin = false;                       /**< @brief Its FIN bit. */
-    bool masked = false;                    /**< @brief Its MASK bit. */
-    std::array<std::uint8_t, 4> mask_key{}; /**< @brief Its masking key, when masked. */
-};
-
-/**
- * @brief The RFC 6455 receive rules both ends share, as frame ingress calls them
- *        (`frame_ingress.hpp`): the header rules on the way in, then unmasking, fragment
- *        chaining and the opcode's answer on each whole body.
- *
- * What differs between the server and the dial-out client is reached through @p End, the
- * end's own adapter: `cap()` (the live receive cap), `malformed()` and `dropped()` (its
- * counters), `pong(bytes)` (its PONG, masked or not) and `hand_up(message)` (its delivery),
- * plus the `frame` and `assembler` state of the stream being read.
- */
-template <class End>
-struct ws_framing_t {
-    End& end; /**< @brief The receiving end. */
-
-    /** @brief Judge the header bytes read so far; an over-cap length or a protocol breach
-     *         closes the stream before anything is drawn. */
-    [[nodiscard]] ingress_header_t header(std::span<const std::byte> have) const {
-        const ws::header_t h = ws::decode_header(have, end.cap());
-        if (h.status == ws::decode_status_t::NEED_MORE)
-            return {ingress_header_t::kind_t::MORE, h.size, 0};
-        if (h.status == ws::decode_status_t::PROTOCOL_ERROR) {
-            // An over-cap length, a §5.5 control breach or a §5.2 reserved opcode: a stream
-            // we refuse to keep reading. Count it; the stream is torn down (§7.1.7).
-            end.malformed();
-            return {ingress_header_t::kind_t::CLOSE, 0, 0};
-        }
-        end.frame = {h.op, h.fin, h.masked, h.mask_key};
-        return {ingress_header_t::kind_t::BODY, h.size, h.len};
-    }
-
-    /** @brief One whole body, in its exact segment (empty when the source refused it). */
-    [[nodiscard]] bool body(tr::view::rx_block_t& blk, std::size_t len) const {
-        if (len != 0 && !blk.seg) {
-            // The receiving link's source refused the body (backpressure): the message is
-            // shed and counted, the connection lives and re-syncs at the next BINARY. A
-            // PING shed here goes unanswered.
-            end.dropped();
-            if (!ws::is_control_opcode(end.frame.op)) end.assembler.reset();
-            return end.frame.op != ws::opcode_t::CLOSE;
-        }
-        const std::span<std::byte> bytes = blk.seg ? blk.frame(len) : std::span<std::byte>{};
-        if (end.frame.masked) ws::detail::xor_mask(bytes, end.frame.mask_key);
-        switch (end.frame.op) {
-            case ws::opcode_t::BINARY:
-            case ws::opcode_t::CONT:
-                return data(len != 0 ? blk.take(len) : tr::view::view_t{});
-            case ws::opcode_t::PING:
-                end.pong(bytes);  // the header rules held it to <= 125 bytes (§5.5)
-                return true;
-            case ws::opcode_t::CLOSE:
-                return false;  // tear this one connection down
-            default:
-                return true;  // TEXT / PONG: ignored (a RESERVED opcode never gets here: #1060)
-        }
-    }
-
-    /**
-     * @brief One data frame's bytes: an unfragmented message goes up as the one view over its
-     *        segment, a fragment is chained by the assembler until its message completes.
-     */
-    [[nodiscard]] bool data(tr::view::view_t piece) const {
-        if (end.frame.op == ws::opcode_t::BINARY && end.frame.fin) {
-            end.assembler.reset();  // a BINARY mid-assembly drops the stale message (§5.4)
-            end.hand_up(tr::view::rope_t{std::move(piece)});
-            return true;
-        }
-        ws_assembler_t::result_t r =
-            end.assembler.on_piece(end.frame.op, end.frame.fin, std::move(piece), end.cap());
-        // Fragments summing past the cap get the answer a single over-cap frame gets, so the
-        // fragmented route is not a way around the bound.
-        if (r.status == ws_assembler_t::status_t::OVERSIZE) {
-            end.malformed();
-            return false;
-        }
-        // A refused chain is a refused body by another name: shed, counted, and the
-        // connection re-syncs at the next BINARY.
-        if (r.status == ws_assembler_t::status_t::REFUSED) end.dropped();
-        if (r.status == ws_assembler_t::status_t::COMPLETE) end.hand_up(std::move(r.message));
-        return true;
-    }
-};
-
-}  // namespace
-
-namespace {
-
-/** @brief ASCII lower-case of @p c (HTTP header names are ASCII, RFC 9110 §5.1). */
-constexpr char ascii_lower(char c) noexcept {
-    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
-}
-
-/**
- * @brief Case-insensitive search for an HTTP header; return its trimmed value as a view
- *        into @p request (empty when absent).
- *
- * `request` is the raw header block; `name` is lowercase (e.g. "sec-websocket-key"). Each
- * header line is matched in place, so nothing is lowered into a copy (#1780).
- */
-std::string_view header_value(std::string_view request, std::string_view name) {
-    for (std::size_t line = 0; line < request.size();) {
-        std::size_t eol = request.find("\r\n", line);
-        if (eol == std::string_view::npos) eol = request.size();
-        const std::string_view text = request.substr(line, eol - line);
-        line = eol + 2;
-        if (text.size() <= name.size() || text[name.size()] != ':' ||
-            !std::equal(name.begin(), name.end(), text.begin(),
-                        [](char want, char got) { return want == ascii_lower(got); }))
-            continue;
-        const std::string_view val = text.substr(name.size() + 1);
-        const std::size_t b = val.find_first_not_of(" \t");
-        if (b == std::string_view::npos) return {};
-        return val.substr(b, val.find_last_not_of(" \t") - b + 1);
-    }
-    return {};
-}
 
 /** @brief The bytes of @p b as text. */
 std::string_view as_text(const mem::bytes_t& b) noexcept {
@@ -295,6 +171,8 @@ struct ws_server_transport_t::framing_t {
         const ::iovec pv{pong.data(), plen};
         link.send_to(s, std::span<const ::iovec>(&pv, 1));
     }
+    /** @brief A CLOSE is not answered: the connection is torn down at once. */
+    void closing(std::span<const std::byte>) const {}
 
     /**
      * @brief Hand one whole message up.
@@ -511,7 +389,7 @@ bool ws_server_transport_t::read_handshake(session_t& s, int fd) {
     if (hdr_end == std::string_view::npos) return true;  // keep accumulating
 
     const std::string_view key =
-        header_value(as_text(s.hs_buf).substr(0, hdr_end + 4), "sec-websocket-key");
+        ws::header_value(as_text(s.hs_buf).substr(0, hdr_end + 4), "sec-websocket-key");
     if (key.empty()) return false;
     // Built on the stack: the reply is fixed text plus the 28-character accept value, and
     // the buffer is sized from exactly those pieces, so it cannot come up short.
@@ -782,10 +660,7 @@ bool ws_client_transport_t::handshake(int fd, std::string_view host, std::uint16
 
     // Validate against the HEADER BLOCK alone: the tail may be arbitrary frame bytes, and
     // neither the `101` search nor the header scan may take a match out of them.
-    const std::string_view header = as_text(resp).substr(0, hdr_end + 4);
-    if (header.find("101") == std::string_view::npos) return false;
-    const std::string_view accept = header_value(header, "sec-websocket-accept");
-    if (accept.empty() || !(ws::accept_key(key) == accept)) return false;
+    if (!ws::upgrade_accepted(as_text(resp).substr(0, hdr_end + 4), key)) return false;
 
     // Bytes pipelined past the header are the start of the frame stream — they are already
     // off the socket, so `serve` can never read them again. Carry them over, exactly as
@@ -829,6 +704,8 @@ struct ws_client_transport_t::framing_t {
             return link.write_gather(wfd, rec, bound, false);
         });
     }
+    /** @brief A CLOSE is not answered: the connection is torn down at once. */
+    void closing(std::span<const std::byte>) const {}
 
     /** @brief Hand one whole message up: a single-link rope reaches a span-only sink
      *         borrowed, a fragmented one materializes once, in the slot, from this link's rx

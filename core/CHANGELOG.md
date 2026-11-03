@@ -58,6 +58,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   segment and chain slot) against the receive cap. Its outcome types are nested
   (`ws_assembler_t::status_t`, `ws_assembler_t::result_t`). The ESP-IDF httpd link is its
   first user outside core.
+- **`ws_framing_t` is a public header, `libtracer/ws_framing.hpp` (#2484).** The RFC 6455
+  receive rules (header judgement against the cap, unmasking, fragment chaining, the opcode's
+  answer) move out of `transport_ws.cpp`, so a link that frames its own byte stream shares
+  them. The end adapter gains `closing(bytes)`, its answer to a CLOSE (core's ends answer none,
+  as before). Also added: `ws::header_value` (the case-insensitive, trimmed header lookup),
+  `ws::upgrade_accepted` (the client's `101` + `Sec-WebSocket-Accept` check), and
+  `frame_ingress_t::read_with`, which drives the ingress from a single-buffer read such as
+  `esp_transport_read`. The ESP-IDF WebSocket client link is the first user outside core.
 
 ## [0.22.0] — 2026-11-02
 

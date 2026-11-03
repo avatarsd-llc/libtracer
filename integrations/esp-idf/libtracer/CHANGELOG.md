@@ -21,6 +21,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed (breaking)
 
+- **`esp_ws_client_link_t` frames its stream with core's WebSocket rules (#2484).** The link
+  now runs its own RFC 6455 client handshake over `tcp_transport` and frames the byte stream
+  with core's `ws_framing_t` and `ws_assembler_t`; it no longer depends on `esp_transport_ws`.
+  - `link_config_t::rx_bytes` is now the receive cap, not the size of a fixed read buffer.
+    A message over it (one frame, or fragments summed, each fragment charged its bytes plus
+    one segment's cost) closes the connection, counted on the new `malformed_rx()` (also in
+    `drop_stats`), and the link re-dials; before, it was dropped and the connection kept. The
+    cap also bounds control frames.
+  - No per-connection read buffer: each frame body is drawn as one segment from
+    `memory.rx` when set (owning delivery), otherwise from `memory.state`.
+  - A frame the source refuses is shed and counted on `dropped_rx`; the link re-syncs at the
+    next BINARY. A stray continuation frame is no longer counted.
+
 - **`httpd_ws_link_t::close_frozen_peers(now, deadline)` is now `sweep(now, deadline)`**, the
   one seam through which a link takes the application's clock
   ([#2481](https://github.com/avatarsd-llc/libtracer/issues/2481)). The frozen-peer verdict and

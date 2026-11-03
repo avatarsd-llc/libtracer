@@ -9,7 +9,7 @@
  *
  * Same construction as the #900/#901 receive-path suite next to it: the REAL chip
  * translation unit (`integrations/esp-idf/libtracer/esp_ws_client_link.cpp`) compiled
- * against a host fake of `esp_transport_ws` (fake_esp_transport.hpp). That suite scripts
+ * against a host fake of `tcp_transport` (fake_esp_transport.hpp). That suite scripts
  * the fake's inbound frames; this one scripts its BLOCKING — a dial that hangs, a dial
  * that fails, a write that parks — because every defect here is a wait nobody bounded.
  * No socket is opened at any layer (#947).
@@ -425,7 +425,7 @@ void test_an_orphaned_dial_that_succeeds_closes_and_releases_once() {
     link.reset();
 
     check(fake_ws::dialers_inside() == 1, "the dial outlived its link, still in flight");
-    check(fake_ws::live_handles() == 2, "still holding the transport pair it built");
+    check(fake_ws::live_handles() == 1, "still holding the transport it built");
 
     fake_ws::release_connects(/*succeed=*/true);
     check(drained_fake(), "and released it the moment the handshake resolved");
@@ -448,7 +448,7 @@ void test_an_orphaned_dial_that_fails_releases_once() {
 
     auto link = dialing_link();
     link.reset();
-    check(fake_ws::live_handles() == 2, "the orphaned dial holds the transport pair");
+    check(fake_ws::live_handles() == 1, "the orphaned dial holds the transport it built");
 
     fake_ws::release_connects(/*succeed=*/false);
     check(drained_fake(), "and released it when the dial failed");
@@ -755,15 +755,16 @@ void test_the_dial_slot_returns_to_its_store_on_both_arms() {
 }
 
 /**
- * @brief #1606 — nothing connection-sized while unconnected: a link holds its scratches and
- *        its transport pair only while a connection stands.
+ * @brief #1606, #2484 — nothing connection-sized: a link holds its transport only while a
+ *        connection stands, and no read buffer at all.
  *
  * The stores' live counts are the oracle. Dialling an unreachable peer, the link holds its
  * dial slot and nothing else from `memory.state`, nothing from `memory.io` (an egress ring is
- * drawn only when a frame has to wait, #2277), and no transport pair across the backoff. When a
- * handshake lands it draws one read scratch and nothing from `memory.io` (each send draws its own
- * frame, #2265); when the peer closes, the scratch goes back, with the pair, before the re-dial —
- * the link is back to what a never-connected one holds.
+ * drawn only when a frame has to wait, #2277), and no transport across the backoff. A standing
+ * connection holds nothing more from either store: its handshake block went back once its first
+ * bytes were framed, there is no read buffer (#2484), and each send draws its own frame (#2265);
+ * when the peer closes, the transport goes back before the re-dial — the link is back to what a
+ * never-connected one holds.
  */
 void test_an_unconnected_link_holds_no_connection_memory() {
     std::printf("#1606 an unconnected link holds no scratch and no transport pair:\n");
@@ -791,15 +792,16 @@ void test_an_unconnected_link_holds_no_connection_memory() {
 
         fake_ws::fail_connects(false);
         check(wait_until([&] { return link->link_up(); }, 5s), "the peer came back");
-        check(state.live == slot + 1, "a standing connection holds its read scratch");
+        check(wait_until([&] { return state.live == slot; }, 2s),
+              "a standing connection holds no read buffer and no handshake block (#2484)");
         check(io.live == 0, "and no write scratch: a send draws its own frame (#2265)");
 
         fake_ws::fail_connects(true);
-        fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_CLOSE, /*fin=*/true,
+        fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::CLOSE, /*fin=*/true,
                                                   /*len=*/2, /*seed=*/0x11)});
         check(wait_until([&] { return !link->link_up(); }, 5s), "the peer closed");
         check(wait_until([&] { return state.live == slot && io.live == 0; }, 2s),
-              "the read scratch went back with the connection");
+              "nothing came back with the connection, because it held nothing more");
         check(wait_until([] { return fake_ws::live_handles() == 0; }, 2s),
               "and so did its transport pair, ahead of the re-dial");
         // End CONNECTED, so the teardown joins the recv thread: a failing dial still in
@@ -881,57 +883,35 @@ void test_shut_down_stops_now_and_the_destructor_frees() {
 }
 
 /**
- * @brief A heap store that, once @ref park is set, holds the next draw until it is cleared:
- *        the lever that stops a dial between its resolve and its `connected_` store.
- */
-class parking_source_t final : public tr::mem::block_source_t {
-   public:
-    parking_source_t() noexcept : tr::mem::block_source_t("parking") {}
-    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
-        if (park.load()) {
-            parked.store(true);
-            while (park.load()) std::this_thread::sleep_for(1ms);
-        }
-        return tr::mem::heap_source().try_alloc(bytes, align);
-    }
-    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
-        tr::mem::heap_source().release(p, bytes, align);
-    }
-    std::atomic<bool> park{false};   /**< @brief Hold the next draw. */
-    std::atomic<bool> parked{false}; /**< @brief A draw is being held. */
-};
-
-/**
  * @brief #1606 review: shut_down() racing a dial that has RESOLVED but not yet published
  *        `connected_ = true` must still leave the link down.
  *
- * The dial is held inside its scratch draw — past the resolve, so it is not in flight and
- * shut_down() cannot condemn it — while shut_down() runs its top-of-function `connected_`
- * clear and parks in the join. Released, the dial stores `true` and the thread exits on
+ * The dial is held inside `esp_transport_get_socket` (`fake_ws::park_get_socket`), where it
+ * applies the socket policy — past the resolve, so it is not in flight and shut_down() cannot
+ * condemn it — while shut_down() runs its top-of-function `connected_` clear and parks in the
+ * join. Released, the dial stores `true` and the thread exits on
  * `stop_` without a departure arm. Without the second clear beside the release, link_up()
  * then answers true for a link whose pair is already gone. Run under TSan as well.
  */
 void test_shut_down_racing_a_resolved_dial_leaves_the_link_down() {
     std::printf("#1606 shut_down() racing a resolved dial leaves the link down:\n");
-    parking_source_t state;
-    const tr::net::esp_ws_client_config_t cfg{
-        .rx_bytes = kBufBytes, .tx_bytes = kBufBytes, .memory = {.rx = nullptr, .state = &state}};
+    const tr::net::esp_ws_client_config_t cfg{.rx_bytes = kBufBytes, .tx_bytes = kBufBytes};
     fake_ws::reset();
     {
         auto link =
             tr::mem::make_poly<esp_ws_client_link_t>(tr::mem::net_source(), "127.0.0.1", 8080, cfg);
-        state.park.store(true);
+        fake_ws::park_get_socket(true);
         link->start_receiving();
-        check(wait_until([&] { return state.parked.load(); }, 2s),
-              "the dial resolved and is held inside its scratch draw");
+        check(wait_until([] { return fake_ws::get_socket_parked(); }, 2s),
+              "the dial resolved and is held applying its socket policy");
         std::thread stopper([&] { link->shut_down(); });
         // Let shut_down() pass its first clear and reach the join; the dial cannot move.
         std::this_thread::sleep_for(100ms);
-        state.park.store(false);
+        fake_ws::park_get_socket(false);
         stopper.join();
         check(!link->link_up(), "link_up() is false once shut_down() returns");
         check(!link->stats().up, "and so is stats().up");
-        check(fake_ws::live_handles() == 0, "and the pair is released");
+        check(fake_ws::live_handles() == 0, "and the transport is released");
     }
     check(drained_fake(), "it drained");
 }
@@ -951,7 +931,7 @@ void test_a_parked_read_does_not_hold_a_send() {
     esp_ws_client_link_t* const under_test = link.get();
 
     fake_ws::hold_reads(true);
-    fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, true, 8, 1)});
+    fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, true, 8, 1)});
     check(wait_until([] { return fake_ws::readers_inside() == 1; }, 2s),
           "the recv thread is parked INSIDE esp_transport_read");
 
@@ -977,11 +957,11 @@ void test_a_parked_read_does_not_hold_a_send() {
  * @brief #2265: what one send costs at the transport, at 64 B, 1 KiB, 4 KiB and 16 KiB.
  *
  * The counts come from the fake's model of the IDF transport (see
- * `fake_ws::lwip_calls`). Before, a frame was one `esp_transport_write` on the WS handle:
- * 5 lwIP calls, and IDF masked the payload in place and unmasked it back (2 extra passes),
- * after the link's own copy into the scratch. Now the link builds the frame (header plus
- * the payload gathered and masked in one pass) and writes it once on the TCP parent: 2
- * lwIP calls, and the transport touches no payload byte. The caller's bytes are only read.
+ * `fake_ws::lwip_calls`). Before #2265, a frame was one `esp_transport_write` on the WS
+ * handle: 5 lwIP calls, and IDF masked the payload in place and unmasked it back. Now the
+ * link builds the frame (header plus the payload gathered and masked in one pass) and
+ * writes it once on the TCP transport: 2 lwIP calls, and the transport touches no payload
+ * byte (since #2484 there is no WS transport at all). The caller's bytes are only read.
  */
 void test_one_send_costs_one_write_and_one_mask_pass() {
     std::printf("one send is one write on the TCP parent, masked once:\n");
@@ -1002,15 +982,10 @@ void test_one_send_costs_one_write_and_one_mask_pass() {
         link->send(std::span<const std::span<const std::byte>>(parts));
 
         const int calls = fake_ws::lwip_calls();
-        const std::size_t touched = fake_ws::transport_touched_bytes();
         const std::size_t wire = fake_ws::wire_bytes();
         const std::size_t want_wire = len + (len < 126 ? 2 : len <= 0xFFFF ? 4 : 10) + 4;
-        std::printf(
-            "       %5zu B: %d lwIP calls, %zu B on the wire, %zu B re-touched by the "
-            "transport\n",
-            len, calls, wire, touched);
+        std::printf("       %5zu B: %d lwIP calls, %zu B on the wire\n", len, calls, wire);
         check(calls == 2, "2 lwIP calls per send: one poll, one send");
-        check(touched == 0, "the transport touches no payload byte (no mask or unmask pass)");
         check(wire == want_wire, "the wire carries exactly one frame: header, key, payload");
         check(fake_ws::last_write_masked() && fake_ws::last_write_op() == 0x2,
               "a masked BINARY frame");
@@ -1031,21 +1006,21 @@ void test_control_frames_are_answered_through_the_write_path() {
     auto link = dialing_link();
     check(wait_until([&] { return link->link_up(); }, 2s), "and came up connected");
 
-    fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_PING, true, 4, 0x40)});
+    fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::PING, true, 4, 0x40)});
     check(wait_until([] { return fake_ws::last_write_op() == 0xA; }, 2s), "a PONG went out");
-    const fake_ws::frame_t ping = fake_ws::make_frame(WS_TRANSPORT_OPCODES_PING, true, 4, 0x40);
+    const fake_ws::frame_t ping = fake_ws::make_frame(tr::net::ws::opcode_t::PING, true, 4, 0x40);
     check(fake_ws::last_write_masked() && fake_ws::last_write_payload() == ping.payload,
           "masked, echoing the PING's payload");
     check(fake_ws::lwip_calls() == 2, "as one write on the TCP parent");
 
-    fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_PING, true, 0, 0)});
+    fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::PING, true, 0, 0)});
     check(wait_until([] { return fake_ws::lwip_calls() == 4; }, 2s),
           "an empty PING, which reads as 0 bytes, is answered too");
     check(fake_ws::last_write_op() == 0xA && fake_ws::last_write_payload().empty(),
           "with an empty PONG");
 
     const int dials = fake_ws::connect_count();
-    fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_CLOSE, true, 2, 0x03)});
+    fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::CLOSE, true, 2, 0x03)});
     check(wait_until([] { return fake_ws::last_write_op() == 0x8; }, 2s), "a CLOSE went out");
     check(wait_until([&] { return fake_ws::connect_count() > dials; }, 4s),
           "and the link dropped the connection and re-dialed");
@@ -1063,34 +1038,15 @@ tr::mem::poly_ptr_t<esp_ws_client_link_t> up_link(std::size_t rx_bytes) {
     return link;
 }
 
-/**
- * @brief #2265 — a control payload is answered whole even past `rx_bytes`: IDF reads a
- *        control payload whole or fails the read, so the read scratch carries 125 B more.
- */
-void test_a_ping_past_rx_bytes_is_answered_whole() {
-    std::printf("a PING larger than rx_bytes gets its whole PONG:\n");
-    fake_ws::reset();
-    auto link = up_link(16);
-    const int dials = fake_ws::connect_count();
-    const fake_ws::frame_t ping = fake_ws::make_frame(WS_TRANSPORT_OPCODES_PING, true, 100, 0x21);
-    fake_ws::push_frames({ping});
-    check(wait_until([] { return fake_ws::last_write_op() == 0xA; }, 2s), "a PONG went out");
-    check(fake_ws::last_write_payload() == ping.payload, "echoing all 100 B");
-    check(link->dropped_rx() == 0, "nothing was dropped");
-    check(link->link_up() && fake_ws::connect_count() == dials, "and the link did not re-dial");
-    link.reset();
-    check(drained_fake(), "and the link drained");
-}
-
 /** @brief #2265 — a PING between two fragments is answered whole and the message survives. */
 void test_a_ping_mid_fragment_is_answered_whole() {
     std::printf("a PING between fragments gets its whole PONG:\n");
     fake_ws::reset();
-    auto link = up_link(16);  // below 125 B: the PING only fits in the spare room
+    auto link = up_link(kBufBytes);
     const int dials = fake_ws::connect_count();
-    const fake_ws::frame_t ping = fake_ws::make_frame(WS_TRANSPORT_OPCODES_PING, true, 100, 0x31);
-    fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, false, 10, 0x01), ping,
-                          fake_ws::make_frame(WS_TRANSPORT_OPCODES_CONT, true, 6, 0x02)});
+    const fake_ws::frame_t ping = fake_ws::make_frame(tr::net::ws::opcode_t::PING, true, 100, 0x31);
+    fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, false, 10, 0x01), ping,
+                          fake_ws::make_frame(tr::net::ws::opcode_t::CONT, true, 6, 0x02)});
     check(wait_until([] { return fake_ws::last_write_op() == 0xA; }, 2s), "a PONG went out");
     check(fake_ws::last_write_payload() == ping.payload, "echoing all 100 B");
     check(wait_until([] { return fake_ws::drained(); }, 2s), "every frame was read");
@@ -1123,7 +1079,6 @@ int main() {
     test_a_parked_read_does_not_hold_a_send();
     test_one_send_costs_one_write_and_one_mask_pass();
     test_control_frames_are_answered_through_the_write_path();
-    test_a_ping_past_rx_bytes_is_answered_whole();
     test_a_ping_mid_fragment_is_answered_whole();
     // Nothing detached may still be running here: a condemned dial's recv thread outlives
     // its link by design, and one still inside the transport at process exit is a crash

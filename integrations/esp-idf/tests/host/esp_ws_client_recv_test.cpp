@@ -8,7 +8,7 @@
  *
  * Same construction as the #816 / #835 httpd suites: the REAL chip translation unit
  * (`integrations/esp-idf/libtracer/esp_ws_client_link.cpp`) is compiled here against a
- * host fake of the one IDF facility each contract rests on — `esp_transport_ws`'s frame
+ * host fake of the one IDF facility each contract rests on — `tcp_transport`'s byte
  * stream (fake_esp_transport.hpp). No socket is
  * opened at any layer: the ESP-IDF WebSocket plane must never use POSIX sockets (#947),
  * and a fake that opened one would prove the wrong thing.
@@ -22,16 +22,14 @@
  *      sized through its attr here. The observable is the stack of the thread that dials,
  *      read back inside the fake's connect.
  *
- *   2. #901 — drop-don't-truncate ACTUALLY HOLDS. An oversized message is dropped
- *      WHOLE: its remainder is consumed and discarded, never handed up as a bogus
- *      standalone frame. This is not fragmentation-specific — `esp_transport_read` caps
- *      each read at the space offered, so a single unfragmented oversized frame splits
- *      across reads and IDF re-reports that frame's `fin` on each of them, which is what
- *      made the tail look like a complete small message.
+ *   2. #901, #2484 — nothing of an over-cap message is ever delivered. Since #2484 the link
+ *      frames its raw stream with core's rules, so a frame announcing more than `rx_bytes`,
+ *      or fragments whose charged cost passes it, CLOSES the connection, counted on
+ *      `malformed_rx()`, exactly as core's own WS links and the httpd sibling answer it;
+ *      the link re-dials and the next message arrives on the new connection.
  *
- *   3. The two adjacent gaps: a stray CONTINUATION with no message open is dropped (the
- *      server sibling's rule), and an EXACT-FIT message delivers instead of being swept
- *      into the overflow branch.
+ *   3. The two adjacent gaps: a stray CONTINUATION with no message open is dropped (core's
+ *      rule), and an EXACT-FIT message delivers.
  *
  *   4. #1102 — a link HOLDS THE FIRST DIAL until `start_receiving()` (ADR-0081's
  *      defer-the-dial arm). An unarmed link never connects, so a peer's push-on-connect
@@ -48,7 +46,7 @@
  *   6. #2478 — a new BINARY mid-assembly drops the stale part, and a TEXT frame is
  *      ignored, on core's rule.
  *
- * Each drop case also proves RECOVERY — a well-formed message sent right after parses
+ * Each drop case also proves RECOVERY — a well-formed message sent after it parses
  * correctly — and that is what makes the assertions ordering-based rather than
  * sleep-based: a bogus tail would reach the receiver BEFORE the good message, so
  * counting deliveries at the moment the good one lands catches it without a timing
@@ -153,8 +151,9 @@ class sink_t {
     std::vector<std::vector<std::byte>> got_;
 };
 
-/** @brief The rx buffer every receive-path case sizes its frames against. */
-constexpr std::size_t kRxBytes = 64;
+/** @brief The receive cap every receive-path case sizes its frames against: room for a
+ *         small fragmented message at its charged cost (#2484). */
+constexpr std::size_t kRxBytes = 512;
 /** @brief A recv stack the host can honor and tell apart from its default: above the glibc
  *         floor (`PTHREAD_STACK_MIN`, 16 KiB on x86-64) and far below the 8 MiB default. */
 constexpr std::size_t kHostStack = 256 * 1024;
@@ -172,7 +171,8 @@ std::size_t default_stack() {
 /** @brief A distinctive well-formed message used as the "did the assembler recover?"
  *         probe after every drop. */
 fake_ws::frame_t good_message() {
-    return fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, /*fin=*/true, /*len=*/8, /*seed=*/0xA0);
+    return fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, /*fin=*/true, /*len=*/8,
+                               /*seed=*/0xA0);
 }
 
 /** @brief True iff @p got is byte-for-byte the payload of @p want. */
@@ -263,47 +263,70 @@ tr::mem::poly_ptr_t<tr::net::esp_ws_client_link_t> dialed_link(sink_t& sink) {
 }
 
 /**
- * @brief #901 — ONE unfragmented oversized frame: the tail must not be delivered.
- *
- * The verifier's case. The frame is 100 bytes against a 64-byte buffer, so
- * `esp_transport_read` serves 64 then 36, both reporting BINARY/fin — the second used to
- * land as a complete 36-byte message.
+ * @brief Wait for the link to re-dial past @p dials and come back up, then send @p probe and
+ *        check it is the next delivery — the recovery half of every over-cap case.
  */
-void test_oversized_single_frame_tail_is_not_delivered() {
-    std::printf("#901 oversized UNFRAGMENTED frame is dropped whole:\n");
+void check_recovers(const tr::net::esp_ws_client_link_t& link, sink_t& sink, int dials,
+                    std::size_t delivered, const fake_ws::frame_t& probe) {
+    // An over-cap close delivered nothing, so the connection counts as unproductive and the
+    // re-dial waits one reconnect backoff (#1128).
+    check(wait_until([&] { return fake_ws::connect_count() > dials && link.link_up(); }, 5s),
+          "the link re-dialed");
+    fake_ws::push_frames({probe});
+    check(wait_until([&] { return sink.count() > delivered; }, 5s), "a message was delivered");
+    check(sink.count() == delivered + 1, "EXACTLY one — nothing of the over-cap message");
+    check(same_bytes(sink.at(delivered), probe), "and it is the well-formed message that followed");
+}
+
+/**
+ * @brief #901, #2484 — ONE unfragmented frame over the cap closes the connection; none of
+ *        it is delivered.
+ *
+ * The frame announces 548 bytes against a 512-byte cap. Core's header rule refuses it off
+ * the header, before a byte of the body is drawn (#872), and the link re-dials.
+ */
+void test_oversized_single_frame_closes_the_connection() {
+    std::printf("#901/#2484 an over-cap UNFRAGMENTED frame closes the connection:\n");
     fake_ws::reset();
     sink_t sink;
     auto link = dialed_link(sink);
-    const fake_ws::frame_t good = good_message();
+    const int dials = fake_ws::connect_count();
     fake_ws::push_frames(
-        {fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, true, kRxBytes + 36, 1), good});
-    check(wait_until([&] { return sink.count() >= 1; }, 5s), "a message was delivered");
-    check(sink.count() == 1, "EXACTLY one message — the dropped frame's tail was not delivered");
-    check(same_bytes(sink.at(0), good), "and it is the well-formed message that followed");
-    check(link->dropped_rx() == 1, "the oversized message was counted on dropped_rx()");
+        {fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, true, kRxBytes + 36, 1),
+         good_message()});
+    check(wait_until([&] { return link->malformed_rx() == 1; }, 5s),
+          "the over-cap frame was counted on malformed_rx()");
+    check_recovers(*link, sink, dials, 0, good_message());
+    check(link->dropped_rx() == 0, "and it is not a shed message: dropped_rx() stays 0");
     // Release the link HERE, so the drain below is waited for inside the case rather
     // than raced at process exit (#1456).
     link.reset();
     check_drained();
 }
 
-/** @brief #901 — a FRAGMENTED oversized message: same contract, the issue's own case. */
-void test_oversized_fragmented_message_tail_is_not_delivered() {
-    std::printf("#901 oversized FRAGMENTED message is dropped whole:\n");
+/**
+ * @brief #901, #2484 — fragments whose CHARGED cost passes the cap close the connection;
+ *        the message is never delivered.
+ *
+ * Two 200-byte fragments each fit the per-frame rule, but each is also charged
+ * `ws_assembler_t::kFragmentCost`, so the second takes the message past 512.
+ */
+void test_oversized_fragmented_message_closes_the_connection() {
+    std::printf("#901/#2484 an over-cap FRAGMENTED message closes the connection:\n");
     fake_ws::reset();
     sink_t sink;
     auto link = dialed_link(sink);
-    const fake_ws::frame_t good = good_message();
+    const int dials = fake_ws::connect_count();
     fake_ws::push_frames({
-        fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, /*fin=*/false, 40, 1),
-        fake_ws::make_frame(WS_TRANSPORT_OPCODES_CONT, /*fin=*/false, 40, 2),
-        fake_ws::make_frame(WS_TRANSPORT_OPCODES_CONT, /*fin=*/true, 12, 3),
-        good,
+        fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, /*fin=*/false, 200, 1),
+        fake_ws::make_frame(tr::net::ws::opcode_t::CONT, /*fin=*/false, 200, 2),
+        fake_ws::make_frame(tr::net::ws::opcode_t::CONT, /*fin=*/true, 12, 3),
+        good_message(),
     });
-    check(wait_until([&] { return sink.count() >= 1; }, 5s), "a message was delivered");
-    check(sink.count() == 1, "EXACTLY one message — the remaining fragments were discarded");
-    check(same_bytes(sink.at(0), good), "and it is the well-formed message that followed");
-    check(link->dropped_rx() == 1, "the oversized message was counted on dropped_rx()");
+    check(wait_until([&] { return link->malformed_rx() == 1; }, 5s),
+          "the over-cap message was counted on malformed_rx()");
+    check_recovers(*link, sink, dials, 0, good_message());
+    check(link->dropped_rx() == 0, "and it is not a shed message: dropped_rx() stays 0");
     // Release the link HERE, so the drain below is waited for inside the case rather
     // than raced at process exit (#1456).
     link.reset();
@@ -317,7 +340,7 @@ void test_exact_fit_message_delivers() {
     sink_t sink;
     auto link = dialed_link(sink);
     const fake_ws::frame_t exact =
-        fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, true, kRxBytes, 0x40);
+        fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, true, kRxBytes, 0x40);
     fake_ws::push_frames({exact});
     check(wait_until([&] { return sink.count() >= 1; }, 5s), "the exact-fit message delivered");
     check(sink.count() == 1, "exactly once");
@@ -336,11 +359,12 @@ void test_stray_continuation_is_dropped() {
     sink_t sink;
     auto link = dialed_link(sink);
     const fake_ws::frame_t good = good_message();
-    fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_CONT, true, 16, 0x70), good});
+    fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::CONT, true, 16, 0x70), good});
     check(wait_until([&] { return sink.count() >= 1; }, 5s), "a message was delivered");
     check(sink.count() == 1, "EXACTLY one — the stray CONT was not delivered");
     check(same_bytes(sink.at(0), good), "and it is the well-formed message that followed");
-    check(link->dropped_rx() == 1, "the stray CONT was counted on dropped_rx()");
+    check(link->dropped_rx() == 0 && link->malformed_rx() == 0,
+          "a stray CONT carries no message, so nothing is counted (core's assembler)");
     // Release the link HERE, so the drain below is waited for inside the case rather
     // than raced at process exit (#1456).
     link.reset();
@@ -354,8 +378,8 @@ void test_fragmented_fitting_message_reassembles() {
     fake_ws::reset();
     sink_t sink;
     auto link = dialed_link(sink);
-    const fake_ws::frame_t a = fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, false, 20, 0x10);
-    const fake_ws::frame_t b = fake_ws::make_frame(WS_TRANSPORT_OPCODES_CONT, true, 12, 0x30);
+    const fake_ws::frame_t a = fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, false, 20, 0x10);
+    const fake_ws::frame_t b = fake_ws::make_frame(tr::net::ws::opcode_t::CONT, true, 12, 0x30);
     fake_ws::push_frames({a, b});
     check(wait_until([&] { return sink.count() >= 1; }, 5s), "the message delivered");
     check(sink.count() == 1, "exactly once");
@@ -373,9 +397,7 @@ void test_fragmented_fitting_message_reassembles() {
  * @brief #2478 — a new BINARY frame mid-assembly starts a new message and drops the stale
  *        part, on core's rule (`core/src/transport_ws.cpp`) and the httpd sibling's.
  *
- * BINARY(fin=0) then BINARY(fin=1) used to deliver both payloads glued together. The second
- * half pins the same rule while an oversized message is being discarded: the new BINARY ends
- * the discard instead of being swallowed as part of it.
+ * BINARY(fin=0) then BINARY(fin=1) used to deliver both payloads glued together.
  */
 void test_binary_mid_assembly_drops_the_stale_part() {
     std::printf("#2478 a BINARY mid-assembly drops the stale part:\n");
@@ -383,21 +405,13 @@ void test_binary_mid_assembly_drops_the_stale_part() {
     sink_t sink;
     auto link = dialed_link(sink);
     const fake_ws::frame_t fresh =
-        fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, /*fin=*/true, 2, 0xB0);
+        fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, /*fin=*/true, 2, 0xB0);
     fake_ws::push_frames(
-        {fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, /*fin=*/false, 3, 0xA0), fresh});
+        {fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, /*fin=*/false, 3, 0xA0), fresh});
     check(wait_until([&] { return sink.count() >= 1; }, 5s), "a message was delivered");
     check(sink.count() == 1, "exactly once");
     check(same_bytes(sink.at(0), fresh), "and it is only the new BINARY, no stale bytes");
-
-    const fake_ws::frame_t after = good_message();
-    fake_ws::push_frames(
-        {fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, /*fin=*/false, kRxBytes + 16, 1), after});
-    check(wait_until([&] { return sink.count() >= 2; }, 5s),
-          "a BINARY after an oversized open message was delivered");
-    check(sink.count() == 2 && same_bytes(sink.at(1), after),
-          "whole — it ended the discard instead of being swallowed by it");
-    check(link->dropped_rx() == 1, "only the oversized message was counted as dropped");
+    check(link->dropped_rx() == 0 && link->malformed_rx() == 0, "and nothing was counted");
     link.reset();
     check_drained();
 }
@@ -412,16 +426,15 @@ void test_text_frame_is_ignored() {
     sink_t sink;
     auto link = dialed_link(sink);
     const fake_ws::frame_t good = good_message();
-    fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_TEXT, true, 16, 0x50),
-                          fake_ws::make_frame(WS_TRANSPORT_OPCODES_TEXT, true, kRxBytes + 8, 0x60),
-                          good});
+    fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::TEXT, true, 16, 0x50),
+                          fake_ws::make_frame(tr::net::ws::opcode_t::TEXT, true, 300, 0x60), good});
     check(wait_until([&] { return sink.count() >= 1; }, 5s), "a message was delivered");
     check(sink.count() == 1, "EXACTLY one — no TEXT frame was delivered");
     check(same_bytes(sink.at(0), good), "and it is the BINARY message that followed");
 
-    const fake_ws::frame_t a = fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, false, 10, 0x10);
-    const fake_ws::frame_t b = fake_ws::make_frame(WS_TRANSPORT_OPCODES_CONT, true, 6, 0x30);
-    fake_ws::push_frames({a, fake_ws::make_frame(WS_TRANSPORT_OPCODES_TEXT, true, 20, 0x70), b});
+    const fake_ws::frame_t a = fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, false, 10, 0x10);
+    const fake_ws::frame_t b = fake_ws::make_frame(tr::net::ws::opcode_t::CONT, true, 6, 0x30);
+    fake_ws::push_frames({a, fake_ws::make_frame(tr::net::ws::opcode_t::TEXT, true, 20, 0x70), b});
     check(wait_until([&] { return sink.count() >= 2; }, 5s), "the fragmented message delivered");
     std::vector<std::byte> want = a.payload;
     want.insert(want.end(), b.payload.begin(), b.payload.end());
@@ -474,11 +487,11 @@ void test_unarmed_link_holds_the_dial() {
         // Reconnect leg: the latch is ONE-SHOT. A peer CLOSE tears the connection down; the
         // re-dial happens with no re-arm, and a message on the NEW connection is delivered —
         // a future latch that wrongly re-closed per connection reddens here.
-        fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_CLOSE, /*fin=*/true,
+        fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::CLOSE, /*fin=*/true,
                                                   /*len=*/2, /*seed=*/0x11)});
         check(wait_until([] { return fake_ws::connect_count() >= 2; }, 5s),
               "the link re-dialed after the peer CLOSE with no re-arm");
-        const fake_ws::frame_t after = fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY,
+        const fake_ws::frame_t after = fake_ws::make_frame(tr::net::ws::opcode_t::BINARY,
                                                            /*fin=*/true, /*len=*/8, /*seed=*/0xB0);
         fake_ws::push_frames({after});
         check(wait_until([&] { return sink.count() >= 2; }, 5s),
@@ -519,24 +532,22 @@ void test_drop_stats_projects_through_the_base_interface() {
     check(clean.dropped_rx == 0 && clean.malformed_rx == 0 && clean.dropped_tx == 0,
           "a link that dropped nothing reports nothing through the base seam");
 
-    const fake_ws::frame_t good = good_message();
     fake_ws::push_frames(
-        {fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, true, kRxBytes + 36, 1), good});
-    check(wait_until([&] { return sink.count() >= 1; }, 5s), "a message was delivered");
+        {fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, true, kRxBytes + 36, 1)});
+    check(wait_until([&] { return link->malformed_rx() == 1; }, 5s),
+          "an over-cap frame was counted");
 
     const tr::net::transport_drop_stats_t d = generic.drop_stats();
-    check(d.dropped_rx == 1, "the oversize drop is visible through the BASE interface");
-    check(d.dropped_rx == link->dropped_rx(),
-          "and it is the SAME number dropped_rx() reports — a projection, not a second tally");
-    check(d.malformed_rx == 0,
-          "malformed_rx stays 0 — this link never classifies a message as protocol-malformed, "
-          "and the #932 default exists so it need not fabricate one");
+    check(d.malformed_rx == 1, "the over-cap close is visible through the BASE interface");
+    check(d.malformed_rx == link->malformed_rx(),
+          "and it is the SAME number malformed_rx() reports — a projection, not a second tally");
+    check(d.dropped_rx == link->dropped_rx(), "dropped_rx reads straight off its counter too");
     check(d.dropped_tx == link->stats().c.tx_drops,
           "dropped_tx reads straight off the counter that owns it");
 
     // The ceiling beside the drop (#1160), in the vocabulary's own spelling.
     check(link->rx_capacity() == link->rx_bytes() && link->rx_capacity() == kRxBytes,
-          "rx_capacity() names the ceiling that produced the drop");
+          "rx_capacity() names the ceiling that produced the close");
     check(link->tx_capacity() == link->tx_bytes(), "and tx_capacity() its outbound twin");
 
     link.reset();
@@ -647,7 +658,7 @@ void test_named_rx_source_delivers_owning_ropes() {
 
         if (kCanLoan) {
             const fake_ws::frame_t big =
-                fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, true, kLoanMsg, 0x33);
+                fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, true, kLoanMsg, 0x33);
             fake_ws::push_frames({big});
             check(wait_until([&] { return ropes.count() >= 2; }, 5s), "a large message delivered");
             check(ropes.offset(1) == tr::mem::kRxLoanBytes,
@@ -717,8 +728,8 @@ int main() {
     test_recv_stack_reaches_the_thread();
     test_zero_recv_stack_arms_nothing();
     test_unarmed_link_spawns_no_thread();
-    test_oversized_single_frame_tail_is_not_delivered();
-    test_oversized_fragmented_message_tail_is_not_delivered();
+    test_oversized_single_frame_closes_the_connection();
+    test_oversized_fragmented_message_closes_the_connection();
     test_exact_fit_message_delivers();
     test_stray_continuation_is_dropped();
     test_fragmented_fitting_message_reassembles();

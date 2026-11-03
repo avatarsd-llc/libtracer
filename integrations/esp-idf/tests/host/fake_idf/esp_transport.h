@@ -27,19 +27,18 @@ typedef struct esp_transport_item_t* esp_transport_handle_t;
 /** @brief Free a transport handle. Does NOT free its parent. */
 esp_err_t esp_transport_destroy(esp_transport_handle_t t);
 
-/** @brief Open the connection (for the ws transport, the full RFC 6455 handshake).
- *         @return 0 on success, < 0 on failure. */
+/** @brief Open the TCP connection. @return 0 on success, < 0 on failure. */
 int esp_transport_connect(esp_transport_handle_t t, const char* host, int port, int timeout_ms);
 
-/** @brief Read up to @p len payload bytes. @return bytes read, 0 on timeout (or a
- *         control frame consumed internally), < 0 on error. */
+/** @brief Read up to @p len bytes of the stream. @return bytes read, 0 on timeout, < 0
+ *         on error or the peer's FIN. */
 int esp_transport_read(esp_transport_handle_t t, char* buffer, int len, int timeout_ms);
 
 /** @brief Wait for readability. @return 1 when data is available, 0 on timeout, < 0 on
  *         error. */
 int esp_transport_poll_read(esp_transport_handle_t t, int timeout_ms);
 
-/** @brief Write one message. @return bytes written, < 0 on error. */
+/** @brief Write @p len bytes. @return bytes written, < 0 on error. */
 int esp_transport_write(esp_transport_handle_t t, const char* buffer, int len, int timeout_ms);
 
 /** @brief Close the connection (the handle stays valid for a re-connect). */

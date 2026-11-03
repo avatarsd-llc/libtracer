@@ -7,7 +7,7 @@
  *
  * Same construction as the #900/#901 receive-path suite and the #952 teardown suite: the
  * REAL chip translation unit (`integrations/esp-idf/libtracer/esp_ws_client_link.cpp`) is
- * compiled against the host fake of `esp_transport_ws` (fake_esp_transport.hpp). No socket
+ * compiled against the host fake of `tcp_transport` (fake_esp_transport.hpp). No socket
  * is opened at any layer — this plane must never use POSIX sockets (#947).
  *
  * The defect #959 names is an ORDERING one. `set_handshake_headers()` was the only way to
@@ -49,8 +49,10 @@
  *
  * Two more cases guard what a naive fix would break: a re-dial carries the headers too (a
  * snapshot taken once at construction and not re-read would still pass the first case),
- * and no headers still leaves `cfg.headers` NULL, so the handshake stays byte-for-byte the
- * historical request rather than gaining an empty header block.
+ * and no headers adds no line, so the request carries only the standard Upgrade lines
+ * rather than gaining an empty header block. Since #2484 the link writes that request
+ * itself, on the TCP transport, and checks the server's `101` and Sec-WebSocket-Accept;
+ * a server that answers with the wrong accept fails the dial.
  *
  * Also pinned: the `tx_bytes` ceiling is now VISIBLE (#959's second half). The COUNTER
  * landed with #942, and a bump on it does not say which drop happened — `send()`'s
@@ -205,7 +207,7 @@ std::string capture_stderr(body_t&& body) {
 constexpr std::size_t kBufBytes = 64;
 
 /** @brief The token header a board-to-board dial carries. CRLF-terminated, which is the
- *         form `esp_transport_ws` emits verbatim. Not a real credential — the shape is
+ *         form the link emits verbatim. Not a real credential — the shape is
  *         the whole point. */
 const std::string kToken = "X-Graph-Token: abc123\r\n";
 
@@ -227,12 +229,12 @@ void test_first_dial_carries_the_headers() {
             "127.0.0.1", 8080,
             {.handshake_headers = kToken, .rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
         link.start_receiving();
-        check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
+        check(wait_until([] { return fake_ws::handshakes() >= 1; }, 2s), "the link dialed");
         const auto dials = fake_ws::dial_headers();
         check(!dials.empty(), "a dial was recorded");
         // Indexed at ZERO deliberately: reading "the last headers" would pass on the
         // broken surface as soon as a re-dial had happened.
-        check(!dials.empty() && dials[0].has_value(), "dial ONE set cfg.headers");
+        check(!dials.empty() && dials[0].has_value(), "handshake ONE carried extra lines");
         check(!dials.empty() && dials[0].value_or("") == kToken, "and it carried the token");
         check(fake_ws::last_ws_path() == "/ws", "the path went out on the same dial");
     }
@@ -243,26 +245,24 @@ void test_first_dial_carries_the_headers() {
  * @brief #959 — a RE-dial carries them too.
  *
  * The fix must not be "snapshot the token once and hand it to the first dial": the recv
- * thread rebuilds the transport pair on every reconnect (connect_once destroys and
- * re-creates both handles for a clean frame state), so the headers have to be re-applied
- * to each new `esp_transport_ws` handle or a peer that gates admission refuses every
- * reconnect after the first. The first dial is failed on purpose so the second one is a
- * genuine rebuild rather than the same handle re-used.
+ * thread builds a fresh transport and handshake on every reconnect, so the headers have to
+ * go out on each new request or a peer that gates admission refuses every reconnect after
+ * the first. The peer closes the first connection so the second handshake is a genuine
+ * new connection.
  */
 void test_every_dial_carries_the_headers() {
     std::printf("#959 a RE-dial carries the headers too:\n");
     fake_ws::reset();
-    fake_ws::fail_connects(true);
     {
         tr::net::esp_ws_client_link_t link(
             "127.0.0.1", 8080,
             {.handshake_headers = kToken, .rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
         link.start_receiving();
-        check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s),
-              "the first dial failed");
-        fake_ws::fail_connects(false);
+        check(wait_until([&] { return link.link_up(); }, 2s), "the first dial landed");
+        fake_ws::push_frames(
+            {fake_ws::make_frame(tr::net::ws::opcode_t::CLOSE, /*fin=*/true, /*len=*/2, 0x11)});
         // One reconnect backoff (kReconnectBackoffMs, 1.5 s) separates the two dials.
-        check(wait_until([] { return fake_ws::connect_count() >= 2; }, 10s), "the link re-dialed");
+        check(wait_until([] { return fake_ws::handshakes() >= 2; }, 10s), "the link re-dialed");
         const auto dials = fake_ws::dial_headers();
         check(dials.size() >= 2, "both dials were recorded");
         bool all_carried = !dials.empty();
@@ -273,24 +273,49 @@ void test_every_dial_carries_the_headers() {
 }
 
 /**
- * @brief #959 — with no headers, `cfg.headers` stays NULL.
+ * @brief #959 — with no headers, the request carries no extra line.
  *
  * "No token" must be the historical request byte-for-byte, not a request with an empty
  * header block appended: the two are different bytes on the wire and a peer parsing the
  * upgrade is entitled to notice.
  */
 void test_no_headers_leaves_the_field_null() {
-    std::printf("#959 no headers leaves cfg.headers null:\n");
+    std::printf("#959 no headers adds no line to the request:\n");
     fake_ws::reset();
     {
         // The default — the same call every existing embedder writes.
         tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
                                            {.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
         link.start_receiving();
-        check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
+        check(wait_until([] { return fake_ws::handshakes() >= 1; }, 2s), "the link dialed");
         const auto dials = fake_ws::dial_headers();
         check(!dials.empty(), "a dial was recorded");
-        check(!dials.empty() && !dials[0].has_value(), "and it left cfg.headers null");
+        check(!dials.empty() && !dials[0].has_value(), "and it carried no extra line");
+        check(fake_ws::last_ws_path() == "/ws", "for the default path");
+    }
+    check_drained();
+}
+
+/**
+ * @brief #2484 — the link checks the server's answer: a `101` whose Sec-WebSocket-Accept
+ *        does not match the request's key fails the dial, which releases its transport.
+ */
+void test_a_wrong_accept_fails_the_dial() {
+    std::printf("#2484 a wrong Sec-WebSocket-Accept fails the dial:\n");
+    fake_ws::reset();
+    fake_ws::reject_upgrades(true);
+    {
+        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
+                                           {.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
+        link.start_receiving();
+        check(wait_until([] { return fake_ws::handshakes() >= 1; }, 2s), "the link asked");
+        check(wait_until([] { return fake_ws::live_handles() == 0; }, 2s),
+              "and released the transport of the refused dial");
+        check(!link.ok() && !link.link_up(), "the link never came up");
+        fake_ws::reject_upgrades(false);
+        // One reconnect backoff separates the refused dial from the next.
+        check(wait_until([&] { return link.link_up(); }, 5s),
+              "a server that answers correctly brings it up");
     }
     check_drained();
 }
@@ -521,6 +546,7 @@ int main() {
     test_first_dial_carries_the_headers();
     test_every_dial_carries_the_headers();
     test_no_headers_leaves_the_field_null();
+    test_a_wrong_accept_fails_the_dial();
     test_oversize_frame_is_refused_and_counted();
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     test_tx_bytes_counts_payload();
