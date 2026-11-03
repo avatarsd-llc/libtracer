@@ -103,6 +103,39 @@ class Density(unittest.TestCase):
         self.assertEqual(rep["gap"], 2)
 
 
+class TipBanked(unittest.TestCase):
+    """@brief A tip whose run never banked is visible even inside the gap bound (#2447).
+
+    The nightly went green three nights running while every push run on `main` was
+    red, because a broken bench stalls the store only a few commits behind HEAD.
+    """
+
+    def test_a_tip_with_a_point_is_banked(self):
+        rep = sg.density_report(store([entry(3, 100)]), [sha(3), sha(2), sha(1)])
+        self.assertTrue(rep["tip_banked"])
+        self.assertEqual(rep["tip"], sha(3))
+
+    def test_a_tip_behind_a_small_gap_is_not_banked(self):
+        """Inside any sane bound, and still a run that never completed."""
+        rep = sg.density_report(store([entry(1, 100)]), [sha(3), sha(2), sha(1)])
+        self.assertEqual(rep["gap"], 2)
+        self.assertFalse(rep["tip_banked"])
+
+    def test_a_flagged_point_still_proves_the_run_completed(self):
+        """Contamination decides coverage, not whether the measurement ran."""
+        flagged = f"{HOST} · {hg.contamination_note('A/A bracket 12.0% > 6.0% band')}"
+        rep = sg.density_report(store([entry(3, 100, extra=flagged)]), [sha(3), sha(2)])
+        self.assertTrue(rep["tip_banked"])
+
+    def test_every_suite_must_carry_the_tip(self):
+        doc = {"entries": {LATENCY: [entry(3, 100)], THROUGHPUT: [entry(1, 100)]}}
+        self.assertFalse(sg.density_report(doc, [sha(3), sha(1)])["tip_banked"])
+
+    def test_empty_store_is_not_banked_and_empty_history_is(self):
+        self.assertFalse(sg.density_report({"entries": {}}, [sha(1)])["tip_banked"])
+        self.assertTrue(sg.density_report(store([entry(1, 100)]), [])["tip_banked"])
+
+
 class RollingBaseline(unittest.TestCase):
     """@brief The estimator rule, inherited from docs/methodology.md and not restated."""
 
@@ -327,6 +360,12 @@ class WorkflowWiring(unittest.TestCase):
         under `always()`."""
         self.assertIn("needs.density.outputs.measure != 'false'", self.text)
         self.assertNotIn("needs.density.outputs.measure == 'true'", self.text)
+
+    def test_a_schedule_measures_a_tip_that_has_no_point(self):
+        """#2447: the gap bound alone let a broken bench on `main` read green nightly."""
+        self.assertIn("steps.gap.outputs.tip_banked", self.text)
+        self.assertRegex(self.text, r'TIP_BANKED:-true\}" = "false"')
+        self.assertIn('|| [ "$catchup" = true ]', self.text)
 
     def test_the_rolling_comparator_and_the_toolchain_read_are_wired(self):
         self.assertRegex(self.text, r"store_guard\.py drift")

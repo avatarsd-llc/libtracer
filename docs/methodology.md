@@ -1188,9 +1188,12 @@ it has to price the move on the bench before the pin is allowed to move with it.
   a run that never happens (filtered out, failed, or cancelled while queued) leaves a
   hole nothing notices, and a step inside the hole widens from a commit into a range of
   merges. A daily
-  catch-up measures HEAD whenever the last trusted point is more than 8 bench-relevant
-  merges behind `main`, so the guarantee is a **bound on the gap** — narrow enough to
-  bisect — rather than a point per commit.
+  catch-up measures the newest bench-relevant commit whenever the last trusted point is
+  more than 8 bench-relevant merges behind `main`, so the guarantee is a **bound on the
+  gap** — narrow enough to bisect — rather than a point per commit. It also measures that
+  commit when it has no point at all and no push run is still pending for it: a bench
+  that is broken on `main` banks nothing, stalls the store only a few commits behind,
+  inside the bound, and would otherwise leave the nightly green over a red `main`.
 - **A banked series is a TREND instrument; the paired same-runner A/B is the gate.** The
   two stores answer "where has this point been going" across machines and months. They do
   not answer "did this commit cost anything", and reading them as if they did produces
