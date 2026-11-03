@@ -95,9 +95,9 @@
  * graph traffic (control TLVs, value pushes,
  * directed replies) draws nothing in EITHER direction. Every draw goes through the one
  * allocation seam (ADR-0083, #1880): connection state — the slot table, each session and
- * its reassembly buffer, the resolution handles, the RX scratch, the gate and the queued
- * work items — from `memory.state`, and egress — the per-peer TX frames, the reply scratch
- * and the large class — from `memory.io` (@ref httpd_ws_config_t::memory):
+ * its fragment chain and borrowed-link fragments, the resolution handles, the RX scratch, the gate
+ * and the queued work items — from `memory.state`, and egress — the per-peer TX frames, the reply
+ * scratch and the large class — from `memory.io` (@ref httpd_ws_config_t::memory):
  *   - RX: a frame that fits the once-drawn scratch is read into it and
  *     delivered borrowed — no per-frame allocation. Larger frames (up to the
  *     kMaxFrameBytes abuse cap) fall back to an exact-size buffer from `memory.state`.
@@ -174,6 +174,7 @@
 #include "esp_http_server.h"
 #include "libtracer/function_ref.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/mem_source_backend.hpp"
 #include "libtracer/mem_string.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer_esp/fixed_array.hpp"
@@ -237,13 +238,13 @@ struct httpd_ws_config_t {
      * `state` and `io` are the allocation seam (ADR-0083, #1880; null means the process net
      * sub-pool, which is the process heap on a chip build). `state` holds the connection
      * state: the handler gate, the registered URI, the session table and each session with
-     * its reassembly buffer, the resolution handles, the RX scratch, an RX frame too large
-     * for it, and the control-queue work items (a refusal's close, an administrative close,
-     * the teardown detach). `io` holds egress: each session's TX slot and its inline payload
-     * block (drawn when the session is admitted), the in-call scratch frame, the large class,
-     * and a payload past both. What the constructor draws (the gate, the URI, the scratches
-     * and the large class) is sized by the knobs above, so a store that cannot
-     * hold it is a sizing bug and the constructor aborts naming it
+     * its fragment chain (and a borrowed link's fragments), the resolution handles, the RX scratch,
+     * an RX frame too large for it, and the control-queue work items (a refusal's close, an
+     * administrative close, the teardown detach). `io` holds egress: each session's TX slot and its
+     * inline payload block (drawn when the session is admitted), the in-call scratch frame, the
+     * large class, and a payload past both. What the constructor draws (the gate, the URI, the
+     * scratches and the large class) is sized by the knobs above, so a store that cannot hold it is
+     * a sizing bug and the constructor aborts naming it
      * (`mem::exhausted_at_init`). A refusal after that sheds one peer or one frame and
      * counts it — a new session is refused like a peer past `max_peers`, an RX frame is
      * dropped as `rx_dropped_alloc`, and a TX payload as an enqueue drop.
@@ -844,9 +845,9 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
          *         cause), or an administrative @ref close_peer — the count that separates
          *         a peer that left from one torn down. */
         std::uint32_t sessions_condemned = 0;
-        /** @brief Inbound frames refused at the abuse cap, before any reassembly. The peer
-         *         is dropped with them. No session is charged: the cap is applied before
-         *         the slot is resolved. */
+        /** @brief Inbound frames refused at the abuse cap, and fragmented messages whose
+         *         charged cost passed it (#2483). The peer is dropped with them. No session
+         *         is charged: it is closed. */
         std::uint32_t rx_dropped_oversize = 0;
         /** @brief Inbound frames dropped because the oversize payload buffer could not be
          *         allocated. The session is closed with them. */
@@ -965,6 +966,11 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * the ingress recv and nothing else. Without one, the same frame is delivered borrowed
      * out of the reusable RX scratch and such a consumer copies it out itself: the recv,
      * plus a second full copy at the seam, on every frame.
+     *
+     * A FRAGMENTED message (#2483) is received the same way: each fragment straight into its
+     * own segment from this backend, chained by `ws_assembler_t` (the chain and the
+     * delivered rope's link array are drawn from it too), and handed up as one multi-link
+     * rope with no copy. A span-only sink gets it flattened once into this backend.
      *
      * WHAT IT COSTS, and who pays. The bytes are the INTEGRATOR's — an ADR-0067
      * `tr::mem::pool_source_t` behind a `tr::mem::source_backend_t` is the shape, and it is
@@ -1809,8 +1815,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      */
     void note_rx_message(session_t* slot, std::size_t bytes);
 
-    /** @brief Count an inbound message discarded before delivery (reassembly cap or a
-     *  failed nothrow growth) on @p slot — takes @ref peers_m_. */
+    /** @brief Count an inbound message discarded before delivery (a refused fragment, chain
+     *  or copy) on @p slot — takes @ref peers_m_. */
     void note_rx_drop(session_t* slot);
 
     /**
@@ -2195,8 +2201,6 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief Count+log an inbound frame the injected @ref rx_backend refused, out of line
      *         and for the same per-frame reason. */
     void note_rx_pool_refusal(std::size_t len);
-    /** @brief Log a reassembly that would pass the cap, out of line. */
-    void note_reassembly_over_cap(std::size_t had, std::size_t adding);
     /** @brief See @ref stats_t::tx_conflated. */
     std::atomic<std::uint32_t> tx_conflated_{0};
     /** @brief See @ref stats_t::tx_stall_strikes. */
@@ -2239,6 +2243,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     std::atomic<void*> server_task_{nullptr};
     /** @brief The connection-state store, `memory.state` resolved (#1880). */
     mem::block_source_t* const state_src_;
+    /** @brief The segments a borrowed link receives fragments into, drawn from
+     *         @ref state_src_ (#2483). Never handed up: a borrowed link copies a completed
+     *         message out and releases the fragments before delivering it. */
+    mem::source_backend_t state_backend_{*state_src_};
     /** @brief The egress store, `memory.io` resolved (#1880). */
     mem::block_source_t* const io_src_;
     /** @brief The WS URI registered (unregistered by the adopting dtor), copied into
@@ -2246,7 +2254,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     mem::string_t uri_;
     /** @brief Guards the slot vector and each slot's name/fd/open — the cross-thread
      *         reads (enumerate_peers / peer_link / a send's fd snapshot) against the
-     *         httpd task's accept/close. The reassembly buffer is httpd-task-only. */
+     *         httpd task's accept/close. The fragment assembler is httpd-task-only. */
     mutable std::mutex peers_m_;
     /**
      * @brief The session table, grown on demand from `memory.state` and recycled in place.
@@ -2295,28 +2303,19 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     mem::mem_backend_t* rx_backend_ = nullptr;
     std::atomic<std::uint32_t> rx_dropped_pool_{0}; /**< @brief @ref stats_t::rx_dropped_pool. */
     /**
-     * @brief Deliver one OWNING frame to whichever sink this link's mode installed — the
-     *        twin of @ref deliver, and never reached on a borrowed link.
+     * @brief Deliver one OWNING message — one frame's segment, or a fragmented message's
+     *        chained segments — to whichever sink this link's mode installed; the twin of
+     *        @ref deliver, and never reached on a borrowed link.
      *
      * Separate from @ref deliver rather than a branch inside it, because @ref deliver IS the
      * borrowed hot path: the dispatch-inline cliff (#1223/#1250) is close enough that a
      * frame-rate seam does not get a test added to it in order to serve a mode it is not in.
+     * A span-only sink gets a fragmented message flattened once into @ref rx_backend_.
      */
-    void deliver_owned(peer_handle_t peer, view::view_t frame);
-    /**
-     * @brief Copy @p body into a segment from @ref rx_backend_ and deliver it owning; count
-     *        and drop if the source refuses.
-     *
-     * The FRAGMENTED arm's ending. An assembled message is already in `asm_buf`, so it
-     * cannot be recv'd into pool memory the way an unfragmented frame is — it is copied in
-     * once at the end instead. That is one copy on a path that is already quadratic in its
-     * fragment count, and it is what keeps a rope-only sink from being starved by the one
-     * message shape this link cannot hand it directly.
-     */
-    void deliver_owned_copy(peer_handle_t peer, std::span<const std::byte> body);
+    void deliver_owned(peer_handle_t peer, view::rope_t frame);
     /** @brief Set once @ref check_httpd_stack has reported a thin stack — it then stops
      *         sampling. Plain `bool`: written and read only on the httpd task, like
-     *         @ref rx_scratch_ and the reassembly buffer. */
+     *         @ref rx_scratch_ and the fragment assembler. */
     bool stack_named_ = false;
     /** @brief Effective RX scratch capacity — the ctor's `rx_scratch_bytes` resolved
      *         against @ref kDefaultRxScratchBytes, and zeroed if the allocation failed so

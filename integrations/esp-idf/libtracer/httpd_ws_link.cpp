@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <expected>
 #include <mutex>
 #include <new>
 #include <utility>
@@ -38,6 +39,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "libtracer/egress.hpp"
+#include "libtracer/ws_assembler.hpp"
 
 namespace tr::net {
 
@@ -48,6 +50,10 @@ namespace tr::net {
 // component compiles this TU only under CONFIG_LIBTRACER_WS_SERVER, which SELECTS
 // CONFIG_LIBTRACER_BUS_LINKS, and core's host suites compile it only in a build that binds the
 // bus tier (LIBTRACER_TEST_ESP_WS_SERVER). So the assert is actionable wherever it can fire.
+// on_data_frame hands a fragment's `httpd_ws_type_t` to the assembler as its opcode.
+static_assert(static_cast<int>(HTTPD_WS_TYPE_CONTINUE) == static_cast<int>(ws::opcode_t::CONT) &&
+                  static_cast<int>(HTTPD_WS_TYPE_BINARY) == static_cast<int>(ws::opcode_t::BINARY),
+              "httpd_ws_type_t no longer carries the RFC 6455 opcode values");
 static_assert(kBusLinks,
               "httpd_ws_link.cpp is the WebSocket SERVER link, a bus by construction, and this "
               "build binds kBusLinks = false (the default since v0.17.0). ESP-IDF: enable "
@@ -147,8 +153,8 @@ constexpr std::size_t kStackHeadroomFloor =
  *
  * A borrowed-delivery transport heap-allocates the frame's bytes per receive, so
  * an unbounded length is a heap-exhaustion lever. Graph control-plane TLVs are far
- * smaller; a frame or reassembly past this is treated as abuse and the peer is
- * dropped (or the message discarded).
+ * smaller; a frame past this, or a fragmented message whose charged cost passes it
+ * (@ref ws_assembler_t, #2483), is treated as abuse and the peer is dropped.
  *
  * DELIBERATELY FIXED, and not one of #1160's constructor arguments. It costs NO RAM — it
  * is the ceiling on a per-frame nothrow allocation, not a buffer — so there is nothing to
@@ -489,38 +495,6 @@ constexpr int kKeepProbes = 3;          /**< @brief Unanswered probes before dea
     return want < ceiling ? want : ceiling;
 }
 
-/** @brief Longest RFC 6455 §5.2 server frame header: 2 bytes plus a 64-bit length. */
-constexpr std::size_t kWsHeaderMax = 10;
-
-/**
- * @brief Encode the server frame header for one unfragmented BINARY frame of
- *        @p payload_len bytes (RFC 6455 §5.2: FIN|BINARY, unmasked, 7/16/64-bit length).
- *
- * The same bytes `httpd_ws_send_frame_async` writes ahead of a gathered frame. The link
- * writes them itself where IDF cannot: a RETAINED frame (RFC-0028 §6.9), and the rest of a
- * frame a non-blocking write left part-way (#2095).
- * @return The header length: 2, 4 or 10.
- */
-[[nodiscard]] std::size_t encode_ws_header(std::size_t payload_len,
-                                           std::array<std::byte, kWsHeaderMax>& out) noexcept {
-    out[0] = std::byte{0x82};
-    if (payload_len < 126) {
-        out[1] = static_cast<std::byte>(payload_len);
-        return 2;
-    }
-    if (payload_len <= 0xFFFF) {
-        out[1] = std::byte{126};
-        out[2] = static_cast<std::byte>((payload_len >> 8) & 0xFF);
-        out[3] = static_cast<std::byte>(payload_len & 0xFF);
-        return 4;
-    }
-    out[1] = std::byte{127};
-    for (int i = 0; i < 8; ++i)
-        out[2 + i] = static_cast<std::byte>(
-            (static_cast<std::uint64_t>(payload_len) >> (8 * (7 - i))) & 0xFF);
-    return kWsHeaderMax;
-}
-
 /**
  * @brief Destinations one fan-out chunk holds — the ON-STACK snapshot a broadcast walks
  *        its peer set through, and the reason a broadcast allocates nothing.
@@ -716,83 +690,6 @@ constexpr std::size_t kEndpointChars = kAddrChars + 6;
     }
     (void)std::snprintf(out, sizeof(out), "fd%d", fd);
 }
-
-/**
- * @brief Failable fragment-reassembly buffer: grows geometrically from the link's
- *        `memory.state` (#1880), so a refusal drops the in-flight message instead of
- *        aborting the node.
- *
- * `std::vector` is unusable here: under `-fno-exceptions` its throwing allocator
- * turns a failed growth into `abort()` via the bad_alloc stub — and the appended
- * chunk is peer-controlled up to kMaxFrameBytes, so reassembly growth MUST be
- * failure-capable (the same backpressure contract as the tx queue).
- *
- * The work per message is linear in its bytes. The block doubles from 8 bytes, clamped at
- * kMaxFrameBytes, so a message of n bytes regrows O(log n) times and copies under 2n
- * bytes however it is cut, and never holds a block past the cap. Each fragment is
- * charged its bytes plus
- * @ref kFragmentHeaderBytes against kMaxFrameBytes, so the cap bounds the fragment count
- * as well as the bytes: an empty CONTINUE costs what its header cost on the wire.
- */
-struct asm_buf_t {
-    /** @brief The smallest RFC 6455 frame header (§5.2): what one fragment costs on the wire
-     *         before any payload, charged with it against kMaxFrameBytes. */
-    static constexpr std::size_t kFragmentHeaderBytes = 2;
-
-    /** @brief An empty buffer that will draw its storage from @p src (`memory.state`). */
-    explicit asm_buf_t(mem::block_source_t& src) noexcept : bytes_(src) {}
-    /** @brief True when no reassembly is in progress. */
-    [[nodiscard]] bool empty() const noexcept { return charged_ == 0; }
-    /** @brief What the message has been charged so far: its bytes plus a header per fragment. */
-    [[nodiscard]] std::size_t charged() const noexcept { return charged_; }
-    /** @brief Whether a fragment of @p chunk bytes would take the charge past kMaxFrameBytes. */
-    [[nodiscard]] bool over_cap(std::size_t chunk) const noexcept {
-        return charged_ + chunk + kFragmentHeaderBytes > kMaxFrameBytes;
-    }
-    /** @brief The assembled bytes so far (valid until the next append/clear). */
-    [[nodiscard]] std::span<const std::byte> bytes() const noexcept { return mem::as_span(bytes_); }
-    /** @brief Release the storage (post-deliver / slot-reclaim / drop reset). */
-    void clear() noexcept {
-        bytes_ = mem::bytes_t(bytes_.source());
-        charged_ = 0;
-    }
-    /**
-     * @brief Move the assembled message OUT, leaving this buffer empty.
-     *
-     * The delivery of a completed reassembly must not be followed by a write back into
-     * the slot: the app callback the delivery runs can tear this link down in-call
-     * (#814), and the slot is gone by the time deliver() returns. Taking the bytes into
-     * a caller-local buffer first makes the post-delivery `clear()` unnecessary, so the
-     * RX path touches NOTHING owned by the link once it has delivered.
-     */
-    [[nodiscard]] asm_buf_t take() noexcept {
-        asm_buf_t out(bytes_.source());
-        out.bytes_ = std::move(bytes_);
-        out.charged_ = std::exchange(charged_, 0);
-        return out;
-    }
-    /**
-     * @brief Append @p chunk and charge it, nothrow. Precondition: `!over_cap(chunk.size())`.
-     * @retval false The store refused — the buffer is cleared (the partial message is
-     *               unrecoverable) and the caller drops the message (backpressure).
-     */
-    [[nodiscard]] bool append(std::span<const std::byte> chunk) noexcept {
-        const std::size_t want = bytes_.size() + chunk.size();
-        const std::size_t doubled = std::max({want, std::size_t{8}, 2 * bytes_.capacity()});
-        const bool room =
-            want <= bytes_.capacity() || bytes_.reserve(std::min(doubled, kMaxFrameBytes));
-        if (!room || !bytes_.append(chunk.data(), chunk.size())) {
-            clear();
-            return false;
-        }
-        charged_ += chunk.size() + kFragmentHeaderBytes;
-        return true;
-    }
-
-   private:
-    mem::bytes_t bytes_;      /**< @brief Owned storage, doubled up to kMaxFrameBytes. */
-    std::size_t charged_ = 0; /**< @brief Bytes plus a header per fragment, against the cap. */
-};
 
 }  // namespace
 
@@ -1000,12 +897,12 @@ struct httpd_ws_link_t::tx_wait_t {
  * generation it captured rather than trusting the slot's current one. Threading:
  * `fd`/`open`/`name` are read cross-thread (peer_link / enumerate_peers / a send's fd
  * snapshot) and written by the httpd task (accept/close) — all under `peers_m_`.
- * `asm_buf` is touched only on the httpd task (RX reassembly). `gate` is set once at
+ * `assembler` is touched only on the httpd task (RX reassembly). `gate` is set once at
  * creation and never changes.
  */
 struct httpd_ws_link_t::session_t {
-    /** @brief A free slot whose reassembly buffer draws from @p src (`memory.state`). */
-    explicit session_t(mem::block_source_t& src) noexcept : asm_buf(src) {}
+    /** @brief A free slot whose fragment chain draws from @p src (`memory.state`). */
+    explicit session_t(mem::block_source_t& src) noexcept : assembler(src) {}
     /**
      * @brief The owning link's gate — how @ref on_session_closed reaches the link.
      *
@@ -1076,7 +973,7 @@ struct httpd_ws_link_t::session_t {
      * likely to answer at the moment the strike log needs the name.
      */
     char endpoint_str[kEndpointChars] = {};
-    asm_buf_t asm_buf;         /**< @brief RFC 6455 fragment reassembly (nothrow). */
+    ws_assembler_t assembler;  /**< @brief RFC 6455 fragment reassembly (#2483). */
     std::uint8_t tx_drops = 0; /**< @brief Consecutive failed sends (peers_m_). */
     /**
      * @brief This peer has been condemned — no frame may reach its socket again (peers_m_).
@@ -1110,7 +1007,7 @@ struct httpd_ws_link_t::session_t {
      * Not under `peers_m_`, unlike every other cross-thread member of this slot, and not
      * atomic: all four touch points — the two brackets and the override's accumulate and
      * verdict — run on the httpd task, and `httpd_ws_send_frame_async` is synchronous, so
-     * the window cannot interleave with another frame's. Same confinement `asm_buf` has
+     * the window cannot interleave with another frame's. Same confinement `assembler` has
      * on the receive side.
      */
     bool tx_frame_open = false;
@@ -1995,7 +1892,7 @@ void httpd_ws_link_t::detach_sessions() {
     {
         // Each armed slot moves into the item: the server holds it as a session ctx until
         // the item detaches it, so the item frees it (#2339), and this destructor no longer
-        // does. Neutralised on the way, so its resolution handle and reassembly buffer go
+        // does. Neutralised on the way, so its resolution handle and fragment chain go
         // back now rather than whenever the item runs.
         const std::lock_guard lock(peers_m_);
         std::size_t i = 0;
@@ -2087,7 +1984,7 @@ void httpd_ws_link_t::neutralise(session_t* slot) {
     // handle's own null-owner case covers a directed send that outlives the link.
     slot->open = false;
     slot->fd = -1;
-    slot->asm_buf.clear();
+    slot->assembler.reset();
     retire_resolution(slot, /*inert=*/true);
 }
 
@@ -2430,7 +2327,12 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
         // A new peer past the high-water mark: one session and one table entry from
         // `memory.state` (#1880). A refusal of either is this peer's to pay — it is refused
         // exactly like a peer past `max_peers`, and the CALLER counts it the same way.
-        slot = mem::make_in<session_t>(*state_src_, *state_src_);
+        // The fragment chain draws from the receive source when the link has one (#2483): a
+        // completed message's rope holds its links in a chain from that same source, and a
+        // kept message must not hold connection state past the link, nor spend its budget.
+        slot = mem::make_in<session_t>(
+            *state_src_,
+            rx_backend_ != nullptr ? static_cast<mem::block_source_t&>(*rx_backend_) : *state_src_);
         if (slot == nullptr || !slots_.push_back(slot)) {
             mem::drop_in(*state_src_, slot);
             return nullptr;
@@ -2453,7 +2355,7 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     // into the graph. The generation makes a reused slot's name a fresh one.
     slot->name.len = format_slot_name(slot->handle, slot->name.text.data());
     format_endpoint(fd, slot->endpoint_str);
-    slot->asm_buf.clear();
+    slot->assembler.reset();
     slot->fd = fd;
     slot->open = true;
     // THIS claim is the establish edge, whichever of the two it is — the only honest place to
@@ -2591,28 +2493,33 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // (TCP-stream misalignment). Only then decide what to do with it. Fast path: a
     // frame that fits reads into the once-allocated rx scratch — no per-frame heap.
     // The scratch is safe to reuse per frame because this handler is the only RX
-    // path (httpd task) and delivery below is synchronous; reassembly copies out of
-    // `body` before returning. An oversized frame falls back to an exact-size nothrow
-    // buffer (frame.len is peer-controlled up to kMaxFrameBytes; a throwing
-    // std::vector would abort the node on heap exhaustion under -fno-exceptions);
-    // on OOM the payload cannot be drained, so fail the handler — httpd closes just
-    // this session (backpressure), never the whole node.
+    // path (httpd task) and delivery below is synchronous; a fragment never lands in
+    // it (it is received into a segment, below). An oversized frame falls back to an exact-size
+    // nothrow buffer (frame.len is peer-controlled up to kMaxFrameBytes; a throwing std::vector
+    // would abort the node on heap exhaustion under -fno-exceptions); on OOM the payload cannot be
+    // drained, so fail the handler — httpd closes just this session (backpressure), never the whole
+    // node.
     fixed_array_t<std::byte> heap_payload;
-    // The OWNING-RX segment (#1565), when an integrator named a source to draw it from. It
-    // is the recv DESTINATION, not a copy of one: the frame lands in pool memory once and
-    // travels from there by refcount, which is the entire saving the mode exists for. Empty
-    // on a borrowed link, on a fragmented frame, and on a refusal — the three cases below.
+    // The frame's segment, when it has one: it is the recv DESTINATION, not a copy of one, so
+    // the bytes land once and travel from there by refcount. An owning link (#1565) draws one
+    // for every frame from the integrator's source. A FRAGMENT gets one on every link (#2483),
+    // because the assembler chains fragments as owning links, never copying them: from that
+    // same source on an owning link, from `memory.state` on a borrowed one. Empty for an
+    // unfragmented frame on a borrowed link and on a refusal.
+    const bool fragment = frame.type == HTTPD_WS_TYPE_CONTINUE ||
+                          (frame.type == HTTPD_WS_TYPE_BINARY && !frame.final);
+    mem::mem_backend_t* const seg_src =
+        fragment && rx_backend_ == nullptr ? &state_backend_ : rx_backend_;
     view::segment_ptr_t owned_seg;
     bool pool_refused = false;
     std::byte* payload = nullptr;
     if (frame.len != 0) {
-        // ONE test in front of the two arms that were already here, against a member written
-        // once by the constructor and never again. A borrowed link answers it false and
-        // takes the scratch arm exactly as it always has — no allocation, no second read of
-        // anything, and nothing at all added to `deliver` itself (the frame-rate seam this
-        // deliberately stays out of; see deliver_owned).
-        if (rx_backend_ != nullptr) {
-            if (view::segment_t* const seg = rx_backend_->alloc(frame.len); seg != nullptr) {
+        // ONE test in front of the two arms that were already here. An unfragmented frame on a
+        // borrowed link answers it false and takes the scratch arm exactly as it always has —
+        // no allocation, and nothing at all added to `deliver` itself (the frame-rate seam
+        // this deliberately stays out of; see deliver_owned).
+        if (seg_src != nullptr) {
+            if (view::segment_t* const seg = seg_src->alloc(frame.len); seg != nullptr) {
                 owned_seg = view::segment_ptr_t::adopt(seg);
                 payload = owned_seg->bytes.data();
             } else {
@@ -2631,8 +2538,12 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
                 // A refused frame too large to drain through the scratch. Allocating a
                 // drain buffer here would defeat the refusal, so the only bounded answer is
                 // the one the sibling OOM arm already gives: fail the handler and let httpd
-                // close THIS session. Counted first, as its own cause.
-                note_rx_pool_refusal(frame.len);
+                // close THIS session. Counted first, as its own cause: the injected pool's, or
+                // on a borrowed link (a fragment from `memory.state`) the alloc failure's.
+                if (rx_backend_ != nullptr)
+                    note_rx_pool_refusal(frame.len);
+                else
+                    note_rx_alloc_fail(frame.len);
                 return ESP_FAIL;
             } else {
                 if (!heap_payload.assign(*state_src_, frame.len)) {
@@ -2646,9 +2557,10 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         err = httpd_ws_recv_frame(req, &frame, frame.len);
         if (err != ESP_OK) return err;
     }
-    if (pool_refused) {
+    if (pool_refused && !fragment) {
         // Drained, and now dropped: the stream stays framed, the peer stays connected, and
-        // the loss is named rather than silent.
+        // the loss is named rather than silent. A refused FRAGMENT goes on to its slot,
+        // whose message it sheds (below).
         note_rx_pool_refusal(frame.len);
         return ESP_OK;
     }
@@ -2659,7 +2571,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     if (frame.type != HTTPD_WS_TYPE_BINARY && frame.type != HTTPD_WS_TYPE_CONTINUE) return ESP_OK;
 
     const int fd = httpd_req_to_sockfd(req);
-    // Resolve the slot (peer name for the bus tag + the reassembly buffer). Copy the
+    // Resolve the slot (peer name for the bus tag + the fragment assembler). Copy the
     // name out under the lock — the deliver below is synchronous, so a local string
     // outlives the whole in-call servicing.
     // esp_http_server responds the WS handshake INTERNALLY and does NOT call the URI
@@ -2747,9 +2659,11 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         notify_arrived(handle, peer.view());
     }
 
-    // Reassembly — asm_buf is httpd-task-only, so no lock. The SPA sends one whole TLV
+    // Reassembly — the assembler is httpd-task-only, so no lock. The SPA sends one whole TLV
     // per unfragmented BINARY frame (the fast path); a fragmented message chains here.
-    if (frame.type == HTTPD_WS_TYPE_BINARY && frame.final && slot->asm_buf.empty()) {
+    if (!fragment) {
+        // A BINARY mid-assembly drops the stale message (RFC 6455 §5.4) and is delivered.
+        if (slot->assembler.assembling()) slot->assembler.reset();
         note_rx_message(slot, body.size());  // BEFORE the delivery — see note_rx_message
         // An unauthenticated session's message is a CREDENTIAL, never a TLV: it goes to the
         // auth hook and the graph never sees it. This is the gate that makes "admitted but
@@ -2761,7 +2675,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             // OWNING (#1565): the bytes are already in the integrator's pool memory — this
             // hands the segment up, it does not copy it. The move empties `owned_seg`, so
             // the sink's rope is the only reference and nothing is released underneath it.
-            deliver_owned(handle, view::view_t{std::move(owned_seg), 0, body.size()});
+            deliver_owned(handle, view::rope_t{view::view_t{std::move(owned_seg), 0, body.size()}});
         else
             // Borrowed: no extra copy, and no owned segment either — the borrowed link, and
             // also the EMPTY frame on an owning one, which has no bytes to hand up. An empty
@@ -2770,45 +2684,65 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             deliver(handle, body);
         return ESP_OK;
     }
-    if (frame.type == HTTPD_WS_TYPE_CONTINUE && slot->asm_buf.empty())
-        return ESP_OK;  // stray CONTINUE with no assembly open — drop
-    if (frame.type == HTTPD_WS_TYPE_BINARY)
-        slot->asm_buf.clear();  // a BINARY mid-assembly discards the stale partial
-    if (slot->asm_buf.over_cap(body.size())) {
-        // The peer counter has this; the log is the way to see it without polling (#953),
-        // at the level of its sibling alloc failure just below.
-        note_reassembly_over_cap(slot->asm_buf.charged(), body.size());
-        slot->asm_buf.clear();
+    // A fragment: chained by the one RFC 6455 assembler core uses (#2483). A refused segment
+    // sheds the message as a refused chain does; either way the session lives and re-syncs at
+    // the next BINARY. A stray CONT whose segment was refused sheds nothing: it had no message.
+    // `httpd_ws_type_t` carries the RFC 6455 opcode values (§5.2), so BINARY and CONTINUE
+    // convert as they are.
+    ws_assembler_t::result_t r;
+    if (pool_refused) {
+        if (frame.type == HTTPD_WS_TYPE_BINARY || slot->assembler.assembling())
+            r.status = ws_assembler_t::status_t::REFUSED;
+        slot->assembler.reset();
+    } else {
+        r = slot->assembler.on_piece(static_cast<ws::opcode_t>(frame.type), frame.final,
+                                     view::view_t{std::move(owned_seg), 0, frame.len},
+                                     kMaxFrameBytes);
+    }
+    if (r.status == ws_assembler_t::status_t::OVERSIZE) {
+        // Fragments summing past the cap get the answer one over-cap frame gets — the peer is
+        // dropped — so the fragmented route is not a way around the bound.
+        note_rx_oversize(frame.len);
+        return ESP_FAIL;
+    }
+    if (r.status == ws_assembler_t::status_t::REFUSED) note_rx_drop(slot);
+    if (r.status != ws_assembler_t::status_t::COMPLETE) return ESP_OK;
+    // The assembler is idle again, so nothing owned by the link is touched past the delivery:
+    // it runs the app in-call and the app may destroy this link (#814).
+    note_rx_message(slot, r.message.total_length());  // last touch of `slot` — see below
+    if (!pending && rx_backend_ != nullptr) {
+        // OWNING: the fragments are the integrator's segments, chained — handed up with no
+        // copy at all to a rope sink. A span-only sink needs them in one piece: flattened
+        // here, once, into the pool, so a refusal is the named drop it always was rather than
+        // the receiver slot's silent one.
+        if (!(peer_named_ ? peer_rx_.has_rope() : rx_.has_rope())) {
+            std::expected<view::view_t, view::flatten_err_t> flat =
+                r.message.try_materialize(*rx_backend_);
+            if (!flat) {
+                note_rx_pool_refusal(r.message.total_length());
+                return ESP_OK;
+            }
+            r.message = view::rope_t{std::move(*flat)};
+        }
+        deliver_owned(handle, std::move(r.message));
+        return ESP_OK;
+    }
+    // A credential (a Noise message can outgrow a browser's frame budget) or a borrowed link's
+    // message needs its bytes in one piece: one copy, into a buffer from `memory.state`. The
+    // fragments are released BEFORE the delivery, because on a borrowed link their segments
+    // came from this link's own backend, which the app may destroy in-call.
+    if (!heap_payload.assign(*state_src_, r.message.total_length())) {
         note_rx_drop(slot);
-        return ESP_OK;  // reassembly would exceed the cap — drop the message
+        return ESP_OK;
     }
-    if (!slot->asm_buf.append(body)) {
-        note_rx_drop(slot);
-        ESP_LOGW(kTag, "reassembly alloc failed - message dropped");
-        return ESP_OK;  // nothrow growth failed: drop the message, keep the peer
-    }
-    if (frame.final) {
-        // Take the message OUT of the slot before delivering it. Delivery runs the app
-        // in-call and the app may destroy this link (#814) — after which `slot` and every
-        // other member is freed, so the old clear()-after-deliver was a use-after-free on
-        // the fragmented path. Nothing owned by the link is touched past this point.
-        const asm_buf_t message = slot->asm_buf.take();
-        note_rx_message(slot, message.bytes().size());  // last touch of `slot` — see below
-        // Same fork as the unfragmented path: a credential may arrive fragmented (a Noise
-        // message can outgrow a browser's frame budget), and it must reach the hook by the
-        // same route rather than being the one shape that leaks into the graph.
-        if (pending)
-            on_auth_message(slot, message.bytes());
-        else if (rx_backend_ != nullptr)
-            // The reassembled message cannot have been recv'd into pool memory — it was
-            // built fragment by fragment in `asm_buf` before its total size was known — so
-            // the owning mode pays ONE copy into a pool segment here. That is the price of
-            // not starving a rope sink of the one message shape this link cannot hand it
-            // directly.
-            deliver_owned_copy(handle, message.bytes());
-        else
-            deliver(handle, message.bytes());
-    }
+    std::byte* at = heap_payload.data();
+    for (const view::view_t& link : r.message.links()) at = std::ranges::copy(link.bytes(), at).out;
+    r.message = view::rope_t{};
+    const std::span<const std::byte> message(heap_payload.data(), at);
+    if (pending)
+        on_auth_message(slot, message);
+    else
+        deliver(handle, message);
     return ESP_OK;
 }
 
@@ -3174,7 +3108,7 @@ httpd_ws_link_t::slot_name_t httpd_ws_link_t::reclaim_slot(session_t* slot, peer
         // of its predecessor's into a log that a human will read as being about the peer
         // now in it.
         slot->endpoint_str[0] = '\0';
-        slot->asm_buf.clear();
+        slot->assembler.reset();
         slot->tx_drops = 0;
         // Slots are RECYCLED in place, so both TX verdicts about the departed peer must
         // be cleared with it. The dead mark especially: lwIP hands a descriptor NUMBER
@@ -3296,8 +3230,8 @@ void httpd_ws_link_t::note_rx_drop(session_t* slot) {
  */
 [[gnu::noinline]] void httpd_ws_link_t::note_rx_oversize(std::size_t len) {
     rx_dropped_oversize_.fetch_add(1, std::memory_order_relaxed);
-    ESP_LOGW(kTag, "rx frame over the abuse cap (len=%u > %u) - dropping the peer", (unsigned)len,
-             (unsigned)kMaxFrameBytes);
+    ESP_LOGW(kTag, "rx frame or message over the abuse cap (len=%u, cap %u) - dropping the peer",
+             (unsigned)len, (unsigned)kMaxFrameBytes);
 }
 
 /** @brief Count and name an RX payload allocation failure. `noinline` for the reason on
@@ -3323,15 +3257,6 @@ void httpd_ws_link_t::note_rx_drop(session_t* slot) {
     ESP_LOGW(kTag, "rx pool refused a segment (len=%u) - frame dropped", (unsigned)len);
 }
 
-/** @brief Name a reassembly that would pass the cap — the per-peer counter is bumped by the
- *         caller, which holds the slot; this adds only the log the site never had.
- *         `noinline` for the reason on @ref note_rx_oversize. */
-[[gnu::noinline]] void httpd_ws_link_t::note_reassembly_over_cap(std::size_t had,
-                                                                 std::size_t adding) {
-    ESP_LOGW(kTag, "reassembly over the cap (%u charged + %u > %u) - message dropped",
-             (unsigned)had, (unsigned)adding, (unsigned)kMaxFrameBytes);
-}
-
 void httpd_ws_link_t::deliver(peer_handle_t peer, std::span<const std::byte> frame) {
     // Peer-named bus tag when the facet is on (each tab its own return route); the flat
     // point-to-point sink otherwise — matching what fwd_router_t::add_child installed.
@@ -3343,7 +3268,7 @@ void httpd_ws_link_t::deliver(peer_handle_t peer, std::span<const std::byte> fra
     }
 }
 
-void httpd_ws_link_t::deliver_owned(peer_handle_t peer, view::view_t frame) {
+void httpd_ws_link_t::deliver_owned(peer_handle_t peer, view::rope_t frame) {
     // The same two-slot fork as @ref deliver, one tier up. `receiver_slot_t::deliver` is the
     // TIER SELECT: a rope sink — which is what fwd_router_t::add_child installed, because
     // delivers_ropes() answered true for this link — takes the frame owning and may pin it,
@@ -3351,22 +3276,11 @@ void httpd_ws_link_t::deliver_owned(peer_handle_t peer, view::view_t frame) {
     // same bytes borrowed for the call. Either way this function is unreachable unless an
     // integrator named an rx_backend, so no borrowed link pays a single instruction of it.
     if (peer_named_) {
-        peer_rx_.deliver(peer, std::move(frame));
+        peer_rx_.deliver_rope(peer, std::move(frame), *rx_backend_);
     } else {
         rx_peer_ = peer;
-        rx_.deliver(std::move(frame));
+        rx_.deliver_rope(std::move(frame), *rx_backend_);
     }
-}
-
-void httpd_ws_link_t::deliver_owned_copy(peer_handle_t peer, std::span<const std::byte> body) {
-    view::segment_t* const seg = rx_backend_->alloc(body.size());
-    if (seg == nullptr) {
-        note_rx_pool_refusal(body.size());
-        return;  // named drop — never the heap, for the reason on rx_backend()
-    }
-    view::segment_ptr_t held = view::segment_ptr_t::adopt(seg);
-    if (!body.empty()) std::memcpy(held->bytes.data(), body.data(), body.size());
-    deliver_owned(peer, view::view_t{std::move(held), 0, body.size()});
 }
 
 // ---------------------------------------------------------------------------
@@ -4368,12 +4282,13 @@ esp_err_t httpd_ws_link_t::write_rest(httpd_handle_t h, int fd, const tx_frame_t
     // The frame as one byte sequence — its WebSocket header, its gathered bytes, then a
     // retained value's links straight from the published block — written from `f.sent` on.
     // A gathered frame's header is the one httpd_ws_send_frame_async would have written
-    // (encode_ws_header); a retained frame carries its own in `payload`. Every write goes
+    // (ws::encode_frame_header); a retained frame carries its own in `payload`. Every write goes
     // through the session's send override inside write_frame's bracket, so a part the socket
     // takes only some of ends this call with the rest still owed.
     const tx_block_t& b = *f.blk;
-    std::array<std::byte, kWsHeaderMax> hdr{};
-    const std::size_t hdr_len = b.value ? 0 : encode_ws_header(b.len, hdr);
+    std::array<std::byte, ws::kMaxServerFrameHeader> hdr{};
+    const std::size_t hdr_len =
+        b.value ? 0 : ws::encode_frame_header(hdr, ws::opcode_t::BINARY, b.len);
     std::size_t skip = f.sent;
     const auto write_part = [&](const std::byte* p, std::size_t n) {
         if (skip >= n) {
@@ -4418,8 +4333,9 @@ httpd_ws_link_t::tx_block_t* httpd_ws_link_t::make_retained(
     // from the published block, by reference.
     std::size_t head_len = 0;
     for (const auto& part : head) head_len += part.size();
-    std::array<std::byte, kWsHeaderMax> ws_hdr{};
-    const std::size_t ws_len = encode_ws_header(head_len + value.total_length(), ws_hdr);
+    std::array<std::byte, ws::kMaxServerFrameHeader> ws_hdr{};
+    const std::size_t ws_len =
+        ws::encode_frame_header(ws_hdr, ws::opcode_t::BINARY, head_len + value.total_length());
     return make_block(std::span<const std::byte>(ws_hdr.data(), ws_len), head, &value);
 }
 
