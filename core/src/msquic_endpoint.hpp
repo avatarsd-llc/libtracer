@@ -71,6 +71,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_string.hpp"
 #include "libtracer/receiver_slot.hpp"
+#include "libtracer/transport.hpp"
 
 #if defined(__SANITIZE_THREAD__)
 #define LIBTRACER_TSAN 1

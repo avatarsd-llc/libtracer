@@ -543,9 +543,8 @@ void test_tx_drop_counters() {
     const tr::net::transport_t& generic = idle;
     const auto stats = generic.drop_stats();
     check(stats.dropped_tx == 3, "drop_stats() reports the TX drops, not a hardcoded zero");
-    check(stats.dropped_rx == idle.drop_stats().dropped_rx &&
-              stats.malformed_rx == idle.drop_stats().malformed_rx,
-          "the snapshot's other two fields still agree with the concrete accessors");
+    check(stats.dropped_rx == 0 && stats.malformed_rx == 0,
+          "the snapshot's other two fields are zero: an outbound shed counts neither");
 }
 
 /**
