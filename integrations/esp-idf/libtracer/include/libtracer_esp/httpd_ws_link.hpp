@@ -869,6 +869,11 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
          * Zero forever on a link that named no backend. Fail-CLOSED: a refusal is never
          * served from the heap instead, which would return the unbounded footprint the
          * injected pool exists to bound.
+         *
+         * A rare second cause shares it (#2504): an owning frame that reached the delivery
+         * slot with no sink installed — a sink cleared by teardown, or never installed, while
+         * the frame was on its way up. That count says nothing about the pool's size; it is
+         * here so the frame is not lost silently, and outside teardown it stays at zero.
          */
         std::uint32_t rx_dropped_pool = 0;
         /**

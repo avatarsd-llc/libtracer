@@ -330,7 +330,7 @@ class rope_in_t : public transport_t {
     /** @brief Rope delivery, so the forward hop gathers rather than flattening. */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
     /** @brief Push one frame up as if the wire had just produced it. */
-    void inject(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
+    void inject(tr::view::rope_t frame) { (void)rx_.deliver_rope(std::move(frame)); }
 };
 
 /**

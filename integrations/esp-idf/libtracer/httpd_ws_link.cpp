@@ -3275,12 +3275,17 @@ void httpd_ws_link_t::deliver_owned(peer_handle_t peer, view::rope_t frame) {
     // subrope it, or forward it; a span-only sink installed by some other embedder gets the
     // same bytes borrowed for the call. Either way this function is unreachable unless an
     // integrator named an rx_backend, so no borrowed link pays a single instruction of it.
+    // A frame no sink took is counted on rx_dropped_pool (#2504): a sink swapped to span-only
+    // after the caller's has_rope() check whose materialize the rx pool then refused, or (a
+    // sink cleared in that same gap) none at all — dropped either way, never silently.
+    bool delivered = false;
     if (peer_named_) {
-        peer_rx_.deliver_rope(peer, std::move(frame), *rx_backend_);
+        delivered = peer_rx_.deliver_rope(peer, std::move(frame), *rx_backend_);
     } else {
         rx_peer_ = peer;
-        rx_.deliver_rope(std::move(frame), *rx_backend_);
+        delivered = rx_.deliver_rope(std::move(frame), *rx_backend_);
     }
+    rx_dropped_pool_.fetch_add(!delivered, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------

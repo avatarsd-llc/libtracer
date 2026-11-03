@@ -19,6 +19,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   connection holds it. The answer must now carry status code `101` on its status line (not
   "101" anywhere), `Upgrade: websocket` and a `Connection` header with the `Upgrade` token
   (RFC 6455 §4.1), through core's `ws::upgrade_accepted`.
+- **`httpd_ws_link_t` counts a frame its delivery slot could not hand up on
+  `stats_t::rx_dropped_pool` (#2504).** A sink swapped to span-only between the link's
+  `has_rope()` check and the delivery, with the rx pool refusing the materialize, used to drop
+  the frame silently. A frame that reaches the slot with no sink (teardown) is counted there
+  too, a rare second cause that says nothing about the pool's size (documented on
+  `stats_t::rx_dropped_pool`).
 - **`esp_ws_client_link_t` follows core's reassembly rule (#2478).** A new BINARY frame that
   arrives while a fragmented message is open now starts a new message and drops the stale
   part, instead of having the stale bytes glued on in front of it; it also ends the discard

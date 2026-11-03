@@ -914,17 +914,19 @@ void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
     //
     // Precedence per the bus_link_t contract: the peer-named slot when any peer
     // sink is installed; otherwise the flat transport_t slot (the frame without
-    // its peer name) — a single-peer consumer needs no bus facet.
+    // its peer name) — a single-peer consumer needs no bus facet. A frame the
+    // slot could not hand up (a span-only sink whose materialize was refused,
+    // #2504) is a `dropped_rx`.
     if (peer_rx_.has_any()) {
         // The HANDLE, not the name (#1294): a CAN peer's identity is its node id, so the
         // handle is that id at the announce-census constant generation and the name the
         // router grows into `src` is resolved back from it by `peer_name`.
-        peer_rx_.deliver_rope(peer_handle_t{src_node, transport_can::kAnnouncedPeerGeneration},
-                              std::move(frame));
+        drops_.count_dropped_rx(static_cast<std::size_t>(!peer_rx_.deliver_rope(
+            peer_handle_t{src_node, transport_can::kAnnouncedPeerGeneration}, std::move(frame))));
         return;
     }
     if (rx_.has_any()) {
-        rx_.deliver_rope(std::move(frame));
+        drops_.count_dropped_rx(static_cast<std::size_t>(!rx_.deliver_rope(std::move(frame))));
         return;
     }
     // Neither slot holds a sink: the #1103 sink-install window — the transport
@@ -932,9 +934,9 @@ void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
     // not reached `add_child` yet, and on a bus any bystander traffic lands in
     // that span unprovoked. ADR-0081 §4's drop arm: dropped HERE with its own
     // named counter, never parked in the library, and ingestion is never gated
-    // (on_rx keeps running, so `last_heard` and both sweeps stay live). The
-    // has_any→deliver_rope gap can only mis-tick during teardown's sink clear,
-    // where the frame is going nowhere either way.
+    // (on_rx keeps running, so `last_heard` and both sweeps stay live). A sink
+    // cleared in the has_any→deliver_rope gap (teardown's sink clear) ticks
+    // `dropped_rx` above instead; the frame is dropped and counted either way.
     dropped_presink_.fetch_add(1, std::memory_order_relaxed);
 }
 

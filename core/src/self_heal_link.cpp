@@ -103,7 +103,9 @@ transport_drop_stats_t self_heal_link_t::drop_stats() const noexcept {
         s = inner_;
     }
     transport_drop_stats_t stats = s ? s->link->drop_stats() : transport_drop_stats_t{};
-    stats.dropped_tx += engine_drops_.snapshot().dropped_tx;
+    const transport_drop_stats_t engine = engine_drops_.snapshot();
+    stats.dropped_rx += engine.dropped_rx;
+    stats.dropped_tx += engine.dropped_tx;
     return stats;
 }
 
@@ -282,7 +284,8 @@ bool self_heal_link_t::wire_socket(sock_t& sock) {
         sock.link->set_rope_receiver(
             [](void* c, view::rope_t frame) {
                 auto* const s = static_cast<sock_t*>(c);
-                s->self->rx_.deliver_rope(std::move(frame));
+                s->self->engine_drops_.count_dropped_rx(
+                    static_cast<std::size_t>(!s->self->rx_.deliver_rope(std::move(frame))));
             },
             &sock);
     } else {

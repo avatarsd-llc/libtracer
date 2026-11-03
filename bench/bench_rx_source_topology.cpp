@@ -186,7 +186,7 @@ class rope_in_t : public transport_t {
    public:
     void send(std::span<const std::byte>) override {}  // inbound-only
     [[nodiscard]] bool delivers_ropes() const override { return true; }
-    void inject(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
+    void inject(tr::view::rope_t frame) { (void)rx_.deliver_rope(std::move(frame)); }
 };
 
 /**

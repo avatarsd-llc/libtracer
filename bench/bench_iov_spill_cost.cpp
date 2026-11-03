@@ -129,7 +129,7 @@ struct census_transport_t : transport_t {
 /** @brief An inbound link on the ROPE arm — the only arm that can exceed `kFwdMaxIov`. */
 struct rope_in_t : census_transport_t {
     [[nodiscard]] bool delivers_ropes() const override { return true; }
-    void deliver(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
+    void deliver(tr::view::rope_t frame) { (void)rx_.deliver_rope(std::move(frame)); }
 };
 
 void emit_path(std::vector<std::byte>& out, std::initializer_list<std::string_view> segs) {

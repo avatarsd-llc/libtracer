@@ -78,7 +78,7 @@ class record_link_t : public transport_t {
             std::memcpy(seg->bytes.data(), part.data(), part.size());
             r.append(tr::view::view_t::over(std::move(seg)));
         }
-        rx_.deliver_rope(std::move(r));
+        (void)rx_.deliver_rope(std::move(r));
     }
     std::vector<std::vector<std::byte>> sent; /**< @brief Every frame handed down, in order. */
 

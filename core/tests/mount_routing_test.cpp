@@ -616,7 +616,7 @@ struct rope_in_link_t : tr::net::transport_t {
     }
     [[nodiscard]] bool delivers_ropes() const override { return true; }
     /** @brief Hand the frame up as a rope, as a scatter-gather transport does. */
-    void inject(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
+    void inject(tr::view::rope_t frame) { (void)rx_.deliver_rope(std::move(frame)); }
 };
 
 /** @brief A rope over @p bytes split at every @p cuts boundary (each cut = a link). */

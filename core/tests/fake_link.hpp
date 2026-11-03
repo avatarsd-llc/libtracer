@@ -245,7 +245,7 @@ class fake_link_t final : public net::transport_t {
             pending_.append(std::move(piece));
         }
         if (more_) return;
-        if (!discard_ && pending_.link_count() != 0) rx_.deliver_rope(std::move(pending_));
+        if (!discard_ && pending_.link_count() != 0) (void)rx_.deliver_rope(std::move(pending_));
         pending_ = view::rope_t{};
         pending_len_ = 0;
         discard_ = false;
