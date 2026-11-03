@@ -113,17 +113,16 @@ struct prefixed_iov_t {
  */
 template <class Deliver>
 struct prefix_framing_t {
-    std::size_t max_frame;                  /**< @brief The link's receive cap. */
-    std::atomic<std::size_t>& malformed_rx; /**< @brief The link's malformed counter. */
-    std::atomic<std::size_t>& dropped_rx;   /**< @brief The link's shed counter. */
-    Deliver deliver;                        /**< @brief Hands one frame up. */
+    std::size_t max_frame; /**< @brief The link's receive cap. */
+    drop_tally_t<>& drops; /**< @brief The link's shed-frame counters. */
+    Deliver deliver;       /**< @brief Hands one frame up. */
 
     /** @brief Judge the prefix bytes read so far. */
     [[nodiscard]] ingress_header_t header(std::span<const std::byte> have) const {
         if (have.size() < kPrefixBytes) return {ingress_header_t::kind_t::MORE, kPrefixBytes, 0};
         const std::size_t len = tr::detail::load_le<std::uint32_t>(have.first(kPrefixBytes));
         if (len > max_frame) {
-            malformed_rx.fetch_add(1, std::memory_order_relaxed);
+            drops.count_malformed_rx();
             return {ingress_header_t::kind_t::CLOSE, 0, 0};
         }
         return {ingress_header_t::kind_t::BODY, kPrefixBytes, len};
@@ -133,7 +132,7 @@ struct prefix_framing_t {
      *         a refused draw (shed and counted). */
     [[nodiscard]] bool body(tr::view::rx_block_t& blk, std::size_t len) {
         if (!blk.seg) {
-            dropped_rx.fetch_add(static_cast<std::size_t>(len != 0), std::memory_order_relaxed);
+            drops.count_dropped_rx(static_cast<std::size_t>(len != 0));
             return true;
         }
         deliver(blk.take(len));
@@ -143,10 +142,9 @@ struct prefix_framing_t {
 
 /** @brief A @ref prefix_framing_t over @p deliver. */
 template <class Deliver>
-prefix_framing_t<Deliver> prefix_framing(std::size_t max_frame,
-                                         std::atomic<std::size_t>& malformed_rx,
-                                         std::atomic<std::size_t>& dropped_rx, Deliver deliver) {
-    return {max_frame, malformed_rx, dropped_rx, std::move(deliver)};
+prefix_framing_t<Deliver> prefix_framing(std::size_t max_frame, drop_tally_t<>& drops,
+                                         Deliver deliver) {
+    return {max_frame, drops, std::move(deliver)};
 }
 
 }  // namespace
@@ -296,7 +294,7 @@ void tcp_transport_t::send_record(std::span<const std::span<const std::byte>> pa
     // Oversize for the cap, or a refused gather store: shed it, but COUNT it (#932) —
     // an egress drop used to be a bare return no observer could see.
     if (!rec.ok) {
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_tx();
         return;
     }
     // One egress (ADR-0087 §2): a publisher that finds the peer idle writes its record
@@ -319,7 +317,7 @@ void tcp_transport_t::serve(int fd) {
     frame_ingress_t<kPrefixBytes, 0> ingress;
     // Tier select lives in the slot (receiver_slot.hpp): the rope sink gets the frame OWNING,
     // the span sink borrows it.
-    auto framing = prefix_framing(max_frame_, malformed_rx_, dropped_rx_,
+    auto framing = prefix_framing(max_frame_, drops_,
                                   [this](view::view_t frame) { rx_.deliver(std::move(frame)); });
     while (!stop_.load(std::memory_order_relaxed)) {
         // A frame the socket cut short waits for writability, so this thread waits for both
@@ -466,7 +464,7 @@ void tcp_server_transport_t::send_record(session_base_t* to,
     // frame in that vertex's ring.
     const prefixed_iov_t rec(parts, tcp_transport_t::kMaxFrame, egress_source());
     if (!rec.ok) {
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed, and counted (#932)
+        drops_.count_dropped_tx();  // shed, and counted (#932)
         return;
     }
     if (to == nullptr)
@@ -498,7 +496,7 @@ void tcp_server_transport_t::on_readable(session_base_t& base, int fd) {
     // deliverable 3), so the per-frame path reads a member and gains no dispatch (#1438). The
     // FLAT tier's WHO (#375 Part 2) is one 8-byte store, cleared once the frame is handed up,
     // so the field names a session only while its frame is being delivered (#1915).
-    auto framing = prefix_framing(max_frame_, malformed_rx_, dropped_rx_, [&](view::view_t f) {
+    auto framing = prefix_framing(max_frame_, drops_, [&](view::view_t f) {
         delivering_ = s.handle;
         if (bus_mode())
             deliver_to_peer(s.handle, std::move(f));

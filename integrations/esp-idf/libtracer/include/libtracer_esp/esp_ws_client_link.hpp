@@ -259,7 +259,7 @@ struct esp_ws_client_config_t {
      * ingress-loan reserve where the reserve is free in the source's size class, so a terminus
      * that shares it builds its record in the block — and is delivered as a rope the sink may
      * keep. An exhausted source is backpressure: the message is dropped and counted on
-     * @ref esp_ws_client_link_t::dropped_rx, never satisfied from the heap. `nullptr` (THIS
+     * `drop_stats().dropped_rx`, never satisfied from the heap. `nullptr` (THIS
      * kind's default) keeps borrowed delivery straight out of the scratch, with no per-message
      * allocation — the sibling server link's default and the reason for it.
      *
@@ -487,20 +487,6 @@ class esp_ws_client_link_t final : public transport_t {
     }
 
     /**
-     * @brief Inbound MESSAGES dropped by the receive path since construction — the
-     *        `dropped_rx()` convention core's transports already spell this way.
-     *
-     * Two causes, both of which used to be logs-only (#953): a message that does not fit
-     * `rx_bytes` (dropped whole, never truncated — its remaining fragments are consumed
-     * and discarded too, #901), and a stray CONTINUATION arriving with no message open.
-     * A frame lost to a connection drop is NOT counted: that is the link going down, not
-     * the receive path refusing a message.
-     */
-    [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
-        return dropped_rx_.load(std::memory_order_relaxed);
-    }
-
-    /**
      * @brief One coherent snapshot of this link's passive counters plus the two
      *        dial facts only the link can know.
      *
@@ -516,7 +502,7 @@ class esp_ws_client_link_t final : public transport_t {
      * on roughly two round-trips, sampled only at (re)dial — it can be days stale and
      * it is NOT an RTT measurement. A host surfacing it should label it "handshake".
      *
-     * `c.rx_drops` is NOT a second tally: it is read straight from @ref dropped_rx, so
+     * `c.rx_drops` is NOT a second tally: it is read straight from `drop_stats().dropped_rx`, so
      * this link has exactly one inbound-drop truth and both spellings always agree.
      *
      * `dial_attempts` / `dial_failures` make the failure arm visible (#1606 ask 1). They
@@ -555,8 +541,8 @@ class esp_ws_client_link_t final : public transport_t {
 
     /** @brief Effective reusable RX capacity, bytes — the ctor's `rx_bytes`, which every
      *         connection's read scratch is drawn at (#1606). A message past it is dropped whole
-     * (@ref dropped_rx), so a node reporting an inbound-drop streak can now report the ceiling that
-     *         produced it instead of quoting a constant from third-party sources (#1160). */
+     * (`drop_stats().dropped_rx`), so a node reporting an inbound-drop streak can now report the
+     * ceiling that produced it instead of quoting a constant from third-party sources (#1160). */
     [[nodiscard]] std::size_t rx_bytes() const noexcept { return rx_bytes_; }
 
     /** @brief Effective TX capacity, bytes — the ctor's `tx_bytes`, the largest payload a
@@ -589,7 +575,9 @@ class esp_ws_client_link_t final : public transport_t {
      * all-zero default exists to make sayable.
      */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-        return {.dropped_rx = dropped_rx(), .malformed_rx = 0, .dropped_tx = stats().c.tx_drops};
+        return {.dropped_rx = dropped_rx_.load(std::memory_order_relaxed),
+                .malformed_rx = 0,
+                .dropped_tx = stats().c.tx_drops};
     }
 
     /**
@@ -884,8 +872,15 @@ class esp_ws_client_link_t final : public transport_t {
     /** @brief @ref shut_down condemned a dial in flight, so that dial — not the destructor
      *         — returns the dial slot. Owner thread only. */
     bool dial_orphaned_ = false;
-    /** @brief Receive-path message drops — see @ref dropped_rx. Written only by the recv
-     *         thread, read by anyone, so relaxed is enough (it is a statistic). */
+    /**
+     * @brief Inbound MESSAGES the receive path dropped, read as `drop_stats().dropped_rx`.
+     *
+     * Two causes, both of which used to be logs-only (#953): a message that does not fit
+     * `rx_bytes` (dropped whole, never truncated — its remaining fragments are consumed and
+     * discarded too, #901), and a stray CONTINUATION arriving with no message open. A frame
+     * lost to a connection drop is NOT counted: that is the link going down. Written only by
+     * the recv thread, read by anyone, so relaxed is enough (it is a statistic).
+     */
     std::atomic<std::uint64_t> dropped_rx_{0};
     /** @brief The recv thread: a static task drawn from `tr::mem::default_root()` (#2288),
      *         never the link's own source, because @ref shut_down may DETACH it mid-dial and

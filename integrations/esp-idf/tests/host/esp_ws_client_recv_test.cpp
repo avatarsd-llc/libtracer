@@ -280,7 +280,8 @@ void test_oversized_single_frame_tail_is_not_delivered() {
     check(wait_until([&] { return sink.count() >= 1; }, 5s), "a message was delivered");
     check(sink.count() == 1, "EXACTLY one message — the dropped frame's tail was not delivered");
     check(same_bytes(sink.at(0), good), "and it is the well-formed message that followed");
-    check(link->dropped_rx() == 1, "the oversized message was counted on dropped_rx()");
+    check(link->drop_stats().dropped_rx == 1,
+          "the oversized message was counted on drop_stats().dropped_rx");
     // Release the link HERE, so the drain below is waited for inside the case rather
     // than raced at process exit (#1456).
     link.reset();
@@ -303,7 +304,8 @@ void test_oversized_fragmented_message_tail_is_not_delivered() {
     check(wait_until([&] { return sink.count() >= 1; }, 5s), "a message was delivered");
     check(sink.count() == 1, "EXACTLY one message — the remaining fragments were discarded");
     check(same_bytes(sink.at(0), good), "and it is the well-formed message that followed");
-    check(link->dropped_rx() == 1, "the oversized message was counted on dropped_rx()");
+    check(link->drop_stats().dropped_rx == 1,
+          "the oversized message was counted on drop_stats().dropped_rx");
     // Release the link HERE, so the drain below is waited for inside the case rather
     // than raced at process exit (#1456).
     link.reset();
@@ -322,7 +324,7 @@ void test_exact_fit_message_delivers() {
     check(wait_until([&] { return sink.count() >= 1; }, 5s), "the exact-fit message delivered");
     check(sink.count() == 1, "exactly once");
     check(same_bytes(sink.at(0), exact), "with all of its bytes");
-    check(link->dropped_rx() == 0, "and nothing was counted as dropped");
+    check(link->drop_stats().dropped_rx == 0, "and nothing was counted as dropped");
     // Release the link HERE, so the drain below is waited for inside the case rather
     // than raced at process exit (#1456).
     link.reset();
@@ -340,7 +342,8 @@ void test_stray_continuation_is_dropped() {
     check(wait_until([&] { return sink.count() >= 1; }, 5s), "a message was delivered");
     check(sink.count() == 1, "EXACTLY one — the stray CONT was not delivered");
     check(same_bytes(sink.at(0), good), "and it is the well-formed message that followed");
-    check(link->dropped_rx() == 1, "the stray CONT was counted on dropped_rx()");
+    check(link->drop_stats().dropped_rx == 1,
+          "the stray CONT was counted on drop_stats().dropped_rx");
     // Release the link HERE, so the drain below is waited for inside the case rather
     // than raced at process exit (#1456).
     link.reset();
@@ -362,7 +365,7 @@ void test_fragmented_fitting_message_reassembles() {
     std::vector<std::byte> want = a.payload;
     want.insert(want.end(), b.payload.begin(), b.payload.end());
     check(sink.at(0) == want, "with both fragments, in order");
-    check(link->dropped_rx() == 0, "and nothing was counted as dropped");
+    check(link->drop_stats().dropped_rx == 0, "and nothing was counted as dropped");
     // Release the link HERE, so the drain below is waited for inside the case rather
     // than raced at process exit (#1456).
     link.reset();
@@ -397,7 +400,7 @@ void test_binary_mid_assembly_drops_the_stale_part() {
           "a BINARY after an oversized open message was delivered");
     check(sink.count() == 2 && same_bytes(sink.at(1), after),
           "whole — it ended the discard instead of being swallowed by it");
-    check(link->dropped_rx() == 1, "only the oversized message was counted as dropped");
+    check(link->drop_stats().dropped_rx == 1, "only the oversized message was counted as dropped");
     link.reset();
     check_drained();
 }
@@ -427,7 +430,7 @@ void test_text_frame_is_ignored() {
     want.insert(want.end(), b.payload.begin(), b.payload.end());
     check(sink.count() == 2 && sink.at(1) == want,
           "with both fragments and none of the TEXT between them");
-    check(link->dropped_rx() == 0, "and nothing was counted as dropped");
+    check(link->drop_stats().dropped_rx == 0, "and nothing was counted as dropped");
     link.reset();
     check_drained();
 }
@@ -469,7 +472,7 @@ void test_unarmed_link_holds_the_dial() {
         check(wait_until([&] { return sink.count() >= 1; }, 5s),
               "the pre-arm message ARRIVED after arming — held, never lost");
         check(same_bytes(sink.at(0), good), "byte-for-byte");
-        check(link.dropped_rx() == 0, "and nothing was counted as dropped");
+        check(link.drop_stats().dropped_rx == 0, "and nothing was counted as dropped");
 
         // Reconnect leg: the latch is ONE-SHOT. A peer CLOSE tears the connection down; the
         // re-dial happens with no re-arm, and a message on the NEW connection is delivered —
@@ -484,7 +487,7 @@ void test_unarmed_link_holds_the_dial() {
         check(wait_until([&] { return sink.count() >= 2; }, 5s),
               "a message on the new connection was delivered — the latch did not re-close");
         check(same_bytes(sink.at(1), after), "byte-for-byte");
-        check(link.dropped_rx() == 0, "and still nothing was counted as dropped");
+        check(link.drop_stats().dropped_rx == 0, "and still nothing was counted as dropped");
     }
     check_drained();
 }
@@ -526,8 +529,8 @@ void test_drop_stats_projects_through_the_base_interface() {
 
     const tr::net::transport_drop_stats_t d = generic.drop_stats();
     check(d.dropped_rx == 1, "the oversize drop is visible through the BASE interface");
-    check(d.dropped_rx == link->dropped_rx(),
-          "and it is the SAME number dropped_rx() reports — a projection, not a second tally");
+    check(d.dropped_rx == link->stats().c.rx_drops,
+          "and it is the SAME number c.rx_drops reports — a projection, not a second tally");
     check(d.malformed_rx == 0,
           "malformed_rx stays 0 — this link never classifies a message as protocol-malformed, "
           "and the #932 default exists so it need not fabricate one");
@@ -658,7 +661,7 @@ void test_named_rx_source_delivers_owning_ropes() {
 
         src.refuse.store(true);
         fake_ws::push_frames({good_message()});
-        check(wait_until([&] { return link.dropped_rx() == 1; }, 5s),
+        check(wait_until([&] { return link.drop_stats().dropped_rx == 1; }, 5s),
               "a refusing source is a COUNTED drop, never a heap fallback");
         check(ropes.count() == before, "and nothing was delivered for it");
 

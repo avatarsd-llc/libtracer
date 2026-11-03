@@ -247,16 +247,8 @@ bool quic_transport_t::dial_ended() const noexcept {
     return ok() && !impl_->listen && !impl_->link_established.load(std::memory_order_relaxed);
 }
 
-std::uint64_t quic_transport_t::dropped_rx() const noexcept {
-    return impl_ ? impl_->dropped_rx.load(std::memory_order_relaxed) : 0;
-}
-
-std::uint64_t quic_transport_t::malformed_rx() const noexcept {
-    return impl_ ? impl_->malformed_rx.load(std::memory_order_relaxed) : 0;
-}
-
-std::uint64_t quic_transport_t::dropped_tx() const noexcept {
-    return impl_ ? impl_->dropped_tx.load(std::memory_order_relaxed) : 0;
+transport_drop_stats_t quic_transport_t::drop_stats() const noexcept {
+    return impl_ ? impl_->drops.snapshot() : transport_drop_stats_t{};
 }
 
 namespace {

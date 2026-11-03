@@ -544,8 +544,8 @@ class stream_endpoint_t : protected posix_endpoint_t {
         std::span<const std::span<const std::byte>> head, const graph::value_t& value) noexcept;
 
     /**
-     * @brief Account one egress call (#838, #2144): every shed frame is a `dropped_tx_`, every
-     *        turn that found the socket full and moved nothing a `stalled_tx_`.
+     * @brief Account one egress call (#838, #2144): every shed frame is a counted `dropped_tx`,
+     * every turn that found the socket full and moved nothing a `stalled_tx_`.
      */
     void note_egress(const egress_result_t& r) noexcept;
 
@@ -677,9 +677,10 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *         (core/STYLE.md §Introspection clause 5, #1697): a 64-bit atomic is a
      *         libatomic call on every rv32; a 32-bit target wraps after 2^32. */
     std::atomic<std::size_t> stalled_tx_{0};
-    /** @brief Outbound frames this link never put on the wire, every cause: a refused build,
-     *         a closed peer, a full ring, a failed write. The link's `dropped_tx`. */
-    std::atomic<std::size_t> dropped_tx_{0};
+    /** @brief This link's shed-frame counters (#2482). `dropped_tx` is every outbound frame
+     *         it never put on the wire: a refused build, a closed peer, a full ring, a failed
+     *         write. `dropped_rx` and `malformed_rx` are the derived kind's framing refusals. */
+    drop_tally_t<> drops_;
     /** @brief Peers the application's liveness check closed as frozen (#2198) — every one
      *         counted. Relaxed: a diagnostic tally. */
     std::atomic<std::size_t> frozen_closed_{0};
@@ -745,6 +746,11 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     /** @brief The peer-visitor shape the query trio speaks — @ref bus_link_t's, so the
      *         facet arm's overrides are the same signature and no consumer sees two. */
     using peer_visitor_t = bus_link_t::peer_visitor_t;
+
+    /** @brief The server's shed-frame counters, summed over every peer (#932, #2482). */
+    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+        return drops_.snapshot();
+    }
 
     /**
      * @brief True if the listen socket is bound and listening — and, on a target that closed

@@ -1076,7 +1076,7 @@ void test_a_ping_past_rx_bytes_is_answered_whole() {
     fake_ws::push_frames({ping});
     check(wait_until([] { return fake_ws::last_write_op() == 0xA; }, 2s), "a PONG went out");
     check(fake_ws::last_write_payload() == ping.payload, "echoing all 100 B");
-    check(link->dropped_rx() == 0, "nothing was dropped");
+    check(link->drop_stats().dropped_rx == 0, "nothing was dropped");
     check(link->link_up() && fake_ws::connect_count() == dials, "and the link did not re-dial");
     link.reset();
     check(drained_fake(), "and the link drained");
@@ -1094,7 +1094,7 @@ void test_a_ping_mid_fragment_is_answered_whole() {
     check(wait_until([] { return fake_ws::last_write_op() == 0xA; }, 2s), "a PONG went out");
     check(fake_ws::last_write_payload() == ping.payload, "echoing all 100 B");
     check(wait_until([] { return fake_ws::drained(); }, 2s), "every frame was read");
-    check(link->dropped_rx() == 0, "the message around it was not dropped");
+    check(link->drop_stats().dropped_rx == 0, "the message around it was not dropped");
     check(link->link_up() && fake_ws::connect_count() == dials, "and the link did not re-dial");
     link.reset();
     check(drained_fake(), "and the link drained");

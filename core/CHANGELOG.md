@@ -48,9 +48,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   After the first `sweep` call, ops and acquires no longer start retries. The worker thread stays, as the one dialer, until the dial
   can run without blocking (#2147); `connect_timeout` is still handed to the factory and not
   yet compared against `now`.
+- **The per-kind drop accessors are removed; read `drop_stats()` (#2482).** `dropped_rx()`,
+  `malformed_rx()` and `dropped_tx()` are gone from `tcp_transport_t`,
+  `tcp_server_transport_t`, `ws_client_transport_t`, `ws_server_transport_t`,
+  `udp_transport_t`, `quic_transport_t` and `webtransport_transport_t`, and `dropped_rx()` /
+  `dropped_tx()` from `can_transport_t`. Read the same numbers as `drop_stats().dropped_rx`,
+  `.malformed_rx` and `.dropped_tx`, which every link already answered through the
+  `transport_t` interface. The counters behind them are unchanged, except that the QUIC and
+  WebTransport ones are now word-wide like every other link's (core/STYLE.md §Introspection
+  clause 5).
+- **`noise::counter_t::MALFORMED_RX` and `DROPPED_TX` are removed (#2482).** `noise_link_t`
+  now keeps its own `malformed_rx` and `dropped_tx` in a `drop_tally_t`; read them through
+  `drop_stats()`, which adds them to the carrier's, as before.
 
 ### Added
 
+- **`tr::net::drop_tally_t` and `tr::net::drop_classes_t` (#2482).** The three shed-frame
+  counters of `transport_drop_stats_t` as one embeddable value: `count_dropped_rx(n)`,
+  `count_malformed_rx(n)`, `count_dropped_tx(n)` and `snapshot()`. Every counting link keeps
+  its counters in one and answers `drop_stats()` with its snapshot; a per-peer facade still
+  reports its owner's. `drop_classes_t` leaves out at build time a class a link never drops
+  (CAN has no `malformed_rx` word), so the tally costs no more than the counters it replaces.
 - **`ws_assembler_t` is a public header, `libtracer/ws_assembler.hpp` (#2483).** The RFC 6455
   fragmented-message assembler that core's WS server and dial-out client use moves out of
   `transport_ws.cpp` unchanged, so every WebSocket link shares one reassembly: each fragment is

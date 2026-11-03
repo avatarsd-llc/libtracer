@@ -727,10 +727,10 @@ esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
     out.connect_ms = connect_ms_.load(std::memory_order_relaxed);
     // Filled from `dropped_rx_`, not kept in a second counter: the receive path already tallies
     // every inbound discard there (#953/#901), and a second counter bumped at the same sites could
-    // only drift from it. `c.rx_drops` and `dropped_rx()` are therefore two spellings of one
-    // number, never two numbers. Saturating, because the block is 32-bit and the atomic is 64-bit —
-    // a link that really dropped 4 billion messages reports the cap here and the exact figure
-    // through `dropped_rx()`.
+    // only drift from it. `c.rx_drops` and `drop_stats().dropped_rx` are therefore two spellings of
+    // one number, never two numbers. Saturating, because the block is 32-bit and the atomic is
+    // 64-bit — a link that really dropped 4 billion messages reports the cap here and the exact
+    // figure through `drop_stats().dropped_rx`.
     const std::uint64_t rx_dropped = dropped_rx_.load(std::memory_order_relaxed);
     out.c.rx_drops = static_cast<std::uint32_t>(
         std::min<std::uint64_t>(rx_dropped, std::numeric_limits<std::uint32_t>::max()));

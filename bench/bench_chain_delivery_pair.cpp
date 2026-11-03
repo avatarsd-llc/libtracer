@@ -440,7 +440,7 @@ struct can_chain_t : chain_base_t {
     }
     [[nodiscard]] std::uint64_t dropped_tx() const {
         std::uint64_t n = 0;
-        for (const auto& t : tp) n += t->dropped_tx();
+        for (const auto& t : tp) n += t->drop_stats().dropped_tx;
         return n;
     }
 };
@@ -490,11 +490,11 @@ struct can_cell_t {
     if (norelay)
         for (std::size_t i = 0; i < hops; ++i) ch.upe[i + 1]->mute = true;
     const std::size_t before = ch.delivered;
-    const std::uint64_t drops = ch.dropped_tx();
+    const std::uint64_t drops = ch.drop_stats().dropped_tx;
     ch.origin.inject(frame);
     ch.pump();
     c.delivered = ch.delivered - before;
-    c.refused = ch.dropped_tx() - drops;
+    c.refused = ch.drop_stats().dropped_tx - drops;
     for (std::size_t i = 0; i < hops; ++i) {
         c.fwd.push_back(ch.dn[i]->tx);
         c.rev.push_back(ch.upe[i + 1]->tx);

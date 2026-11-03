@@ -21,6 +21,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed (breaking)
 
+- **`esp_ws_client_link_t::dropped_rx()` is removed (#2482).** Read the same counter as
+  `drop_stats().dropped_rx`, or `stats().c.rx_drops`, as core's transports now do.
 - **`httpd_ws_link_t::close_frozen_peers(now, deadline)` is now `sweep(now, deadline)`**, the
   one seam through which a link takes the application's clock
   ([#2481](https://github.com/avatarsd-llc/libtracer/issues/2481)). The frozen-peer verdict and

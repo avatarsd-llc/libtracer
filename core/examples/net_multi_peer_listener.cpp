@@ -238,7 +238,7 @@ int main() {
     // on demand, so a stale name cannot be sent to.
     check(ok, facet.peer_link("p9") == nullptr, "a name no slot holds resolves to no endpoint");
 
-    check(ok, server.dropped_tx() == 0, "nothing was shed on the way out");
+    check(ok, server.drop_stats().dropped_tx == 0, "nothing was shed on the way out");
 
     std::printf("one listener, %zu peers in slots, cap %zu, 1 directed + 1 broadcast\n",
                 names.size(), server.max_peers());

@@ -124,8 +124,8 @@ void udp_transport_t::shut_down() {
 
 void udp_transport_t::send(std::span<const std::byte> frame) {
     const std::uint64_t p = peer();
-    if (fd_ < 0 || p == 0) {  // no peer (learned or configured) => nobody to send to
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed, and counted (#932)
+    if (fd_ < 0 || p == 0) {        // no peer (learned or configured) => nobody to send to
+        drops_.count_dropped_tx();  // shed, and counted (#932)
         return;
     }
     sockaddr_in peer{};
@@ -136,7 +136,7 @@ void udp_transport_t::send(std::span<const std::byte> frame) {
     // counted, never retried: the link carries no acks, and the next value supersedes it (#2279).
     if (::sendto(fd_, frame.data(), frame.size(), MSG_NOSIGNAL, reinterpret_cast<sockaddr*>(&peer),
                  sizeof(peer)) != static_cast<ssize_t>(frame.size()))
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_tx();
 }
 
 void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
@@ -146,7 +146,7 @@ void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
 void udp_transport_t::send_to(std::uint64_t address,
                               std::span<const std::span<const std::byte>> iov) {
     if (fd_ < 0) {
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // no socket => a counted drop
+        drops_.count_dropped_tx();  // no socket => a counted drop
         return;
     }
     if (iov.empty()) return;  // nothing to send is not a drop
@@ -169,7 +169,7 @@ void udp_transport_t::send_to(std::uint64_t address,
     const std::size_t n = iov.size();
     ::iovec* vec = table.acquire(n);
     if (vec == nullptr) {  // gather store exhausted => drop the datagram, counted (#932)
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_tx();
         return;
     }
     std::size_t total = 0;
@@ -179,7 +179,7 @@ void udp_transport_t::send_to(std::uint64_t address,
     }
     const std::uint64_t p = address;
     if (p == 0) {  // no peer (learned or configured) => nobody to send to
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_tx();
         return;
     }
     sockaddr_in peer{};
@@ -192,7 +192,7 @@ void udp_transport_t::send_to(std::uint64_t address,
     msg.msg_iov = vec;
     msg.msg_iovlen = n;
     if (::sendmsg(fd_, &msg, MSG_NOSIGNAL) != static_cast<ssize_t>(total))  // as in `send` (#2279)
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_tx();
 }
 
 void udp_transport_t::run() {
@@ -260,14 +260,14 @@ void udp_transport_t::run() {
         if (learn_peer_) peer_.store(source_, std::memory_order_relaxed);
         const auto len = static_cast<std::size_t>(n);
         if (drained) {
-            dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+            drops_.count_dropped_rx();
             continue;
         }
         if (len > span_cap || (mh.msg_flags & MSG_TRUNC) != 0) {
             // Over the cap, or cut short by a held segment: refuse it whole. It is KEPT (it is
             // still a clean buffer for the next datagram), so a peer spraying over-cap datagrams
             // costs no allocator traffic at all.
-            malformed_rx_.fetch_add(1, std::memory_order_relaxed);
+            drops_.count_malformed_rx();
             continue;
         }
         if (rx_seg) {
@@ -285,7 +285,7 @@ void udp_transport_t::run() {
         if (rx_.has_rope()) {
             view::segment_ptr_t seg = view::segment_ptr_t::adopt(backend_->alloc(alloc_cap));
             if (!seg) {
-                dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+                drops_.count_dropped_rx();
                 continue;
             }
             std::memcpy(seg->bytes.data(), stack.data(), len);
