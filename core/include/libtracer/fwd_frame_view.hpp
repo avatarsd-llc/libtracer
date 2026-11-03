@@ -867,6 +867,18 @@ inline constexpr std::size_t kFwdSrcHdrCap = 6;
 inline constexpr std::size_t kFwdMaxIov = 10;
 
 /**
+ * @brief The most links a rope frame may span and still gather into the forward hop's stack
+ *        table first (#2471) — a MEASURED threshold, not a derived bound.
+ *
+ * Past it the router gathers straight into its block table. A rope's gather emits one entry
+ * per region plus one per link boundary falling inside a kept region, so the link count is
+ * what pushes a frame past @ref kFwdMaxIov. Measured on `bench_forward_rope` (#2471): at up to
+ * four links the stack attempt fits and draws nothing, while at eight links and a payload of
+ * 1 KiB or more it overflows, and the thrown-away first gather cost more than the block draw.
+ */
+inline constexpr std::size_t kFwdStackRopeLinks = 4;
+
+/**
  * @brief The rebuilt forward-hop frame: fresh stack heads + the untouched source
  *        regions to interleave (ADR-0038 inv. #2 — ZERO heap on the forward hop).
  *

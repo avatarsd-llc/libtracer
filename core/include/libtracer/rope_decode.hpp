@@ -102,6 +102,12 @@ class rope_cursor_t {
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
 
     /**
+     * @brief Links in the chain this cursor walks — the whole chain's, not only the ones its
+     *        window touches. A forward hop sizes its gather table by it (#2471).
+     */
+    [[nodiscard]] std::size_t link_count() const noexcept { return links_.size(); }
+
+    /**
      * @brief Has any read through THIS cursor been truncated at the window edge? (#986)
      *
      * The release-mode half of @ref for_each_span's containment contract. A bulk feed

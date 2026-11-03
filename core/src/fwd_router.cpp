@@ -2281,11 +2281,14 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     // regions (remaining dst, selector, original src bytes, payload) — no payload copy. The
     // gather is written ONCE over the cursor seam (fwd_rebuild_t::gather); each region is
     // emitted via `for_each_span`, which yields exactly one sub-span for a contiguous source
-    // and one per straddled link for a rope. Both gather into one stack `std::array` first
-    // (ZERO heap, ADR-0038 inv. #2), and only a gather that overflows it is taken again into
-    // a `mem::block_array_t` over the failable byte seam (#596): a rope frame whose regions
-    // straddle a few links fits the stack as a contiguous one does (#2264).
-    {
+    // and one per straddled link for a rope. A frame over at most kFwdStackRopeLinks links
+    // gathers into one stack `std::array` first (ZERO heap, ADR-0038 inv. #2), and only a
+    // gather that overflows it is taken again into a `mem::block_array_t` over the failable
+    // byte seam (#596): a rope frame whose regions straddle a few links fits the stack as a
+    // contiguous one does (#2264). A rope over more links goes straight to the block table and
+    // gathers once (#2471): its regions straddle enough links to overflow the array, and the
+    // stack attempt was a whole gather thrown away.
+    if (cur_src.link_count() <= kFwdStackRopeLinks) [[likely]] {
         // Each region is one sub-span per link it straddles — a stack array sized by
         // kFwdMaxIov, which is COUNTED from gather's emit sequence (see its docs), not a chosen
         // budget. Every contiguous frame but one fits it: a relayed SUBSCRIBE request's reverse
@@ -2326,7 +2329,9 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     // inlined there it was a second copy of the whole gather in the hot hop (+2.6 KB).
     const auto send_spilled = [&]() __attribute__((noinline)) {
         mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};
-        bool ok = true;
+        // One block twice the stack array's size up front, so a frame a few links too wide for
+        // the array draws once rather than growing 8 -> 16 -> 32 (#2471).
+        bool ok = iov.reserve(2 * kFwdMaxIov);
         rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
             if (ok && !iov.push_back(s)) ok = false;
         });

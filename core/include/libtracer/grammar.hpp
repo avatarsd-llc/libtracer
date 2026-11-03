@@ -63,6 +63,9 @@ struct span_cursor_t {
     /** @brief Number of bytes available from the TLV's start. */
     [[nodiscard]] std::size_t size() const noexcept { return buf.size(); }
 
+    /** @brief Links the source is split into: one, always — the twin of the rope cursor's. */
+    [[nodiscard]] static constexpr std::size_t link_count() noexcept { return 1; }
+
     /**
      * @brief Never latched — a contiguous cursor cannot serve a byte from outside its
      *        window, so it has nothing to report (#986).

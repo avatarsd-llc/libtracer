@@ -77,6 +77,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`link_count()` on both grammar cursors, and `tr::net::kFwdStackRopeLinks` (#2471).**
+  `rope_cursor_t::link_count()` answers the links in the chain it walks and
+  `span_cursor_t::link_count()` answers 1, so one cursor-generic caller can size by it. The
+  forward hop uses it: a rope over at most `kFwdStackRopeLinks` (4) links gathers into the
+  stack table first, as before; a wider rope gathers once, straight into one block from the
+  receiving link's source, sized twice the stack table.
+
 - **`fwd_router_t::link_down(link_name, peer)`**: evicts one bus peer's subscriber edges by its
   handle (#2237). Since #2103, `link_down(name)` reaches only a registered child's edges, and a
   bus peer's left only through the bus's own peer-down seam. An announce-census CAN bus never

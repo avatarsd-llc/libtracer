@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -68,17 +69,26 @@ class counting_source_t final : public tr::mem::block_source_t {
 class rec_link_t final : public transport_t {
    public:
     explicit rec_link_t(bool ropes = false) : ropes_(ropes) {}
-    void send(std::span<const std::byte>) override { ++sent; }
-    void send(std::span<const std::span<const std::byte>>) override { ++sent; }
+    void send(std::span<const std::byte> frame) override {
+        ++sent;
+        iov_entries = 1;
+        bytes.assign(frame.begin(), frame.end());
+    }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        ++sent;
+        iov_entries = iov.size();
+        bytes.clear();
+        for (const auto s : iov) bytes.insert(bytes.end(), s.begin(), s.end());
+    }
     [[nodiscard]] bool delivers_ropes() const override { return ropes_; }
-    /** @brief Deliver @p frame: borrowed on a span link, as a 4-link rope on a rope link. */
-    void inject(std::span<const std::byte> frame) {
+    /** @brief Deliver @p frame: borrowed on a span link, as a @p links-link rope on a rope link. */
+    void inject(std::span<const std::byte> frame, std::size_t links = 4) {
         if (!ropes_) {
             rx_.deliver_borrowed(frame);
             return;
         }
         tr::view::rope_t r;
-        const std::size_t step = (frame.size() + 3) / 4;
+        const std::size_t step = (frame.size() + links - 1) / links;
         for (std::size_t off = 0; off < frame.size(); off += step) {
             const std::size_t n = std::min(step, frame.size() - off);
             tr::view::segment_ptr_t seg = tr::view::heap_alloc(n);
@@ -87,7 +97,9 @@ class rec_link_t final : public transport_t {
         }
         rx_.deliver_rope(std::move(r));
     }
-    int sent = 0; /**< @brief Frames the router handed down. */
+    int sent = 0;                 /**< @brief Frames the router handed down. */
+    std::size_t iov_entries = 0;  /**< @brief Entries in the last frame's gather table. */
+    std::vector<std::byte> bytes; /**< @brief The last frame's bytes, gathered in order. */
 
    private:
     bool ropes_ = false;
@@ -129,7 +141,16 @@ void test_read_draws(bool ropes, int expected) {
     }
 }
 
-/** @brief A rope-tier WRITE forwarded to another link: no gather draw for a few links. */
+/**
+ * @brief A rope-tier WRITE forwarded to another link: no gather draw over a few links, ONE
+ *        draw over many, and the same bytes out whatever the inbound shape (#2471).
+ *
+ * A rope over at most `kFwdStackRopeLinks` links gathers into the stack table. A wider one
+ * gathers once, straight into one block from the receiving link's source sized twice the stack
+ * table, so a dozen links cost one draw: no thrown-away stack gather, and no block that grows
+ * (three draws before #2471). The forwarded bytes are compared against the span tier's for
+ * every shape, including one link per byte.
+ */
 void test_forward_draws() {
     for (const std::size_t n : kSizes) {
         counting_source_t rx;
@@ -142,15 +163,38 @@ void test_forward_draws() {
         const auto frame =
             b_fwd(fwd_op_t::WRITE, b_path({"out", "x"}), b_path({"origin"}), {}, value_tlv(n));
 
-        in.inject(frame);
-        (void)rx.take();
-        out.sent = 0;
+        // A one-link rope takes the span tier: its bytes are the reference every shape matches.
+        in.inject(frame, 1);
+        check(out.sent == 1 && out.iov_entries <= tr::net::kFwdMaxIov,
+              "the span tier forwards from the stack table");
+        const std::vector<std::byte> want = out.bytes;
         constexpr int kFrames = 8;
-        for (int i = 0; i < kFrames; ++i) in.inject(frame);
-        const int draws = rx.take();
-        std::printf("  rope forward, %5zu B value: %d rx draws / %d frames\n", n, draws, kFrames);
-        check(out.sent == kFrames, "every frame was forwarded");
-        check(draws == 0, "a 4-link rope forward gathers on the stack: no rx draw");
+        const auto draws_for = [&](std::size_t links) {
+            in.inject(frame, links);  // warm: one-time link state lands here, not in the count
+            (void)rx.take();
+            out.sent = 0;
+            for (int i = 0; i < kFrames; ++i) in.inject(frame, links);
+            check(out.sent == kFrames, "every frame was forwarded");
+            check(out.bytes == want, "a rope forward's bytes match the contiguous frame's");
+            return rx.take();
+        };
+
+        const int few = draws_for(4);
+        std::printf("  rope forward, %5zu B value, 4 links: %d rx draws / %d frames\n", n, few,
+                    kFrames);
+        check(few == 0, "a 4-link rope forward gathers on the stack: no rx draw");
+
+        // Past kFwdStackRopeLinks: a dozen links put one cut in most regions.
+        const int wide = draws_for(12);
+        std::printf(
+            "  rope forward, %5zu B value, 12 links (%zu entries): %d rx draws / %d frames\n", n,
+            out.iov_entries, wide, kFrames);
+        check(out.iov_entries > tr::net::kFwdMaxIov, "the 12-link frame overflows the stack table");
+        check(out.iov_entries <= 2 * tr::net::kFwdMaxIov, "and fits the first spill block");
+        check(wide == kFrames, "an overflowing rope forward draws ONE block per frame");
+
+        // One link per byte: the widest split; only the bytes are pinned.
+        (void)draws_for(frame.size());
     }
 }
 
