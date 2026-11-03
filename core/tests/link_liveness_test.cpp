@@ -398,8 +398,10 @@ void test_standing_binding_selfheals() {
     check(dropped_tx(net, "net/fake-client/a") == drops_before + 1,
           "an op on a RECONNECTING link is dropped and counted");
     check(elapsed < 4s, "and it failed FAST — no connect_timeout wait on a healing link");
-    script.script(false);  // retry #1 concludes down → backoff (1 ms)
-    check(script.await_attempts(3), "the loop retried after the backoff interval");
+    // No app clock drives this link (no `sweep` call), so that op, an event, released the
+    // next attempt (#2304): retry #1 concludes down and retry #2 follows at once.
+    script.script(false);
+    check(script.await_attempts(3), "the op on the healing link released the next retry");
     script.script(true);  // retry #2 succeeds
     check(await_state(node, "/net/fake-client/a", link_state_t::UP),
           "self-heal reaches UP again (up → reconnecting → up)");
@@ -472,6 +474,109 @@ void test_remove_while_healing_tears_down() {
     check(!node.find(path_t::parse("/net/fake-client/a")->key()).has_value(),
           "the vertex is retired — no ghost engine keeps publishing");
     check(g_socks_alive.load() == 0, "no socket survives the removal");
+}
+
+/**
+ * @brief #2304 — the heal's retries are spaced by `backoff` on the APPLICATION's clock: a fake
+ *        `now` passed to `sweep` is the only time the engine sees, and a pending reconnect
+ *        always answers a non-zero next-due time.
+ */
+void test_backoff_runs_on_the_app_now() {
+    std::printf("#2304: backoff is compared against the app's now through sweep:\n");
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_fake_engine_module(net, script);
+    const script_guard_t guard{script};  // bounded teardown even on a failing test
+    (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", /*backoff_ms=*/100));
+    tr::net::transport_t* const link = tr::testing::link_of(net, "net/fake-client/a");
+    const auto attempts = [&] {
+        const std::lock_guard l(script.m);
+        return script.attempts;
+    };
+
+    check(link->sweep(1000, 1000) == 0, "a dormant link answers nothing due");
+    check(net.acquire_link("net/fake-client/a").has_value(), "acquire_link takes the hold");
+    script.script(true);
+    check(await_state(node, "/net/fake-client/a", link_state_t::UP), "the link comes UP");
+
+    // The loss starts the heal's first attempt at once; it fails.
+    script.script(false);
+    if (!script.built.empty()) script.built[0]->die();
+    check(script.await_attempts(2), "the loss started the first retry");
+    check(await_state(node, "/net/fake-client/a", link_state_t::RECONNECTING),
+          "the failed retry leaves the link RECONNECTING");
+
+    check(link->sweep(1000, 1000) == 1100, "the first sweep stamps the wait: now + backoff");
+    check(link->sweep(1099, 1099) == 1100, "one tick short of backoff: still due at the stamp");
+    // The app drives the clock now, so traffic no longer starts retries.
+    const std::byte frame[1] = {std::byte{0x00}};
+    link->send(frame);
+    check(net.acquire_link("net/fake-client/a").has_value(), "a second standing binding");
+    check(attempts() == 2, "neither the op nor the acquire started an attempt mid-backoff");
+
+    script.script(false);
+    check(link->sweep(1100, 1100) == 1200,
+          "backoff elapsed on the app's clock: the retry starts, the next is stamped");
+    check(script.await_attempts(3), "...and the factory ran the retry");
+    check(await_state(node, "/net/fake-client/a", link_state_t::RECONNECTING),
+          "the retry failed: still RECONNECTING");
+    check(link->sweep(1150, 1150) == 1200, "the next retry waits for its own backoff");
+    check(attempts() == 3, "no attempt before it");
+
+    script.script(true);
+    check(link->sweep(5000, 5000) == 5100,
+          "a late sweep starts the retry at once and still answers a time after now");
+    check(await_state(node, "/net/fake-client/a", link_state_t::UP), "the heal reaches UP");
+    check(link->sweep(5100, 5100) == 0, "an UP link with an idle socket answers nothing due");
+    check(attempts() == 4, "four attempts in all: no retry ran outside the app's clock");
+    (void)net.release_link("net/fake-client/a");
+    (void)net.release_link("net/fake-client/a");
+}
+
+/**
+ * @brief #2304 — with no `sweep` ever called, a standing binding still heals: each op or
+ *        acquire on the reconnecting link starts one attempt, and nothing else does (no spin).
+ */
+void test_unclocked_heal_retries_on_events() {
+    std::printf("#2304: with no app clock, a heal retries on events and never spins:\n");
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_fake_engine_module(net, script);
+    const script_guard_t guard{script};  // bounded teardown even on a failing test
+    (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", /*backoff_ms=*/1));
+    tr::net::transport_t* const link = tr::testing::link_of(net, "net/fake-client/a");
+
+    script.script(false);
+    check(net.acquire_link("net/fake-client/a").has_value(), "acquire_link takes the hold");
+    check(await_state(node, "/net/fake-client/a", link_state_t::RECONNECTING),
+          "the acquire's dial failed under a standing binding: RECONNECTING");
+    // A spinning retry would dial thousands of times in this window; a time-driven one,
+    // with backoff at 1 ms, hundreds. The engine has no clock, so it dials none.
+    const auto until = std::chrono::steady_clock::now() + 50ms;
+    while (std::chrono::steady_clock::now() < until) std::this_thread::yield();
+    {
+        const std::lock_guard l(script.m);
+        check(script.attempts == 1, "no event, no attempt: the heal waits without a timer");
+    }
+
+    script.script(false);
+    const std::byte frame[1] = {std::byte{0x00}};
+    link->send(frame);
+    check(script.await_attempts(2), "an op on the reconnecting link started one retry");
+    script.script(true);
+    check(net.acquire_link("net/fake-client/a").has_value(), "a second standing binding");
+    check(await_state(node, "/net/fake-client/a", link_state_t::UP),
+          "the acquire started the next retry, which came UP");
+    {
+        const std::lock_guard l(script.m);
+        check(script.attempts == 3, "one attempt per event");
+    }
+    (void)net.release_link("net/fake-client/a");
+    (void)net.release_link("net/fake-client/a");
 }
 
 /** @brief The `:subscribers[N]` eviction sentinel — an empty `STATUS` (RFC-0009 §D.1). */
@@ -708,6 +813,10 @@ void test_builtin_tcp_kind_runs_through_the_engine() {
           "the remote hangup is seen and, with a standing binding held, publishes RECONNECTING");
     peer = std::make_unique<tr::net::transport_tcp_server>(port);
     check(peer->ok(), "a replacement listener bound the same port (SO_REUSEADDR)");
+    // The loss started one attempt, which may have run before the new listener bound. No app
+    // clock drives this link, so an op is the event that starts the next one (#2304).
+    const std::byte frame[1] = {std::byte{0x00}};
+    link->send(frame);
     check(await_state(node, "/net/tcp-client/a", link_state_t::UP),
           "the RE-RUN built-in factory produced a fresh live socket — UP again, same vertex");
     check(node.find(path_t::parse("/net/tcp-client/a")->key()).has_value(),
@@ -950,6 +1059,8 @@ int main() {
     test_standing_binding_selfheals();
     test_release_during_heal_stops_retry();
     test_remove_while_healing_tears_down();
+    test_backoff_runs_on_the_app_now();
+    test_unclocked_heal_retries_on_events();
     test_routed_subscription_holds_the_link();
     test_each_routed_subscription_is_one_hold();
     test_retiring_the_producer_releases_its_holds();

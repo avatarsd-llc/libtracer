@@ -36,6 +36,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `sweep(now, deadline)` (it ignores `deadline`; its windows are its own configured spans) and
   returns the next armed deadline. The session and the liveness `poll` reported are
   `link_up()` and `state()`.
+- **A self-heal link's retries run on the application's `now`, not a timer (#2304).** The
+  `self_heal_link_t` worker no longer waits `backoff` with a timed wait. A loss starts the
+  heal's first attempt; each later attempt waits until the `now` passed to `sweep` (directly or
+  through `transport_vertex_t::sweep`) reaches `backoff` after the first call that saw the wait,
+  and `sweep` answers that time, never 0, while a reconnect is pending. `backoff` is therefore
+  read in `now`'s units (milliseconds, the key's unit). A link whose application never calls
+  `sweep` retries on events instead: each op or `acquire_link` on a `reconnecting` link starts
+  one attempt, and nothing else does, so it never spins. After the first `sweep` call, ops and
+  acquires no longer start retries. The worker thread stays, as the one dialer, until the dial
+  can run without blocking (#2147); `connect_timeout` is still handed to the factory and not
+  yet compared against `now`.
 
 ### Added
 

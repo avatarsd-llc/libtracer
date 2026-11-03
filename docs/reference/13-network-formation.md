@@ -353,7 +353,8 @@ machine managed automatically (RFC-0014).
   wait" awaits `up` on the connection vertex — which resolves specifically when liveness
   reaches `up` and returns `link-down` on terminal failure — and sends after it.
 - **Self-healing is the retry loop toward that target, and runs only while refcount >
-  0.** Loss while in use re-dials with `backoff`. A one-shot op's transient hold is
+  0.** Loss while in use re-dials with `backoff`, spaced on the application's `now`
+  ([#2304](https://github.com/avatarsd-llc/libtracer/issues/2304)). A one-shot op's transient hold is
   released **before** self-heal is evaluated, so a lone one-shot whose dial fails drops
   the refcount to 0 and the link re-dormants with no background retry.
 - **A permanently-unreachable `DIAL` peer with a standing binding retries

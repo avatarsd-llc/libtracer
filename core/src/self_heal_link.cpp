@@ -6,12 +6,12 @@
  * the state machine; this file is the concurrency: one worker thread per engine that is
  * the sole dialer and the sole liveness publisher, a corpse list that keeps socket
  * destruction (a recv-thread join) off the notifier thread, and a generation stamp that
- * keeps a stale corpse's late down-report from killing a healed successor.
+ * keeps a stale corpse's late down-report from killing a healed successor. The worker
+ * waits on no timer: an event or the application's `now` releases each attempt (#2304).
  */
 
 #include "libtracer/self_heal_link.hpp"
 
-#include <chrono>
 #include <optional>
 #include <utility>
 
@@ -108,25 +108,38 @@ transport_drop_stats_t self_heal_link_t::drop_stats() const noexcept {
 }
 
 std::uint64_t self_heal_link_t::sweep(std::uint64_t now, std::uint64_t deadline) {
+    sweep_t sw{.now = now, .deadline = deadline};
     sock_ref_t s;
     {
         const std::lock_guard l(m_);
+        clocked_ = true;  // from here on the app's `now`, not traffic, spaces the retries
         s = inner_;
+        // A heal waits for `backoff` on the app's clock (#2304). The first call that finds the
+        // wait stamps it; one at or past the stamp releases the attempt and stamps the next, so
+        // a pending reconnect always answers a time strictly after `now`.
+        if (state_ == link_state_t::RECONNECTING && refs_ > 0) {
+            if (retry_at_ == 0) {
+                retry_at_ = now + settings_.backoff_ms;
+            } else if (!attempt_due_ && now >= retry_at_) {
+                retry_at_ = now + settings_.backoff_ms;
+                attempt_due_ = true;
+                ensure_worker_locked();
+                cv_.notify_all();
+            }
+            sw.due(retry_at_);
+        }
     }
-    return s ? s->link->sweep(now, deadline) : 0;
+    if (s) sw.due(s->link->sweep(now, deadline));
+    return sw.next;
 }
 
 void self_heal_link_t::acquire() {
     const std::lock_guard l(m_);
     if (stop_) return;
     ++refs_;
-    // A standing binding demands reachability: kick a dormant link toward UP without
-    // blocking the caller (the §4 "bring it up and wait" verb is `await` on the vertex).
-    if (state_ == link_state_t::DORMANT) {
-        wake_requested_ = true;
-        ensure_worker_locked();
-        cv_.notify_all();
-    }
+    // A standing binding demands reachability: kick the link toward UP without blocking the
+    // caller (the §4 "bring it up and wait" verb is `await` on the vertex).
+    demand_locked();
 }
 
 void self_heal_link_t::release() {
@@ -140,6 +153,7 @@ void self_heal_link_t::release() {
         park_locked(std::move(inner_));
         live_gen_ = 0;
         state_ = link_state_t::DORMANT;
+        attempt_due_ = false;  // a retry `sweep` released before the heal came up is stale
         publish_pending_ = true;
         ensure_worker_locked();
     }
@@ -203,17 +217,25 @@ self_heal_link_t::sock_ref_t self_heal_link_t::ready_socket() {
     if (stop_) return {};
     if (state_ == link_state_t::UP && inner_) return inner_;
     // Every other state is link-down, answered at once (RFC-0014 Amendment 5): the op never
-    // waits, its frame is the caller's counted drop, and a DORMANT link is kicked toward UP on
-    // the worker. DIALING and RECONNECTING are already driving there. A caller that must
-    // bring the link up and wait awaits `up` on the connection vertex. The worker's own
-    // publish fan-out never kicks: a subscriber of this link's liveness routed through this
-    // link would otherwise re-dial the link it just put to rest.
-    if (state_ == link_state_t::DORMANT && detail::this_thread_id() != worker_id_) {
-        wake_requested_ = true;
-        ensure_worker_locked();
-        cv_.notify_all();
-    }
+    // waits, its frame is the caller's counted drop, and the link is kicked toward UP on the
+    // worker. A caller that must bring the link up and wait awaits `up` on the connection
+    // vertex. The worker's own publish fan-out never kicks: a subscriber of this link's
+    // liveness routed through this link would otherwise re-dial the link it just put to rest,
+    // or retry it in a loop.
+    if (detail::this_thread_id() != worker_id_) demand_locked();
     return {};
+}
+
+void self_heal_link_t::demand_locked() {
+    // A DORMANT link dials on demand (Amendment 5). A RECONNECTING one retries on the event only
+    // while no app clock drives it (#2304): once `sweep` has run, its `now` spaces the attempts
+    // by `backoff`, and traffic must not bypass that. DIALING is already driving toward UP.
+    if (state_ != link_state_t::DORMANT && (state_ != link_state_t::RECONNECTING || clocked_))
+        return;
+    attempt_due_ = true;
+    retry_at_ = 0;  // an attempt released off the app's clock: the next wait is stamped afresh
+    ensure_worker_locked();
+    cv_.notify_all();
 }
 
 void self_heal_link_t::worker_entry(void* self) {
@@ -291,8 +313,12 @@ void self_heal_link_t::on_socket_down(sock_t& sock) {
     live_gen_ = 0;
     // Loss while in use → self-heal (refcount > 0); loss with nothing bound → dormant,
     // no background retry (§4). State flips HERE so ops fail fast immediately; the
-    // publish is the worker's (sole publisher — this runs on the socket's own thread).
+    // publish is the worker's (sole publisher — this runs on the socket's own thread). The
+    // loss is the event that releases the heal's first attempt; later ones wait for `backoff`
+    // on the app's clock, or for the next event when no clock drives the link (#2304).
     state_ = refs_ > 0 ? link_state_t::RECONNECTING : link_state_t::DORMANT;
+    attempt_due_ = refs_ > 0;
+    retry_at_ = 0;
     publish_pending_ = true;
     ensure_worker_locked();
     cv_.notify_all();
@@ -342,9 +368,12 @@ void self_heal_link_t::worker_main() {
     std::unique_lock l(m_);
     worker_id_ = detail::this_thread_id();
     for (;;) {
+        // No timeout: every wake is an event, so a dormant or backing-off link costs no
+        // wakeup at all (#2304). An attempt is released by a demand (`demand_locked`), by a
+        // loss, or by the app's `now` passing `retry_at_` (`sweep`).
         cv_.wait(l, [&] {
-            return stop_ || corpses_ != nullptr || publish_pending_ || wake_requested_ ||
-                   state_ == link_state_t::RECONNECTING;
+            return stop_ || corpses_ != nullptr || publish_pending_ || attempt_due_ ||
+                   (state_ == link_state_t::RECONNECTING && refs_ == 0);
         });
         if (stop_) break;
         if (corpses_ != nullptr) {
@@ -356,44 +385,30 @@ void self_heal_link_t::worker_main() {
             publish_unlocked(l, state_);
             continue;
         }
-        if (wake_requested_) {
-            wake_requested_ = false;
-            if (state_ != link_state_t::DORMANT) continue;  // stale kick
-            // dormant → dialing: the demand dial (first-ever or resumed), §4.
-            state_ = link_state_t::DIALING;
-            publish_unlocked(l, link_state_t::DIALING);
-            if (stop_) break;
-            const bool up = attempt_locked(l);
-            if (stop_) break;
-            if (up) {
-                state_ = link_state_t::UP;
-                publish_unlocked(l, link_state_t::UP);
-            } else {
-                // A lone one-shot's failed dial re-dormants with NO background retry;
-                // only a standing binding (refs > 0) triggers self-heal (§4).
-                state_ = refs_ > 0 ? link_state_t::RECONNECTING : link_state_t::DORMANT;
-                publish_unlocked(l, state_);
-            }
-            continue;
-        }
-        // state_ == RECONNECTING: one self-heal tick. Runs iff refcount > 0 (§4);
-        // retries FOREVER — no attempt cap, no terminal failure state.
-        if (refs_ == 0) {
+        if (state_ == link_state_t::RECONNECTING && refs_ == 0) {
+            // The last standing release stops the heal (§4): dormant, no further attempt.
+            attempt_due_ = false;
             state_ = link_state_t::DORMANT;
             publish_unlocked(l, link_state_t::DORMANT);
             continue;
         }
+        attempt_due_ = false;
+        if (state_ == link_state_t::DORMANT) {
+            // dormant → dialing: the demand dial (first-ever or resumed), §4.
+            state_ = link_state_t::DIALING;
+            publish_unlocked(l, link_state_t::DIALING);
+            if (stop_) break;
+        } else if (state_ != link_state_t::RECONNECTING) {
+            continue;  // a stale release: the link came up meanwhile
+        }
         const bool up = attempt_locked(l);
         if (stop_) break;
-        if (up) {
-            state_ = link_state_t::UP;
-            publish_unlocked(l, link_state_t::UP);
-            continue;
-        }
-        // The backoff wait between attempts — interruptible by stop and by the last
-        // standing release (which dormants at the top of the next iteration).
-        cv_.wait_for(l, std::chrono::milliseconds(settings_.backoff_ms),
-                     [&] { return stop_ || refs_ == 0; });
+        // A failed attempt heals only under a standing binding, forever (§4: no attempt cap,
+        // no terminal state); a lone one-shot's failed dial re-dormants with NO retry.
+        state_ = up          ? link_state_t::UP
+                 : refs_ > 0 ? link_state_t::RECONNECTING
+                             : link_state_t::DORMANT;
+        publish_unlocked(l, state_);
     }
     worker_id_ = {};
 }

@@ -182,7 +182,10 @@ registered with `transport_kind_traits_t::self_heal_dial` gets DORMANT creation 
 socket), demand dial (an op on a link that is not `up` is a counted drop that starts one
 attempt, and nothing waits for it: RFC-0014 Amendment 5), self-heal with `backoff` while a
 standing binding (`acquire_link`/`release_link`) holds the link, and close-to-dormant on
-the last release. The BUILT-IN point-to-point kinds `udp`, `tcp` and `ws` are opted in
+the last release. The engine reads no clock: the retry spacing is `backoff` compared against
+the `now` the application passes to `transport_vertex_t::sweep`, and a link no `sweep` call
+reaches retries on its next op or `acquire_link` instead
+([#2304](https://github.com/avatarsd-llc/libtracer/issues/2304)). The BUILT-IN point-to-point kinds `udp`, `tcp` and `ws` are opted in
 ([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548)) — on a build that carries the
 engine (`kSelfHealLinks = true`, opt-in since v0.17.0,
 [#1670](https://github.com/avatarsd-llc/libtracer/issues/1670)) their DIAL connections are

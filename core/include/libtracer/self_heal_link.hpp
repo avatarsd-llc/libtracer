@@ -35,7 +35,8 @@ namespace tr::net {
 
 /** @brief The engine's own retry interval when the SPEC's `backoff` is 0/absent
  *         (RFC-0014 §4: an engine default, overridden by config — never a synthetic
- *         limit; the retry itself runs forever while a standing binding holds). */
+ *         limit; the retry itself runs forever while a standing binding holds). It is
+ *         compared against the application's `now` (#2304), so it is in `now`'s units. */
 inline constexpr std::uint32_t kDefaultBackoffMs = 1000;
 
 /** @brief The value handed to the kind's factory in `conn_settings_t` when the SPEC's
@@ -66,9 +67,10 @@ inline constexpr std::uint32_t kDefaultConnectTimeoutMs = 5000;
  * - `DIALING` → `UP` on a successful construct; → `RECONNECTING` (a standing binding
  *   holds) or back to `DORMANT` (none does — a lone one-shot's failed dial triggers NO
  *   background retry, §4's transient-hold rule) on a failed one.
- * - `UP` → `RECONNECTING` on socket loss with refcount > 0: the self-heal retry loop —
- *   an attempt per `backoff` interval, FOREVER (no give-up bound and no terminal state,
- *   the §4 no-synthetic-limits ruling). Ops on a `RECONNECTING` link fail fast
+ * - `UP` → `RECONNECTING` on socket loss with refcount > 0: the self-heal retry loop,
+ *   FOREVER (no give-up bound and no terminal state, the §4 no-synthetic-limits ruling).
+ *   The loss starts the first attempt; each later one waits for `backoff` on the
+ *   application's clock (see @ref sweep). Ops on a `RECONNECTING` link fail fast
  *   (dropped and counted), never block on a dead peer.
  * - `UP` → `DORMANT` on socket loss with refcount 0, and on the LAST @ref release
  *   (§4: refcount → 0 → close socket, go dormant, stop retrying).
@@ -86,9 +88,19 @@ inline constexpr std::uint32_t kDefaultConnectTimeoutMs = 5000;
  * background retry at refcount 0, re-dormant with no retry on loss (or on a failed
  * wake-dial) at refcount 0, and close-plus-re-dormant on the last STANDING release.
  *
+ * **Time.** The engine reads no clock and arms no timer (#2304). Its only time is the
+ * `now` the application passes to @ref sweep, and the retry spacing is `backoff` compared
+ * against it. A link whose application never calls @ref sweep still heals, on events
+ * instead of time: each op, each @ref acquire, starts one attempt while the link is
+ * `RECONNECTING`. Once @ref sweep has run, those events no longer start retries, so
+ * traffic cannot bypass the spacing.
+ *
  * **Threading.** One worker thread per engine, started lazily on the first transition
  * and joined by @ref stop / the destructor; it is the only thread that dials and the only
- * publisher of liveness, so transitions publish in order. Dead sockets are reaped off the
+ * publisher of liveness, so transitions publish in order. It sleeps until an event
+ * wakes it, never on a timeout, so a dormant or backing-off link costs no wakeup. The
+ * factory's dial blocks it, so the thread stays until a dial can run without blocking
+ * (#2147's wait module). Dead sockets are reaped off the
  * notifier thread (a socket's down-notifier fires ON its own receive thread, which its
  * destructor joins — reaping in place would self-deadlock). The engine takes no lock of
  * `transport_vertex_t` or the router; the publisher writes the graph vertex directly, so
@@ -158,9 +170,10 @@ class self_heal_link_t final : public transport_t {
      * @brief A STANDING binding takes its hold (RFC-0014 §4: a routed subscription or
      *        `await` that needs the peer reachable).
      *
-     * Non-blocking: a dormant link is kicked toward `UP` (the worker dials); the caller
-     * that must WAIT for `UP` uses `await` on the connection vertex (S6's verb). While
-     * refcount > 0 the engine self-heals on loss, forever.
+     * Non-blocking: a dormant link is kicked toward `UP` (the worker dials), and so is a
+     * `RECONNECTING` one whose application has not called @ref sweep; the caller that must
+     * WAIT for `UP` uses `await` on the connection vertex (S6's verb). While refcount > 0
+     * the engine self-heals on loss, forever.
      */
     void acquire();
 
@@ -215,8 +228,24 @@ class self_heal_link_t final : public transport_t {
      *         (`dropped_tx`). A healed link's previous socket takes its counts with it. */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override;
 
-    /** @brief The application's clock, forwarded to the CURRENT socket (#2198, #2481).
-     *         A frozen peer it closes goes down as any other, so the engine heals it. */
+    /**
+     * @brief The application's clock (#2481): spaces the heal's attempts by `backoff`, and
+     *        forwards to the CURRENT socket (#2198), whose frozen peer goes down as any other.
+     *
+     * While the link is `RECONNECTING` under a standing binding, the first call stamps the
+     * wait at `now + backoff` and answers it; a call at or past the stamp starts the next
+     * attempt and answers `now + backoff` again (#2304). So a pending reconnect always
+     * answers a time after `now`, never 0, and an application that sleeps until the answer
+     * wakes for its retry. The heal's first attempt after a loss is started by the loss, so
+     * between that loss and the next call the link has nothing to answer yet: an
+     * application that wants a lost link retried within a bound caps its sleep at that
+     * bound, as it does for a peer that starts owing bytes (@ref transport_vertex_t::sweep).
+     * `backoff` is read in @p now's units: the key is spelled in milliseconds, so a node
+     * with self-heal links passes `now` in milliseconds.
+     *
+     * The first call also hands the retry spacing to the application for good: from then on
+     * an op or an @ref acquire no longer starts a retry on a `RECONNECTING` link.
+     */
     std::uint64_t sweep(std::uint64_t now, std::uint64_t deadline) override;
 
    private:
@@ -323,8 +352,13 @@ class self_heal_link_t final : public transport_t {
     static void worker_entry(void* self);
 
     /** @brief The op-side gate: the §4 transient hold. Returns the socket to send on, or
-     *         nullptr = drop (any state but `UP`; a `DORMANT` link is kicked first). */
+     *         nullptr = drop (any state but `UP`; the link is kicked first, see
+     *         `demand_locked`). */
     [[nodiscard]] sock_ref_t ready_socket();
+
+    /** @brief An op or a standing binding demands the link: start an attempt on a `DORMANT`
+     *         link, or on a `RECONNECTING` one that no app clock drives. Caller holds `m_`. */
+    void demand_locked();
 
     /** @brief Park @p dead on the corpse list (it adopts the hold); caller holds `m_`. */
     void park_locked(sock_ref_t dead) noexcept;
@@ -350,7 +384,14 @@ class self_heal_link_t final : public transport_t {
     link_state_t state_ = link_state_t::DORMANT; /**< @brief The machine (DIAL subset). */
     std::uint32_t refs_ = 0;                     /**< @brief Standing bindings (§4). */
     std::uint64_t live_gen_ = 0;                 /**< @brief Generation of `inner_` (0 = none). */
-    bool wake_requested_ = false;                /**< @brief A dormant link was demanded. */
+    bool attempt_due_ = false;                   /**< @brief An attempt is released: a dormant
+                                                             link was demanded, or a heal's
+                                                             wait ended. */
+    std::uint64_t retry_at_ = 0;                 /**< @brief The app's `now` at which the heal's
+                                                             next attempt is due; 0 = not
+                                                             stamped yet (#2304). */
+    bool clocked_ = false;                       /**< @brief @ref sweep has run: the app's
+                                                             `now` spaces the retries. */
     bool publish_pending_ = false;               /**< @brief A non-worker thread changed `state_`;
                                                              the worker owes the publish. */
     bool stop_ = false;                          /**< @brief Terminal; set by @ref stop. */
