@@ -14,7 +14,9 @@
  *
  * ## The axis
  *
- * **Link count**, at a fixed registry size and a fixed frame. A one-link rope is the control:
+ * **Link count**, at a fixed registry size, crossed with the **payload** (4 B, 64 B, 1, 4 and
+ * 16 KiB): a large payload puts every cut inside a kept region, which is what pushes the hop's
+ * gather past its stack table (#2471). A one-link rope is the control:
  * same bytes, same route, same registry, but nothing straddles, so it isolates the cost of the
  * rope shape itself from the cost of the routing decision. Sweeping to one-link-per-byte gives
  * the worst case a real reassembly path can produce.
@@ -48,6 +50,7 @@
 
 #include "bench_common.hpp"
 #include "libtracer/graph.hpp"
+#include "libtracer/packed_path.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -95,13 +98,16 @@ struct rope_transport_t : capture_transport_t {
     void deliver(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
 };
 
+/**
+ * @brief A packed `PATH` over @p segs (RFC-0018: one `[u8 len][bytes]` record per segment).
+ *
+ * Spelled with the library's own record emitter. This bench once spelled each segment as a
+ * nested `NAME` TLV, the pre-RFC-0018 form: the router refused every frame as an unroutable
+ * address and the bench timed the refusal reply instead of the forward (#2471).
+ */
 void emit_path(std::vector<std::byte>& out, std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (const std::string_view s : segs) {
-        tr::wire::emit_tlv(
-            body, type_t::NAME, opt_t{},
-            std::span<const std::byte>(reinterpret_cast<const std::byte*>(s.data()), s.size()));
-    }
+    for (const std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
 }
 
@@ -143,7 +149,7 @@ std::vector<std::byte> make_fwd(std::initializer_list<std::string_view> dst,
  * A frame arrives on "in" addressed to "out": the hop resolves the mount, strips it from
  * `dst`, prepends the inbound run to `src`, and sends on "out". No terminus, no local vertex.
  */
-void run_point(std::size_t links) {
+[[nodiscard]] bool run_point(std::size_t links, std::size_t pay_len) {
     graph_t graph;
     fwd_router_t router(graph);
     rope_transport_t in_link;
@@ -155,11 +161,10 @@ void run_point(std::size_t links) {
     router.attach_link("net/ws-client/out", out_link);
     router.attach_link("net/ws-server/in", in_link);
 
-    const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
-                                  std::byte{0xEF}};
+    const std::vector<std::byte> payload(pay_len, std::byte{0xDE});
     const std::vector<std::byte> frame =
         make_fwd({"net", "ws-client", "out", "sensor", "temp"}, {"reply"},
-                 std::span<const std::byte>(payload, 4));
+                 std::span<const std::byte>(payload.data(), payload.size()));
 
     // Built ONCE, outside the timed window. A rope-delivering transport already owns its
     // buffers; charging their allocation to the hop would measure this fixture, not the router.
@@ -196,17 +201,23 @@ void run_point(std::size_t links) {
     std::printf("NOTE links=%zu (rope has %zu) batch=%zu samples=%zu\n", links, proto.link_count(),
                 batch, batches);
     // A hop that forwarded NOTHING measures the reject path, which would look like a win.
-    if (out_link.sends == 0) std::printf("WARN links=%zu forwarded NOTHING\n", links);
+    // It is a failure, not a note: a WARN line alone let this bench time the refusal path
+    // unnoticed (#2471).
+    if (out_link.sends == 0) std::printf("FAIL links=%zu forwarded NOTHING\n", links);
+    return out_link.sends != 0;
 }
 
 }  // namespace
 
 int main() {
     std::printf("FWD forward hop over a MULTI-LINK ROPE (on_frame_rope; #668):\n");
+    bool ok = true;
     for (const std::size_t links : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8},
                                     std::size_t{16}, std::size_t{32}, std::size_t{64}}) {
-        run_point(links);
+        for (const std::size_t pay : {std::size_t{4}, std::size_t{64}, std::size_t{1024},
+                                      std::size_t{4096}, std::size_t{16384}})
+            ok = run_point(links, pay) && ok;
     }
     std::printf("\n(sink=%zu)\n", sink);
-    return 0;
+    return ok ? 0 : 1;
 }
