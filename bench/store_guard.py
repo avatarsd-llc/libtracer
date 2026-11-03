@@ -165,7 +165,27 @@ def density_report(doc: dict, candidates: list[str], suite_substr: str = "") -> 
         per_suite[suite] = {"gap": gap, "at": at, "trusted": len(ok),
                             "banked": len(entries)}
     worst = max((s["gap"] for s in per_suite.values()), default=len(candidates))
-    return {"gap": worst, "suites": per_suite, "candidates": len(candidates)}
+    return {"gap": worst, "suites": per_suite, "candidates": len(candidates),
+            "tip": candidates[0] if candidates else None,
+            "tip_banked": tip_banked(doc, candidates, suite_substr)}
+
+
+def tip_banked(doc: dict, candidates: list[str], suite_substr: str = "") -> bool:
+    """@brief Did the newest bench-relevant `main` commit bank a point in EVERY suite?
+
+    Any point counts, a flagged one included: the question is whether that commit's
+    measurement ran to completion, not whether its sample is coverage. A tip with no
+    point is one whose run failed, was cancelled or was superseded, and the gap bound
+    alone cannot see it: a broken bench on `main` leaves the store a few commits behind,
+    inside the bound, while every push run reds (2026-10-21 to 10-25, #2447). An empty
+    history has nothing to measure and reads as banked; an empty store reads as not.
+    """
+    if not candidates:
+        return True
+    suites = [entries for suite, entries in (doc.get("entries") or {}).items()
+              if not suite_substr or suite_substr.lower() in suite.lower()]
+    return bool(suites) and all(any(entry_sha(e) == candidates[0] for e in entries)
+                                for entries in suites)
 
 
 def compiler_of(extra: str | None) -> str | None:
@@ -360,7 +380,11 @@ def _cmd_density(args: argparse.Namespace) -> int:
     _summary(["### bench-local sample density",
               f"Worst gap **{rep['gap']}** bench-relevant `main` commits behind HEAD "
               f"(bound {args.max_gap}) — {verdict}."])
-    _gh_output(due="true" if due else "false", gap=rep["gap"])
+    if rep["tip"] and not rep["tip_banked"]:
+        print(f"store_guard: the newest bench-relevant commit {rep['tip'][:8]} has no "
+              f"point — its run failed, was cancelled or was superseded")
+    _gh_output(due="true" if due else "false", gap=rep["gap"], tip=rep["tip"] or "",
+               tip_banked="true" if rep["tip_banked"] else "false")
     return 1 if (due and args.mode == "fail") else 0
 
 

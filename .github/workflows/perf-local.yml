@@ -51,7 +51,8 @@
 # point on 2026-08-15). Sixteen consecutive merges once banked nothing, which is how
 # the compact-forward +41% step became a RANGE instead of a commit. So a daily
 # `schedule:` asks `store_guard.py density` how far the store lags the bench-relevant
-# history of `main` and measures HEAD when the gap exceeds the bound. The guarantee
+# history of `main` and measures its newest bench-relevant commit when the gap exceeds
+# the bound, or when that commit has no point at all (#2447, the tip rule). The guarantee
 # is a BOUND ON THE GAP, not a point per commit: any regression range stays narrow
 # enough to bisect. Contaminated points do not count as coverage — a sample the A/A
 # pair flagged answers "what was the machine doing", not "what did the code cost".
@@ -161,6 +162,10 @@ jobs:
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
       (github.repository == 'avatarsd-llc/libtracer')
     runs-on: ubuntu-latest
+    # `actions: read` for the tip rule's "is a push run still pending" query (#2447).
+    permissions:
+      contents: read
+      actions: read
     # Measured healthy max 0.70 min, p50 0.67; the 4.40 max is a slow actions/checkout on
     # the 2026-08-19 incident day. 20 = ~4.5x the worst observed. Hosted runner, pure
     # banked-series validity checks. See core-ci.yml's header for the tree-wide policy.
@@ -193,16 +198,34 @@ jobs:
 
       # A branch push measures unconditionally — that is the primary leg and the density
       # check is only advice to it. A tag push measures only when its commit has no point
-      # yet. A schedule measures ONLY to close a gap, and a manual dispatch can override
-      # (a backfill `commit` always measures).
+      # yet. A schedule measures to close a gap, OR when the newest bench-relevant commit
+      # has no point at all (#2447), and a manual dispatch can override (a backfill
+      # `commit` always measures).
+      #
+      # THE TIP RULE (#2447). The gap bound alone let the nightly go green on 2026-10-23,
+      # 24 and 25 while every push run on `main` was red: a broken bench banks nothing, so
+      # the store stalls a few commits behind HEAD, inside the bound, and the catch-up
+      # skips. A nightly green then said nothing about whether `main` could be measured.
+      # So a tip whose run failed, was cancelled or was superseded is measured again by
+      # the nightly, which reds the same night if the bench is broken on `main`, and banks
+      # the missing point if the failure was the host's. A push run still queued or running
+      # will bank or red that tip itself, so the nightly leaves it alone and says so.
+      #
+      # A schedule measures the TIP, not HEAD, when HEAD is a later commit the paths
+      # filter skipped (docs, CI): their core/ and bench/ trees are the tip's by
+      # definition, and a point banked under a sha that is not a density candidate would
+      # never close the gap, so the next night would measure it again.
       - name: Decide whether this run measures
         id: decide
         env:
           DUE: ${{ steps.gap.outputs.due }}
+          TIP: ${{ steps.gap.outputs.tip }}
+          TIP_BANKED: ${{ steps.gap.outputs.tip_banked }}
           FORCED: ${{ inputs.force }}
           BACKFILL: ${{ inputs.commit }}
           EVENT: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           commit=""
@@ -213,8 +236,24 @@ jobs:
               exit 1
             }
           fi
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
           here="$(git rev-parse HEAD^{commit})"
+          catchup=false
+          if [ "$EVENT" = "schedule" ] && [ "${TIP_BANKED:-true}" = "false" ]; then
+            inflight="$(gh run list -R "$GITHUB_REPOSITORY" --workflow perf-local.yml \
+              --event push --branch main --limit 20 --json status \
+              --jq '[.[] | select(.status != "completed")] | length' || echo 0)"
+            if [ "${inflight:-0}" -gt 0 ]; then
+              echo "::notice::the newest bench-relevant commit ${TIP:0:8} has no point, but a push run on main is still pending and will bank or red it"
+            else
+              catchup=true
+              echo "::warning::the newest bench-relevant commit ${TIP:0:8} has no point (its run failed, was cancelled or was superseded) — measuring it now"
+            fi
+          fi
+          if [ "$EVENT" = "schedule" ] && { [ "$catchup" = true ] || [ "$DUE" = "true" ]; } \
+             && [ -n "${TIP:-}" ] && [ "$TIP" != "$here" ]; then
+            commit="$TIP"
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
           if [ "$EVENT" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
             if grep -q "\"$here\"" "$RUNNER_TEMP"/data*.js; then
               echo "measure=false" >> "$GITHUB_OUTPUT"
@@ -223,7 +262,7 @@ jobs:
               echo "measure=true" >> "$GITHUB_OUTPUT"
             fi
           elif [ "$EVENT" = "push" ] || [ "$FORCED" = "true" ] || [ -n "$commit" ] \
-             || [ "$DUE" = "true" ]; then
+             || [ "$DUE" = "true" ] || [ "$catchup" = true ]; then
             echo "measure=true" >> "$GITHUB_OUTPUT"
           else
             echo "measure=false" >> "$GITHUB_OUTPUT"
