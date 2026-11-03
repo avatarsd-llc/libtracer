@@ -34,6 +34,7 @@
 #include "libtracer/config.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_string.hpp"
+#include "libtracer/park.hpp"
 #include "libtracer/ws.hpp"
 
 namespace tr::net {
@@ -224,15 +225,16 @@ class sender_exit_t {
      * @brief Lower the tally, releasing everything this sender did to the drain, and wake
      *        the drain if this was its last sender.
      *
-     * The notify is this sender's last act, and the woken destructor may already be
-     * freeing the object. libstdc++ (the host's and the IDF toolchains') keys the wake on
-     * the tally's ADDRESS, in a waiter table of its own, and loads and stores nothing at
-     * it: the same address-only wake a mutex unlock ends with, which is what lets any
-     * `std::mutex` be destroyed by the thread that just locked it after another's unlock.
+     * The wake is this sender's last act, and the woken destructor may already be freeing
+     * the object. `tr::park_wake` keys the wake on the tally's ADDRESS, in a table of its
+     * own, and loads and stores nothing at it: the same address-only wake a mutex unlock
+     * ends with, which is what lets any `std::mutex` be destroyed by the thread that just
+     * locked it after another's unlock. It is not `std::atomic::notify_all`, whose
+     * libstdc++ waiter table costs 2 KB of static RAM on esp32c6 (#2507).
      */
     ~sender_exit_t() {
         if (tally_.fetch_sub(1, std::memory_order_release) == (kDrainWaiting | 1))
-            tally_.notify_all();
+            park_wake(tally_);
     }
 
     sender_exit_t(const sender_exit_t&) = delete;
@@ -478,11 +480,11 @@ esp_ws_client_link_t::~esp_ws_client_link_t() {
     // embedder-owned lifetime residual, not something this loop can widen its way into.
     //
     // The wait is on the tally (#2338): the bit says a drain is waiting, the last sender out
-    // under it wakes the drain, and `wait` returns at once if the count moved after the read
+    // under it wakes the drain, and `park_wait` returns at once if the count moved after the read
     // it was handed, so no wake is lost between the read and the block.
     std::uint32_t n = senders_.fetch_or(kDrainWaiting, std::memory_order_acquire);
     while ((n & ~kDrainWaiting) != 0) {
-        senders_.wait(n, std::memory_order_acquire);
+        park_wait(senders_, n, std::memory_order_acquire);
         n = senders_.load(std::memory_order_acquire);
     }
     // Every sender has left, so no writer holds the role: the close only returns what is

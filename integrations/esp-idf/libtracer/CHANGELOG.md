@@ -18,6 +18,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   of an oversized message instead of being swallowed by it. A TEXT frame is ignored, as core
   and `httpd_ws_link_t` ignore it, instead of being delivered as data. No new buffer: the
   fixed receive buffer stays the bound.
+- **The WS client no longer links libstdc++'s 2 KB atomic-wait table (#2507).** Its teardown
+  drain (#2338) and the shared egress module waited with `std::atomic::wait`, which put
+  `std::__detail::__waiter_pool_base::_S_for::__w` (2,048 B) into `.bss` on esp32c6 in v0.22.0.
+  Both now park through core's `tr::park_wait` / `tr::park_wake`; teardown still waits for
+  every sender in flight, with no clock and no spin.
 
 ### Changed (breaking)
 
