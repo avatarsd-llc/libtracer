@@ -209,10 +209,10 @@ if(NOT IDF_TARGET STREQUAL "linux")
             "CONFIG_LIBTRACER_WS_SERVER=y (it selects CONFIG_LIBTRACER_BUS_LINKS) if this node "
             "serves WebSocket. Ignore this if CONFIG_HTTPD_WS_SUPPORT is on for another reason.")
     endif()
-    # Chip targets: the esp_transport_ws-backed WS *client* link (esp_ws_client_link_t) — the
-    # embedded-native replacement for core's raw-socket ws_client_transport_t (which fails the
-    # handshake on lwIP silicon), the dial mirror of httpd_ws_link_t. Uses tcp_transport (core
-    # IDF), so gated on CONFIG_LIBTRACER_TRANSPORT_WS alone (no esp_http_server dependency).
+    # Chip targets: the tcp_transport-backed WS *client* link (esp_ws_client_link_t), framed by
+    # core's ws_framing_t (#2484) — the embedded-native replacement for core's raw-socket
+    # ws_client_transport_t (whose sendmsg egress lwIP rejects, #948), the dial mirror of
+    # httpd_ws_link_t. Uses tcp_transport (core IDF), so gated on CONFIG_LIBTRACER_TRANSPORT_WS alone (no esp_http_server dependency).
     # It is the ONLY ws dialer on a chip target since #947.
     if(CONFIG_LIBTRACER_TRANSPORT_WS)
         list(APPEND LIBTRACER_SRCS "esp_ws_client_link.cpp")

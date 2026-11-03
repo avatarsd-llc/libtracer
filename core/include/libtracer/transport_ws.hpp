@@ -53,8 +53,8 @@
  * because stacks are the scarce resource wherever this runs, but do not read that as
  * an invitation to run it on an MCU: on ESP-IDF the supported plane is the IDF-native
  * pair (tr::net::httpd_ws_link_t on esp_http_server, tr::net::esp_ws_client_link_t on
- * esp_transport_ws), and these two types are NOT COMPILED into an ESP-IDF chip build
- * at all. That is not a footprint preference — it is a correctness one: the
+ * esp_transport_tcp framed by ws_framing_t), and these two types are NOT COMPILED into an ESP-IDF
+ * chip build at all. That is not a footprint preference — it is a correctness one: the
  * scatter-gather egress underneath (posix_endpoint_t::write_all_iov) asks sendmsg for
  * MSG_NOSIGNAL, a flag lwIP defines but lwip_sendmsg rejects with EOPNOTSUPP, and the
  * failure is read as peer-gone, so on lwIP every data frame is silently dropped while

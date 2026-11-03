@@ -1,7 +1,7 @@
 /**
  * @file
- * @brief The host fake of `esp_transport_ws`'s inbound frame stream — see
- *        fake_esp_transport.hpp for what it models and why.
+ * @brief The host fake of `tcp_transport`'s byte stream, as a WebSocket server's end of
+ *        it — see fake_esp_transport.hpp for what it models and why.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -20,6 +20,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -31,43 +32,40 @@ namespace {
 
 /** @brief The whole fake's state — one connection at a time, as the link dials one. */
 struct state_t {
-    std::mutex m;                         /**< @brief Guards everything below. */
-    std::condition_variable cv;           /**< @brief Wakes a parked `poll_read`. */
-    std::vector<fake_ws::frame_t> frames; /**< @brief The scripted stream. */
-    std::size_t cur = 0;                  /**< @brief Index of the frame being served. */
-    std::size_t cur_off = 0;              /**< @brief Bytes of `frames[cur]` already served. */
-    /**
-     * @brief The frame whose header the accessors report — IDF's `frame_state`.
-     *
-     * Latched by a read and NOT cleared when the frame ends, exactly as
-     * `transport_ws.c` leaves `frame_state` standing until the next header is parsed.
-     */
-    ws_transport_opcodes_t last_op = WS_TRANSPORT_OPCODES_NONE;
-    bool last_fin = false;    /**< @brief That frame's FIN bit. */
-    int last_payload_len = 0; /**< @brief That frame's TOTAL payload length. */
+    std::mutex m;                /**< @brief Guards everything below. */
+    std::condition_variable cv;  /**< @brief Wakes a parked `poll_read`. */
+    std::vector<std::byte> wire; /**< @brief The scripted frames, encoded as a server sends. */
+    std::size_t wire_off = 0;    /**< @brief Bytes of `wire` already served. */
+    /** @brief The connection the scripted frames go to: the one upgraded last. */
+    esp_transport_handle_t stream = nullptr;
+    bool reject_upgrade = false; /**< @brief Answer handshakes with a wrong accept. */
+    int handshakes = 0;          /**< @brief Handshake requests received. */
 
-    bool connected = false; /**< @brief Between connect and close. */
-    int connects = 0;       /**< @brief Dial count. */
-    std::string ws_path;    /**< @brief The last dial's requested path. */
-    /** @brief The `headers` the last set_config carried; nullopt = the field was null. */
-    std::optional<std::string> headers;
-    /** @brief One entry per dial ENTERED, latched from `headers` — see dial_headers. */
+    int connects = 0;    /**< @brief Dial count. */
+    std::string ws_path; /**< @brief The last handshake's requested path. */
+    /** @brief One entry per handshake request — see dial_headers. */
     std::vector<std::optional<std::string>> dialed_headers;
     /** @brief What esp_transport_get_socket answers — see fake_ws::set_socket_fd. */
     int socket_fd = -1;
 
     /** @name Handle liveness and the blocking levers (#952, #1058). */
     /** @{ */
+    /** @brief One connection's own stream state: its handshake and its response. */
+    struct conn_t {
+        bool upgraded = false;       /**< @brief Its handshake request has been answered. */
+        std::vector<std::byte> resp; /**< @brief The `101` queued for it. */
+        std::size_t resp_off = 0;    /**< @brief Bytes of `resp` already served. */
+    };
     /**
-     * @brief Every handle created and not yet destroyed, mapped to "is it the WS one".
+     * @brief Every handle created and not yet destroyed, with its connection's state.
      *
-     * A REGISTRY rather than the two `tcp_live`/`ws_live` booleans it replaces, because
-     * #1058 puts two transport pairs on the fake at once: an orphaned dial still holding
-     * its pair while the link that started it is gone and a fresh link has dialed its
-     * own. A single-pair model would score the orphan's release as a misuse against the
-     * live link's handles, which is the one counter the whole suite rests on.
+     * A REGISTRY, because #1058 puts two connections on the fake at once: an orphaned dial
+     * still holding its own while the link that started it is gone and a fresh link has
+     * dialed its own. A single-connection model would score the orphan's release as a
+     * misuse against the live link's handle, which is the one counter the whole suite rests
+     * on.
      */
-    std::map<esp_transport_handle_t, bool> live;
+    std::map<esp_transport_handle_t, conn_t> live;
     /** @brief Next handle value to hand out — distinct per handle, monotonic. */
     std::uintptr_t next_handle = 0x7c000001;
     int misuse = 0;            /**< @brief Ops on a null/destroyed handle — see handle_misuse. */
@@ -91,11 +89,13 @@ struct state_t {
     int last_write_op = -1;             /**< @brief Its WS opcode; -1 = none yet. */
     bool last_write_masked = false;     /**< @brief Its MASK bit. */
     int lwip_calls = 0;                /**< @brief lwIP calls the writes made — see lwip_calls. */
-    std::size_t transport_touched = 0; /**< @brief Payload bytes the transport re-touched. */
     std::size_t wire_bytes = 0;        /**< @brief Bytes handed to lwIP's send. */
     bool hold_read = false;            /**< @brief Park readers instead of serving them. */
     std::condition_variable read_cv;   /**< @brief Wakes parked readers. */
     int readers = 0;                   /**< @brief Readers parked right now. */
+    bool park_socket = false;          /**< @brief Park `esp_transport_get_socket`. */
+    bool socket_parked = false;        /**< @brief A caller is parked there. */
+    std::condition_variable socket_cv; /**< @brief Wakes it. */
     /** @} */
 
     std::size_t dial_stack = 0; /**< @brief The first dialing thread's stack size. */
@@ -107,15 +107,86 @@ state_t& st() {
     return s;
 }
 
-/** @brief With `m` held: mint a fresh live handle, @p is_ws saying which kind it is. */
-esp_transport_handle_t mint_handle(bool is_ws) {
+/** @brief With `m` held: mint a fresh live handle. */
+esp_transport_handle_t mint_handle() {
     const auto h = reinterpret_cast<esp_transport_handle_t>(st().next_handle++);
-    st().live.emplace(h, is_ws);
+    st().live.emplace(h, state_t::conn_t{});
     return h;
 }
 
-/** @brief True with `m` held iff an unread scripted byte (or frame) remains. */
-bool pending(const state_t& s) { return s.cur < s.frames.size(); }
+/** @brief With `m` held: true iff an unread scripted frame byte remains. */
+bool frames_pending(const state_t& s) { return s.wire_off < s.wire.size(); }
+
+/** @brief With `m` held: true iff connection @p t has a byte to serve — its `101`, then,
+ *         once it is the stream, the scripted frames. */
+bool pending(esp_transport_handle_t t) {
+    const auto it = st().live.find(t);
+    if (it == st().live.end()) return false;
+    const state_t::conn_t& c = it->second;
+    return c.resp_off < c.resp.size() || (c.upgraded && st().stream == t && frames_pending(st()));
+}
+
+/** @brief Append @p f to @p out as a server frame: unmasked, with a 2/4/10-byte header. */
+void encode_frame(const fake_ws::frame_t& f, std::vector<std::byte>& out) {
+    const std::size_t n = f.payload.size();
+    out.push_back(static_cast<std::byte>((f.fin ? 0x80U : 0U) | static_cast<unsigned>(f.op)));
+    if (n < 126) {
+        out.push_back(static_cast<std::byte>(n));
+    } else if (n <= 0xFFFF) {
+        out.push_back(std::byte{126});
+        for (int i = 1; i >= 0; --i) out.push_back(static_cast<std::byte>((n >> (8 * i)) & 0xFF));
+    } else {
+        out.push_back(std::byte{127});
+        for (int i = 7; i >= 0; --i)
+            out.push_back(
+                static_cast<std::byte>((static_cast<std::uint64_t>(n) >> (8 * i)) & 0xFF));
+    }
+    out.insert(out.end(), f.payload.begin(), f.payload.end());
+}
+
+/**
+ * @brief With `m` held: answer the handshake request @p req written on @p t — record what
+ *        it asked for and queue the `101` on that connection. @return whether it parsed.
+ */
+bool answer_handshake(esp_transport_handle_t t, std::string_view req) {
+    if (!req.starts_with("GET ") || !req.ends_with("\r\n\r\n")) return false;
+    const std::size_t path_end = req.find(' ', 4);
+    if (path_end == std::string_view::npos) return false;
+    ++st().handshakes;
+    st().ws_path = std::string(req.substr(4, path_end - 4));
+    // The extra lines: every header line that is not one of the standard Upgrade lines.
+    static constexpr std::string_view kStandard[] = {
+        "host:", "upgrade:", "connection:", "sec-websocket-key:", "sec-websocket-version:"};
+    std::string extra;
+    for (std::size_t at = req.find("\r\n") + 2; at < req.size();) {
+        const std::size_t eol = req.find("\r\n", at);
+        const std::string_view line = req.substr(at, eol - at);
+        at = eol + 2;
+        if (line.empty()) break;
+        std::string lower(line);
+        for (char& c : lower) c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+        bool standard = false;
+        for (const std::string_view name : kStandard)
+            standard = standard || lower.starts_with(name);
+        if (!standard) extra.append(line).append("\r\n");
+    }
+    st().dialed_headers.push_back(extra.empty() ? std::nullopt
+                                                : std::optional<std::string>(std::move(extra)));
+    const std::string_view key = tr::net::ws::header_value(req, "sec-websocket-key");
+    const std::string accept(st().reject_upgrade ? std::string_view("AAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+                                                 : tr::net::ws::accept_key(key).view());
+    const std::string resp =
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+        "Connection: Upgrade\r\nSec-WebSocket-Accept: " +
+        accept + "\r\n\r\n";
+    state_t::conn_t& c = st().live[t];
+    c.resp.assign(reinterpret_cast<const std::byte*>(resp.data()),
+                  reinterpret_cast<const std::byte*>(resp.data()) + resp.size());
+    c.resp_off = 0;
+    c.upgraded = true;
+    st().stream = t;
+    return true;
+}
 
 /**
  * @brief With `m` held: is @p t a handle that may legally be operated on right now?
@@ -136,7 +207,7 @@ bool handle_usable(esp_transport_handle_t t) {
 
 namespace fake_ws {
 
-frame_t make_frame(ws_transport_opcodes_t op, bool fin, std::size_t len, std::uint8_t seed) {
+frame_t make_frame(tr::net::ws::opcode_t op, bool fin, std::size_t len, std::uint8_t seed) {
     frame_t f{op, fin, {}};
     f.payload.reserve(len);
     for (std::size_t i = 0; i < len; ++i)
@@ -164,20 +235,18 @@ void reset() {
     st().last_write_op = -1;
     st().last_write_masked = false;
     st().lwip_calls = 0;
-    st().transport_touched = 0;
     st().wire_bytes = 0;
     st().hold_read = false;
     st().readers = 0;
-    st().frames.clear();
-    st().cur = 0;
-    st().cur_off = 0;
-    st().last_op = WS_TRANSPORT_OPCODES_NONE;
-    st().last_fin = false;
-    st().last_payload_len = 0;
-    st().connected = false;
+    st().park_socket = false;
+    st().socket_parked = false;
+    st().wire.clear();
+    st().wire_off = 0;
+    st().stream = nullptr;
+    st().reject_upgrade = false;
+    st().handshakes = 0;
     st().connects = 0;
     st().ws_path.clear();
-    st().headers.reset();
     st().dialed_headers.clear();
     st().socket_fd = -1;
     st().dial_stack = 0;
@@ -186,14 +255,24 @@ void reset() {
 void push_frames(std::vector<frame_t> frames) {
     {
         const std::lock_guard<std::mutex> lk(st().m);
-        for (auto& f : frames) st().frames.push_back(std::move(f));
+        for (const frame_t& f : frames) encode_frame(f, st().wire);
     }
     st().cv.notify_all();
 }
 
 bool drained() {
     const std::lock_guard<std::mutex> lk(st().m);
-    return !pending(st());
+    return !frames_pending(st());
+}
+
+void reject_upgrades(bool on) {
+    const std::lock_guard<std::mutex> lk(st().m);
+    st().reject_upgrade = on;
+}
+
+int handshakes() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().handshakes;
 }
 
 int connect_count() {
@@ -329,11 +408,6 @@ int lwip_calls() {
     return st().lwip_calls;
 }
 
-std::size_t transport_touched_bytes() {
-    const std::lock_guard<std::mutex> lk(st().m);
-    return st().transport_touched;
-}
-
 std::size_t wire_bytes() {
     const std::lock_guard<std::mutex> lk(st().m);
     return st().wire_bytes;
@@ -352,6 +426,19 @@ int readers_inside() {
     return st().readers;
 }
 
+void park_get_socket(bool on) {
+    {
+        const std::lock_guard<std::mutex> lk(st().m);
+        st().park_socket = on;
+    }
+    if (!on) st().socket_cv.notify_all();
+}
+
+bool get_socket_parked() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().socket_parked;
+}
+
 }  // namespace fake_ws
 
 /** @name The `esp_transport` C surface the chip TU links against. */
@@ -359,37 +446,14 @@ int readers_inside() {
 
 esp_transport_handle_t esp_transport_tcp_init(void) {
     const std::lock_guard<std::mutex> lk(st().m);
-    return mint_handle(/*is_ws=*/false);
-}
-
-esp_transport_handle_t esp_transport_ws_init(esp_transport_handle_t parent_handle) {
-    const std::lock_guard<std::mutex> lk(st().m);
-    // A LIVE, non-ws parent — IDF's `esp_transport_ws_init` wraps a tcp transport that
-    // still exists. Not counted as a misuse: the link never calls this with a dead parent
-    // (it checks the init above), so an answer of nullptr is the failure the link handles.
-    const auto it = st().live.find(parent_handle);
-    if (it == st().live.end() || it->second) return nullptr;
-    return mint_handle(/*is_ws=*/true);
-}
-
-esp_err_t esp_transport_ws_set_config(esp_transport_handle_t t,
-                                      const esp_transport_ws_config_t* config) {
-    (void)t;
-    const std::lock_guard<std::mutex> lk(st().m);
-    if (config != nullptr && config->ws_path != nullptr) st().ws_path = config->ws_path;
-    // Latched, null included: "the field was left null" and "the field was an empty
-    // string" are different handshakes on the wire, and the link's contract is that no
-    // headers means the byte-for-byte historical request (#959).
-    st().headers = (config != nullptr && config->headers != nullptr)
-                       ? std::optional<std::string>(config->headers)
-                       : std::nullopt;
-    return ESP_OK;
+    return mint_handle();
 }
 
 esp_err_t esp_transport_destroy(esp_transport_handle_t t) {
     const std::lock_guard<std::mutex> lk(st().m);
     if (!handle_usable(t)) return ESP_FAIL;
     st().live.erase(t);
+    if (st().stream == t) st().stream = nullptr;
     return ESP_OK;
 }
 
@@ -406,11 +470,6 @@ int esp_transport_connect(esp_transport_handle_t t, const char* host, int port, 
             ::pthread_attr_destroy(&attr);
         }
     }
-    // Sampled HERE, not read back later: what dial N requested is a fact only dial N can
-    // report, and what #959 left undefined was whether the first dial requested the same
-    // headers as every one after it. Recorded for failed and hung dials too — what a dial
-    // asked for is what it asked for, whether or not it landed.
-    st().dialed_headers.push_back(st().headers);
     st().connect_timeout_ms = timeout_ms;
     if (st().hang_connect) {
         // What an unreachable peer does: spend the whole bound, then fail. Nothing the
@@ -430,11 +489,9 @@ int esp_transport_connect(esp_transport_handle_t t, const char* host, int port, 
         if (!handle_usable(t)) return -1;
         if (!st().connect_released) return -1;  // the bound expired: an unreachable peer
         if (!st().connect_succeed) return -1;
-        st().connected = true;
         return 0;
     }
     if (st().fail_connect) return -1;
-    st().connected = true;
     return 0;
 }
 
@@ -442,7 +499,14 @@ int esp_transport_close(esp_transport_handle_t t) {
     const std::lock_guard<std::mutex> lk(st().m);
     if (!handle_usable(t)) return -1;
     ++st().closes;
-    st().connected = false;
+    state_t::conn_t& c = st().live[t];
+    // The end of this connection's stream: whatever was still queued for it is gone with it.
+    if (st().stream == t) {
+        st().wire.clear();
+        st().wire_off = 0;
+        st().stream = nullptr;
+    }
+    c = state_t::conn_t{};
     return 0;
 }
 
@@ -455,15 +519,20 @@ int esp_transport_get_socket(esp_transport_handle_t t) {
     // `setsockopt` so no option reaches the kernel either. Still no POSIX socket anywhere
     // in this plane (#947) — that ruling is about the transport, and this fake continues
     // to serve every byte from its own script.
-    const std::lock_guard<std::mutex> lk(st().m);
+    std::unique_lock<std::mutex> lk(st().m);
+    if (st().park_socket) {
+        st().socket_parked = true;
+        st().socket_cv.wait(lk, [] { return !st().park_socket; });
+        st().socket_parked = false;
+    }
     return st().socket_fd;
 }
 
 int esp_transport_poll_read(esp_transport_handle_t t, int timeout_ms) {
     std::unique_lock<std::mutex> lk(st().m);
     if (!handle_usable(t)) return -1;
-    st().cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [] { return pending(st()); });
-    return pending(st()) ? 1 : 0;
+    st().cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [t] { return pending(t); });
+    return pending(t) ? 1 : 0;
 }
 
 int esp_transport_read(esp_transport_handle_t t, char* buffer, int len, int timeout_ms) {
@@ -479,41 +548,38 @@ int esp_transport_read(esp_transport_handle_t t, char* buffer, int len, int time
         --st().readers;
         if (!handle_usable(t)) return -1;
     }
-    if (!pending(st())) {
-        // Nothing queued: a timeout, exactly as ws_read reports it — and, as there, no
-        // header was received, so the opcode accessor answers NONE. IDF v6.0
-        // transport_ws.c: ws_read_header sets `frame_state.header_received = false` on
-        // entry, and esp_transport_ws_get_read_opcode returns NONE while it is false.
-        st().last_op = WS_TRANSPORT_OPCODES_NONE;
-        return 0;
-    }
-    const fake_ws::frame_t& f = st().frames[st().cur];
-    const bool control = (static_cast<unsigned>(f.op) & 0x8U) != 0;
-    if (control && f.payload.size() > static_cast<std::size_t>(len > 0 ? len : 0)) {
-        // IDF v6.0 with propagate_control_frames reads a control payload WHOLE into the
-        // caller's buffer, or fails the read without consuming it (transport_ws.c ws_read,
-        // "Control frame payload exceeds caller buffer").
-        st().last_op = f.op;
-        return -1;
-    }
-    // The header is (re-)reported for as long as this frame is being drained.
-    st().last_op = f.op;
-    st().last_fin = f.fin;
-    st().last_payload_len = static_cast<int>(f.payload.size());
-    const std::size_t left = f.payload.size() - st().cur_off;
+    // `tcp_read`: whatever is queued, up to the room offered, across frame boundaries — the
+    // connection's `101` first, then (once it is the stream) the scripted frames.
+    state_t::conn_t& c = st().live[t];
     const std::size_t room = len > 0 ? static_cast<std::size_t>(len) : std::size_t{0};
-    const std::size_t take = std::min(left, room);
-    if (take != 0) std::memcpy(buffer, f.payload.data() + st().cur_off, take);
-    st().cur_off += take;
-    if (st().cur_off >= f.payload.size()) {  // frame drained (a 0-byte frame lands here too)
-        ++st().cur;
-        st().cur_off = 0;
+    std::size_t got = 0;
+    const std::size_t from_resp = std::min(room, c.resp.size() - c.resp_off);
+    if (from_resp != 0) {  // an empty vector's data() may be null: memcpy(_, nullptr, 0) is UB
+        std::memcpy(buffer, c.resp.data() + c.resp_off, from_resp);
     }
-    return static_cast<int>(take);
+    c.resp_off += from_resp;
+    got += from_resp;
+    if (c.upgraded && st().stream == t) {
+        const std::size_t from_wire = std::min(room - got, st().wire.size() - st().wire_off);
+        if (from_wire != 0) {
+            std::memcpy(buffer + got, st().wire.data() + st().wire_off, from_wire);
+        }
+        st().wire_off += from_wire;
+        got += from_wire;
+    }
+    return static_cast<int>(got);  // 0 = nothing queued: `tcp_read`'s timeout
 }
 
 int esp_transport_write(esp_transport_handle_t t, const char* buffer, int len, int timeout_ms) {
     std::unique_lock<std::mutex> lk(st().m);
+    if (handle_usable(t) && !st().live[t].upgraded) {
+        // A connection's first write is its opening-handshake request: answered, and not a
+        // frame, so no write counter or lever below applies to it.
+        return answer_handshake(
+                   t, std::string_view(buffer, static_cast<std::size_t>(len > 0 ? len : 0)))
+                   ? len
+                   : -1;
+    }
     ++st().writes;  // counted on ENTRY, before the handle check: a call on a dead
                     // handle is still a call the link decided to make
     st().write_timeout_ms = timeout_ms;
@@ -544,19 +610,7 @@ int esp_transport_write(esp_transport_handle_t t, const char* buffer, int len, i
     }
     const std::span<const std::byte> bytes(reinterpret_cast<const std::byte*>(buffer),
                                            static_cast<std::size_t>(len > 0 ? len : 0));
-    if (st().live[t]) {
-        // A write on the WS handle is IDF's `_ws_write` (transport_ws.c): a poll, then the
-        // header and the payload as two parent writes (each a poll and a send) — 5 lwIP
-        // calls — masking the caller's payload in place first and unmasking it after.
-        st().lwip_calls += 5;
-        st().transport_touched += 2 * bytes.size();
-        st().wire_bytes += tr::net::ws::detail::client_frame_bytes(bytes.size());
-        st().last_write.assign(bytes.begin(), bytes.end());
-        st().last_write_op = static_cast<int>(tr::net::ws::opcode_t::BINARY);
-        st().last_write_masked = true;
-        return len;
-    }
-    // A write on the TCP parent is `tcp_write` (transport_ssl.c): a poll, then one send.
+    // A frame write is `tcp_write` (transport_ssl.c): a poll, then one send.
     // The bytes are a whole client frame; decode it as the peer would, unmasking a copy.
     st().lwip_calls += 2;
     st().wire_bytes += bytes.size();
@@ -571,24 +625,6 @@ int esp_transport_write(esp_transport_handle_t t, const char* buffer, int len, i
     st().last_write_op = static_cast<int>(h.op);
     st().last_write_masked = h.masked;
     return len;
-}
-
-ws_transport_opcodes_t esp_transport_ws_get_read_opcode(esp_transport_handle_t t) {
-    (void)t;
-    const std::lock_guard<std::mutex> lk(st().m);
-    return st().last_op;
-}
-
-bool esp_transport_ws_get_fin_flag(esp_transport_handle_t t) {
-    (void)t;
-    const std::lock_guard<std::mutex> lk(st().m);
-    return st().last_fin;
-}
-
-int esp_transport_ws_get_read_payload_len(esp_transport_handle_t t) {
-    (void)t;
-    const std::lock_guard<std::mutex> lk(st().m);
-    return st().last_payload_len;
 }
 
 /** @} */

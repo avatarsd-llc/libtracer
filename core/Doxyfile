@@ -107,6 +107,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/grammar.hpp \
                          core/include/libtracer/ws.hpp \
                          core/include/libtracer/ws_assembler.hpp \
+                         core/include/libtracer/ws_framing.hpp \
                          core/include/libtracer/frame_ingress.hpp \
                          core/include/libtracer/crc.hpp \
                          core/include/libtracer/loopback.hpp \

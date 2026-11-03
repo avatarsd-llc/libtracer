@@ -1,7 +1,7 @@
 /**
  * @file
- * @brief `esp_ws_client_link_t` — a libtracer WebSocket *client* `transport_t`
- *        backed by ESP-IDF's abstracted `esp_transport_ws` (over `tcp_transport`).
+ * @brief `esp_ws_client_link_t` — a libtracer WebSocket *client* `transport_t` on
+ *        ESP-IDF's `tcp_transport`, framed by core's RFC 6455 receive rules (#2484).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -11,10 +11,16 @@
  * rolls the RFC 6455 opening handshake (`Sec-WebSocket-Key`/`-Accept`) and the
  * frame codec/masking over lwIP BSD sockets — which does not reliably complete on
  * ESP32 silicon (an lwIP/handshake interaction observed dropping board-to-board
- * dials). This link instead rides `esp_transport_ws`: ESP-IDF's tested transport
- * stack owns the socket, the client handshake (`esp_transport_connect` performs
- * the full GET-upgrade + 101 validation for the configured `ws_path`), the
- * masking/framing, and PING/PONG/CLOSE control-frame handling. It is the client
+ * dials; #948 found the cause, `sendmsg(MSG_NOSIGNAL)`, which lwIP rejects). This link
+ * instead rides `esp_transport_tcp`: ESP-IDF's transport stack owns the socket, and every
+ * byte goes through `esp_transport_write` / `esp_transport_read`. Since #2484 the link does
+ * the rest itself on core's code: the opening handshake (the Upgrade request for the
+ * configured `ws_path`, and the `101` + Sec-WebSocket-Accept check, `ws::upgrade_accepted`),
+ * and the receive side, which reads raw bytes and frames them with core's
+ * @ref ws_framing_t and @ref ws_assembler_t — the rules core's own WS links and the httpd
+ * sibling use, so a fragment, a TEXT frame or an over-cap message gets one answer
+ * everywhere. It used to ride `esp_transport_ws`, whose frame-state reads made this link
+ * keep a private reassembly that grew its own receive bugs (#901, #2478). It is the client
  * mirror of @ref httpd_ws_link_t (the esp_http_server-backed *server* link) — the
  * same "platform link picked by which TU compiles, never an in-source #ifdef"
  * split as `twai_link_t` is for CAN. The portable `ws_client_transport_t` stays for
@@ -47,8 +53,8 @@
  *     surface: host, port, `ws_path` and the handshake headers are all constructor
  *     arguments and all `const` thereafter — read by the recv thread, written by nobody.
  *     (The rx/tx SIZES are the same rule in a weaker spelling: fixed by the ctor and
- *     never resized. The read scratch is drawn per connection and each send's frame per
- *     send — see the cost note at the end of this comment — but no one may make their
+ *     never resized. Each inbound frame's block is drawn per frame and each send's frame
+ *     per send — see the cost note at the end of this comment — but no one may make their
  *     extent settable either.)
  *     It used to have one such surface — `set_handshake_headers()` assigned an
  *     unsynchronized `std::string` that `connect_once()` was already reading (#959). That
@@ -85,17 +91,17 @@
  *     link itself: a link that is never armed never dials.
  *   - A single recv thread (spawned by @ref start_receiving) owns the read side: it dials
  *     (with reconnect/backoff), then loops `esp_transport_poll_read` +
- *     `esp_transport_read` — reading each frame's payload DIRECTLY into a reusable
- *     buffer (server→client frames are unmasked per RFC 6455 §5.1, so the read is
- *     a zero-copy fill) — and delivers it borrowed to the router SYNCHRONOUSLY on
- *     that thread, exactly as the raw client delivered on its recv thread. Control
- *     frames come up to the loop (`propagate_control_frames = true`, #2265), which
- *     answers a PING with a PONG and a CLOSE with a CLOSE through the send path.
+ *     `esp_transport_read` — reading each frame's header into core's frame-ingress slot
+ *     and its body DIRECTLY into a segment of its exact length (server→client frames are
+ *     unmasked per RFC 6455 §5.1, so the read is the only pass), and delivers each message
+ *     to the router SYNCHRONOUSLY on that thread, exactly as the raw client delivered on its
+ *     recv thread. A PING is answered with a PONG and a CLOSE with a CLOSE, through the
+ *     send path (#2265).
  *   - `send()` may be called from ANY task (a subscription push on an io/timer
  *     thread, a reply on the recv thread itself). Writes are serialized by one small
  *     mutex, `write_m_`, held only for the write. The READ takes no lock (#2265): only
- *     the recv thread touches `esp_transport_ws`'s handle, a writer writes the TCP parent,
- *     and lwIP sockets are full-duplex. The write is not prompt — the caller's timeout
+ *     the recv thread reads the TCP transport, a writer only writes it, and lwIP sockets
+ *     are full-duplex. The write is not prompt — the caller's timeout
  *     bounds the poll and the `send()` inside one `esp_transport_write` — so that mutex
  *     IS held blocking, for a bound derived from the task-watchdog period rather than the
  *     4 s literal it used to be (#952). The graph/router lock-stripes below are
@@ -133,7 +139,7 @@
  *     the tally (a few instructions). The embedder owns the link's lifetime against its
  *     own callers; this type bounds what happens once a caller is on the tally.
  *   - The handles themselves are published by `connected_`, not by the mutex: the recv
- *     thread rebuilds `ws_`/`tcp_` on every re-dial holding NO lock, and releases them
+ *     thread rebuilds `tcp_` on every re-dial holding NO lock, and releases them
  *     with the `connected_` store. So a handle is only ever read behind an ACQUIRE that
  *     observed `true` — a check ahead of that gate races the rebuild, whatever lock it
  *     holds.
@@ -178,15 +184,15 @@
  *     off (the default) there is no `st_m_` at all, and the success path takes no
  *     counter lock.
  *
- * NO per-frame heap, and NOTHING CONNECTION-SIZED WHILE UNCONNECTED (#1606). The read
- * scratch is drawn from `memory.state` when a handshake lands and returned when that
- * connection goes down, together with its transport pair; a failed dial returns its pair
- * on the failure path. So a link that is dialling, backing off, or has never reached its
- * peer holds its dial slot, this object and its recv thread — and, only while a dial is in
- * flight, the transport pair being built. Each send draws its frame from `memory.io`
- * (#1661, #2265) and returns it when the write is done; the global heap is never touched.
- * The other per-message draw is opt-in: a link given `memory.rx` takes each
- * receive block from that application source. One recv thread per dialed peer (each
+ * NO per-frame heap, and NOTHING CONNECTION-SIZED HELD (#1606, #2484). There is no read
+ * buffer: each inbound frame is received into a segment of its exact length, drawn from
+ * `memory.rx` when the application named one and from `memory.state` otherwise, and
+ * returned when the message has been delivered. A dial draws its handshake block from
+ * `memory.state` and returns it once the connection's first bytes are framed; a failed
+ * dial returns it and its transport on the failure path. So a link holds its dial slot,
+ * this object, its recv thread and its transport, plus what the message in flight
+ * occupies. Each send draws its frame from `memory.io` (#1661, #2265) and returns it when
+ * the write is done; the global heap is never touched. One recv thread per dialed peer (each
  * blocks on its own connection), mirroring `ws_client_transport_t`.
  */
 #pragma once
@@ -228,8 +234,8 @@ struct esp_ws_client_config_t {
     std::string_view ws_path = "/ws";
     /**
      * @brief Extra HTTP header lines appended to the opening-handshake request, each
-     *        `Name: value\r\n`-terminated (`esp_transport_ws` emits them verbatim); empty
-     *        leaves the field null, so the handshake is byte-for-byte the historical one. The
+     *        `Name: value\r\n`-terminated (emitted verbatim); empty adds none, so the
+     *        request carries only the standard Upgrade lines. The
      *        client counterpart to `httpd_ws_link_t::set_admission_cb`: a board-to-board dial
      *        carries no browser session cookie, so a token header here is how a dialing node
      *        authenticates itself. A CONSTRUCTOR knob, not a setter, because the recv thread
@@ -237,9 +243,16 @@ struct esp_ws_client_config_t {
      *        Borrowed for the constructor call only, like @ref ws_path (#1880).
      */
     std::string_view handshake_headers{};
-    /** @brief Reusable receive-buffer size (one inbound message must fit); our control TLVs
-     *         are small, so the default is modest. The read scratch is drawn 125 B larger,
-     *         so a WS control frame (whose payload IDF reads whole) always fits. */
+    /**
+     * @brief The receive cap, bytes: the largest frame payload, and the largest CHARGED cost
+     *        of a fragmented message — its bytes plus @ref ws_assembler_t::kFragmentCost per
+     *        fragment (#2484). Our control TLVs are small, so the default is modest.
+     *
+     * A cap, not a buffer: nothing of this size is held. A frame that announces more, or a
+     * message whose fragments sum past it, closes the connection and is counted on
+     * @ref esp_ws_client_link_t::malformed_rx — core's answer to a peer that breaks the
+     * agreed bound (RFC 6455 §7.1.7) — and the link re-dials.
+     */
     std::size_t rx_bytes = 2048;
     /**
      * @brief Largest outbound payload a send admits (one frame). A larger outbound frame
@@ -254,14 +267,15 @@ struct esp_ws_client_config_t {
     /**
      * @brief The link's memory (@ref link_memory_t, #1661), as `httpd_ws_link_t` takes it.
      *
-     * `rx` opts in to OWNING RX delivery: each complete inbound message is copied once out of
-     * the read scratch into a receive block drawn from this source — with the RFC-0028 §6.9
-     * ingress-loan reserve where the reserve is free in the source's size class, so a terminus
-     * that shares it builds its record in the block — and is delivered as a rope the sink may
-     * keep. An exhausted source is backpressure: the message is dropped and counted on
-     * @ref esp_ws_client_link_t::dropped_rx, never satisfied from the heap. `nullptr` (THIS
-     * kind's default) keeps borrowed delivery straight out of the scratch, with no per-message
-     * allocation — the sibling server link's default and the reason for it.
+     * `rx` opts in to OWNING RX delivery: each inbound frame is received into a block drawn
+     * from this source — with the RFC-0028 §6.9 ingress-loan reserve where the reserve is
+     * free in the source's size class, so a terminus that shares it builds its record in the
+     * block — and each message is delivered as a rope the sink may keep (a fragmented one as
+     * the chain of its fragments). An exhausted source is backpressure: the message is
+     * dropped and counted on @ref esp_ws_client_link_t::dropped_rx, never satisfied from the
+     * heap. `nullptr` (THIS kind's default) keeps borrowed delivery: each frame is received
+     * into a block from `state` and handed up borrowed, and a fragmented message is flattened
+     * once into one.
      *
      * `io` is the send side's store: each send's masked frame (drawn per send and returned
      * when the write is done; a refusal drops the frame and counts it on `tx_drops`), the
@@ -270,28 +284,23 @@ struct esp_ws_client_config_t {
      * the static arena on this target).
      *
      * `state` is the connection-state store (#1880): the dial slot (the copies of the host,
-     * URI and handshake headers every dial reads) and the read scratch (`rx_bytes`). The
-     * slot is drawn once, by the constructor; a store that refuses it is a sizing bug, and
-     * the constructor aborts naming it (`mem::exhausted_at_init`, ADR-0083). The read
-     * scratch is drawn when a handshake lands and returned when that connection goes down
-     * (#1606), so it is a runtime draw: a refusal is backpressure — the fresh connection is
-     * closed and the attempt counts as a failed dial. The store must outlive the link's
-     * recv thread: a dial condemned by the destructor returns its slot when that dial
-     * resolves, up to `kDialTimeoutMs` after the destructor has returned.
+     * URI and handshake headers every dial reads), each dial's handshake block, and — on a
+     * borrowed link — each inbound frame's block. The slot is drawn once, by the
+     * constructor; a store that refuses it is a sizing bug, and the constructor aborts naming
+     * it (`mem::exhausted_at_init`, ADR-0083). The handshake block is a runtime draw: a
+     * refusal is backpressure — the fresh connection is closed and the attempt counts as a
+     * failed dial. The store must outlive the link's recv thread: a dial condemned by the
+     * destructor returns its slot when that dial resolves, up to `kDialTimeoutMs` after the
+     * destructor has returned.
      *
-     * What stays outside all three, because IDF offers no allocator hook for it:
-     * - the transport pair each dial builds (`esp_transport_tcp_init`/`esp_transport_ws_init`)
-     *   and the WS transport's handshake buffer, `CONFIG_WS_BUFFER_SIZE` bytes. The
-     *   application sizes that buffer through Kconfig, and `CONFIG_WS_DYNAMIC_BUFFER` frees
-     *   it after each handshake instead of holding it for the link's life;
-     * - the payload of a PING or CLOSE the transport answers itself, which it `malloc`s per
-     *   control frame (at most 125 bytes, RFC 6455 §5.5).
+     * What stays outside all three, because IDF offers no allocator hook for it: the TCP
+     * transport each dial builds (`esp_transport_tcp_init`).
      */
     link_memory_t memory{.rx = nullptr};
 };
 
 /**
- * @brief A WebSocket (RFC 6455) *client* `transport_t` on ESP-IDF `esp_transport_ws`
+ * @brief A WebSocket (RFC 6455) *client* `transport_t` on ESP-IDF `esp_transport_tcp`
  *        — dials one peer and exposes it through the point-to-point `transport_t` seam.
  *
  * Public surface mirrors `ws_client_transport_t`: a chip node substitutes this type at
@@ -435,7 +444,7 @@ class esp_ws_client_link_t final : public transport_t {
      *
      * "Shut down now, free at collect()": an owner that removes this link while a forward
      * may still be on its way into it calls this at removal, and the destructor — at the
-     * graph's next `collect()` — returns the memory (the read scratch, the dial slot). A
+     * graph's next `collect()` — returns the memory (the dial slot). A
      * `send()` after this is shed without touching a handle and without counting a drop.
      * Its cost is the destructor's worst case, `kPollMs + kWriteBudgetMs`; a dial in flight
      * is condemned rather than waited out, as there. IDEMPOTENT, and safe to follow with
@@ -490,14 +499,25 @@ class esp_ws_client_link_t final : public transport_t {
      * @brief Inbound MESSAGES dropped by the receive path since construction — the
      *        `dropped_rx()` convention core's transports already spell this way.
      *
-     * Two causes, both of which used to be logs-only (#953): a message that does not fit
-     * `rx_bytes` (dropped whole, never truncated — its remaining fragments are consumed
-     * and discarded too, #901), and a stray CONTINUATION arriving with no message open.
-     * A frame lost to a connection drop is NOT counted: that is the link going down, not
-     * the receive path refusing a message.
+     * A message the receiving source refused (a frame's block, a fragment chain, or the
+     * flatten of a fragmented message for a span-only sink): shed whole, the connection
+     * lives and re-syncs at the next BINARY (receiver pays). A message over `rx_bytes` is
+     * NOT counted here — it closes the connection and is counted on @ref malformed_rx
+     * (#2484) — and neither is a frame lost to a connection drop, nor a stray CONTINUATION,
+     * which core's assembler drops as carrying no message.
      */
     [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
         return dropped_rx_.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Frames that broke RFC 6455 or the receive cap since construction, each of which
+     *        closed its connection (#2484): an announced length over `rx_bytes`, fragments
+     *        whose charged cost passed it, a control-frame breach (§5.5) or a reserved
+     *        opcode (§5.2). The link re-dials after each.
+     */
+    [[nodiscard]] std::uint32_t malformed_rx() const noexcept {
+        return malformed_rx_.load(std::memory_order_relaxed);
     }
 
     /**
@@ -553,10 +573,9 @@ class esp_ws_client_link_t final : public transport_t {
      */
     [[nodiscard]] stats_t stats() const;
 
-    /** @brief Effective reusable RX capacity, bytes — the ctor's `rx_bytes`, which every
-     *         connection's read scratch is drawn at (#1606). A message past it is dropped whole
-     * (@ref dropped_rx), so a node reporting an inbound-drop streak can now report the ceiling that
-     *         produced it instead of quoting a constant from third-party sources (#1160). */
+    /** @brief Effective RX cap, bytes — the ctor's `rx_bytes` (#2484). A message past it
+     *         closes its connection (@ref malformed_rx), so a node reporting those can report
+     *         the ceiling that produced them instead of quoting a constant (#1160). */
     [[nodiscard]] std::size_t rx_bytes() const noexcept { return rx_bytes_; }
 
     /** @brief Effective TX capacity, bytes — the ctor's `tx_bytes`, the largest payload a
@@ -583,13 +602,13 @@ class esp_ws_client_link_t final : public transport_t {
      *
      * A PROJECTION, never a second tally, on the rule this link already states for
      * `c.rx_drops`: every field here is READ from the counter that already owns the truth,
-     * so the two spellings can never drift. `malformed_rx` is honestly ZERO — a WebSocket
-     * client's framing is the IDF transport's, so this link never classifies a message as
-     * protocol-malformed and must not fabricate a number for one, which is what the #932
-     * all-zero default exists to make sayable.
+     * so the two spellings can never drift. `malformed_rx` is @ref malformed_rx: since the
+     * link frames its own stream (#2484) it does classify a frame as protocol-malformed.
      */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-        return {.dropped_rx = dropped_rx(), .malformed_rx = 0, .dropped_tx = stats().c.tx_drops};
+        return {.dropped_rx = dropped_rx(),
+                .malformed_rx = malformed_rx(),
+                .dropped_tx = stats().c.tx_drops};
     }
 
     /**
@@ -604,7 +623,7 @@ class esp_ws_client_link_t final : public transport_t {
      * @{
      */
     /** @brief Effective inbound message ceiling, bytes — the ceiling behind
-     *         `drop_stats().dropped_rx`. */
+     *         `drop_stats().malformed_rx`'s over-cap arm. */
     [[nodiscard]] std::size_t rx_capacity() const noexcept { return rx_bytes(); }
     /** @brief Effective outbound frame ceiling, bytes — the ceiling behind
      *         `drop_stats().dropped_tx`'s oversize arm. */
@@ -651,6 +670,11 @@ class esp_ws_client_link_t final : public transport_t {
      */
     struct dial_t;
 
+    /** @brief The link's end of core's RFC 6455 receive rules (@ref ws_framing_t, #2484):
+     *         its cap, counters, control replies and delivery. Defined in the .cpp; it lives
+     *         on the recv thread's stack. */
+    struct framing_end_t;
+
     /** @brief What one dial attempt ended as (#1058). */
     enum class dial_outcome_t {
         UP,       /**< @brief A handshake completed; the link is connected. */
@@ -664,7 +688,7 @@ class esp_ws_client_link_t final : public transport_t {
     void recv_loop();
     /** @brief The recv thread's entry: `recv_loop()` on the link @p self. */
     static void recv_entry(void* self);
-    /** @brief One dial attempt: build the tcp+ws transports, connect, draw the read scratch,
+    /** @brief One dial attempt: build the TCP transport, connect, do the opening handshake,
      *         apply the per-socket policy (Nagle off, bounded write, keepalive probes), mark
      *         up — or release all of it on the failure path (#1606).
      *         @return which of the three outcomes it reached (@ref dial_outcome_t). */
@@ -692,17 +716,6 @@ class esp_ws_client_link_t final : public transport_t {
      */
     void write_locked(std::span<const std::byte> wire);
     /**
-     * @brief Copy the first @p len bytes of the read scratch into a receive block from
-     *        @ref rx_backend_ and deliver it owning; count and drop if the source refuses.
-     *
-     * Recv thread only, and reached only when `memory.rx` was named (#1661). The block is
-     * drawn through `view::alloc_rx`, so a message carries the RFC-0028 §6.9 ingress-loan
-     * reserve where it is free.
-     *
-     * @param len The complete message's length in the scratch.
-     */
-    void deliver_owned(std::size_t len);
-    /**
      * @brief Write one masked BINARY frame to @p dst: the header, then the @p len payload
      *        bytes of @p iov gathered and masked in one pass (#2265).
      *
@@ -728,26 +741,23 @@ class esp_ws_client_link_t final : public transport_t {
      */
     dial_t* const dial_;
 
-    // Both handles are written ONLY by the recv thread (connect_once adopts the freshly
-    // built pair out of `dial_` when a handshake lands, holding no lock; the recv loop
-    // releases it under `write_m_` when that connection goes down) and PUBLISHED by the
-    // connected_ release store below; any other thread must observe that store before it
-    // may read either one. NULL whenever no connection stands, which is what makes a
-    // teardown that lands mid-dial find nothing to destroy: the pair being built belongs to
-    // `dial_` until it resolves.
-    esp_transport_handle_t tcp_ = nullptr;  // parent TCP transport (owned)
-    esp_transport_handle_t ws_ = nullptr;   // WS transport over tcp_ (owned)
-
-    /** @brief The RX fill (zero-copy read target), `rx_bytes_` drawn from `memory.state`
-     *         (#1880) when a handshake lands and returned when the connection goes down
-     *         (#1606). Recv thread only. */
-    fixed_array_t<std::byte> rx_buf_;
+    /**
+     * @brief The connection's TCP transport (owned), or null when none stands.
+     *
+     * Written ONLY by the recv thread (connect_once adopts it out of `dial_` when a handshake
+     * lands, holding no lock; the recv loop releases it under `write_m_` when that connection
+     * goes down) and PUBLISHED by the connected_ release store below; any other thread must
+     * observe that store before it may read it. Null whenever no connection stands, which is
+     * what makes a teardown that lands mid-dial find nothing to destroy: the transport being
+     * built belongs to `dial_` until it resolves.
+     */
+    esp_transport_handle_t tcp_ = nullptr;
     /** @brief The owning-RX source (`memory.rx`, #1661), or null for borrowed delivery.
      *         Written once by the constructor, before the recv thread exists. */
     mem::mem_backend_t* const rx_backend_;
     /** @brief The store each send's frame is drawn from: `memory.io`, or the net sub-pool. */
     mem::block_source_t* const tx_src_;
-    /** @brief The configured read ceiling, `rx_bytes`. */
+    /** @brief The configured receive cap, `rx_bytes`. */
     const std::size_t rx_bytes_;
     /** @brief The configured write ceiling, `tx_bytes`: the largest payload @ref send admits. */
     const std::size_t tx_bytes_;
@@ -887,6 +897,9 @@ class esp_ws_client_link_t final : public transport_t {
     /** @brief Receive-path message drops — see @ref dropped_rx. Written only by the recv
      *         thread, read by anyone, so relaxed is enough (it is a statistic). */
     std::atomic<std::uint64_t> dropped_rx_{0};
+    /** @brief Frames that closed their connection — see @ref malformed_rx. Recv thread
+     *         writes, word-sized and relaxed (`core/STYLE.md` §Introspection). */
+    std::atomic<std::uint32_t> malformed_rx_{0};
     /** @brief The recv thread: a static task drawn from `tr::mem::default_root()` (#2288),
      *         never the link's own source, because @ref shut_down may DETACH it mid-dial and
      *         a detached thread's block is released only after this link is gone. */

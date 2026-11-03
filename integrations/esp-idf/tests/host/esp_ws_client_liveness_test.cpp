@@ -7,7 +7,7 @@
  *
  * Same construction as the #900/#901 receive-path and #952 teardown suites: the REAL
  * chip translation unit (`integrations/esp-idf/libtracer/esp_ws_client_link.cpp`) is
- * compiled against the host fake of `esp_transport_ws` (fake_esp_transport.hpp). What
+ * compiled against the host fake of `tcp_transport` (fake_esp_transport.hpp). What
  * this suite adds to the fake's model is the ONE thing the other two deliberately leave
  * out — the descriptor number `esp_transport_get_socket` answers, opted into per suite
  * (`fake_ws::set_socket_fd`) and paired with a `--wrap=setsockopt` interposition, so the
@@ -161,7 +161,8 @@ class down_counter_t {
 /** @brief A CLOSE frame — what a peer that hangs up politely puts on the wire, and the
  *         one death path a test can script through the fake's frame stream. */
 fake_ws::frame_t close_frame() {
-    return fake_ws::make_frame(WS_TRANSPORT_OPCODES_CLOSE, /*fin=*/true, /*len=*/2, /*seed=*/0x11);
+    return fake_ws::make_frame(tr::net::ws::opcode_t::CLOSE, /*fin=*/true, /*len=*/2,
+                               /*seed=*/0x11);
 }
 
 /**
@@ -354,7 +355,7 @@ void test_productive_connection_redials_at_once() {
         auto link = dialed_link();
         // One complete inbound message: this connection is now proven admitted.
         fake_ws::push_frames(
-            {fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, /*fin=*/true, /*len=*/8,
+            {fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, /*fin=*/true, /*len=*/8,
                                  /*seed=*/0x42)});
         const int dials_before = fake_ws::connect_count();
         const auto closed_at = std::chrono::steady_clock::now();

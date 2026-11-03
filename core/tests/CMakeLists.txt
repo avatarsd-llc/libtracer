@@ -278,6 +278,13 @@ target_link_libraries(ws_assembler_test PRIVATE libtracer)
 libtracer_test_warnings(ws_assembler_test)
 add_test(NAME ws_assembler COMMAND ws_assembler_test)
 
+# #2484 — ws_framing_t (header-only), the one set of RFC 6455 receive rules, framing a raw
+# stream through frame_ingress_t::read_with one single-buffer read at a time, cut at every size.
+add_executable(ws_framing_test ws_framing_test.cpp)
+target_link_libraries(ws_framing_test PRIVATE libtracer)
+libtracer_test_warnings(ws_framing_test)
+add_test(NAME ws_framing COMMAND ws_framing_test)
+
 # #55 — transport_can pure framing layer (29-bit ID codec, can_framing,
 # can_reassembly, the CAN transport's own advertise codec; no SocketCAN). Links libtracer for heap_alloc.
 add_executable(can_frames_test can_frames_test.cpp)
@@ -846,7 +853,7 @@ endif()
 if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # #900 + #901 — the WS *CLIENT* link's receive path, on the same construction: the
     # chip TU (integrations/esp-idf/libtracer/esp_ws_client_link.cpp) compiled against a
-    # host fake of esp_transport_ws's frame stream and esp_pthread's stack-sizing seam.
+    # host fake of tcp_transport's byte stream (a WS server's end of it, #2484) and the stack seam.
     # Those are the two IDF facilities the contracts rest on — a `recv_stack` that never
     # reaches esp_pthread_set_cfg never reaches the FreeRTOS task, and a read capped at
     # the offered buffer is what splits ONE oversized frame across reads that each report

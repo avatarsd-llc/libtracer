@@ -1,7 +1,7 @@
 /**
  * @file
- * @brief The host fake of `esp_transport_ws`'s inbound frame stream — the driver the
- *        WS *client* link's receive-path suite scripts.
+ * @brief The host fake of ESP-IDF's `tcp_transport` byte stream — the driver the WS
+ *        *client* link's suites script.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -11,26 +11,30 @@
  * peer sends, wait for them to be drained, and read back the stack of the thread that
  * dialed.
  *
- * The ONE behaviour it reproduces exactly, because both bugs under test live on it
- * (transcribed from `components/tcp_transport/transport_ws.c`):
+ * Since #2484 the link reads RAW BYTES and frames them with core's RFC 6455 rules, so the
+ * fake is a WebSocket SERVER's end of one TCP stream, nothing more:
  *
- *   - a read is capped at the buffer the caller offers, and when a frame is bigger than
- *     that, the REST OF THAT SAME FRAME is served by the following reads —
- *     `ws_read` parses a new header only once `frame_state.bytes_remaining` reaches 0
- *     (transport_ws.c:729). Throughout, `_get_read_opcode` / `_get_fin_flag` keep
- *     reporting that one frame's header. So an oversized *unfragmented* message arrives
- *     as several reads that each look like a complete small message, which is how the
- *     tail of a dropped message reached the router as a bogus frame (#901);
- *   - `_get_read_payload_len` is the frame's TOTAL payload length, unchanged while the
- *     frame drains — the only signal that tells the two apart;
- *   - a zero-payload frame returns 0 from `esp_transport_read`, indistinguishable from a
- *     poll timeout (transport_ws.c:763).
+ *   - the link's first write on a connection is its opening-handshake request. The fake
+ *     parses it (path, Sec-WebSocket-Key, any extra header lines), records what that dial
+ *     asked for, and queues a `101 Switching Protocols` with the matching
+ *     Sec-WebSocket-Accept on that connection — or a wrong one, under
+ *     @ref reject_upgrades;
+ *   - every scripted frame is encoded as a server would put it on the wire (unmasked,
+ *     2/4/10-byte header) and served from the same stream right behind the `101`, so a frame
+ *     queued before the dial arrives in the same read as the response, as a server's
+ *     push-on-connect can;
+ *   - a read is capped at the buffer the caller offers and serves whatever bytes are
+ *     queued, across frame boundaries, exactly as `tcp_read` does; 0 is a timeout and a
+ *     negative value the end of the stream;
+ *   - closing an upgraded connection discards what was still queued for it: a new
+ *     connection is a new stream.
  *
- * Handles have IDENTITY (#1058): every `esp_transport_tcp_init` / `esp_transport_ws_init`
- * mints a distinct value and liveness is tracked per handle, because a teardown that lands
- * mid-dial puts two transport pairs on this fake at once — an orphaned dial still holding
- * the pair it built while the link that started it is gone and a fresh link has dialed its
- * own. A single-pair model would score the orphan's release as a misuse against the live
+ * Handles have IDENTITY (#1058): every `esp_transport_tcp_init` mints a distinct value and
+ * liveness is tracked per handle, because a teardown that lands mid-dial puts two
+ * connections on this fake at once — an orphaned dial still holding the one it built while
+ * the link that started it is gone and a fresh link has dialed its own. Each handle has its
+ * own handshake response; the scripted frames go to the connection upgraded last. A
+ * single-connection model would score the orphan's release as a misuse against the live
  * link, and @ref handle_misuse is the counter the whole teardown suite rests on.
  *
  * There is NO socket in this fake, at any layer: nothing is opened, and every byte the
@@ -50,13 +54,13 @@
 #include <string>
 #include <vector>
 
-#include "esp_transport_ws.h"
+#include "libtracer/ws.hpp"
 
 namespace fake_ws {
 
 /** @brief One scripted inbound WebSocket frame, as the peer would put it on the wire. */
 struct frame_t {
-    ws_transport_opcodes_t op;      /**< @brief Its opcode (CONT for a continuation). */
+    tr::net::ws::opcode_t op;       /**< @brief Its opcode (CONT for a continuation). */
     bool fin;                       /**< @brief Its FIN bit. */
     std::vector<std::byte> payload; /**< @brief Its payload, served across as many
                                      *         reads as the reader's buffer forces. */
@@ -64,7 +68,7 @@ struct frame_t {
 
 /** @brief Build a frame of @p len bytes filled with a @p seed-derived pattern, so a
  *         delivered message can be checked byte-for-byte against what was sent. */
-frame_t make_frame(ws_transport_opcodes_t op, bool fin, std::size_t len, std::uint8_t seed);
+frame_t make_frame(tr::net::ws::opcode_t op, bool fin, std::size_t len, std::uint8_t seed);
 
 /** @brief Drop all fake state: script, connection bookkeeping, armed pthread config. */
 void reset();
@@ -78,25 +82,32 @@ void reset();
  */
 void push_frames(std::vector<frame_t> frames);
 
-/** @brief True once every queued frame has been fully read. */
+/** @brief True once every queued frame has been fully read (or discarded by a close). */
 [[nodiscard]] bool drained();
 
-/** @brief How many times a connection was opened (the link re-dials on every drop). */
+/** @brief Answer every later handshake with a Sec-WebSocket-Accept that does not match its
+ *         key, as a server that is not speaking RFC 6455 to this client would. */
+void reject_upgrades(bool on);
+
+/** @brief Opening-handshake requests received since the reset. */
+[[nodiscard]] int handshakes();
+
+/** @brief How many times a TCP connect was attempted (the link re-dials on every drop). */
 [[nodiscard]] int connect_count();
 
-/** @brief The `ws_path` the last dial requested. */
+/** @brief The path the last handshake requested. */
 [[nodiscard]] std::string last_ws_path();
 
 /**
- * @brief The `headers` standing at each `esp_transport_connect`, in dial order —
- *        `std::nullopt` for a dial whose config left the field null.
+ * @brief The extra header lines each handshake request carried, in dial order —
+ *        `std::nullopt` for a request with none beyond the standard Upgrade lines.
  *
  * PER DIAL, not "the last one", and that is the #959 observable: the only way to supply a
  * handshake token ran after the recv thread had already been spawned, which left it
  * UNDEFINED whether the FIRST dial carried one. A `last_headers()` accessor cannot answer
  * that either way — by the time a test read it the second dial would have carried the
- * header and the link would look correct. Sampled at connect (config is applied immediately
- * before it), so entry `n` is what dial `n` actually requested.
+ * header and the link would look correct. Sampled from each request as it is written, so
+ * entry `n` is what handshake `n` actually carried.
  */
 [[nodiscard]] std::vector<std::optional<std::string>> dial_headers();
 
@@ -185,7 +196,7 @@ void release_connects(bool succeed);
 [[nodiscard]] int last_connect_timeout_ms();
 
 /**
- * @brief Park every `esp_transport_write` for the timeout the caller asked for,
+ * @brief Park every frame `esp_transport_write` for the timeout the caller asked for,
  *        modelling a peer whose TCP window has closed. Passing false releases whoever
  *        is parked, as a peer that starts accepting again would.
  *
@@ -193,7 +204,8 @@ void release_connects(bool succeed);
  * writer is parked here it is holding the link's `write_m_`, which is exactly the state
  * the destructor used to ignore. The park honours the caller's timeout, so how long a
  * held write can hold that serializer is the LINK's own bound — pre-#952, three times a
- * 4 s literal.
+ * 4 s literal. A handshake request is never parked: it is not a frame, no sender holds the
+ * serializer across it, and a parked one would only keep the link from coming up.
  */
 void hold_writes(bool on);
 
@@ -229,8 +241,9 @@ void pin_writes(bool on);
  */
 [[nodiscard]] int handle_misuse();
 
-/** @brief Payload bytes the last completed write carried, for the ordinary-path control —
- *         unmasked, as the peer would read them. */
+/** @brief Payload bytes the last completed frame write carried, for the ordinary-path
+ *         control — unmasked, as the peer would read them. A handshake request is not a
+ *         frame, and none of the write counters below count one. */
 [[nodiscard]] std::vector<std::byte> last_write_payload();
 
 /** @name The per-frame write cost (#2265). */
@@ -243,17 +256,10 @@ void pin_writes(bool on);
 [[nodiscard]] bool last_write_masked();
 
 /**
- * @brief lwIP calls the writes made since the reset, as the real transport would.
- *
- * A write on the WS handle is modelled as IDF's `_ws_write`: a poll, then the header and
- * the payload as two parent writes, each a poll and a send — 5 calls. A write on the TCP
- * parent is `tcp_write`: a poll and one send — 2 calls.
+ * @brief lwIP calls the frame writes made since the reset, as the real transport would: a
+ *        write on the TCP transport is `tcp_write`, a poll and one send — 2 calls.
  */
 [[nodiscard]] int lwip_calls();
-
-/** @brief Payload bytes the TRANSPORT touched after the link handed them over: IDF's
- *         in-place mask and unmask on the WS handle (2 per byte), 0 on the TCP parent. */
-[[nodiscard]] std::size_t transport_touched_bytes();
 
 /** @brief Bytes handed to lwIP's send since the reset: whole frames, header included. */
 [[nodiscard]] std::size_t wire_bytes();
@@ -264,6 +270,18 @@ void hold_reads(bool on);
 
 /** @brief How many callers are parked inside `esp_transport_read` right now. */
 [[nodiscard]] int readers_inside();
+
+/**
+ * @brief Park every `esp_transport_get_socket` until called with false.
+ *
+ * The link asks for the descriptor right after a dial resolves and before it publishes the
+ * connection, so this holds a dial in exactly the window a teardown racing a resolved dial
+ * lands in (#1606).
+ */
+void park_get_socket(bool on);
+
+/** @brief True while a caller is parked by @ref park_get_socket. */
+[[nodiscard]] bool get_socket_parked();
 
 /** @} */
 

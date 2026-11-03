@@ -158,6 +158,41 @@ class frame_ingress_t {
     }
 
     /**
+     * @brief One read through @p read, a link's own single-buffer read call, straight into
+     *        where the bytes belong, and hand up every frame it completes.
+     *
+     * For a link whose stream API takes one buffer per read rather than `recvmsg` (the
+     * ESP-IDF client's `esp_transport_read`, #2484). Between frames it offers the header slot
+     * alone, so at most `MaxHeader - 2` bytes of a body are copied (out of the slot into the
+     * body's segment); a body in progress is read straight into its segment, and a refused
+     * one into the header slot, which a body in progress leaves free, as throwaway space. It
+     * keeps no scratch, so it adds nothing to the caller's stack: a lone frame costs two
+     * reads (header, then body), a frame of at most `MaxHeader - 2` bytes one.
+     *
+     * @param read    Called once with the span to fill. Returns the bytes it read, 0 when
+     *                none arrived this time (a timeout), or a negative value when the stream
+     *                is gone.
+     * @param rx      The receiving link's own source, which every body is drawn from.
+     * @param framing The link's framing (see the file comment).
+     * @return False when the stream must close: the read failed or the framing said so.
+     */
+    template <class Read, class Framing>
+    [[nodiscard]] bool read_with(Read&& read, mem::mem_backend_t& rx, Framing& framing) {
+        const std::size_t room = body_len_ - body_have_;
+        const std::span<std::byte> into =
+            !in_body_  ? std::span<std::byte>(hdr_.data() + hdr_have_, MaxHeader - hdr_have_)
+            : blk_.seg ? blk_.frame(body_len_).subspan(body_have_, room)
+                       : std::span<std::byte>(hdr_.data(), std::min(room, MaxHeader));
+        const int n = read(into);
+        if (n <= 0) return n == 0;
+        if (in_body_)
+            body_have_ += static_cast<std::uint32_t>(n);
+        else
+            hdr_have_ += static_cast<std::uint8_t>(n);
+        return advance(rx, framing) >= 0;
+    }
+
+    /**
      * @brief Frame bytes that were already read elsewhere (the bytes a handshake read past
      *        its own end, a wake-up read's scratch), exactly as if they had arrived on the
      *        socket: each frame whole in them is copied into its exact segment, a partial

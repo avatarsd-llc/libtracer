@@ -83,7 +83,7 @@ menu "libtracer"
             WHICH plane you get is decided by the TARGET, not by this bool (#947):
 
               * chip targets get the IDF-NATIVE links only — esp_ws_client_link_t
-                (on esp_transport_ws) and, with LIBTRACER_WS_SERVER=y,
+                (on tcp_transport, framed by core) and, with LIBTRACER_WS_SERVER=y,
                 httpd_ws_link_t (adopts your running esp_http_server). ESP-IDF
                 WebSocket never uses POSIX sockets: core's portable
                 ws_server_transport_t / ws_client_transport_t are the HOST
