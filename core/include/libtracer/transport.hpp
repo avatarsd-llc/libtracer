@@ -917,8 +917,9 @@ class transport_t {
      * call next, so it sleeps until then with no idle wakeup; a link that later starts owing
      * (a send, a new peer) can be due earlier, so an application that wants that bounded also
      * calls after such events or on a cadence of its own. A link whose application never calls
-     * this runs no window and closes no frozen peer; a self-heal link then retries a lost link
-     * only on an op or an `acquire`, never in the background (#2304). Calls must not overlap
+     * this runs no window and closes no frozen peer; a self-heal link then makes the one
+     * attempt the loss starts, and after that retries only on an op or an `acquire`, never in
+     * the background (#2304). Calls must not overlap
      * each other on one link; they may race the link's own threads.
      *
      * The DEFAULT runs nothing and answers 0, which is right for a link with no per-peer

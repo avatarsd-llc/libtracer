@@ -44,8 +44,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   read in `now`'s units (milliseconds, the key's unit). A link whose application never calls
   `sweep` retries on events instead: each op or `acquire_link` on a `reconnecting` link starts
   one attempt, and nothing else does, so absent traffic it never retries. Attempts are spaced
-  start to start, so a dial that blocks longer than `backoff` is followed by the next at once. After the first `sweep` call, ops and
-  acquires no longer start retries. The worker thread stays, as the one dialer, until the dial
+  start to start, so a dial that blocks longer than `backoff` is followed by the next at once.
+  After the first `sweep` call, ops and acquires no longer start retries. The worker thread stays, as the one dialer, until the dial
   can run without blocking (#2147); `connect_timeout` is still handed to the factory and not
   yet compared against `now`.
 
