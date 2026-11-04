@@ -972,7 +972,8 @@ std::vector<std::byte> fwd_of(std::initializer_list<std::span<const std::byte>> 
  * the first routable child. Over this corpus they must agree, case by case, on the route each
  * one acts on. An arm the frame cannot reach is not asked: a `PATH_REF` `dst` and a PAIR head
  * are refused at the hop, an escape head and a malformed segment 0 reach the terminus, and a
- * malformed segment 0 never reaches the rebuild.
+ * malformed segment 0 never reaches the rebuild. A `dst` that is not a `PATH`, and an op that is
+ * not one byte, is answered along nothing by either refusal arm.
  *
  * The one deliberate difference is the empty `src` (RFC-0004 Amendment 2 §Scope boundary,
  * #2477): the hop refusal answers along it and the terminus declines. Both LOCATE it.
@@ -1061,6 +1062,21 @@ void test_src_parity_over_one_corpus() {
           client);
     agree("escape head", {}, fwd_of({read, escape, src}), true, client, client);
     agree("malformed segment 0", {}, fwd_of({read, malformed, src}), false, client, client);
+    // A `dst` that is no PATH at all has no window: nothing is located behind it, and the
+    // terminus refusal must not echo the VALUE it found there as the reply's route.
+    agree("non-PATH dst", {}, fwd_of({read, junk, src}), false, std::nullopt, std::nullopt);
+    {
+        // The op is a u8. A REPLY op two bytes wide is malformed, so neither refusal arm
+        // answers along its `src`, and the refused-route reclaim does not act on it either
+        // (edge_eviction_test). The rebuild is not asked: a forwarding hop carries the op
+        // opaquely and only refuses an empty one, as on main.
+        std::vector<std::byte> wide_op;
+        const std::array<std::byte, 2> wb{
+            std::byte{static_cast<std::uint8_t>(tr::graph::fwd_op_t::REPLY)}, std::byte{0}};
+        tr::wire::emit_tlv(wide_op, type_t::VALUE, opt_t{}, wb);
+        agree("2-byte-op REPLY", fwd_of({wide_op, hop, src}), fwd_of({wide_op, here, src}), false,
+              std::nullopt, std::nullopt);
+    }
     check(bus.broadcasts == 0 && alice.received == 0, "nothing egressed the bus");
 }
 

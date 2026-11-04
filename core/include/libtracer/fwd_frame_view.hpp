@@ -163,8 +163,8 @@ struct fwd_pre_t {
     /** @brief The leading headers were read: a structured FWD, an op VALUE and a `dst` in one
      *         of the forms @ref fwd_dst_kind_t names other than `NONE`. False ⇒ the op fields
      *         may be filled (see @ref op_body_len), and the `dst` window too when the `dst`
-     *         header itself was read (@ref after_dst non-zero), so a refusal can still locate
-     *         `src` behind a `dst` the peek refused. */
+     *         header itself was read as a `PATH` (@ref after_dst non-zero), so a refusal can still
+     * locate `src` behind a `dst` the peek refused. */
     bool valid = false;
     std::size_t body_end = 0; /**< @brief End of the FWD body. */
     std::size_t op_pos = 0;   /**< @brief Offset of the op VALUE TLV. */
@@ -336,7 +336,9 @@ template <class Cursor>
         accept();
         return fwd_dst_kind_t::RETIRED;
     }
-    if (dst_h->type != wire::type_t::PATH || dst_h->opt.pl) return fill_dst();
+    // A `dst` that is not a `PATH` container is no address and has no window: a refusal must
+    // not echo a VALUE (or any other child) as the reply's `src`.
+    if (dst_h->type != wire::type_t::PATH || dst_h->opt.pl) return refuse();
     if (dst_h->body_len == 0) {
         accept();
         return fwd_dst_kind_t::EMPTY;

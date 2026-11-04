@@ -806,14 +806,19 @@ template <class Cursor>
     // Children 1 and 2 — the REPLY op the caller classified and the PATH `dst`, the reply's
     // consumed way home — are the routing peek's; neither is read again. A valid peek here is
     // a `PATH` `dst`: the router refuses a `PATH_REF` one before its REPLY test (RFC-0029 §5.3).
-    if (!pre.valid) return std::nullopt;
+    // The op is a u8, as the other two readers of this frame require: a REPLY op of
+    // any other width is malformed, not a refusal, and must never evict.
+    if (!pre.valid || pre.op_body_len != 1) return std::nullopt;
     // Every later read is one shape: a header of an expected type that starts inside the FWD
-    // body. Stated once, so the children below differ only in what they then check.
+    // body, with its PL flag as that type is spelled — set on the containers (STATUS, ERROR),
+    // clear on the scalar VALUEs. Stated once, so the children below differ only in what they
+    // then check.
     const std::size_t end = pre.body_end;
     const auto child = [&](std::size_t at, wire::type_t want) -> std::optional<fwd_hdr_t> {
         if (at >= end) return std::nullopt;
         const auto h = read_fwd_header(cur, at);
-        if (!h || h->type != want) return std::nullopt;
+        if (!h || h->type != want || h->opt.pl == (want == wire::type_t::VALUE))
+            return std::nullopt;
         return h;
     };
     // Child 3 — the refused route, echoed whole: a PATH of NAMEs, or (RFC-0024 §7.1
@@ -837,9 +842,9 @@ template <class Cursor>
     pos += kind->total;
     // Child 5 — STATUS{ ERROR{ VALUE u16 LE } }, and the code is tr::path::invalid.
     const auto st = child(pos, wire::type_t::STATUS);
-    if (!st || !st->opt.pl) return std::nullopt;
+    if (!st) return std::nullopt;
     const auto err = child(st->body_off, wire::type_t::ERROR);
-    if (!err || !err->opt.pl) return std::nullopt;
+    if (!err) return std::nullopt;
     const auto code = child(err->body_off, wire::type_t::VALUE);
     if (!code || code->body_len != 2) return std::nullopt;
     const auto code_v = cur.load_le(code->body_off, 2);

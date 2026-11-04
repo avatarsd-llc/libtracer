@@ -1175,10 +1175,11 @@ void test_local_unsubscribe() {
 
 /**
  * @brief The `FWD{REPLY, kind=ERROR, STATUS{ERROR{code}}}` refusal frame `reject_bus_name_hop`
- *        emits, hand-built so the test can vary the CODE — the reclaim's discriminator.
+ *        emits, hand-built so the test can vary the CODE — the reclaim's discriminator — and
+ *        the op's width, which is one byte in every frame that is a refusal at all.
  */
 std::vector<std::byte> refusal_frame(const std::vector<std::byte>& refused_route,
-                                     std::uint16_t code) {
+                                     std::uint16_t code, std::size_t op_width = 1) {
     std::vector<std::byte> code_v;
     const std::byte c[2] = {static_cast<std::byte>(code & 0xFFU),
                             static_cast<std::byte>(code >> 8)};
@@ -1189,7 +1190,16 @@ std::vector<std::byte> refusal_frame(const std::vector<std::byte>& refused_route
     tr::wire::emit_tlv(status, type_t::STATUS, opt_t{.pl = true}, err);
     std::vector<std::byte> payload = b_value_u8(1);  // kind VALUE u8 = ERROR
     append(payload, status);
-    return b_fwd(fwd_op_t::REPLY, b_path({}), refused_route, {}, payload);
+    if (op_width == 1) return b_fwd(fwd_op_t::REPLY, b_path({}), refused_route, {}, payload);
+    // A REPLY op @p op_width bytes wide: malformed, since the op is a u8.
+    std::vector<std::byte> op_body(op_width, std::byte{0});
+    op_body[0] = std::byte{static_cast<std::uint8_t>(fwd_op_t::REPLY)};
+    std::vector<std::byte> body;
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, op_body);
+    append(body, b_path({}));
+    append(body, refused_route);
+    append(body, payload);
+    return tr::testing::fwd_envelope(body);
 }
 
 /**
@@ -1272,6 +1282,11 @@ void test_refused_route_reclaims_the_edge() {
     b_to_a.inject(refusal_frame(live_route, 0x0041));  // some code that is not 0x0021
     check(tr::testing::read_subscribers(gb, sensor)->size() == 1,
           "a non-invalid status evicts nothing");
+    // Nor does the right code under a malformed op: the op is a u8, and a REPLY op two bytes
+    // wide is no refusal, whatever follows it (#2479).
+    b_to_a.inject(refusal_frame(live_route, 0x0021, 2));
+    check(tr::testing::read_subscribers(gb, sensor)->size() == 1,
+          "a 2-byte REPLY op evicts nothing, even with tr::path::invalid");
     b_to_a.inject(refusal_frame(live_route, 0x0021));  // tr::path::invalid
     check(tr::testing::read_subscribers(gb, sensor)->empty(),
           "the same route with tr::path::invalid evicts — the discriminator is the code");

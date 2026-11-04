@@ -30,8 +30,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   peek: compare its answer with `fwd_dst_kind_t::PATH` for the old gate, read
   `fwd_pre_t::seg0_off` / `seg0_len` for the first segment, and mask the byte at
   `fwd_pre_t::op_body_off` (when `op_body_len != 0`) for the opcode. On a `NONE` answer whose
-  `dst` header was read, `fwd_pre_t` now also carries that `dst` window (`after_dst` non-zero;
-  `valid` stays false).
+  `dst` header was read as a `PATH`, `fwd_pre_t` now also carries that `dst` window (`after_dst`
+  non-zero; `valid` stays false). A `dst` that is not a `PATH` container carries none, so no
+  refusal locates a `src` behind it.
 - **New: `tr::net::locate_fwd_src` and `fwd_src_t`,** the one `src` locator, by the spec grammar
   `FWD{op, PATH dst, FIELD? selector, PATH src, ...}`. The forward rebuild, the bus-NAME-hop
   refusal, the terminus refusal and the refusal correlation all read `src` through it, so they
