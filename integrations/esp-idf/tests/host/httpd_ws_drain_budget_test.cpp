@@ -300,7 +300,9 @@ void test_egress_work_is_sent_from_inside_the_park() {
     peer->send(std::span<const std::byte>(body));
     check(wait_until([&] { return fake_httpd::instance().sent_frames().size() == 1; }),
           "the push is on the wire with no idle step");
-    check(fake_httpd::semaphore_waiters() == 1 && g_payload_reads.load() == kBudget,
+    // The frame is on the wire BEFORE the drain blocks on the gate again, so the re-park is
+    // waited for, not sampled: the drain sends from inside its wake, then takes once more.
+    check(wait_until([&] { return parked_after(kBudget); }),
           "and the drain is still parked on the same frame: the egress bought no ingress");
     check(link->stats().rx_drain_waits == 1, "one wait, still in progress");
     check(link->stats().enqueue_drops == 0 && link->stats().tx_conflated == 0,
@@ -320,7 +322,7 @@ void test_egress_work_is_sent_from_inside_the_park() {
     }
     check(each_sent, "a flood of pushes goes out one by one through the park");
     check(link->stats().enqueue_drops == 0, "and none of them was dropped");
-    check(fake_httpd::semaphore_waiters() == 1 && g_payload_reads.load() == kBudget,
+    check(wait_until([&] { return parked_after(kBudget); }),
           "and the ingress has not read one frame for all of them");
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     check(g_payload_reads.load() == kBudget && in.delivered() == kBudget,
@@ -373,7 +375,7 @@ void test_park_sends_each_frame_once() {
     peer->send(std::span<const std::byte>(tag));
     check(wait_until([&] { return fake_httpd::instance().sent_frames().size() == 5; }),
           "and a push posted during the park follows them");
-    check(fake_httpd::semaphore_waiters() == 1, "which is still parked");
+    check(wait_until([] { return fake_httpd::semaphore_waiters() == 1; }), "which is still parked");
     const auto sent = fake_httpd::instance().sent_frames();
     bool in_order = sent.size() == 5;
     for (std::size_t i = 0; in_order && i < 5; ++i)
