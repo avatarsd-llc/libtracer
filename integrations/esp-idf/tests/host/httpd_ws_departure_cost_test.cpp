@@ -198,10 +198,12 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
     check(mine_hits == 1, "the departing peer's edge is live (the test is not vacuous)");
 
     // THE DEPARTURE. On the server task, as httpd's own close path does it: close_session
-    // runs free_ctx, which notifies, which evicts.
+    // runs free_ctx, which notifies, which evicts. The task is waited on until the close has
+    // RETURNED: the candidate count reads zero as soon as eviction takes the index entry,
+    // before the edges themselves are reclaimed, so it does not witness the end of eviction.
     mine_hits = 0;
-    fake_httpd::instance().post([] { fake_httpd::instance().close_session(700); });
-    check(wait_for([&] { return g.link_edge_candidates("p0~1") == 0; }, kPatience),
+    task.run_on_task([] { fake_httpd::instance().close_session(700); });
+    check(g.link_edge_candidates("p0~1") == 0,
           "the hangup reached the eviction and cleared the peer's candidates");
 
     check(g.write(path_t("/mine"), rope_t{make_value({0x02})}).has_value(),
