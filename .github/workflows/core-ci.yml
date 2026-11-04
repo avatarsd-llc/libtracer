@@ -110,6 +110,9 @@
 # It keeps its own compiler cache under the runner user's home, because the shared
 # /ccache holds root-owned entries from the containers. No core-ci job runs on a
 # GitHub-hosted runner: the arm64 leg was dropped by owner ruling (#2348).
+# The host legs set LIBTRACER_VCAN_NS=required (#2523): ctest runs transport_can_vcan on a
+# private vcan0 in its own user + network namespace, and a host that can no longer make one
+# fails the leg, named, instead of passing on the shared vcan0 or as a skip.
 #
 # ── COMPILER CACHE (#1691) ──────────────────────────────────────────────────────────
 # Every job that compiles on the self-hosted route shares ONE persistent ccache: the host
@@ -1234,6 +1237,7 @@ jobs:
           LT_EXPECT_LKV_SLOT: ${{ matrix.lkv_slot }}
           LT_EXPECT_RECLAIM_POLICY: reclaim_qsbr_t
           LT_EXPECT_ACL_POLICY: allow_only_policy_t
+          LIBTRACER_VCAN_NS: ${{ runner.environment == 'self-hosted' && 'required' || 'fallback' }}
         run: |
           preset=""
           if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/hazard-slot"; fi
@@ -1335,6 +1339,7 @@ jobs:
           LT_EXPECT_LKV_SLOT: ${{ matrix.lkv_slot }}
           LT_EXPECT_RECLAIM_POLICY: reclaim_qsbr_t
           LT_EXPECT_ACL_POLICY: allow_only_policy_t
+          LIBTRACER_VCAN_NS: ${{ runner.environment == 'self-hosted' && 'required' || 'fallback' }}
         run: |
           preset=""
           if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/hazard-slot"; fi
@@ -1435,6 +1440,7 @@ jobs:
           LT_EXPECT_LKV_SLOT: single_writer_slot_t
           LT_EXPECT_RECLAIM_POLICY: reclaim_qsbr_t
           LT_EXPECT_ACL_POLICY: allow_only_policy_t
+          LIBTRACER_VCAN_NS: ${{ runner.environment == 'self-hosted' && 'required' || 'fallback' }}
           LT_EXPECT_MEMBARRIER: '1'
         run: |
           cmake -S core -B core/build-tsan-membarrier -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
@@ -1459,6 +1465,7 @@ jobs:
           LT_EXPECT_LKV_SLOT: single_writer_slot_t
           LT_EXPECT_RECLAIM_POLICY: reclaim_qsbr_t
           LT_EXPECT_ACL_POLICY: allow_only_policy_t
+          LIBTRACER_VCAN_NS: ${{ runner.environment == 'self-hosted' && 'required' || 'fallback' }}
           LT_EXPECT_MEMBARRIER: refused
         run: |
           "$RUNNER_TEMP/refuse_membarrier" setarch "$(uname -m)" -R \

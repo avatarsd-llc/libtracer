@@ -346,7 +346,8 @@ endif()
 # a fresh unprivileged user + network namespace. The enumeration and bystander checks
 # count every node on the bus, so two runs on one host (two sanitizer jobs on the same
 # runner host) failed each other on a shared vcan0. Where no namespace can be made (a
-# Docker job, no vcan module) the wrapper runs the test as before.
+# Docker job, no vcan module) the wrapper runs the test as before, unless
+# LIBTRACER_VCAN_NS=required (the CI host jobs), which fails the run instead.
 if(LIBTRACER_TRANSPORT_CAN AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(transport_can_vcan_test transport_can_vcan_test.cpp)
   target_link_libraries(transport_can_vcan_test PRIVATE libtracer)

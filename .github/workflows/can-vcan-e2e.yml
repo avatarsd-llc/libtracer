@@ -89,6 +89,9 @@ jobs:
 
       - name: Run the real-vcan transport_can E2E smoke test
         if: steps.vcan.outputs.up == 'true'
+        # required: a lost private namespace fails the run, never a shared-bus or skip pass.
+        env:
+          LIBTRACER_VCAN_NS: required
         run: |
           ctest --test-dir core/build --output-on-failure -R '^transport_can_vcan$'
 
