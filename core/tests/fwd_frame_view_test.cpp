@@ -109,6 +109,23 @@ tr::view::rope_t rope_split(std::span<const std::byte> bytes, std::span<const st
 }
 
 /**
+ * @brief The first `dst` segment's `[off, len)` as the routing peek reads it, or `nullopt` when
+ *        the peek does not answer a canonical `PATH`.
+ */
+template <class Cursor>
+std::optional<std::pair<std::size_t, std::size_t>> first_dst_seg(const Cursor& cur) {
+    tr::net::fwd_pre_t pre;
+    if (tr::net::peek_fwd_dst_any(cur, pre) != tr::net::fwd_dst_kind_t::PATH) return std::nullopt;
+    return std::pair{pre.seg0_off, pre.seg0_len};
+}
+
+/** @brief Does the routing peek open a canonical `dst` the mount descent can walk? */
+template <class Cursor>
+bool opens_path(const Cursor& cur, tr::net::fwd_pre_t& pre) {
+    return tr::net::peek_fwd_dst_any(cur, pre) == tr::net::fwd_dst_kind_t::PATH;
+}
+
+/**
  * @brief The rebuilt forward-hop frame gathered into one contiguous byte vector — a flat,
  *        one-segment mount (strip-1) named @p inbound_name.
  *
@@ -119,7 +136,7 @@ tr::view::rope_t rope_split(std::span<const std::byte> bytes, std::span<const st
 template <class Cursor>
 std::optional<bytes_t> forward_bytes(const Cursor& cur, std::string_view inbound_name) {
     tr::net::fwd_pre_t pre;
-    (void)tr::net::peek_fwd_dst(cur, pre);
+    (void)tr::net::peek_fwd_dst_any(cur, pre);
     pre.strip_at = pre.seg0_off + pre.seg0_len;  // consume the one leading segment
     const auto r = tr::net::rebuild_fwd_forward(cur, pre, {}, inbound_name);
     if (!r || !r->ok()) return std::nullopt;
@@ -149,12 +166,12 @@ int main() {
 
     const bytes_t payload = b_value_u32(0xABCD1234u);
 
-    // 1. peek_fwd_first_dst_seg — span cursor: offsets name the first dst segment's bytes.
+    // 1. The routing peek's segment 0 — span cursor: offsets name the first dst segment's bytes.
     {
         const bytes_t frame =
             b_fwd(fwd_op_t::WRITE, b_path({"child", "x"}), b_path({"c"}), {}, payload);
         const span_cursor cur{frame};
-        const auto seg = tr::net::peek_fwd_first_dst_seg(cur);
+        const auto seg = first_dst_seg(cur);
         check(seg.has_value(), "first-dst-seg peek: a structured FWD yields the segment window");
         const std::string_view want = "child";
         check(seg && seg->second == want.size() &&
@@ -162,42 +179,20 @@ int main() {
               "first-dst-seg peek: [off, len) re-slices to the segment NAME bytes");
     }
 
-    // 1b. peek_fwd_first_dst_seg — rope cursor, split at EVERY byte boundary: the
+    // 1b. The routing peek's segment 0 — rope cursor, split at EVERY byte boundary: the
     //     offsets must be identical to the contiguous read (they are source-agnostic).
     {
         const bytes_t frame =
             b_fwd(fwd_op_t::READ, b_path({"hop", "leaf"}), b_path({}), {}, payload);
-        const auto span_seg = tr::net::peek_fwd_first_dst_seg(span_cursor{frame});
+        const auto span_seg = first_dst_seg(span_cursor{frame});
         bool all_equal = span_seg.has_value();
         for (std::size_t cut = 1; cut + 1 < frame.size() && all_equal; ++cut) {
             const std::size_t cuts[] = {cut};
             const tr::view::rope_t r = rope_split(frame, cuts);
-            const auto rope_seg = tr::net::peek_fwd_first_dst_seg(rope_cursor{r});
+            const auto rope_seg = first_dst_seg(rope_cursor{r});
             all_equal = rope_seg == span_seg;
         }
         check(all_equal, "first-dst-seg peek: every rope split reads the same window as the span");
-    }
-
-    // 2. peek_fwd_op — op discriminant without a decode; rejects the non-FWD / opless.
-    {
-        const bytes_t wr = b_fwd(fwd_op_t::WRITE, b_path({"a"}), b_path({}));
-        const bytes_t rp = b_fwd(fwd_op_t::REPLY, b_path({"a"}), b_path({}));
-        check(tr::net::peek_fwd_op(span_cursor{wr}) == fwd_op_t::WRITE,
-              "op peek: WRITE read by offset");
-        check(tr::net::peek_fwd_op(span_cursor{rp}) == fwd_op_t::REPLY,
-              "op peek: REPLY read by offset");
-        const std::size_t cuts[] = {3, 7, 11};
-        const tr::view::rope_t r = rope_split(rp, cuts);
-        check(tr::net::peek_fwd_op(rope_cursor{r}) == fwd_op_t::REPLY,
-              "op peek: identical over a multi-link rope");
-        check(!tr::net::peek_fwd_op(span_cursor{b_path({"a"})}).has_value(),
-              "op peek: a non-FWD frame yields nullopt");
-        bytes_t empty_op_body;  // FWD{ VALUE(empty), ... } — an op with no payload byte
-        tr::wire::emit_tlv(empty_op_body, type_t::VALUE, opt_t{}, std::span<const std::byte>{});
-        bytes_t bad;
-        tr::wire::emit_tlv(bad, type_t::FWD, opt_t{.pl = true}, empty_op_body);
-        check(!tr::net::peek_fwd_op(span_cursor{bad}).has_value(),
-              "op peek: an empty op VALUE yields nullopt");
     }
 
     // 3. Head rebuild — shrink dst, grow src: BYTE-EXACT vs a reference re-encode.
@@ -276,7 +271,7 @@ int main() {
         // strip_at, the rebuild reuses them) must preserve the stamp identically — the peek
         // now carries the outer opt bits forward for exactly this.
         tr::net::fwd_pre_t pre;
-        check(tr::net::peek_fwd_dst(span_cursor{frame}, pre), "stamped frame: dst peek accepts");
+        check(opens_path(span_cursor{frame}, pre), "stamped frame: dst peek accepts");
         pre.strip_at = pre.seg0_off + pre.seg0_len;  // consume the one leading segment
         const auto pre_r = tr::net::rebuild_fwd_forward(span_cursor{frame}, pre,
                                                         std::span<const std::byte>{}, "in");
@@ -351,13 +346,15 @@ int main() {
         // address I can descend". `rebuild_fwd_forward` is frame-path context and steps over
         // an escape by design (§5.4), so a frame that reaches it has already been routed —
         // asserting a refusal THERE would put the key-context rule on the relay path.
-        check(!tr::net::peek_fwd_first_dst_seg(span_cursor{frame}).has_value(),
+        check(!first_dst_seg(span_cursor{frame}).has_value(),
               "reject: a dst whose FIRST record is the len==0 escape names no child");
         {
             tr::net::fwd_pre_t esc_pre;
-            check(!tr::net::peek_fwd_dst(span_cursor{frame}, esc_pre),
-                  "reject: the dst gate agrees, and clears the carried offsets");
-            check(!esc_pre.valid, "...cleared, so no stale offsets reach a rebuild");
+            check(tr::net::peek_fwd_dst_any(span_cursor{frame}, esc_pre) ==
+                      tr::net::fwd_dst_kind_t::PATH_ESCAPE,
+                  "reject: the dst gate answers PATH_ESCAPE, never the descent's PATH");
+            check(esc_pre.seg0_off == 0 && esc_pre.seg0_len == 0,
+                  "...with no segment window a descent could read as a name");
         }
         // But an escape BEHIND a literal leading segment is STEPPED OVER, not refused —
         // that is the forward-plane half of §5.4, and the reason the skip path exists at
@@ -368,16 +365,16 @@ int main() {
         (void)tr::wire::emit_path_segment(skip_body, "sensor");
         const bytes_t skip_dst = tr::testing::b_path_body(skip_body);
         const bytes_t skip_frame = b_fwd(fwd_op_t::WRITE, skip_dst, b_path({}), {}, payload);
-        check(tr::net::peek_fwd_first_dst_seg(span_cursor{skip_frame}).has_value(),
+        check(first_dst_seg(span_cursor{skip_frame}).has_value(),
               "an escape BEHIND the leading segment leaves the frame routable");
         {
             // The cursor is NAMED, not a temporary: `dst_seg_walk_t` borrows it and reads
-            // through it on every `at()`, unlike the peeks above, which consume theirs
+            // through it on every `at()`, unlike the peek above, which consumes its cursor
             // within the call. (Its deleted rvalue constructors now refuse a temporary
             // outright — this line is what taught them to.)
             const span_cursor skip_cur{skip_frame};
             tr::net::fwd_pre_t pre;
-            check(tr::net::peek_fwd_dst(skip_cur, pre), "...and the dst window still opens");
+            check(opens_path(skip_cur, pre), "...and the dst window still opens");
             tr::net::dst_seg_walk_t<span_cursor> walk(skip_cur, pre);
             const auto s0 = walk.at(0);
             const auto s1 = walk.at(1);
@@ -388,7 +385,7 @@ int main() {
         }
         // An empty dst PATH is not forwardable either.
         const bytes_t empty_dst = b_fwd(fwd_op_t::WRITE, b_path({}), b_path({}), {}, payload);
-        check(!tr::net::peek_fwd_first_dst_seg(span_cursor{empty_dst}).has_value(),
+        check(!first_dst_seg(span_cursor{empty_dst}).has_value(),
               "reject: an empty dst PATH yields no segment window");
     }
 

@@ -598,8 +598,11 @@ void test_bit7_is_refused() {
     // still routes to the terminus that owns the decision...
     const auto flagged = b_fwd_raw_op(kRead | kBit7, b_path({"x"}), b_path({"back"}));
     const tr::wire::grammar::span_cursor cur{flagged};
-    const std::optional<fwd_op_t> peeked = tr::net::peek_fwd_op(cur);
-    check(peeked.has_value() && *peeked == fwd_op_t::READ, "a bit-7 READ peeks as READ at a hop");
+    tr::net::fwd_pre_t pre;
+    (void)tr::net::peek_fwd_dst_any(cur, pre);
+    const auto peeked =
+        static_cast<fwd_op_t>(cur.byte_at(pre.op_body_off) & tr::graph::kFwdOpcodeMask);
+    check(pre.op_body_len == 1 && peeked == fwd_op_t::READ, "a bit-7 READ peeks as READ at a hop");
     // ...and the terminus refuses it: the RFC-0024 mint flag is retired, not ignored.
     const auto r = resolve_bytes(resolver, flagged);
     check(r.has_value() && reply_facts(*r).kind == reply_kind_t::ERROR && !reply_facts(*r).has_mint,

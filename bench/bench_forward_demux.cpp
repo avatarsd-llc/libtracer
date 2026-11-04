@@ -234,7 +234,7 @@ std::vector<std::byte> make_fwd(std::initializer_list<std::string_view> dst,
  *
  *  - **+13 ns** — the gate. The hand-rolled one carried the canonical arm only; the retired
  *    `peek_fwd_dst_any` also tests `PATH_REF`, returns a `fwd_dst_kind_t`, writes a
- *    `ref_count` out-param, and is reached through the `peek_fwd_dst` wrapper.
+ *    `ref_count` out-param, and was reached through the since-deleted `peek_fwd_dst` wrapper.
  *  - **+4 ns** — one segment. `prefill` fills `kDstSegCacheSlots` (4) slots and this bench's
  *    `dst` has five segments, so the retired leg parses a fourth header the hand-rolled arm,
  *    walking exactly the three it is asked for, never read.
@@ -518,7 +518,7 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
  * DESTINATION. It cannot remove work that depends on the FRAME, because the frame is new on
  * every hop. So the fixed per-hop cost divides in two:
  *
- *  - `resolve` — `peek_fwd_dst` opens the `dst` window and the walk hands back the mount
+ *  - `resolve` — `peek_fwd_dst_any` opens the `dst` window and the walk hands back the mount
  *    run. Its answer is the same for every frame to the same destination, so a token that
  *    names the resolved link makes it dead work. **This is the ceiling on caching**, and the
  *    registry scan (axis 2) sits on top of it.
@@ -578,7 +578,7 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
     // Production peeks ONCE and hands the parse to the rebuild via `pre`, so the rebuild leg
     // is timed the same way — otherwise it would re-parse and double-count the very work
     // this axis is trying to attribute to the peek.
-    (void)tr::net::peek_fwd_dst(cur, pre);
+    (void)tr::net::peek_fwd_dst_any(cur, pre);
     // ... and the descent records where the consumed mount run ends, which is the strip the
     // rebuild applies (it walks nothing itself since #1794). Recorded once, outside the timed
     // leg, exactly as the hop records it once per frame before the rebuild runs.
@@ -603,7 +603,7 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
             sink += rebuild_once(cur, pre, mount_tlv);
         } else {
             tr::net::fwd_pre_t local{};
-            if (!tr::net::peek_fwd_dst(cur, local)) return;
+            if (tr::net::peek_fwd_dst_any(cur, local) != tr::net::fwd_dst_kind_t::PATH) return;
             // The peek no longer materializes the segments — it opens the window and the walk
             // reads them (#523). Timing the peek alone would therefore no longer be timing the
             // work this axis attributes to it, so the walk of the mount run rides with it.

@@ -13,9 +13,9 @@
  *     distinct;
  *   - `child_registry_t::resolve_peer` — per-endpoint peer resolution (ADR-0061), so a
  *     peer is reachable only through the module it belongs to, never across buses;
- *   - `peek_fwd_dst` + `dst_seg_walk_t` + strip-K `rebuild_fwd_forward` — consuming K leading `dst`
- *     segments and growing `src` by the FULL mount path, which is what keeps a reply
- *     resolvable once names are per-module-scoped (the ADR-0061 erratum).
+ *   - `peek_fwd_dst_any` + `dst_seg_walk_t` + strip-K `rebuild_fwd_forward` — consuming K leading
+ * `dst` segments and growing `src` by the FULL mount path, which is what keeps a reply resolvable
+ * once names are per-module-scoped (the ADR-0061 erratum).
  */
 
 #include <array>
@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -30,6 +31,7 @@
 
 #include "fwd_frame_builder.hpp"
 #include "libtracer/fwd_frame_view.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "route_frame_builder.hpp"  // host-only frame builders (#1779)
@@ -135,22 +137,25 @@ std::vector<std::byte> make_fwd(std::initializer_list<std::string_view> dst,
                               tr::testing::b_path(src), {}, payload);
 }
 
+/** @brief The NAME segments of a packed `PATH` body (RFC-0018 `[u8 len][bytes]` records). */
+std::vector<std::string> segments_of(std::span<const std::byte> body) {
+    std::vector<std::string> segs;
+    for (std::size_t at = 0; at < body.size();) {
+        const auto len = static_cast<std::size_t>(static_cast<std::uint8_t>(body[at]));
+        if (len == 0 || at + 1 + len > body.size()) break;
+        segs.emplace_back(tr::detail::as_string_view(body.subspan(at + 1, len)));
+        at += 1 + len;
+    }
+    return segs;
+}
+
 /** @brief The NAME segments of the first PATH inside a rebuilt FWD body (dst), then src. */
 std::vector<std::vector<std::string>> paths_of(std::span<const std::byte> frame) {
     std::vector<std::vector<std::string>> out;
     const auto dec = tr::wire::decode(frame);
     if (!dec || dec->type != type_t::FWD) return out;
     for (const auto& child : dec->children) {
-        if (child.type != type_t::PATH) continue;
-        // Packed records (RFC-0018): `[u8 len][bytes]` in the PATH's own payload.
-        std::vector<std::string> segs;
-        for (std::size_t at = 0; at < child.payload.size();) {
-            const auto len = static_cast<std::size_t>(static_cast<std::uint8_t>(child.payload[at]));
-            if (len == 0 || at + 1 + len > child.payload.size()) break;
-            segs.emplace_back(tr::detail::as_string_view(child.payload.subspan(at + 1, len)));
-            at += 1 + len;
-        }
-        out.push_back(std::move(segs));
+        if (child.type == type_t::PATH) out.push_back(segments_of(child.payload));
     }
     return out;
 }
@@ -230,7 +235,8 @@ void test_peek_segments() {
         make_fwd({"net", "ws-client", "foo", "sensor", "temp"}, {"reply"});
     const tr::wire::grammar::span_cursor cur{std::span<const std::byte>(frame)};
     tr::net::fwd_pre_t pre;
-    check(tr::net::peek_fwd_dst(cur, pre), "a structured FWD opens its dst window");
+    check(tr::net::peek_fwd_dst_any(cur, pre) == tr::net::fwd_dst_kind_t::PATH,
+          "a structured FWD opens its dst window");
     tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> walk(cur, pre);
     const auto at = [&](std::size_t i) -> std::string {
         const auto s = walk.at(i);
@@ -254,7 +260,8 @@ void test_peek_segments() {
     const std::vector<std::byte> shortf = make_fwd({"net", "can"}, {"reply"});
     const tr::wire::grammar::span_cursor scur{std::span<const std::byte>(shortf)};
     tr::net::fwd_pre_t spre;
-    check(tr::net::peek_fwd_dst(scur, spre), "a short dst still opens");
+    check(tr::net::peek_fwd_dst_any(scur, spre) == tr::net::fwd_dst_kind_t::PATH,
+          "a short dst still opens");
     tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> swalk(scur, spre);
     check(swalk.at(1).has_value() && !swalk.at(2).has_value(),
           "a short dst yields only what it has");
@@ -272,7 +279,8 @@ void test_strip_k_and_symmetric_src() {
     // The router's sequence (#1794): the peek reads the headers once, the descent records
     // where the K = 3 consumed segments end, and the rebuild applies exactly that strip.
     tr::net::fwd_pre_t pre;
-    check(tr::net::peek_fwd_dst(cur, pre), "the dst window opens");
+    check(tr::net::peek_fwd_dst_any(cur, pre) == tr::net::fwd_dst_kind_t::PATH,
+          "the dst window opens");
     tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> walk(cur, pre);
     pre.strip_at = walk.end_of(2).value_or(pre.dst_end + 1);
     const auto rb = tr::net::rebuild_fwd_forward(cur, pre, std::span<const std::byte>(*enc), {});
@@ -301,7 +309,8 @@ void test_short_dst_is_not_forwardable() {
     const std::string_view mount[3] = {"net", "ws-server", "up"};
     const auto enc = tr::net::encode_mount_tlv(std::span<const std::string_view>(mount));
     tr::net::fwd_pre_t pre;
-    check(tr::net::peek_fwd_dst(cur, pre), "the short dst still opens");
+    check(tr::net::peek_fwd_dst_any(cur, pre) == tr::net::fwd_dst_kind_t::PATH,
+          "the short dst still opens");
     tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> walk(cur, pre);
     const std::optional<std::size_t> end = walk.end_of(2);
     check(!end.has_value(), "the walk has no third segment to end a K = 3 strip at");
@@ -907,6 +916,156 @@ void test_empty_src_refused_one_hop_in_answers_the_prepended_route() {
     check(!last.empty() && last[0].empty(), "with the route spent: an empty dst at its last hop");
 }
 
+namespace {
+
+/** @brief A `block_source_t` that serves from the heap until armed, then refuses every draw. */
+class arming_rx_t final : public tr::mem::block_source_t {
+   public:
+    arming_rx_t() noexcept : block_source_t("test_arming_rx") {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        return armed ? nullptr : tr::mem::heap_source().try_alloc(bytes, align);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, bytes, align);
+    }
+    bool armed = false; /**< @brief Refuse every draw while set. */
+};
+
+/** @brief The `src` segments an arm acted on, or `nullopt` when it acted on none. */
+using src_seen_t = std::optional<std::vector<std::string>>;
+
+/** @brief The `src` the forward rebuild grows, read off the routing peek's offsets. */
+src_seen_t forward_src(std::span<const std::byte> frame) {
+    const tr::wire::grammar::span_cursor cur{frame};
+    tr::net::fwd_pre_t pre;
+    (void)tr::net::peek_fwd_dst_any(cur, pre);
+    const auto rb = tr::net::rebuild_fwd_forward(cur, pre, {}, {});
+    if (!rb || !rb->ok()) return std::nullopt;
+    return segments_of(frame.subspan(rb->src_body_off, rb->src_body_len));
+}
+
+/** @brief The route a refusal answered along — the reply's `dst`, which is the request's `src`
+ *         — or `nullopt` when the router sent nothing back. */
+src_seen_t refusal_src(tr::net::fwd_router_t& router, recording_link_t& in,
+                       std::span<const std::byte> frame) {
+    const std::size_t before = in.sent.size();
+    router.on_frame("net/ws-server/down", frame);
+    if (in.sent.size() == before) return std::nullopt;
+    const auto routes = paths_of(in.sent.back());
+    return routes.empty() ? src_seen_t{} : src_seen_t{routes[0]};
+}
+
+/** @brief A FWD body assembled child by child, so a case can put anything between them. */
+std::vector<std::byte> fwd_of(std::initializer_list<std::span<const std::byte>> children) {
+    std::vector<std::byte> body;
+    for (const auto c : children) body.insert(body.end(), c.begin(), c.end());
+    return tr::testing::fwd_envelope(body);
+}
+
+/**
+ * @brief Both refusal arms and the forward rebuild locate the SAME `src` over one corpus (#2479).
+ *
+ * The forward rebuild, the bus-NAME-hop refusal (`reject_bus_name_hop`) and the terminus
+ * refusal (`emit_refusal_reply`) each used to find `src` their own way: the rebuild by the spec
+ * grammar (`FWD{op, PATH dst, FIELD? selector, PATH src, ...}`), the hop refusal as the first
+ * `PATH` after child 1 of a whole-frame decode, the terminus refusal as the next `PATH` after
+ * the first routable child. Over this corpus they must agree, case by case, on the route each
+ * one acts on. An arm the frame cannot reach is not asked: a `PATH_REF` `dst` and a PAIR head
+ * are refused at the hop, an escape head and a malformed segment 0 reach the terminus, and a
+ * malformed segment 0 never reaches the rebuild.
+ *
+ * The one deliberate difference is the empty `src` (RFC-0004 Amendment 2 §Scope boundary,
+ * #2477): the hop refusal answers along it and the terminus declines. Both LOCATE it.
+ */
+void test_src_parity_over_one_corpus() {
+    std::printf("one src locator: forward, hop refusal and terminus refusal agree (#2479)\n");
+    recording_link_t down;
+    bus_link_impl_t bus;
+    p2p_link_t alice;
+    bus.peers.emplace_back("alice", &alice);
+    arming_rx_t rx;
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph, {.rx = &rx}};
+    (void)router.attach_link("net/ws-server/down", down);
+    (void)router.attach_link("net/ws-server/srv", bus);
+
+    const auto hop = tr::testing::b_path({"net", "ws-server", "srv", "sensor", "temp"});
+    const auto here = tr::testing::b_path({"sensor", "temp"});
+    const auto read =
+        tr::testing::fwd_op_child(static_cast<std::uint8_t>(tr::graph::fwd_op_t::READ));
+    const auto src = tr::testing::b_path({"client"});
+    const src_seen_t client = std::vector<std::string>{"client"};
+    std::vector<std::byte> field;
+    tr::wire::emit_tlv(field, type_t::FIELD, opt_t{.pl = true}, tr::testing::b_path({"x"}));
+    std::vector<std::byte> junk;
+    const std::byte jb{0x2a};
+    tr::wire::emit_tlv(junk, type_t::VALUE, opt_t{}, std::span<const std::byte>(&jb, 1));
+    std::vector<std::byte> path_ref;
+    const std::array<std::byte, 8> ref_body{};
+    tr::wire::emit_tlv(path_ref, type_t::PATH_REF, opt_t{}, ref_body);
+    std::vector<std::byte> esc_body;
+    const std::byte eb{0x41};
+    tr::testing::append_path_escape(esc_body, 0x01, std::span<const std::byte>(&eb, 1));
+    const auto escape = tr::testing::b_path_body(esc_body);
+    const std::array<std::byte, 2> ragged_seg0{std::byte{0x05}, std::byte{0x61}};
+    const auto malformed = tr::testing::b_path_body(ragged_seg0);
+    const std::array<std::byte, 1> ragged_tail{std::byte{0x05}};
+
+    // `at_hop` / `at_terminus`: the frame as that arm sees it, empty when the arm is not
+    // reachable. The rebuild reads the hop frame when there is one, else the terminus one.
+    const auto agree = [&](const char* name, std::span<const std::byte> at_hop,
+                           std::span<const std::byte> at_terminus, bool forwards,
+                           const src_seen_t& expect, const src_seen_t& expect_terminus) {
+        std::printf("  %s\n", name);
+        if (forwards)
+            check(forward_src(at_hop.empty() ? at_terminus : at_hop) == expect,
+                  "the forward rebuild locates it");
+        if (!at_hop.empty())
+            check(refusal_src(router, down, at_hop) == expect, "the hop refusal locates it");
+        if (!at_terminus.empty()) {
+            rx.armed = true;
+            check(refusal_src(router, down, at_terminus) == expect_terminus,
+                  "the terminus refusal locates it");
+            rx.armed = false;
+        }
+    };
+    const auto both = [&](std::initializer_list<std::span<const std::byte>> after_dst) {
+        std::vector<std::byte> tail;
+        for (const auto c : after_dst) tail.insert(tail.end(), c.begin(), c.end());
+        return std::pair{fwd_of({read, hop, tail}), fwd_of({read, here, tail})};
+    };
+
+    {
+        const auto [h, t] = both({field, src});
+        agree("FIELD selector between dst and src", h, t, true, client, client);
+    }
+    {
+        const auto [h, t] = both({junk, src});
+        agree("junk between dst and src: no src", h, t, true, std::nullopt, std::nullopt);
+    }
+    {
+        const auto [h, t] = both({src, ragged_tail});
+        agree("malformed past src", h, t, true, client, client);
+    }
+    {
+        const auto empty_op = tr::testing::fwd_op_child_empty();
+        agree("EMPTY op", fwd_of({empty_op, hop, src}), fwd_of({empty_op, here, src}), true,
+              std::nullopt, std::nullopt);
+    }
+    {
+        const auto [h, t] = both({tr::testing::b_path({})});
+        agree("empty src", h, t, true, std::vector<std::string>{}, std::nullopt);
+    }
+    agree("PATH_REF dst", fwd_of({read, path_ref, src}), {}, true, client, client);
+    agree("PAIR head", fwd_of({read, tr::testing::b_path_pair(9999, 1), src}), {}, true, client,
+          client);
+    agree("escape head", {}, fwd_of({read, escape, src}), true, client, client);
+    agree("malformed segment 0", {}, fwd_of({read, malformed, src}), false, client, client);
+    check(bus.broadcasts == 0 && alice.received == 0, "nothing egressed the bus");
+}
+
+}  // namespace
+
 int main() {
     test_module_scoping();
     test_no_prefix_confusion();
@@ -924,6 +1083,7 @@ int main() {
     test_reject_and_terminus_agree_on_trailered_routes();
     test_reply_naming_a_bus_mount_exactly_stays_put();
     test_empty_src_refused_one_hop_in_answers_the_prepended_route();
+    test_src_parity_over_one_corpus();
 
     return tr::testing::summary("mount_routing");
 }

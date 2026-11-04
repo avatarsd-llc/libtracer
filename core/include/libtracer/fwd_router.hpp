@@ -1531,9 +1531,12 @@ class fwd_router_t {
      * because the element REPLACED the name it stands for and there is nothing left to look
      * up. Non-null only on the `TERMINUS` arm of `route_pair_forward` (see `head_dst_t`);
      * nullptr for every NAME-spelled frame this node terminates.
+     *
+     * @p pre is the routing peek's read of @p frame, handed through so a refusal answers from
+     * the offsets the peek already read (`emit_refusal_reply`, #2479).
      */
     void resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
-                          const view::view_t* frame_view,
+                          const view::view_t* frame_view, const fwd_pre_t& pre,
                           const child_rx_ctx_t* inbound_ctx = nullptr,
                           const wire::path_ref_element_t* dst_target = nullptr,
                           peer_handle_t peer = {});
@@ -1553,9 +1556,10 @@ class fwd_router_t {
      * arena terminus's `decode_into(VERIFY)`. The ADR-0042 §3 referenced store needs
      * a contiguous frame view, so the rope tier stores its one ownership copy (no
      * `frame_view`). Reply routes back over the inbound link (`reply_link`) exactly as the
-     * arena path.
+     * arena path. @p pre is the routing peek's read of @p frame, as at `resolve_terminus`.
      */
     void resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame,
+                               const fwd_pre_t& pre,
                                const wire::path_ref_element_t* dst_target = nullptr,
                                const child_rx_ctx_t* inbound_ctx = nullptr,
                                peer_handle_t peer = {});
@@ -1606,7 +1610,7 @@ class fwd_router_t {
      *                  view-tier resolve straight off the rope on the other. Takes the
      *                  PAIR-spelled `dst` resolution (`const wire::path_ref_element_t*`, null
      *                  for every NAME-spelled frame), because an element leaves no name to
-     *                  look up.
+     *                  look up, and the frame's `fwd_pre_t`, from which a refusal answers.
      * @param  reply    Hand a FWD{REPLY} that reached its originator to the reply sink,
      *                  called with the frame's `fwd_pre_t` for the refusal correlation.
      *
@@ -2026,9 +2030,13 @@ class fwd_router_t {
      * @brief Where a terminating `FWD{REPLY}` goes: the oldest armed @ref origin_t whose return
      *        route the reply's `dst` spells (disarmed as it is taken), else the @ref on_reply
      *        sink (#1645). With nothing armed it is that sink's snapshot and nothing more.
+     *
+     * @p pre is the routing peek's read of the reply: its `dst` window is the route compared,
+     * so a reply that is not a valid FWD matches no record and goes to the sink.
      */
     template <class Cursor>
-    [[nodiscard]] sink_slot_t<reply_fn_t>::snapshot_t reply_target(const Cursor& cur);
+    [[nodiscard]] sink_slot_t<reply_fn_t>::snapshot_t reply_target(const Cursor& cur,
+                                                                   const fwd_pre_t& pre);
 
     /**
      * @name The armed-origin list (#1645)

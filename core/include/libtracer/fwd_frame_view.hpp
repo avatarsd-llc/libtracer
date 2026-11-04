@@ -4,8 +4,8 @@
  *
  * The FWD-plane frame view (ADR-0038 inv. #1/#2, ADR-0053 ④b): the offset-dispatch
  * cluster the forward hop reads a frame by — one top-level header read as ABSOLUTE
- * offsets, the forward-vs-terminus peeks (first `dst` segment, op discriminant),
- * the control-frame head peek, the fixed-capacity stack byte-writer, and the
+ * offsets, the one routing peek (@ref peek_fwd_dst_any) and the one `src` locator
+ * (@ref locate_fwd_src), the fixed-capacity stack byte-writer, and the
  * shrunk-dst / grown-src head rebuild. Everything is templated over the grammar
  * `Cursor` concept (`%grammar.hpp`), so the identical logic serves a contiguous
  * `span_cursor_t` and a link-walking `rope_cursor_t` — offsets, never spans, so every
@@ -161,8 +161,10 @@ template <class Cursor>
  */
 struct fwd_pre_t {
     /** @brief The leading headers were read: a structured FWD, an op VALUE and a `dst` in one
-     *         of the forms @ref fwd_dst_kind_t names other than `NONE`. False ⇒ only the op
-     *         fields below may be filled (see @ref op_body_len). */
+     *         of the forms @ref fwd_dst_kind_t names other than `NONE`. False ⇒ the op fields
+     *         may be filled (see @ref op_body_len), and the `dst` window too when the `dst`
+     *         header itself was read (@ref after_dst non-zero), so a refusal can still locate
+     *         `src` behind a `dst` the peek refused. */
     bool valid = false;
     std::size_t body_end = 0; /**< @brief End of the FWD body. */
     std::size_t op_pos = 0;   /**< @brief Offset of the op VALUE TLV. */
@@ -176,7 +178,7 @@ struct fwd_pre_t {
      *
      *         The op fields are filled as soon as the op is read, before the `dst` is judged,
      *         so the terminus split reads the opcode off them even for a `dst` the peek
-     *         refuses. Non-zero here is exactly the frame `peek_fwd_op` answers for. */
+     *         refuses. */
     std::size_t op_body_len = 0;
     std::size_t dst_body_off = 0; /**< @brief First byte of the dst PATH body. */
     std::size_t dst_end = 0;      /**< @brief End of the dst PATH body. */
@@ -184,7 +186,7 @@ struct fwd_pre_t {
     /**
      * @brief The FIRST `dst` segment's `[body_off, body_len)` — the gate's own read, kept.
      *
-     * @ref peek_fwd_dst must parse this header anyway: "the leading child is a NAME" is the
+     * @ref peek_fwd_dst_any must parse this header anyway: "the leading child is a NAME" is the
      * gate that decides a `dst` is an address at all. It used to throw the parsed offsets
      * away, and the descent immediately re-read the identical four bytes — one duplicated
      * `parse_header` on EVERY forward hop, which is a per-frame cost the pre-lift peek did
@@ -270,8 +272,9 @@ enum class fwd_dst_kind_t : std::uint8_t {
  * @tparam Cursor A grammar byte-source cursor (span or rope).
  * @param  cur    The cursor positioned at the frame's first byte.
  * @param  pre    Filled on every non-`NONE` answer, with `valid` set. On `NONE` it is reset
- *                with `valid = false`, and only its op fields may be filled (when the frame is
- *                a structured FWD with an op VALUE), which is what the terminus split reads.
+ *                with `valid = false`; its op fields are filled when the frame is a structured
+ *                FWD with an op VALUE (the terminus split reads them), and its `dst` window
+ *                when the `dst` header was read (the refusal arms locate `src` behind it).
  *
  * @note `flatten` — see @ref rebuild_fwd_forward for the measurement. The four
  *       @ref read_fwd_header calls below are this function's whole body, and each returns a
@@ -311,15 +314,20 @@ template <class Cursor>
     const auto dst_h = read_fwd_header(cur, dst_pos);
     if (!dst_h) return refuse();
     const std::size_t dst_end = dst_h->body_off + dst_h->body_len;
-    // Every accepted form: the headers are read (`valid`), and the `dst` window is open with
-    // nothing consumed yet — a canonical `dst`'s descent overwrites `strip_at`.
-    const auto accept = [&] {
+    // The `dst` header is read, so its window is recorded whatever the answer: a refusal locates
+    // `src` behind it (@ref locate_fwd_src) even for a `dst` no arm routes. Accepted forms add
+    // `valid`, with nothing consumed yet — a canonical `dst`'s descent overwrites `strip_at`.
+    const auto fill_dst = [&] {
         fill_op();
-        pre.valid = true;
         pre.dst_body_off = dst_h->body_off;
         pre.dst_end = dst_end;
         pre.after_dst = dst_pos + dst_h->total;
         pre.strip_at = dst_h->body_off;
+        return fwd_dst_kind_t::NONE;
+    };
+    const auto accept = [&] {
+        fill_dst();
+        pre.valid = true;
     };
     // RFC-0029 §5.3: the bare `PATH_REF` (`0x14`) array is retired as an address. It is told
     // by its type code alone and refused, addressed, by the router — never shape-checked,
@@ -328,7 +336,7 @@ template <class Cursor>
         accept();
         return fwd_dst_kind_t::RETIRED;
     }
-    if (dst_h->type != wire::type_t::PATH || dst_h->opt.pl) return refuse();
+    if (dst_h->type != wire::type_t::PATH || dst_h->opt.pl) return fill_dst();
     if (dst_h->body_len == 0) {
         accept();
         return fwd_dst_kind_t::EMPTY;
@@ -339,7 +347,7 @@ template <class Cursor>
     // (or, for any other escape, by the terminus arm's refusal). Its `seg0_off`/`seg0_len` stay
     // zero for an escape: a descent that read them would read the escape's payload as a name.
     const auto seg0 = read_packed_seg(cur, dst_h->body_off, dst_end);
-    if (!seg0) return refuse();
+    if (!seg0) return fill_dst();
     accept();
     if (seg0->escape) return fwd_dst_kind_t::PATH_ESCAPE;
     pre.seg0_off = seg0->body_off;
@@ -352,36 +360,50 @@ template <class Cursor>
 }
 
 /**
- * @brief Open the `dst` window of a FWD frame — the mount descent's gate, read by OFFSET.
+ * @brief Where a FWD frame's optional selector and its `src` sit — the one `src` locator.
  *
- * The canonical arm of @ref peek_fwd_dst_any, for a caller that routes only the canonical
- * form (the unit tests and `bench_forward_demux`). Fills @p pre with everything the descent
- * and the head rebuild need about the frame's structure: where the op VALUE and the `dst`
- * PATH body are, and where the body ends. It reads NO segments and materializes nothing, so
- * its cost and its stack are the same whatever the `dst`'s depth — the point of #523. Segments
- * are then walked lazily
- * through @ref dst_seg_walk_t, one at a time, only as far as the registry actually asks.
+ * @see locate_fwd_src
+ */
+struct fwd_src_t {
+    std::size_t sel_pos = 0; /**< @brief Offset of the `FIELD` selector; meaningless at 0 total. */
+    std::size_t sel_total = 0; /**< @brief Its total size; 0 when the frame carries none. */
+    std::size_t pos = 0;       /**< @brief Offset of the `src` PATH's own header. */
+    fwd_hdr_t hdr{};           /**< @brief The `src` PATH's header, as read. */
+};
+
+/**
+ * @brief Locate a FWD frame's `src` behind the `dst` the routing peek read — by the spec
+ *        grammar, and the only reader of it (#2479).
  *
- * This replaces `peek_fwd_dst_segs`, which eagerly filled a `kMountPeekMax`-sized array of
- * offsets. That array was the width bound's last physical residue: it decided in advance
- * how many segments the descent could ever look at, and sizing it by the widest mount would
- * have put a W-sized array on every rope frame (measured on rv32: 592 B of stack at W=4,
- * 2912 B at W=33). Nothing here is sized by a width at all.
+ * The grammar is `FWD{op, PATH dst, FIELD? selector, PATH src, …}`: the child right after `dst`
+ * is either the selector or `src`, and `src` is a `PATH` that lies inside the FWD body. Nothing
+ * else is skipped and nothing past `src` is read, so a frame malformed past `src` still has
+ * one. The forward rebuild, both refusal arms and the refusal correlation all locate `src` here;
+ * four readers with four grammars used to disagree about the same bytes.
  *
  * @tparam Cursor A grammar byte-source cursor (span or rope).
  * @param  cur    The cursor positioned at the frame's first byte.
- * @param  pre    Filled on success; reset with `valid = false` on every failure, so a caller
- *                cannot pass stale offsets to the rebuild.
- * @retval false  Not a structured FWD with an op VALUE, a non-empty `dst` PATH, and a
- *                leading NAME segment — the caller falls through to the terminus/control
- *                arms exactly as it did on the old `n == 0`. A well-formed BOUND `dst` is
- *                among the false answers, and @p pre is cleared for it too.
+ * @param  pre    What @ref peek_fwd_dst_any read off this frame; its `dst` header must have
+ *                been read (@ref fwd_pre_t::after_dst non-zero).
+ * @retval std::nullopt No `dst` header was read, or the child after it (or after the selector)
+ *         is not a `PATH` that fits the body.
  */
 template <class Cursor>
-[[nodiscard]] bool peek_fwd_dst(const Cursor& cur, fwd_pre_t& pre) {
-    if (peek_fwd_dst_any(cur, pre) == fwd_dst_kind_t::PATH) return true;
-    pre = fwd_pre_t{};  // a bound `dst` fills it; this gate's contract is "cleared on false"
-    return false;
+[[nodiscard]] std::optional<fwd_src_t> locate_fwd_src(const Cursor& cur, const fwd_pre_t& pre) {
+    std::size_t pos = pre.after_dst;
+    if (pos == 0 || pos >= pre.body_end) return std::nullopt;
+    fwd_src_t s;
+    auto h = read_fwd_header(cur, pos);
+    if (h && h->type == wire::type_t::FIELD) {
+        s.sel_pos = pos;
+        s.sel_total = h->total;
+        pos += h->total;
+        h = pos < pre.body_end ? read_fwd_header(cur, pos) : std::nullopt;
+    }
+    if (!h || h->type != wire::type_t::PATH || h->total > pre.body_end - pos) return std::nullopt;
+    s.pos = pos;
+    s.hdr = *h;
+    return s;
 }
 
 /**
@@ -493,7 +515,7 @@ inline constexpr std::size_t kDstSegCacheSlots =
  * the caller re-slices from its own cursor.
  *
  * **It BORROWS the cursor, which must outlive it** — and it is the only thing in this cluster
- * that does. Every peek here (@ref peek_fwd_dst, @ref peek_fwd_first_dst_seg,
+ * that does. Every reader here (@ref peek_fwd_dst_any, @ref locate_fwd_src,
  * @ref rebuild_fwd_forward) consumes its cursor within the call and hands back offsets, so a
  * caller may pass a temporary to any of them; this walker keeps reading through the cursor
  * after the constructor returns, so a temporary there is a dangling read on the first
@@ -520,7 +542,7 @@ class dst_seg_walk_t {
      * @brief A TEMPORARY cursor is refused at compile time (both value categories).
      *
      * `dst_seg_walk_t<span_cursor_t> w(span_cursor_t{frame}, pre);` reads exactly like the
-     * `peek_fwd_dst(span_cursor_t{frame}, pre)` one line above it and is the one spelling that
+     * `peek_fwd_dst_any(span_cursor_t{frame}, pre)` one line above it and is the one spelling that
      * is wrong: the temporary dies at the end of the full expression and every later `at()`
      * reads a dead stack slot. That is not hypothetical — it is what a test wrote and what
      * ASan caught as `stack-use-after-scope` through `read_packed_seg`. Deleting these makes
@@ -630,64 +652,6 @@ class dst_seg_walk_t {
      *         cache line per frame is a cost the pre-lift descent did not pay. */
     std::array<std::pair<std::size_t, std::size_t>, kDstSegCacheSlots> cache_;
 };
-
-/**
- * @brief The forward dispatch decision, read by OFFSET with no allocation
- *        (ADR-0038 inv. #1, ADR-0039).
- *
- * A FWD whose first `dst` segment names a transport child is a forward hop that
- * never needs the decoded tree. Returns the `[body_off, body_len)` of the first
- * packed dst-segment record iff the frame is a structured FWD with an op VALUE + a
- * non-empty dst PATH; nullopt otherwise (malformed, non-FWD, or empty dst ⇒ the
- * caller falls back to the full-decode terminus path). Offsets, not a span, so
- * the result is source-agnostic — the caller re-slices the segment bytes from
- * its own cursor (contiguous or rope).
- *
- * @tparam Cursor A grammar byte-source cursor (span or rope).
- * @param  cur    The cursor positioned at the frame's first byte.
- */
-template <class Cursor>
-[[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> peek_fwd_first_dst_seg(
-    const Cursor& cur) {
-    const auto fwd_h = read_fwd_header(cur, 0);
-    if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return std::nullopt;
-    const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
-    // child[0] = op VALUE
-    const auto op_h = read_fwd_header(cur, fwd_h->body_off);
-    if (!op_h || op_h->type != wire::type_t::VALUE) return std::nullopt;
-    // child[1] = dst PATH
-    const std::size_t dst_pos = fwd_h->body_off + op_h->total;
-    if (dst_pos >= body_end) return std::nullopt;
-    const auto dst_h = read_fwd_header(cur, dst_pos);
-    if (!dst_h || dst_h->type != wire::type_t::PATH || dst_h->opt.pl || dst_h->body_len == 0)
-        return std::nullopt;
-    // dst record[0] = the first packed segment (RFC-0018); an escape names no transport child
-    const auto seg0 = read_packed_seg(cur, dst_h->body_off, dst_h->body_off + dst_h->body_len);
-    if (!seg0 || seg0->escape) return std::nullopt;
-    return std::pair{seg0->body_off, seg0->body_len};
-}
-
-/**
- * @brief Read the FWD op discriminant (child[0], a VALUE u8) by OFFSET.
- *
- * The terminus split (REPLY → originator sink vs request → arena resolve)
- * without a decode.
- *
- * @tparam Cursor A grammar byte-source cursor (span or rope).
- * @param  cur    The cursor positioned at the frame's first byte.
- * @retval std::nullopt Not a structured FWD, or its op VALUE is missing/empty.
- */
-template <class Cursor>
-[[nodiscard]] std::optional<graph::fwd_op_t> peek_fwd_op(const Cursor& cur) {
-    const auto fwd_h = read_fwd_header(cur, 0);
-    if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return std::nullopt;
-    const auto op_h = read_fwd_header(cur, fwd_h->body_off);
-    if (!op_h || op_h->type != wire::type_t::VALUE || op_h->body_len == 0) return std::nullopt;
-    // MASKED at a forwarder: bits 7-6 are reserved, and a forwarder routes on the opcode
-    // alone. Only the terminus refuses a set reserved bit (TYPE_MISMATCH, #2245), so the
-    // refusal comes back once, from the hop that would have acted on the byte.
-    return static_cast<graph::fwd_op_t>(cur.byte_at(op_h->body_off) & graph::kFwdOpcodeMask);
-}
 
 /**
  * @brief A fixed-capacity stack byte-writer — the zero-heap head builder for the
@@ -1167,9 +1131,10 @@ template <class Cursor>
  * **One parse per hop (#1794).** Every header in front of the selector was read by
  * @ref peek_fwd_dst_any, and this function reads none of them again: it starts at
  * @ref fwd_pre_t::after_dst and parses only the selector and `src` headers the peek never
- * reached. It used to carry a second, self-parsing arm for a caller with no peek in hand, and
- * a segment walk for a caller that had not recorded where its strip ended; both are gone, so
- * the header logic of a forward hop lives in one function and a fix to it lands everywhere.
+ * reached, through @ref locate_fwd_src — the one `src` grammar every refusal reads too. It used to
+ * carry a second, self-parsing arm for a caller with no peek in hand, and a segment walk for a
+ * caller that had not recorded where its strip ended; both are gone, so the header logic of a
+ * forward hop lives in one function and a fix to it lands everywhere.
  *
  * **strip-K and the symmetric return route (ADR-0061 + its erratum).** A mount is
  * addressed by its full path `/net/<module>/<name>[/<peer>]`, so a hop consumes K
@@ -1210,7 +1175,7 @@ template <class Cursor>
  *       out of line and `on_frame_impl` shrank: a `perf` profile of a `W = 3` hop put **58%**
  *       of it inside an out-of-line `read_fwd_header`, against 4% on the pre-lift build where
  *       the same calls were inlined. `flatten` on the three functions that read headers in a
- *       loop (here, @ref peek_fwd_dst, and the router's `resolve_mount_at`) is worth 6-8 ns
+ *       loop (here, @ref peek_fwd_dst_any, and the router's `resolve_mount_at`) is worth 6-8 ns
  *       per hop across every `W` measured. It is deliberately NOT `always_inline` on
  *       @ref read_fwd_header itself: that inlines it into the cold control-frame and terminus
  *       paths too and measured **+16 to +24%** — strictly worse than doing nothing.
@@ -1235,23 +1200,15 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
         static_cast<graph::fwd_op_t>(cur.byte_at(pre.op_body_off) & graph::kFwdOpcodeMask);
     const bool is_reply = op == graph::fwd_op_t::REPLY;
 
-    std::size_t pos = pre.after_dst;
-    fwd_rebuild_t r;
-    if (pos < pre.body_end) {
-        const auto peek = read_fwd_header(cur, pos);
-        if (peek && peek->type == wire::type_t::FIELD) {
-            r.sel_pos = pos;
-            r.sel_total = peek->total;
-            pos += peek->total;
-        }
-    }
-
-    const auto src_h = read_fwd_header(cur, pos);
-    if (!src_h) return std::nullopt;
     // `src` is a `PATH` in both directions: a reply's carries the forward route (RFC-0029 §6.2),
     // a request's the way back. Anything else cannot accumulate, so it is not forwarded.
-    if (src_h->type != wire::type_t::PATH) return std::nullopt;
-    pos += src_h->total;
+    const auto src = locate_fwd_src(cur, pre);
+    if (!src) return std::nullopt;
+    const fwd_hdr_t* const src_h = &src->hdr;
+    std::size_t pos = src->pos + src_h->total;
+    fwd_rebuild_t r;
+    r.sel_pos = src->sel_pos;
+    r.sel_total = src->sel_total;
 
     r.tail_off = pos;
     r.tail_len = pre.body_end > pos ? pre.body_end - pos : 0;

@@ -69,7 +69,7 @@
     },
     "tr::net::emit_refusal_reply": {
       "ccn": [
-        31
+        17
       ],
       "file": "core/src/fwd_router.cpp"
     },
@@ -87,7 +87,7 @@
     },
     "tr::net::rebuild_fwd_forward": {
       "ccn": [
-        22
+        18
       ],
       "file": "core/include/libtracer/fwd_frame_view.hpp"
     },
