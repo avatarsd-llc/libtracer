@@ -18,8 +18,12 @@
  * This needs the kernel `vcan` module + a `vcan0` link, which an unprivileged
  * container cannot load — so the test SELF-SKIPS (clean exit 0) when the socket
  * cannot bind (no vcan). The existing required CI gates therefore never depend on
- * kernel CAN; the dedicated can-vcan-e2e workflow sets vcan0 up so the socket path
- * is genuinely exercised. CAN_RAW sockets do not receive their own sent frames
+ * kernel CAN; the dedicated can-vcan-e2e workflow runs it where the socket path is
+ * genuinely exercised. ctest runs it through vcan_private_ns.sh, which gives each run
+ * its own vcan0 in a private network namespace (#2523): the enumeration and bystander
+ * checks count every node on the bus, so concurrent runs must never share one.
+ *
+ * CAN_RAW sockets do not receive their own sent frames
  * (CAN_RAW_RECV_OWN_MSGS defaults off) but other sockets on the same interface do,
  * so A→B and B→A are cleanly separable without self-delivery.
  *
