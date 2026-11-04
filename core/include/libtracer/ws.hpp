@@ -16,6 +16,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -248,6 +249,23 @@ struct accept_key_t {
 }
 
 /**
+ * @brief Whether ASCII @p text equals @p lower ignoring case, @p lower given in lower case.
+ *
+ * Compared in place, so nothing is lowered into a copy (#1780).
+ */
+[[nodiscard]] inline bool equals_lower(std::string_view text, std::string_view lower) noexcept {
+    return std::ranges::equal(text, lower, [](char c, char l) {
+        return ((c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c) == l;
+    });
+}
+
+/** @brief @p text without its leading and trailing spaces and tabs (HTTP's OWS). */
+[[nodiscard]] inline std::string_view trim_ows(std::string_view text) noexcept {
+    const std::size_t b = std::min(text.find_first_not_of(" \t"), text.size());
+    return text.substr(b, text.find_last_not_of(" \t") + 1 - b);
+}
+
+/**
  * @brief Case-insensitive lookup of one HTTP header in a raw header block; its value,
  *        trimmed of spaces and tabs, as a view into @p block (empty when absent).
  *
@@ -259,22 +277,13 @@ struct accept_key_t {
  */
 [[nodiscard]] inline std::string_view header_value(std::string_view block,
                                                    std::string_view name) noexcept {
-    const auto lower = [](char c) {
-        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
-    };
     for (std::size_t line = 0; line < block.size();) {
-        std::size_t eol = block.find("\r\n", line);
-        if (eol == std::string_view::npos) eol = block.size();
+        const std::size_t eol = std::min(block.find("\r\n", line), block.size());
         const std::string_view text = block.substr(line, eol - line);
         line = eol + 2;
-        if (text.size() <= name.size() || text[name.size()] != ':') continue;
-        bool same = true;
-        for (std::size_t i = 0; same && i < name.size(); ++i) same = name[i] == lower(text[i]);
-        if (!same) continue;
-        const std::string_view val = text.substr(name.size() + 1);
-        const std::size_t b = val.find_first_not_of(" \t");
-        if (b == std::string_view::npos) return {};
-        return val.substr(b, val.find_last_not_of(" \t") - b + 1);
+        if (text.size() > name.size() && text[name.size()] == ':' &&
+            equals_lower(text.substr(0, name.size()), name))
+            return trim_ows(text.substr(name.size() + 1));
     }
     return {};
 }
@@ -283,10 +292,11 @@ struct accept_key_t {
  * @brief Whether a server's opening-handshake response accepts the client key @p key
  *        (RFC 6455 §4.1, client steps 1–4).
  *
- * The status line's code is `101`; `Upgrade` is `websocket` and `Connection` carries the
+ * The status line is `HTTP/1.1 101`; `Upgrade` is `websocket` and `Connection` carries the
  * token `Upgrade`, both case-insensitive; and Sec-WebSocket-Accept is the value @p key
  * derives. A `101` anywhere else in the block (a header value, the reason phrase) is not
- * the status code (#2515).
+ * the status code (#2515). The `Connection` list is read from its first header line only:
+ * a list a server splits over two `Connection` lines is refused.
  *
  * The one client-side check, shared by core's dial-out client and the ESP-IDF client link.
  *
@@ -295,37 +305,18 @@ struct accept_key_t {
  * @param key    The Sec-WebSocket-Key the request carried.
  */
 [[nodiscard]] inline bool upgrade_accepted(std::string_view header, std::string_view key) noexcept {
-    const auto lower = [](char c) {
-        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
-    };
-    const auto same = [&](std::string_view a, std::string_view b) {
-        if (a.size() != b.size()) return false;
-        for (std::size_t i = 0; i < a.size(); ++i)
-            if (lower(a[i]) != b[i]) return false;
-        return true;
-    };
-    // Status line: HTTP-version SP status-code SP reason-phrase (RFC 9112 §4).
-    const std::string_view status = header.substr(0, header.find("\r\n"));
-    const std::size_t sp = status.find(' ');
-    if (!status.starts_with("HTTP/") || sp == std::string_view::npos ||
-        status.substr(sp + 1, 3) != "101" || (status.size() > sp + 4 && status[sp + 4] != ' '))
+    if (!(header.starts_with("HTTP/1.1 101 ") || header.starts_with("HTTP/1.1 101\r\n")) ||
+        !equals_lower(header_value(header, "upgrade"), "websocket"))
         return false;
-    if (!same(header_value(header, "upgrade"), "websocket")) return false;
     // Connection is a comma-separated token list (RFC 9110 §7.6.1).
     bool upgrade = false;
     for (std::string_view list = header_value(header, "connection"); !upgrade && !list.empty();) {
-        const std::size_t comma = list.find(',');
-        std::string_view token = list.substr(0, comma);
-        list = comma == std::string_view::npos ? std::string_view{} : list.substr(comma + 1);
-        const std::size_t b = token.find_first_not_of(" \t");
-        token = b == std::string_view::npos
-                    ? std::string_view{}
-                    : token.substr(b, token.find_last_not_of(" \t") - b + 1);
-        upgrade = same(token, "upgrade");
+        const std::size_t end = std::min(list.find(','), list.size());
+        upgrade = equals_lower(trim_ows(list.substr(0, end)), "upgrade");
+        list.remove_prefix(std::min(end + 1, list.size()));
     }
-    if (!upgrade) return false;
     const std::string_view accept = header_value(header, "sec-websocket-accept");
-    return !accept.empty() && accept_key(key) == accept;
+    return upgrade && !accept.empty() && accept_key(key) == accept;
 }
 
 /** @brief RFC 6455 frame opcodes (the subset libtracer cares about). */

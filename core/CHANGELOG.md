@@ -123,6 +123,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   requires `Upgrade: websocket` and a `Connection` header carrying the `Upgrade` token, both
   case-insensitive (RFC 6455 §4.1, client steps 1–3), before the Sec-WebSocket-Accept check.
   Core's dial-out client and the ESP-IDF client link both refuse an answer that lacks them.
+  The status line must be `HTTP/1.1 101`. A `Connection` list split over two header lines is
+  refused (only the first line is read). `ws::equals_lower` (in-place ASCII case-insensitive
+  compare) and `ws::trim_ows` (strip HTTP whitespace) are added; `ws::header_value` now uses
+  them.
 
 ## [0.22.0] — 2026-11-02
 

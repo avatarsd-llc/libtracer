@@ -345,6 +345,28 @@ void test_a_long_answer_connects() {
 }
 
 /**
+ * @brief #2515 — an answer whose header does not end within the 1024-byte block fails the
+ *        dial, and the refused dial's transport is released, as any refused dial's is.
+ */
+void test_an_answer_over_the_block_fails_the_dial() {
+    std::printf("#2515 a 101 answer over 1024 bytes is refused:\n");
+    fake_ws::reset();
+    const std::string pad = "X-Pad: " + std::string(1100, 'a') + "\r\n";
+    fake_ws::answer_upgrades_with(std::pair{std::string("HTTP/1.1 101 Switching Protocols"),
+                                            "Upgrade: websocket\r\nConnection: Upgrade\r\n" + pad});
+    {
+        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
+                                           {.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
+        link.start_receiving();
+        check(wait_until([] { return fake_ws::handshakes() >= 1; }, 2s), "the link asked");
+        check(wait_until([] { return fake_ws::live_handles() == 0; }, 2s),
+              "and released the transport of the refused dial");
+        check(!link.ok() && !link.link_up(), "the link never came up");
+    }
+    check_drained();
+}
+
+/**
  * @brief #2515 — an answer the RFC 6455 §4.1 client must refuse fails the dial: a status
  *        code other than `101` (one that only mentions "101" in a header value), and a `101`
  *        missing its `Upgrade: websocket` or `Connection: Upgrade` header.
@@ -606,6 +628,7 @@ int main() {
     test_no_headers_leaves_the_field_null();
     test_a_wrong_accept_fails_the_dial();
     test_a_long_answer_connects();
+    test_an_answer_over_the_block_fails_the_dial();
     test_a_loose_answer_fails_the_dial();
     test_oversize_frame_is_refused_and_counted();
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
