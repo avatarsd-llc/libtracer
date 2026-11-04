@@ -154,6 +154,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   compare) and `ws::trim_ows` (strip HTTP whitespace) are added; `ws::header_value` now uses
   them.
 
+### Fixed
+
+- **Every POSIX stream link object is 8 B smaller again (#2512).** Since #2351 (static thread
+  spawn, #2288) the receive thread is a `static_thread_t` member, and declared after `stop_`
+  it closed `posix_endpoint_t`'s tail padding to the derived link's first members:
+  `stream_endpoint_t` grew 136 -> 144 B on x86-64. `stop_` is now declared last, which gives the
+  padding back. No signature changes.
+
 ## [0.22.0] — 2026-11-02
 
 ### Added

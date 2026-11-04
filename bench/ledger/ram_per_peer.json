@@ -16,8 +16,8 @@
       "arm": "tcp-server",
       "metric": "per_conn",
       "goal": 170,
-      "moved_by": "#2144 (shared-frame egress: the 24 B egress slot replaces the 1 B stall streak, +16 B per peer)",
-      "waiver": "#2144 maintainer ruling (one ring per (peer, vertex), review blocker 4): the 24 B egress slot is the at-rest cost of the shared-frame egress; rings are drawn only while frames wait. Since #2176 removed the WS session's stream buffer, the same slot shows on the ws-server row too (+32 B, one block class).",
+      "moved_by": "#2272 (lock-free server broadcast, #2263: the session's 8 B next link puts it one block class up, 290 -> 306 B; re-pinned by #2512)",
+      "waiver": "#2144 maintainer ruling (one ring per (peer, vertex), review blocker 4): the 24 B egress slot is the at-rest cost of the shared-frame egress; rings are drawn only while frames wait. Since #2176 removed the WS session's stream buffer, the same slot shows on the ws-server row too (+32 B, one block class). The +16 B of #2272 is the price of a broadcast that holds no lock across its writes (#2263, recorded in core/CHANGELOG.md): each session carries the 8 B link of the chain the walk follows.",
       "note": "Goal: today's value less the per-peer transport_t stand-in (120 B on x86), deleted by the #2136 peer record."
     },
     {
@@ -27,7 +27,7 @@
       "arm": "ws-server",
       "metric": "per_conn",
       "goal": 282,
-      "moved_by": "#2144 on #2176 (the 24 B egress slot, no longer absorbed by padding once the WS session lost its stream buffer: 402 -> 434 B per peer)",
+      "moved_by": "#2280 (WS fragment budget: the fragment assembler keeps its links in a chain drawn from the rx source, not an idle rope_t, -48 B: 434 -> 402 B per peer; #2272's 8 B next link fits inside the class; re-pinned by #2512)",
       "waiver": "#2144 maintainer ruling (one ring per (peer, vertex), review blocker 4): the 24 B egress slot is the at-rest cost of the shared-frame egress, here rounded up one block class.",
       "note": "Goal: today's value less the per-peer transport_t stand-in (120 B on x86), deleted by the #2136 peer record."
     },
@@ -47,7 +47,7 @@
       "arm": "tcp-server",
       "metric": "link_base",
       "goal": null,
-      "moved_by": "#2198 (app-driven frozen-peer check: link base 584 -> 600 B)",
+      "moved_by": "#2326 (per-peer lane lock, #2310: egress_t loses its 40 B std::mutex, link base 600 -> 568 B; on ws-server after #2272's 8 B first_ head had moved it 600 -> 616 B; #2351's 8 B tail-padding loss taken back by #2512)",
       "waiver": "#2198 maintainer ruling 2026-10-16 (frozen peers are closed by an app-driven check, implemented per transport vertex): +16 B per server link object, not per peer. It is two 8 B members of stream_endpoint_t, which every stream link inherits: frozen_closed_ (std::atomic<std::size_t>, the count of peers the check closed, read by frozen_closed()) and live_since_ (std::uint64_t, the app-supplied `now` at which the check last saw this endpoint make progress; only the dialer's one-peer record reads it, a server judges each session by its own 8 B live_since). tx_moved_ sits in an existing padding hole and costs 0 B.",
       "note": "Per link, not per peer: what an idle server link holds before any peer. #2136 sets no number; it holds."
     },
@@ -58,7 +58,7 @@
       "arm": "ws-server",
       "metric": "link_base",
       "goal": null,
-      "moved_by": "#2198 (app-driven frozen-peer check: link base 584 -> 600 B)",
+      "moved_by": "#2326 (per-peer lane lock, #2310: egress_t loses its 40 B std::mutex, link base 600 -> 568 B; on ws-server after #2272's 8 B first_ head had moved it 600 -> 616 B; #2351's 8 B tail-padding loss taken back by #2512)",
       "waiver": "#2198 maintainer ruling 2026-10-16 (frozen peers are closed by an app-driven check, implemented per transport vertex): +16 B per server link object, not per peer. It is two 8 B members of stream_endpoint_t, which every stream link inherits: frozen_closed_ (std::atomic<std::size_t>, the count of peers the check closed, read by frozen_closed()) and live_since_ (std::uint64_t, the app-supplied `now` at which the check last saw this endpoint make progress; only the dialer's one-peer record reads it, a server judges each session by its own 8 B live_since). tx_moved_ sits in an existing padding hole and costs 0 B.",
       "note": "Per link, not per peer: what an idle server link holds before any peer. #2136 sets no number; it holds."
     },
@@ -69,8 +69,9 @@
       "arm": "udp-span",
       "metric": "link_base",
       "goal": 232,
-      "moved_by": "#2142 (UDP borrowed-span link receives into stack scratch: 1,768 -> 216 B, goal met)",
-      "note": "Goal: no receive segment at rest; 232 B is what the pool arm reads."
+      "moved_by": "#2096 (Noise link over UDP: the link keeps the in-flight datagram's source, 8 B, sizeof 216 -> 224 B, one block class: 216 -> 232 B; re-pinned by #2512)",
+      "waiver": "#2096 (RFC-0033 §5.4): the Noise link answers a first message at that datagram's source and moves its session only on an authenticated message, so the UDP link must expose the source of the datagram being delivered. The goal (232 B) still holds.",
+      "note": "Goal: no receive segment at rest (#2142 met it, 1,768 -> 216 B); 232 B is what the pool arm reads."
     },
     {
       "id": "tcp remote subscription",
