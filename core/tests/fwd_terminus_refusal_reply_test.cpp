@@ -530,6 +530,42 @@ void test_frame_without_src_is_not_answered() {
     check(client.count == 0, "and nothing was sent — there is no src to address");
 }
 
+/**
+ * @brief A refused frame whose `src` is EMPTY is not answered: an empty `src` still empty at the
+ *        terminus is the origin declining a reply (RFC-0004 Amendment 2), so the refusal is a
+ *        counted drop with nothing on the wire (#2477, ruled not a bug).
+ *
+ * The terminus side of RFC-0004 Amendment 2 §Scope boundary: the marker means "no reply
+ * requested" only where `src` is still empty when it reaches the terminus, and
+ * `emit_refusal_reply` honours it. The forwarder side, where a hop has already prepended a route
+ * to the empty `src`, is pinned in `mount_routing_test`.
+ */
+void test_empty_src_refusal_is_not_answered() {
+    std::printf("a refused frame with an EMPTY src is dropped, not answered (RFC-0004 Am.2):\n");
+    graph_t g;
+    (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    arming_source_t rx;
+    fwd_router_t router(g, {.rx = &rx});
+    fixed_link_t client;
+    (void)router.attach_link("client", client);
+
+    const std::vector<std::byte> dst = b_path({"sensor", "temp"});
+    const std::vector<std::byte> read = b_fwd(fwd_op_t::READ, dst, b_path({}));
+
+    // Control: the same READ with a real src is answered with BACKPRESSURE on the same arm.
+    const std::vector<std::byte> src = b_path({"client"});
+    rx.arm();
+    router.on_frame("client", b_fwd(fwd_op_t::READ, dst, src));
+    check(client.count == 1 && is_backpressure_reply(client.frame(), dst, src),
+          "control: a non-empty src is answered on the same refusal arm");
+
+    const router_stats_t before = router.drop_stats();
+    router.on_frame("client", read);
+    check(rx.refusals() > 0, "instrument: the rx source refused the decode");
+    check(router.drop_stats().arena_dropped == before.arena_dropped + 1, "the drop is counted");
+    check(client.count == 1, "and nothing was sent: the empty src declined a reply");
+}
+
 }  // namespace
 
 int main() {
@@ -546,6 +582,8 @@ int main() {
     test_refusal_echoes_the_wire_time_stamp();
     std::printf("\n");
     test_frame_without_src_is_not_answered();
+    std::printf("\n");
+    test_empty_src_refusal_is_not_answered();
 
     return tr::testing::summary("fwd_terminus_refusal_reply");
 }

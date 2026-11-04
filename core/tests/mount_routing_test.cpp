@@ -838,6 +838,75 @@ void test_reply_naming_a_bus_mount_exactly_stays_put() {
     check(direct.received == 1, "a point-to-point mount named exactly is the reply's last hop");
 }
 
+/**
+ * @brief An empty-`src` request refused at a bus-NAME hop one forwarder in answers along the
+ *        route that forwarder prepended, never along an empty one (#2477, ruled not a bug).
+ *
+ * RFC-0004 Amendment 2 §Scope boundary: forwarders are untouched, so every forwarding hop still
+ * prepends its inbound-link `NAME` to `src`, "including when `src` arrives empty". By the time a
+ * refusing hop reads `src`, then, it is a route, and the hop answers along it as it answers any
+ * other request (`reject_bus_name_hop`). The marker an empty `src` carries survives only where it
+ * is still empty at the terminus, and there `emit_refusal_reply` declines
+ * (`fwd_terminus_refusal_reply_test`); this case pins the forwarder side of that boundary.
+ *
+ * The answer walks back to the forwarder, which delivers it on the origin's own link with an
+ * empty `dst` (#2042): its last hop. No hop on the way back answers it again (a REPLY is never
+ * answered), and nothing fans out on the bus.
+ */
+void test_empty_src_refused_one_hop_in_answers_the_prepended_route() {
+    std::printf(
+        "empty src refused one forwarder in: answered along the prepended route "
+        "(RFC-0004 Am.2 scope boundary, #2477)\n");
+    // F, the forwarder the origin is attached to: origin link in, uplink to N out.
+    recording_link_t origin;
+    recording_link_t up;
+    tr::graph::graph_t graph_f;
+    tr::net::fwd_router_t f{graph_f};
+    (void)f.attach_link("net/ws-client/in", origin);
+    (void)f.attach_link("net/ws-client/up", up);
+    // N, the node with the bus: F's frame arrives on `down`, and `srv` is the bus.
+    recording_link_t down;
+    bus_link_impl_t bus;
+    p2p_link_t alice;
+    bus.peers.emplace_back("alice", &alice);
+    tr::graph::graph_t graph_n;
+    tr::net::fwd_router_t n{graph_n};
+    (void)n.attach_link("net/ws-server/down", down);
+    (void)n.attach_link("net/ws-server/srv", bus);
+
+    // The origin sends with an EMPTY src, through F, to a residual under N's bus NAME.
+    f.on_frame(
+        "net/ws-client/in",
+        make_fwd({"net", "ws-client", "up", "net", "ws-server", "srv", "sensor", "temp"}, {}));
+    check(up.sent.size() == 1 && origin.sent.empty(), "F forwards the frame and answers nothing");
+    if (up.sent.size() != 1) return;
+    const auto fwd = paths_of(up.sent[0]);
+    const std::vector<std::string> prepended = {"net", "ws-client", "in"};
+    check(fwd.size() == 2 && fwd[1] == prepended,
+          "F prepended its inbound mount to the empty src: N sees a route");
+
+    // N refuses the bus-NAME hop and answers along that route.
+    n.on_frame("net/ws-server/down", up.sent[0]);
+    check(bus.broadcasts == 0 && alice.received == 0, "nothing egresses the bus or a peer");
+    check(down.sent.size() == 1, "N answers the refused hop: one reply back toward F");
+    if (down.sent.size() != 1) return;
+    const auto shape = reply_shape(down.sent[0]);
+    check(shape[0] == static_cast<int>(tr::graph::fwd_op_t::REPLY) && shape[1] == 1 &&
+              shape[2] == 0x0021,
+          "the answer is REPLY{ERROR, tr::path::invalid}");
+    const auto back = paths_of(down.sent[0]);
+    check(!back.empty() && back[0] == prepended,
+          "its dst is the route F prepended, not an empty one");
+
+    // F routes the reply to its last hop, the origin's link, and answers nothing itself.
+    f.on_frame("net/ws-client/up", down.sent[0]);
+    check(up.sent.size() == 1, "F never answers the REPLY back up the uplink");
+    check(origin.sent.size() == 1, "the reply leaves F on the origin's own link (#2042)");
+    if (origin.sent.size() != 1) return;
+    const auto last = paths_of(origin.sent[0]);
+    check(!last.empty() && last[0].empty(), "with the route spent: an empty dst at its last hop");
+}
+
 int main() {
     test_module_scoping();
     test_no_prefix_confusion();
@@ -854,6 +923,7 @@ int main() {
     test_bus_name_hop_reply_bytes_are_pinned();
     test_reject_and_terminus_agree_on_trailered_routes();
     test_reply_naming_a_bus_mount_exactly_stays_put();
+    test_empty_src_refused_one_hop_in_answers_the_prepended_route();
 
     return tr::testing::summary("mount_routing");
 }
