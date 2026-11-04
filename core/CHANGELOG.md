@@ -66,6 +66,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `ws::upgrade_accepted` (the client's `101` + `Sec-WebSocket-Accept` check), and
   `frame_ingress_t::read_with`, which drives the ingress from a single-buffer read such as
   `esp_transport_read`. The ESP-IDF WebSocket client link is the first user outside core.
+- **`tr::park_wait` / `tr::park_wake`, `libtracer/park.hpp` (#2507).** `std::atomic::wait` and
+  `notify_all` over an 8-stripe table of mutex + condition-variable pairs. libstdc++ builds
+  `std::atomic::wait` on a shared 2,048 B waiter table on every target; on esp32c6 that table
+  was the whole of v0.22.0's +2 KB `.bss`. `egress_t` (its lane lock and `close`) and the
+  ESP-IDF WS client's teardown drain now park here, so no MCU image links the libstdc++
+  table. Same contract, no clock; only contended and teardown paths reach the table.
 
 ## [0.22.0] — 2026-11-02
 

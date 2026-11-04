@@ -87,6 +87,7 @@
 
 #include "libtracer/function_ref.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/park.hpp"
 #include "libtracer/value.hpp"
 
 namespace tr::net {
@@ -374,9 +375,9 @@ static_assert(sizeof(void*) != 8 || sizeof(egress_peer_t) <= 24,
  * and the lane block drawn or returned with it — never across a write, a frame build or a
  * frame release, and never by a send that finds the peer idle (#2145): it guards the lanes,
  * not the writer election and not the write. A sender that finds it held sleeps on the role
- * byte (`std::atomic::wait`, a futex on Linux, no clock) until the holder lets it go, so a
- * holder preempted inside its step gets the CPU back from a higher-priority sender (the #1618
- * hang a spinner would bring back).
+ * byte (`%tr::park_wait`: no clock, and no libstdc++ waiter table on an MCU, #2507) until the
+ * holder lets it go, so a holder preempted inside its step gets the CPU back from a
+ * higher-priority sender (the #1618 hang a spinner would bring back).
  *
  * @note Thread-safe: any number of senders, plus the link's own receive or wait context.
  */
@@ -517,12 +518,12 @@ class egress_t {
      *
      * The caller makes the in-flight write return first — `shutdown(2)` on the socket — and
      * never calls this from inside a write callback on the same peer. The wait is on the
-     * writer leaving the role (`std::atomic::wait`), not on a clock.
+     * writer leaving the role (`%tr::park_wait`, #2507), not on a clock.
      */
     void close(egress_peer_t& p) noexcept {
         std::uint8_t r = p.role_.fetch_or(egress_peer_t::kClosed, std::memory_order_acq_rel);
         while ((r & egress_peer_t::kWriter) != 0) {
-            p.role_.wait(r, std::memory_order_acquire);
+            park_wait(p.role_, r, std::memory_order_acquire);
             r = p.role_.load(std::memory_order_acquire);
         }
         egress_frame_t::release(std::exchange(p.wire_, nullptr));
@@ -574,7 +575,7 @@ class egress_t {
      * @brief @p p's lane lock for one lane step (#2310): the `kLanes` bit of its role byte.
      *
      * A sender that finds it held marks `kLaneWait` and sleeps on the byte
-     * (`std::atomic::wait`): it never spins against a holder that may be preempted, so a
+     * (`%tr::park_wait`, #2507): it never spins against a holder that may be preempted, so a
      * higher-priority sender on the holder's CPU hands that CPU back (#1618, ruling (a) of
      * #2307). The unlock is the one `fetch_and` it always was, and wakes only when somebody
      * marked that it sleeps. No clock. `role` is the role byte the lock was taken over, so a
@@ -593,7 +594,7 @@ class egress_t {
                            p.role_.compare_exchange_weak(role, role | egress_peer_t::kLaneWait,
                                                          std::memory_order_relaxed)) {
                     role |= egress_peer_t::kLaneWait;
-                    p.role_.wait(role, std::memory_order_relaxed);  // until the unlock wakes us
+                    park_wait(p.role_, role, std::memory_order_relaxed);  // until the unlock
                     role = p.role_.load(std::memory_order_relaxed);
                 }
             }
@@ -603,7 +604,7 @@ class egress_t {
                 static_cast<std::uint8_t>(egress_peer_t::kLanes | egress_peer_t::kLaneWait);
             const std::uint8_t was =
                 p.role_.fetch_and(static_cast<std::uint8_t>(~kHeld), std::memory_order_release);
-            if ((was & egress_peer_t::kLaneWait) != 0) p.role_.notify_all();
+            if ((was & egress_peer_t::kLaneWait) != 0) park_wake(p.role_);
         }
         lanes_guard_t(const lanes_guard_t&) = delete;
         lanes_guard_t& operator=(const lanes_guard_t&) = delete;
@@ -757,7 +758,7 @@ class egress_t {
             const std::uint8_t was = p.role_.fetch_and(
                 static_cast<std::uint8_t>(~egress_peer_t::kWriter), std::memory_order_seq_cst);
             if ((was & egress_peer_t::kClosed) != 0) {
-                p.role_.notify_all();  // a teardown waits for exactly this
+                park_wake(p.role_);  // a teardown waits for exactly this
                 return;
             }
             if (held) return;  // the waiter, or the next send, resumes it
