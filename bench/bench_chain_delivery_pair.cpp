@@ -490,11 +490,11 @@ struct can_cell_t {
     if (norelay)
         for (std::size_t i = 0; i < hops; ++i) ch.upe[i + 1]->mute = true;
     const std::size_t before = ch.delivered;
-    const std::uint64_t drops = ch.drop_stats().dropped_tx;
+    const std::uint64_t drops = ch.dropped_tx();
     ch.origin.inject(frame);
     ch.pump();
     c.delivered = ch.delivered - before;
-    c.refused = ch.drop_stats().dropped_tx - drops;
+    c.refused = ch.dropped_tx() - drops;
     for (std::size_t i = 0; i < hops; ++i) {
         c.fwd.push_back(ch.dn[i]->tx);
         c.rev.push_back(ch.upe[i + 1]->tx);
