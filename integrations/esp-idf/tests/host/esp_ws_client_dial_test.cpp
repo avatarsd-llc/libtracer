@@ -73,6 +73,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -321,6 +322,63 @@ void test_a_wrong_accept_fails_the_dial() {
 }
 
 /**
+ * @brief #2515 — a `101` of 1000 bytes fits the handshake block (1024 B, as
+ *        `esp_transport_ws` defaulted to), so a server or proxy with a long answer connects.
+ */
+void test_a_long_answer_connects() {
+    std::printf("#2515 a 1000-byte 101 answer connects:\n");
+    fake_ws::reset();
+    constexpr std::string_view kStatus = "HTTP/1.1 101 Switching Protocols";
+    constexpr std::string_view kLines = "Upgrade: websocket\r\nConnection: Upgrade\r\n";
+    // Status CRLF + lines + the accept line (22 + 28 + 2) + the closing CRLF = 1000.
+    constexpr std::size_t kFixed = kStatus.size() + 2 + kLines.size() + 52 + 2;
+    const std::string pad = "X-Pad: " + std::string(1000 - kFixed - 9, 'a') + "\r\n";
+    fake_ws::answer_upgrades_with(std::pair{std::string(kStatus), std::string(kLines) + pad});
+    {
+        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
+                                           {.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
+        link.start_receiving();
+        check(wait_until([&] { return link.link_up(); }, 2s), "the link came up");
+        check(fake_ws::handshakes() == 1, "on its first dial");
+    }
+    check_drained();
+}
+
+/**
+ * @brief #2515 — an answer the RFC 6455 §4.1 client must refuse fails the dial: a status
+ *        code other than `101` (one that only mentions "101" in a header value), and a `101`
+ *        missing its `Upgrade: websocket` or `Connection: Upgrade` header.
+ */
+void test_a_loose_answer_fails_the_dial() {
+    std::printf("#2515 a non-101 status, or a 101 missing Upgrade or Connection, is refused:\n");
+    struct case_t {
+        const char* what;
+        const char* status;
+        const char* lines;
+    };
+    static constexpr case_t kCases[] = {
+        {"a 403 that mentions 101 in a header value is refused", "HTTP/1.1 403 Forbidden",
+         "X-Note: 101\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"},
+        {"a 101 without Upgrade is refused", "HTTP/1.1 101 Switching Protocols",
+         "Connection: Upgrade\r\n"},
+        {"a 101 without Connection is refused", "HTTP/1.1 101 Switching Protocols",
+         "Upgrade: websocket\r\n"},
+    };
+    for (const case_t& c : kCases) {
+        fake_ws::reset();
+        fake_ws::answer_upgrades_with(std::pair{std::string(c.status), std::string(c.lines)});
+        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
+                                           {.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
+        link.start_receiving();
+        check(wait_until([] { return fake_ws::handshakes() >= 1; }, 2s), "the link asked");
+        check(wait_until([] { return fake_ws::live_handles() == 0; }, 2s),
+              "and released the transport of the refused dial");
+        check(!link.ok() && !link.link_up(), c.what);
+    }
+    check_drained();
+}
+
+/**
  * @brief #959 — an outbound frame larger than `tx_bytes` is refused, COUNTED and LOGGED.
  *
  * `transport_t::send` returns void, so nothing is handed back to the caller. The counter
@@ -547,6 +605,8 @@ int main() {
     test_every_dial_carries_the_headers();
     test_no_headers_leaves_the_field_null();
     test_a_wrong_accept_fails_the_dial();
+    test_a_long_answer_connects();
+    test_a_loose_answer_fails_the_dial();
     test_oversize_frame_is_refused_and_counted();
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     test_tx_bytes_counts_payload();

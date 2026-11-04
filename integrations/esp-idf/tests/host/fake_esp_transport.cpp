@@ -39,7 +39,10 @@ struct state_t {
     /** @brief The connection the scripted frames go to: the one upgraded last. */
     esp_transport_handle_t stream = nullptr;
     bool reject_upgrade = false; /**< @brief Answer handshakes with a wrong accept. */
-    int handshakes = 0;          /**< @brief Handshake requests received. */
+    /** @brief The answer's header lines between the status line's CRLF and the accept
+     *         line; `std::nullopt` = the default 101 (see fake_ws::answer_upgrades_with). */
+    std::optional<std::pair<std::string, std::string>> answer;
+    int handshakes = 0; /**< @brief Handshake requests received. */
 
     int connects = 0;    /**< @brief Dial count. */
     std::string ws_path; /**< @brief The last handshake's requested path. */
@@ -175,10 +178,12 @@ bool answer_handshake(esp_transport_handle_t t, std::string_view req) {
     const std::string_view key = tr::net::ws::header_value(req, "sec-websocket-key");
     const std::string accept(st().reject_upgrade ? std::string_view("AAAAAAAAAAAAAAAAAAAAAAAAAAA=")
                                                  : tr::net::ws::accept_key(key).view());
-    const std::string resp =
-        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
-        "Connection: Upgrade\r\nSec-WebSocket-Accept: " +
-        accept + "\r\n\r\n";
+    const std::string resp = st().answer
+                                 ? st().answer->first + "\r\n" + st().answer->second +
+                                       "Sec-WebSocket-Accept: " + accept + "\r\n\r\n"
+                                 : "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                                   "Connection: Upgrade\r\nSec-WebSocket-Accept: " +
+                                       accept + "\r\n\r\n";
     state_t::conn_t& c = st().live[t];
     c.resp.assign(reinterpret_cast<const std::byte*>(resp.data()),
                   reinterpret_cast<const std::byte*>(resp.data()) + resp.size());
@@ -244,6 +249,7 @@ void reset() {
     st().wire_off = 0;
     st().stream = nullptr;
     st().reject_upgrade = false;
+    st().answer.reset();
     st().handshakes = 0;
     st().connects = 0;
     st().ws_path.clear();
@@ -268,6 +274,11 @@ bool drained() {
 void reject_upgrades(bool on) {
     const std::lock_guard<std::mutex> lk(st().m);
     st().reject_upgrade = on;
+}
+
+void answer_upgrades_with(std::optional<std::pair<std::string, std::string>> answer) {
+    const std::lock_guard<std::mutex> lk(st().m);
+    st().answer = std::move(answer);
 }
 
 int handshakes() {

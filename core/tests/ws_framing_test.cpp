@@ -160,7 +160,8 @@ int main() {
         using tr::net::ws::upgrade_accepted;
         constexpr std::string_view kKey = "dGhlIHNhbXBsZSBub25jZQ==";  // RFC 6455 §1.3
         check(upgrade_accepted("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
-                               "sec-WEBSOCKET-accept:  s3pPLMBiTxaQ9kYGzzhZRbK+xOo= \r\n\r\n",
+                               "Connection: Upgrade\r\nsec-WEBSOCKET-accept:  "
+                               "s3pPLMBiTxaQ9kYGzzhZRbK+xOo= \r\n\r\n",
                                kKey),
               "upgrade_accepted: the RFC 6455 §1.3 answer, any header-name case, trimmed");
         check(!upgrade_accepted("HTTP/1.1 101 Switching Protocols\r\n"
@@ -173,6 +174,35 @@ int main() {
               "so is any status but 101");
         check(!upgrade_accepted("HTTP/1.1 101 Switching Protocols\r\n\r\n", kKey),
               "and an answer with no accept at all");
+        // #2515: the status line's code, and both RFC 6455 §4.1 headers, case-insensitive.
+        constexpr std::string_view kGood = "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n";
+        const auto answer = [&](std::string_view status, std::string_view lines) {
+            return upgrade_accepted(
+                std::string(status) + "\r\n" + std::string(lines) + std::string(kGood) + "\r\n",
+                kKey);
+        };
+        check(answer("HTTP/1.1 101 Switching Protocols",
+                     "UPGRADE: WebSocket\r\nconnection: keep-alive, UPGRADE\r\n"),
+              "both headers match case-insensitively, Upgrade as one token of a list");
+        check(answer("HTTP/1.1 101", "Upgrade: websocket\r\nConnection: Upgrade\r\n"),
+              "a status line with no reason phrase is still a 101");
+        check(!answer("HTTP/1.1 403 Forbidden",
+                      "X-Note: 101\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"),
+              "a 101 in a header value is not the status code");
+        check(!answer("HTTP/1.1 400 Bad 101", "Upgrade: websocket\r\nConnection: Upgrade\r\n"),
+              "nor is one in the reason phrase");
+        check(!answer("HTTP/1.1 1010 Odd", "Upgrade: websocket\r\nConnection: Upgrade\r\n"),
+              "nor a code that only starts with 101");
+        check(!answer("HTTP/1.1 101 Switching Protocols", "Connection: Upgrade\r\n"),
+              "an answer with no Upgrade header is refused");
+        check(
+            !answer("HTTP/1.1 101 Switching Protocols", "Upgrade: h2c\r\nConnection: Upgrade\r\n"),
+            "so is an Upgrade to anything but websocket");
+        check(!answer("HTTP/1.1 101 Switching Protocols", "Upgrade: websocket\r\n"),
+              "and one with no Connection header");
+        check(!answer("HTTP/1.1 101 Switching Protocols",
+                      "Upgrade: websocket\r\nConnection: keep-alive, upgraded\r\n"),
+              "or a Connection list without the Upgrade token");
     }
 
     if (g_failures != 0) {

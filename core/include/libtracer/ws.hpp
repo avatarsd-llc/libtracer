@@ -280,8 +280,13 @@ struct accept_key_t {
 }
 
 /**
- * @brief Whether a server's opening-handshake response accepts the client key @p key: a `101`
- *        status and the Sec-WebSocket-Accept value that key derives (RFC 6455 §4.1).
+ * @brief Whether a server's opening-handshake response accepts the client key @p key
+ *        (RFC 6455 §4.1, client steps 1–4).
+ *
+ * The status line's code is `101`; `Upgrade` is `websocket` and `Connection` carries the
+ * token `Upgrade`, both case-insensitive; and Sec-WebSocket-Accept is the value @p key
+ * derives. A `101` anywhere else in the block (a header value, the reason phrase) is not
+ * the status code (#2515).
  *
  * The one client-side check, shared by core's dial-out client and the ESP-IDF client link.
  *
@@ -290,7 +295,35 @@ struct accept_key_t {
  * @param key    The Sec-WebSocket-Key the request carried.
  */
 [[nodiscard]] inline bool upgrade_accepted(std::string_view header, std::string_view key) noexcept {
-    if (header.find("101") == std::string_view::npos) return false;
+    const auto lower = [](char c) {
+        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    };
+    const auto same = [&](std::string_view a, std::string_view b) {
+        if (a.size() != b.size()) return false;
+        for (std::size_t i = 0; i < a.size(); ++i)
+            if (lower(a[i]) != b[i]) return false;
+        return true;
+    };
+    // Status line: HTTP-version SP status-code SP reason-phrase (RFC 9112 §4).
+    const std::string_view status = header.substr(0, header.find("\r\n"));
+    const std::size_t sp = status.find(' ');
+    if (!status.starts_with("HTTP/") || sp == std::string_view::npos ||
+        status.substr(sp + 1, 3) != "101" || (status.size() > sp + 4 && status[sp + 4] != ' '))
+        return false;
+    if (!same(header_value(header, "upgrade"), "websocket")) return false;
+    // Connection is a comma-separated token list (RFC 9110 §7.6.1).
+    bool upgrade = false;
+    for (std::string_view list = header_value(header, "connection"); !upgrade && !list.empty();) {
+        const std::size_t comma = list.find(',');
+        std::string_view token = list.substr(0, comma);
+        list = comma == std::string_view::npos ? std::string_view{} : list.substr(comma + 1);
+        const std::size_t b = token.find_first_not_of(" \t");
+        token = b == std::string_view::npos
+                    ? std::string_view{}
+                    : token.substr(b, token.find_last_not_of(" \t") - b + 1);
+        upgrade = same(token, "upgrade");
+    }
+    if (!upgrade) return false;
     const std::string_view accept = header_value(header, "sec-websocket-accept");
     return !accept.empty() && accept_key(key) == accept;
 }

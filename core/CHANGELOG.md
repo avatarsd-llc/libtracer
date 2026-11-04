@@ -116,6 +116,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   0.22.0's, was 4–16% faster than 0.21.0 at 1–4 links and slower only at 8 links from 1 KiB
   and at 16 links, which this release restores.
 
+### Fixed
+
+- **`ws::upgrade_accepted` checks the status line and both upgrade headers (#2515).** It
+  parses the status line's code as `101` instead of finding "101" anywhere in the block, and
+  requires `Upgrade: websocket` and a `Connection` header carrying the `Upgrade` token, both
+  case-insensitive (RFC 6455 §4.1, client steps 1–3), before the Sec-WebSocket-Accept check.
+  Core's dial-out client and the ESP-IDF client link both refuse an answer that lacks them.
+
 ## [0.22.0] — 2026-11-02
 
 ### Added

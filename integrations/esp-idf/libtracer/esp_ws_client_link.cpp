@@ -276,13 +276,15 @@ void release_tcp(esp_transport_handle_t& tcp) noexcept {
 /**
  * @brief The most one opening-handshake response may take, bytes, before the dial gives up
  *        on it (RFC 6455 §4.1): a `101` from core's server or `esp_http_server` is about
- *        130 B. What a server pipelined behind its header and still fits is kept and framed.
+ *        130 B, and 1024 B is what `esp_transport_ws` defaulted to, so a server or proxy
+ *        with a longer answer still connects (#2515). What a server pipelined behind its
+ *        header and still fits is kept and framed.
  *
  * Drawn per dial from `memory.state` and returned once the connection's first bytes are
  * framed, so no connection holds it (#1606). The request is built in the same block, which
  * is drawn larger when a long `ws_path` or header block needs it.
  */
-constexpr std::size_t kHandshakeBytes = 512;
+constexpr std::size_t kHandshakeBytes = 1024;
 
 }  // namespace
 
