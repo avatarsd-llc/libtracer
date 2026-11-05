@@ -757,20 +757,20 @@ transcript (`--emit-pins`), quoted in that PR — never a widened band.
 
 ### `bench_pin_net` — RFC-0022 §6 receive-pool occupancy (#760)
 
-```sh
+```bash
 cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
 cmake --build bench/build --target bench_pin_net -j
 python3 bench/host_guard.py wait
 # sub <port> <hint> <payload> <slot> <slots> <window_ms> <V> <label>; pub <port> <payload> <count> <V>
 # four arms rotated every round; B2-null is the in-band A/A null collate_pin.py needs
-for P in 512 64; do port=47300
+bash -c 'for P in 512 64; do port=47300
   for r in $(seq 0 11); do for V in 1 8 24 32 48; do
     arms=(B-copy:2 B2-null:2 D-default:0 C-share:1)
     for j in 0 1 2 3; do IFS=: read -r L K <<<"${arms[$(((r+j)%4))]}"; port=$((port+2))
       bench/build/bench_pin_net sub $port $K $P 1024 24 6000 $V $L & sleep 0.25
       bench/build/bench_pin_net pub $port $P 200000 $V >/dev/null; wait
     done; done; done > /tmp/pinnet-$P.tsv
-done
+done'
 python3 bench/collate_pin.py /tmp/pinnet-512.tsv /tmp/pinnet-64.tsv
 ```
 
