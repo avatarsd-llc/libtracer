@@ -386,9 +386,9 @@ void test_oversize_declared_length_is_refused_and_bounded() {
     std::printf("        offered %zu KiB; peak RSS moved %zu KiB\n", pushed / 1024, growth / 1024);
 
     check(growth < kRssSlack, "the process peak RSS did not follow the declared length");
-    check(wait_until([&] { return server.malformed_rx() == 1; }, 2s),
+    check(wait_until([&] { return server.drop_stats().malformed_rx == 1; }, 2s),
           "malformed_rx ticked exactly once");
-    check(server.dropped_rx() == 0, "and nothing was counted as backpressure");
+    check(server.drop_stats().dropped_rx == 0, "and nothing was counted as backpressure");
     bool closed = false;
     (void)read_until(cfd, [](const std::vector<std::byte>& b) { return !b.empty(); }, 2s, &closed);
     check(closed, "the server failed the connection");
@@ -430,7 +430,7 @@ void test_partial_frame_under_the_cap_is_held_then_delivered() {
 
     // Several poll rounds (the server's poll bound is 100 ms) with nothing arriving.
     std::this_thread::sleep_for(400ms);
-    check(server.malformed_rx() == 0, "a legal partial frame is NOT malformed");
+    check(server.drop_stats().malformed_rx == 0, "a legal partial frame is NOT malformed");
     check(open_peers(server) == 1, "and the connection is still open");
 
     std::vector<std::byte> second_half;
@@ -474,7 +474,7 @@ void test_the_cap_is_the_configured_one() {
         const int cfd = tcp_connect(tight.local_port());
         check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken (4 KiB cap)");
         check(write_bytes(cfd, frame), "the 8 KiB frame was written");
-        check(wait_until([&] { return tight.malformed_rx() == 1; }, 2s),
+        check(wait_until([&] { return tight.drop_stats().malformed_rx == 1; }, 2s),
               "the 4 KiB-capped server refused it");
         check(sink.count() == 0, "and delivered nothing");
         ::close(cfd);
@@ -489,7 +489,7 @@ void test_the_cap_is_the_configured_one() {
         check(wait_until([&] { return sink.count() != 0; }, 3s),
               "the default-cap server delivered it");
         check(sink.first() == payload, "byte-for-byte");
-        check(wide.malformed_rx() == 0, "and counted nothing malformed");
+        check(wide.drop_stats().malformed_rx == 0, "and counted nothing malformed");
         ::close(cfd);
     }
 }
@@ -519,13 +519,13 @@ void test_fragments_cannot_walk_past_the_cap() {
     check(write_bytes(cfd, masked_client_frame(ws::opcode_t::CONT, chunk, /*fin=*/false)),
           "fragment 2 (half the cap is now held) written");
     std::this_thread::sleep_for(200ms);
-    check(server.malformed_rx() == 0 && sink.count() == 0,
+    check(server.drop_stats().malformed_rx == 0 && sink.count() == 0,
           "neither fragment is refused on its own");
 
     const std::vector<std::byte> rest(kCap / 2 + 1, std::byte{0x2C});
     check(write_bytes(cfd, masked_client_frame(ws::opcode_t::CONT, rest, /*fin=*/true)),
           "fragment 3 (its payload alone takes the total past the cap) written");
-    check(wait_until([&] { return server.malformed_rx() == 1; }, 2s),
+    check(wait_until([&] { return server.drop_stats().malformed_rx == 1; }, 2s),
           "the over-cap TOTAL is malformed");
     check(sink.count() == 0, "and no message was delivered");
     bool closed = false;
@@ -559,7 +559,7 @@ void test_tiny_fragments_are_charged_their_segment() {
     }
     // The write may be cut short once the server fails the connection; that is the answer.
     (void)write_bytes(cfd, wire);
-    check(wait_until([&] { return server.malformed_rx() == 1; }, 2s),
+    check(wait_until([&] { return server.drop_stats().malformed_rx == 1; }, 2s),
           "the charged cost passed the cap and the message is malformed");
     check(sink.count() == 0, "and no message was delivered");
     bool closed = false;
@@ -635,7 +635,8 @@ void test_assembly_draws_no_heap_per_fragment() {
     check(at_many <= at_few, "16x the fragments draw no more from the heap");
     check(sink.bytes.load() - bytes_before == (4 + 64) * kPiece,
           "and both messages reassembled byte-exact in length");
-    check(server.dropped_rx() == 0 && server.malformed_rx() == 0, "with nothing refused");
+    check(server.drop_stats().dropped_rx == 0 && server.drop_stats().malformed_rx == 0,
+          "with nothing refused");
     ::close(cfd);
 }
 
@@ -709,9 +710,9 @@ void test_backend_exhaustion_is_counted_backpressure() {
         check(write_bytes(cfd, masked_client_frame(ws::opcode_t::CONT, piece, /*fin=*/false)),
               "another fragment written");
 
-    check(wait_until([&] { return server.dropped_rx() >= 1; }, 3s),
+    check(wait_until([&] { return server.drop_stats().dropped_rx >= 1; }, 3s),
           "the exhausted pool showed up as dropped_rx");
-    check(server.malformed_rx() == 0, "and NOT as a protocol violation");
+    check(server.drop_stats().malformed_rx == 0, "and NOT as a protocol violation");
 
     // The link is still usable: a PING must still be answered.
     check(write_bytes(cfd, masked_client_frame(ws::opcode_t::PING,
@@ -776,10 +777,10 @@ void test_delivered_rope_table_comes_from_the_rx_source() {
 
     gate.armed.store(true);
     check(write_bytes(cfd, wire), "a three-fragment message written");
-    check(wait_until([&] { return server.dropped_rx() == 1; }, 2s),
+    check(wait_until([&] { return server.drop_stats().dropped_rx == 1; }, 2s),
           "the refused link table shed the message as dropped_rx");
     check(gate.refusals.load() >= 1, "... and the refusal came through the rx source");
-    check(sink.messages.load() == 0 && server.malformed_rx() == 0,
+    check(sink.messages.load() == 0 && server.drop_stats().malformed_rx == 0,
           "nothing was delivered, and nothing is malformed");
 
     gate.armed.store(false);
@@ -869,9 +870,9 @@ void test_client_refuses_an_oversize_server_frame() {
                                           {.max_frame = kSmallCap});
     check(client.ok(), "the client completed its opening handshake");
     client.start_receiving();
-    check(wait_until([&] { return client.malformed_rx() == 1; }, 5s),
+    check(wait_until([&] { return client.drop_stats().malformed_rx == 1; }, 5s),
           "the client counted the over-cap frame as malformed");
-    check(client.dropped_rx() == 0, "and counted nothing as backpressure");
+    check(client.drop_stats().dropped_rx == 0, "and counted nothing as backpressure");
 
     hostile.join();
     ::close(lfd);

@@ -440,7 +440,7 @@ struct can_chain_t : chain_base_t {
     }
     [[nodiscard]] std::uint64_t dropped_tx() const {
         std::uint64_t n = 0;
-        for (const auto& t : tp) n += t->dropped_tx();
+        for (const auto& t : tp) n += t->drop_stats().dropped_tx;
         return n;
     }
 };

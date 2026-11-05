@@ -194,7 +194,7 @@ void test_tcp_retained_race() {
         while (std::chrono::steady_clock::now() < deadline) {
             {
                 const std::lock_guard lock(sink.m);
-                if (sink.frames + dialer.dropped_tx() >= sent) break;
+                if (sink.frames + dialer.drop_stats().dropped_tx >= sent) break;
             }
             std::this_thread::sleep_for(2ms);
         }
@@ -210,7 +210,7 @@ void test_tcp_retained_race() {
             const std::lock_guard lock(sink.m);
             check(sink.torn == 0, "no frame torn (each arrived whole and byte-exact)");
             check(sink.reordered == 0, "each thread's frames arrived in order");
-            check(sink.frames + dialer.dropped_tx() == sent,
+            check(sink.frames + dialer.drop_stats().dropped_tx == sent,
                   "every frame is accounted for: received, or dropped and counted");
             check(sink.last_seq[0] >= 0 && sink.last_seq[1] >= 0, "both threads delivered");
         }

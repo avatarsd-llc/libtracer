@@ -26,14 +26,14 @@ void loopback_endpoint_t::send(std::span<const std::byte> frame) {
     mem::block_source_t& src = peer_->src_;
     void* const p = src.try_alloc(sizeof(frame_t) + frame.size(), kFrameAlign);
     if (p == nullptr) {
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_tx();
         return;
     }
     auto* const f = ::new (p) frame_t{nullptr, frame.size()};
     std::copy(frame.begin(), frame.end(), reinterpret_cast<std::byte*>(f + 1));
     if (!peer_->enqueue(f)) {
         peer_->release(f);
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_tx();
     }
 }
 

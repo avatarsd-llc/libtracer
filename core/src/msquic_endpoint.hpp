@@ -71,6 +71,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_string.hpp"
 #include "libtracer/receiver_slot.hpp"
+#include "libtracer/transport.hpp"
 
 #if defined(__SANITIZE_THREAD__)
 #define LIBTRACER_TSAN 1
@@ -257,35 +258,36 @@ class msquic_endpoint_t {
     /** @brief The egress store every in-flight send's @ref send_ctx_t is drawn from
      *         (`link_memory_t::io`, default the net sub-pool — #1780). */
     mem::block_source_t* tx_src = &mem::net_source();
-    std::size_t max_frame = kMaxFrame;          /**< @brief This connection's frame cap, `:settings
-                                                            max_frame` resolved through
-                                                            `length_prefix_framer_t::configured_cap`
-                                                            (tighten-only, #1035). It bounds BOTH
-                                                            directions: RX through
-                                                            `length_prefix_framer_t::feed`, and TX
-                                                            through both @ref send_frame overloads
-                                                            (#1409). */
-    std::atomic<std::uint64_t> dropped_rx{0};   /**< @brief Backpressure-dropped frames. */
-    std::atomic<std::uint64_t> malformed_rx{0}; /**< @brief Malformed length prefixes seen. */
+    std::size_t max_frame = kMaxFrame; /**< @brief This connection's frame cap, `:settings
+                                                   max_frame` resolved through
+                                                   `length_prefix_framer_t::configured_cap`
+                                                   (tighten-only, #1035). It bounds BOTH
+                                                   directions: RX through
+                                                   `length_prefix_framer_t::feed`, and TX
+                                                   through both @ref send_frame overloads
+                                                   (#1409). */
     /**
-     * @brief Outbound frames shed before the wire (#932): over THIS CONNECTION's
-     *        @ref max_frame, no peer stream to write to, or a `StreamSend` msquic refused.
+     * @brief This connection's shed-frame counters (#932, #2482): word-wide relaxed atomics
+     *        (core/STYLE.md §Introspection clause 5), where they used to be 64-bit.
      *
-     * The first class used to be measured against @ref kMaxFrame, the 16 MiB PROTOCOL
-     * maximum, rather than the per-connection cap (#1409). A link whose `:settings
-     * max_frame` had tightened RX to, say, 64 KiB would still gather up to 16 MiB into one
-     * owned send buffer and hand it to msquic; a conformant peer running this same code
-     * then read a prefix beyond its own configured cap, counted `malformed_rx` and shut the
-     * connection DOWN — so an over-cap local send was a link teardown rather than a shed
-     * frame, and this counter never moved. `max_frame` is `configured_cap`-clamped at
-     * construction, so it is never looser than `kMaxFrame` and the correction can only
-     * tighten: a link that configured no cap sees no behaviour change at all.
+     * `dropped_rx`: frames dropped because the RX backend was exhausted (backpressure).
+     * `malformed_rx`: length prefixes announcing more than @ref max_frame; each shuts the
+     * connection down. `dropped_tx`: outbound frames shed before the wire: over THIS
+     * CONNECTION's @ref max_frame, no peer stream to write to, or a `StreamSend` msquic
+     * refused.
      *
-     * Counts the PROTOCOL-frame path only (@ref send_frame). H3 handshake material goes
-     * out through @ref send_raw, which is not a frame the router believed it sent, so a
-     * refusal there is a connection-setup failure rather than a dropped frame.
+     * The first `dropped_tx` class used to be measured against @ref kMaxFrame, the 16 MiB
+     * PROTOCOL maximum, rather than the per-connection cap (#1409): a conformant peer then
+     * read a prefix beyond its own configured cap, counted `malformed_rx` and shut the
+     * connection DOWN, so an over-cap local send was a link teardown rather than a shed frame.
+     * `max_frame` is `configured_cap`-clamped at construction, so the correction can only
+     * tighten.
+     *
+     * `dropped_tx` counts the PROTOCOL-frame path only (@ref send_frame). H3 handshake
+     * material goes out through @ref send_raw, which is not a frame the router believed it
+     * sent, so a refusal there is a connection-setup failure rather than a dropped frame.
      */
-    std::atomic<std::uint64_t> dropped_tx{0};
+    drop_tally_t<> drops;
     /** @} */
 
     /**
@@ -464,9 +466,9 @@ class msquic_endpoint_t {
             },
             // At decision time, so a frame delivered later in this same chunk cannot
             // reach an observer before the drop that preceded it is counted (#1255).
-            [this] { dropped_rx.fetch_add(1, std::memory_order_relaxed); });
+            [this] { drops.count_dropped_rx(); });
         if (res.malformed) {
-            malformed_rx.fetch_add(1, std::memory_order_relaxed);
+            drops.count_malformed_rx();
             shutdown_conn(kAppErrMalformed);
             return false;
         }
@@ -516,16 +518,15 @@ class msquic_endpoint_t {
      * tcp. Thread-safe: the stream slot is read under @ref conn_m.
      *
      * Both shed paths — no stream, and a `StreamSend` msquic refused — count
-     * @ref dropped_tx, so the caller's frame is never lost silently (#932).
+     * `drop_stats().dropped_tx`, so the caller's frame is never lost silently (#932).
      */
     void submit_frame(send_ctx_t::ptr_t ctx) {
         const std::lock_guard lock(conn_m);
         if (frame_stream == nullptr) {  // no peer stream (yet / anymore) — drop
-            dropped_tx.fetch_add(1, std::memory_order_relaxed);
+            drops.count_dropped_tx();
             return;
         }
-        if (!submit(frame_stream, std::move(ctx)))
-            dropped_tx.fetch_add(1, std::memory_order_relaxed);
+        if (!submit(frame_stream, std::move(ctx))) drops.count_dropped_tx();
     }
 
     /**
@@ -560,14 +561,14 @@ class msquic_endpoint_t {
         // reads the prefix against the very same configured number, so anything past it is
         // a record the peer would count `malformed_rx` on and tear the connection down for.
         if (frame.size() > max_frame) {
-            dropped_tx.fetch_add(1, std::memory_order_relaxed);
+            drops.count_dropped_tx();
             return;
         }
         // The one library-held buffer, and the one allocation on the TX path: failable
         // (#934), so a tight heap sheds the frame with a counter instead of aborting.
         send_ctx_t::ptr_t ctx = send_ctx_t::make_frame(*tx_src, frame.size());
         if (!ctx) {
-            dropped_tx.fetch_add(1, std::memory_order_relaxed);
+            drops.count_dropped_tx();
             return;
         }
         if (!frame.empty()) std::memcpy(ctx->bytes() + kPrefixBytes, frame.data(), frame.size());
@@ -587,12 +588,12 @@ class msquic_endpoint_t {
         std::size_t total = 0;
         for (const auto& s : iov) total += s.size();
         if (total > max_frame) {  // this connection's cap — see the span overload (#1409)
-            dropped_tx.fetch_add(1, std::memory_order_relaxed);
+            drops.count_dropped_tx();
             return;
         }
         send_ctx_t::ptr_t ctx = send_ctx_t::make_frame(*tx_src, total);  // failable (#934)
         if (!ctx) {
-            dropped_tx.fetch_add(1, std::memory_order_relaxed);
+            drops.count_dropped_tx();
             return;
         }
         std::size_t off = kPrefixBytes;

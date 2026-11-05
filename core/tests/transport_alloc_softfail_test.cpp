@@ -1588,7 +1588,7 @@ void drive_ws_reserved_opcode(std::uint8_t op, const char* label) {
         read_until(cfd, [](const std::vector<std::byte>& b) { return !b.empty(); }, 2s, &closed);
     check(got.empty(), "the server wrote nothing back");
     check(closed, "the server FAILED the connection");
-    check(server.malformed_rx() == 1, "and COUNTED it as malformed, exactly once");
+    check(server.drop_stats().malformed_rx == 1, "and COUNTED it as malformed, exactly once");
     ::close(cfd);
 }
 
@@ -1939,7 +1939,8 @@ void test_can_receive_tables_refusal_is_counted() {
 
     for (const auto& f : wire) inj_raw->inject(f);
     check(delivered == 0, "with every table entry refused, nothing was delivered");
-    check(receiver.dropped_rx() > 0, "and the refused frames were COUNTED in dropped_rx");
+    check(receiver.drop_stats().dropped_rx > 0,
+          "and the refused frames were COUNTED in dropped_rx");
     check(budget.refused() > 0, "the refusals were at the injected reasm_src seam");
 
     budget.lift();

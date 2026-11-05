@@ -364,9 +364,9 @@ void test_oversize_prefix() {
     client.write(prefix);
 
     const auto deadline = std::chrono::steady_clock::now() + 3s;
-    while (listener.malformed_rx() == 0 && std::chrono::steady_clock::now() < deadline)
+    while (listener.drop_stats().malformed_rx == 0 && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(5ms);
-    check(listener.malformed_rx() == 1, "the oversize prefix counted as malformed");
+    check(listener.drop_stats().malformed_rx == 1, "the oversize prefix counted as malformed");
     check(delivered.load() == 0, "nothing delivered");
     // A desynced stream cannot be re-framed — the transport shuts the
     // connection down, observable as a shutdown event at the client.
@@ -449,7 +449,7 @@ void test_view_delivery_segment_identity() {
               "the segment was allocated at exactly the frame length");
         check(v.owner.use_count() == 1, "the receiver holds the ONLY reference (no library copy)");
     }
-    check(listener.dropped_rx() == 0, "no backpressure drops on the heap backend");
+    check(listener.drop_stats().dropped_rx == 0, "no backpressure drops on the heap backend");
 }
 
 // ADR-0042 §2 backpressure on a stream: an exhausted backend drops the frame
@@ -472,10 +472,12 @@ void test_backpressure_drain() {
     dialer.send(f3);
 
     check(sink.wait_for_count(1, 4000ms), "the third frame still delivers after two drops");
-    check(listener.dropped_rx() == 2, "both exhausted frames counted as backpressure drops");
+    check(listener.drop_stats().dropped_rx == 2,
+          "both exhausted frames counted as backpressure drops");
     check(sink.count() == 1 && sink.at(0) == f3,
           "framing sync survived the drained frames (byte-identical delivery)");
-    check(listener.malformed_rx() == 0, "no malformed prefixes — the stream never desynced");
+    check(listener.drop_stats().malformed_rx == 0,
+          "no malformed prefixes — the stream never desynced");
 }
 
 void test_scatter_gather() {
@@ -518,31 +520,31 @@ void test_tx_drop_counters() {
     // Class 1: no peer stream. A listener nobody dialled has no frame stream, so
     // every send is shed — the "dialing / torn down" case a router cannot see.
     quic_transport_t idle(std::uint16_t{0}, g_cert, g_key);
-    check(idle.dropped_tx() == 0, "a fresh link has shed nothing");
+    check(idle.drop_stats().dropped_tx == 0, "a fresh link has shed nothing");
     const std::array<std::byte, 3> small{std::byte{1}, std::byte{2}, std::byte{3}};
     idle.send(std::span<const std::byte>(small));
-    check(idle.dropped_tx() == 1, "a send with no peer stream counted one TX drop");
+    check(idle.drop_stats().dropped_tx == 1, "a send with no peer stream counted one TX drop");
 
     // The scatter-gather overload funnels through the same locked hand-off, so it
     // must count identically — the two overloads cannot disagree.
     const std::array<std::span<const std::byte>, 1> iov{std::span<const std::byte>(small)};
     idle.send(std::span<const std::span<const std::byte>>(iov));
-    check(idle.dropped_tx() == 2, "the gather overload counted its shed too");
+    check(idle.drop_stats().dropped_tx == 2, "the gather overload counted its shed too");
 
     // Class 2: oversize. Refused before any stream is consulted, so this counts on
     // a peerless link as well — and stays distinct from `malformed_rx`, which is the
     // INBOUND spelling of the same cap.
     std::vector<std::byte> huge(quic_transport_t::kMaxFrame + 1, std::byte{0xAB});
     idle.send(std::span<const std::byte>(huge));
-    check(idle.dropped_tx() == 3, "an oversize frame counted a TX drop");
-    check(idle.malformed_rx() == 0, "an outbound oversize is not an inbound malformed");
+    check(idle.drop_stats().dropped_tx == 3, "an oversize frame counted a TX drop");
+    check(idle.drop_stats().malformed_rx == 0, "an outbound oversize is not an inbound malformed");
 
     // The point of #932: a holder of only the interface reads the same numbers.
     const tr::net::transport_t& generic = idle;
     const auto stats = generic.drop_stats();
     check(stats.dropped_tx == 3, "drop_stats() reports the TX drops, not a hardcoded zero");
-    check(stats.dropped_rx == idle.dropped_rx() && stats.malformed_rx == idle.malformed_rx(),
-          "the snapshot's other two fields still agree with the concrete accessors");
+    check(stats.dropped_rx == 0 && stats.malformed_rx == 0,
+          "the snapshot's other two fields are zero: an outbound shed counts neither");
 }
 
 /**
@@ -556,8 +558,8 @@ void test_tx_drop_counters() {
  *
  * Before the fix the 128 KiB record below went out; the listener's framer read a prefix past
  * its own 64 KiB cap, ticked `malformed_rx` and shut the connection down. So all four
- * assertions redden together: `dropped_tx()` reads 0, `malformed_rx()` reads 1, the link is
- * down, and the in-cap frame behind it never arrives.
+ * assertions redden together: `drop_stats().dropped_tx` reads 0, `drop_stats().malformed_rx` reads
+ * 1, the link is down, and the in-cap frame behind it never arrives.
  */
 void test_tx_honours_the_connection_cap() {
     std::printf("QUIC transport — egress is bounded by the CONNECTION's max_frame (#1409):\n");
@@ -575,23 +577,24 @@ void test_tx_honours_the_connection_cap() {
     const auto before = test_frame(64, 0x10);
     dialer.send(before);
     check(sink.wait_for_count(1, 3000ms), "an in-cap frame crosses the tightened link");
-    check(dialer.dropped_tx() == 0, "and counted no shed");
+    check(dialer.drop_stats().dropped_tx == 0, "and counted no shed");
 
     // BETWEEN the tightened cap and the 16 MiB protocol maximum.
     const std::vector<std::byte> over(128 * 1024, std::byte{0xEE});
     dialer.send(std::span<const std::byte>(over));
-    check(dialer.dropped_tx() == 1, "a 128 KiB record on a 64 KiB link is SHED, with a counter");
+    check(dialer.drop_stats().dropped_tx == 1,
+          "a 128 KiB record on a 64 KiB link is SHED, with a counter");
 
     // The gather overload funnels through the same bound.
     const std::array<std::span<const std::byte>, 1> iov{std::span<const std::byte>(over)};
     dialer.send(std::span<const std::span<const std::byte>>(iov));
-    check(dialer.dropped_tx() == 2, "the gather overload honours the same cap");
+    check(dialer.drop_stats().dropped_tx == 2, "the gather overload honours the same cap");
 
     const auto after = test_frame(128, 0x90);
     dialer.send(after);
     check(sink.wait_for_count(2, 3000ms), "a following in-cap frame still reaches the peer");
     check(sink.count() == 2 && sink.at(1) == after, "byte-identically — the framer never desynced");
-    check(listener.malformed_rx() == 0,
+    check(listener.drop_stats().malformed_rx == 0,
           "the peer never saw a malformed prefix: the over-cap record never left this node");
     // Asserted LAST, after the round trip above: the peer's teardown is asynchronous, so a
     // liveness read taken the instant after the over-cap send would still say "up" on the
@@ -1030,7 +1033,8 @@ void test_dial_does_not_wait() {
 
     const std::array<std::byte, 3> small{std::byte{1}, std::byte{2}, std::byte{3}};
     dialer.send(std::span<const std::byte>(small));
-    check(dialer.dropped_tx() == 1, "a send before up is dropped and counted, never queued");
+    check(dialer.drop_stats().dropped_tx == 1,
+          "a send before up is dropped and counted, never queued");
 
     // msquic's default handshake idle timeout is 10 s; give it room, from the test's clock.
     const auto deadline = std::chrono::steady_clock::now() + 20s;

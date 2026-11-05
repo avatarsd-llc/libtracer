@@ -310,10 +310,10 @@ void test_client_queue_race() {
     std::size_t nested = 0;
     for (int round = 0; round < kMaxRounds && (round < kMinRounds || nested == 0); ++round) {
         sink.reset();
-        const std::uint64_t dropped0 = client.dropped_tx();
+        const std::uint64_t dropped0 = client.drop_stats().dropped_tx;
         auto send = [&](std::span<const std::byte> f) { client.send(f); };
         nested += publish_round(send, send);
-        auto dropped = [&] { return client.dropped_tx() - dropped0; };
+        auto dropped = [&] { return client.drop_stats().dropped_tx - dropped0; };
         check(sink.wait_accounted(2u * kFramesPerThread, dropped, 30s),
               "the round drained: every frame arrived or was counted");
         check_round(sink, dropped(), "client->server");
@@ -366,11 +366,11 @@ void test_server_two_doors_race() {
 
     for (int round = 0; round < kMinRounds; ++round) {
         sink.reset();
-        const std::uint64_t dropped0 = server.dropped_tx();
+        const std::uint64_t dropped0 = server.drop_stats().dropped_tx;
         auto broadcast = [&](std::span<const std::byte> f) { server.send(f); };
         auto direct = [&](std::span<const std::byte> f) { directed->send(f); };
         (void)publish_round(broadcast, direct);
-        auto dropped = [&] { return server.dropped_tx() - dropped0; };
+        auto dropped = [&] { return server.drop_stats().dropped_tx - dropped0; };
         check(sink.wait_accounted(2u * kFramesPerThread, dropped, 30s),
               "the round drained: every frame arrived or was counted");
         check_round(sink, dropped(), "server->client");

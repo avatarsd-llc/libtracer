@@ -260,9 +260,9 @@ void test_endless_request_is_refused_and_bounded() {
     std::printf("        offered %zu KiB; peak RSS moved %zu KiB\n", pushed / 1024, growth / 1024);
 
     check(growth < kRssSlack, "the process peak RSS did not follow what the peer offered");
-    check(wait_until([&] { return server.malformed_rx() == 1; }, 2s),
+    check(wait_until([&] { return server.drop_stats().malformed_rx == 1; }, 2s),
           "malformed_rx ticked exactly once");
-    check(server.dropped_rx() == 0, "and nothing was counted as backpressure");
+    check(server.drop_stats().dropped_rx == 0, "and nothing was counted as backpressure");
     bool closed = false;
     const auto got = read_to_close(cfd, &closed);
     check(closed, "the server closed the link");
@@ -324,7 +324,8 @@ void test_client_refuses_an_endless_server_header_block() {
     const std::size_t growth = peak_rss_bytes() - rss_before;
 
     check(!client.ok(), "the dial failed rather than completing a handshake");
-    check(client.malformed_rx() == 1, "the over-budget response header block was counted");
+    check(client.drop_stats().malformed_rx == 1,
+          "the over-budget response header block was counted");
     check(client.effective_max_handshake() == tr::net::ws_server_transport_t::kMaxHandshakeBytes,
           "on the default budget, the same 16 KiB the accept side defaults to");
     check(growth < kRssSlack, "and the accumulation did not follow the server's offer");
@@ -356,7 +357,7 @@ void test_the_budget_is_the_configured_one() {
         const int cfd = tcp_connect(tight.local_port());
         check(cfd >= 0, "raw client connected (1 KiB budget)");
         (void)write_text(cfd, request);  // the server may close mid-write; that is the point
-        check(wait_until([&] { return tight.malformed_rx() == 1; }, 2s),
+        check(wait_until([&] { return tight.drop_stats().malformed_rx == 1; }, 2s),
               "the 1 KiB-budget server refused the 4 KiB request");
         bool closed = false;
         const auto got = read_to_close(cfd, &closed);
@@ -374,7 +375,7 @@ void test_the_budget_is_the_configured_one() {
         const auto got =
             read_until(cfd, [](const std::vector<std::byte>& b) { return has_101(b); }, 3s);
         check(has_101(got), "the default-budget server completed the handshake");
-        check(wide.malformed_rx() == 0, "and counted nothing malformed");
+        check(wide.drop_stats().malformed_rx == 0, "and counted nothing malformed");
         ::close(cfd);
     }
 
@@ -421,7 +422,7 @@ void test_a_dribbled_request_is_judged_on_its_total() {
         const auto got =
             read_until(cfd, [](const std::vector<std::byte>& b) { return has_101(b); }, 3s);
         check(has_101(got), "a legal dribbled handshake still completes");
-        check(ample.malformed_rx() == 0, "with nothing counted malformed");
+        check(ample.drop_stats().malformed_rx == 0, "with nothing counted malformed");
         check(wait_until([&] { return open_peers(ample) == 1; }, 2s), "and the peer is open");
         ::close(cfd);
     }
@@ -430,7 +431,7 @@ void test_a_dribbled_request_is_judged_on_its_total() {
         const int cfd = tcp_connect(tiny.local_port());
         check(cfd >= 0, "raw client connected (128-byte budget)");
         (void)dribble(cfd, kUpgradeRequest, 64);  // refused partway; the writes then fail
-        check(wait_until([&] { return tiny.malformed_rx() == 1; }, 2s),
+        check(wait_until([&] { return tiny.drop_stats().malformed_rx == 1; }, 2s),
               "the same 64-byte reads sum past a 128-byte budget and are refused");
         bool closed = false;
         const auto got = read_to_close(cfd, &closed);

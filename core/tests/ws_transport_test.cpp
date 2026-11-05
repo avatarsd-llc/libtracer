@@ -410,7 +410,8 @@ void test_reserved_frame_between_fragments_fails_the_connection() {
     check(back.empty() && closed, "nothing came back, and the server FAILED the connection");
     check(fut.wait_for(500ms) != std::future_status::ready,
           "the fragments were NOT stitched around the reserved frame");
-    check(server.malformed_rx() == 1, "the reserved frame was COUNTED as malformed, exactly once");
+    check(server.drop_stats().malformed_rx == 1,
+          "the reserved frame was COUNTED as malformed, exactly once");
     ::close(cfd);
 }
 
@@ -1525,15 +1526,16 @@ struct down_latch_t {
 
 /** @brief What a hostile server's illegal control frame drew out of our client. */
 struct control_breach_outcome_t {
-    bool handshaken = false;            /**< @brief The client completed its opening handshake. */
-    std::vector<std::byte> reply;       /**< @brief Every byte the client wrote back after it. */
-    bool peer_closed = false;           /**< @brief The client's end of the socket went away. */
-    bool link_down = false;             /**< @brief The departure seam fired. */
-    std::uint64_t malformed_before = 0; /**< @brief `malformed_rx()` before the breach. */
-    std::uint64_t malformed_after = 0;  /**< @brief ...and after it. */
-    bool link_up_before = false;        /**< @brief `link_up()` before the recv thread ran. */
-    bool ok_after = false;              /**< @brief `ok()` after the teardown (came-up, #1059). */
-    bool link_up_after = false;         /**< @brief `link_up()` after the teardown (liveness). */
+    bool handshaken = false;      /**< @brief The client completed its opening handshake. */
+    std::vector<std::byte> reply; /**< @brief Every byte the client wrote back after it. */
+    bool peer_closed = false;     /**< @brief The client's end of the socket went away. */
+    bool link_down = false;       /**< @brief The departure seam fired. */
+    std::uint64_t malformed_before =
+        0;                             /**< @brief `drop_stats().malformed_rx` before the breach. */
+    std::uint64_t malformed_after = 0; /**< @brief ...and after it. */
+    bool link_up_before = false;       /**< @brief `link_up()` before the recv thread ran. */
+    bool ok_after = false;             /**< @brief `ok()` after the teardown (came-up, #1059). */
+    bool link_up_after = false;        /**< @brief `link_up()` after the teardown (liveness). */
 };
 
 /**
@@ -1596,7 +1598,7 @@ control_breach_outcome_t drive_control_breach(std::span<const std::byte> breach)
         tr::net::ws_client_transport_t client("127.0.0.1", port);
         out.handshaken = client.ok();
         out.link_up_before = client.link_up();
-        out.malformed_before = client.malformed_rx();
+        out.malformed_before = client.drop_stats().malformed_rx;
         client.set_receiver(sink);
         client.set_down_notifier(&down_latch_t::notify, &latch);
         client.start_receiving();
@@ -1610,7 +1612,7 @@ control_breach_outcome_t drive_control_breach(std::span<const std::byte> breach)
         // Read BEFORE releasing the hostile end: past `test_done` its `close` would fire the
         // departure seam by itself and both of these would stop measuring the §5.5 gate.
         out.link_down = latch.wait(2s);
-        out.malformed_after = client.malformed_rx();
+        out.malformed_after = client.drop_stats().malformed_rx;
         // The #1059 divergence, read at the same point: the teardown path clears
         // `connected_` BEFORE the departure seam fires, so once `link_down` is true these
         // two reads are deterministic — `ok()` keeps the came-up fact, `link_up()` the
@@ -1742,7 +1744,7 @@ void test_client_answers_a_control_frame_at_the_bound_masked() {
         check(after == std::vector<std::byte>(liveness.begin(), liveness.end()),
               "carrying that message's own bytes");
         check(!latch.fired_now(), "and the link was never reported down");
-        check(client.malformed_rx() == 0,
+        check(client.drop_stats().malformed_rx == 0,
               "a control frame exactly AT the §5.5 bound is not a breach");
         test_done.set_value();
     }
@@ -1816,7 +1818,7 @@ void test_client_fails_the_connection_on_a_fragmented_control_frame() {
  *
  * The second teardown vector the ruling names, and the one with NOTHING hostile in it: the
  * server sends a well-formed CLOSE, the client takes the ordinary teardown path — the
- * departure seam fires, `malformed_rx()` does NOT move — and the two accessors diverge.
+ * departure seam fires, `drop_stats().malformed_rx` does NOT move — and the two accessors diverge.
  * Before the fix `ok()` doubled as the liveness answer and stayed true forever; a revert
  * of the `connected_` clear in the teardown path turns the `link_up_after` line red.
  */
@@ -1831,7 +1833,7 @@ void test_client_link_up_clears_on_peer_close() {
     check(got.peer_closed, "the client closed its end of the socket on the peer's CLOSE");
     check(got.link_down, "and reported the link down through the departure seam");
     check(got.malformed_after == got.malformed_before,
-          "a legal CLOSE is not a protocol breach — malformed_rx() did not move");
+          "a legal CLOSE is not a protocol breach — drop_stats().malformed_rx did not move");
     check(!got.link_up_after, "link_up() reports the closed link DOWN (#1059)");
     check(got.ok_after, "while ok() still answers that the link CAME UP — the two diverge");
 }

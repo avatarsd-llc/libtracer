@@ -92,8 +92,8 @@ struct tcp_config_t {
     /**
      * @brief The link's memory (@ref link_memory_t). `rx`: each inbound frame is read into a
      *        fresh exactly-`len`-byte segment from it (ADR-0042 §2); exhaustion is
-     *        backpressure — the frame is drained off the stream, dropped, and `dropped_rx()`
-     *        ticks; never an OOM.
+     *        backpressure — the frame is drained off the stream, dropped, and
+     * `drop_stats().dropped_rx` ticks; never an OOM.
      */
     link_memory_t memory{};
     /**
@@ -163,7 +163,7 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
     /** @brief The largest frame the length prefix may announce — the shared
      *         length_prefix_framer_t::kDefaultMaxFrame (16 MiB) unless `:settings
      *         max_frame` tightens it. A larger prefix is malformed — counted via
-     *         @ref malformed_rx and the connection is closed (a desynced stream
+     *         `drop_stats().malformed_rx` and the connection is closed (a desynced stream
      *         cannot be trusted again). */
     static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
@@ -286,24 +286,6 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
     /** @brief LISTEN mode: the actual bound TCP port (resolves an ephemeral 0). */
     [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
 
-    /** @brief Frames dropped because the RX backend was exhausted (backpressure,
-     *         ADR-0039 §4 / ADR-0042 §2) — drained off the stream, never an OOM. */
-    [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
-        return dropped_rx_.load(std::memory_order_relaxed);
-    }
-
-    /** @brief Malformed length prefixes seen (announced length > @ref kMaxFrame).
-     *         Each one tears the connection down — the stream has lost framing sync. */
-    [[nodiscard]] std::uint64_t malformed_rx() const noexcept {
-        return malformed_rx_.load(std::memory_order_relaxed);
-    }
-
-    /** @brief Frames shed on the way OUT (#932): a record over @ref kMaxFrame, a refused
-     *         gather store, or no live peer to write to (dialing / torn down). */
-    [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
-        return dropped_tx_.load(std::memory_order_relaxed);
-    }
-
     /** @brief Strikes a STALLED peer cost (#838, #2144): offers past a full STREAM lane whose
      *         turn moved nothing, each one a frame shed. `kMaxConsecutiveStalls` rings of them in a
      *         row close the connection, so a non-zero count with @ref link_up still true is a peer
@@ -328,10 +310,17 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
         return frozen_closed_.load(std::memory_order_relaxed);
     }
 
-    /** @brief The interface-level snapshot (#932) — the concrete accessors above, as the
-     *         one shape a generic `transport_t*` holder reads. */
+    /**
+     * @brief This link's shed-frame counters (#932, #2482).
+     *
+     * `dropped_rx`: frames dropped because the RX backend was exhausted (backpressure,
+     * ADR-0039 §4 / ADR-0042 §2), drained off the stream, never an OOM. `malformed_rx`: length
+     * prefixes announcing more than the frame cap; each tears the connection down, since the
+     * stream has lost framing sync. `dropped_tx`: a record over the cap, a refused gather
+     * store, or no live peer to write to (dialing / torn down).
+     */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-        return {dropped_rx(), malformed_rx(), dropped_tx()};
+        return drops_.snapshot();
     }
 
    private:
@@ -355,11 +344,6 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
     // RX segment source for frame reassembly (ADR-0042 §2) + drop counters.
     mem::mem_backend_t* backend_;
     std::size_t max_frame_ = kMaxFrame;  // per-connection receive cap (:settings; 0 => kMaxFrame)
-    // Drop counters: word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697) —
-    // a 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit
-    // accessors widen on read; a 32-bit target wraps after 2^32.
-    std::atomic<std::size_t> dropped_rx_{0};
-    std::atomic<std::size_t> malformed_rx_{0};
     std::size_t recv_stack_ = 0; /**< @brief The stack hint, held for @ref start_receiving. */
     /** @brief `memory.stack`, held for @ref start_receiving (#2288). */
     mem::block_source_t* stack_src_ = nullptr;
@@ -367,7 +351,7 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
      *         called at most once per endpoint. DIAL only; a LISTEN link spends its one
      *         `start` on the accept loop and never enters the latched path at all. */
     std::atomic<bool> recv_started_{false};
-    // conn_fd_, dropped_tx_ and the egress (and their teardown discipline) live in
+    // conn_fd_, drops_ and the egress (and their teardown discipline) live in
     // stream_endpoint_t.
 };
 
@@ -450,29 +434,6 @@ class tcp_server_transport_t final : public stream_server_base_t {
      *         sink gets the same bytes borrowed.  Covers both facets. */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
-    /** @brief Frames dropped to RX-backend exhaustion (backpressure), summed
-     *         over all peers. */
-    [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
-        return dropped_rx_.load(std::memory_order_relaxed);
-    }
-
-    /** @brief Malformed length prefixes seen (announced length above the
-     *         effective cap).  Each one tears that peer's connection down. */
-    [[nodiscard]] std::uint64_t malformed_rx() const noexcept {
-        return malformed_rx_.load(std::memory_order_relaxed);
-    }
-
-    /** @brief Frames shed on the way OUT (#932), summed over the whole link: a record
-     *         over the frame cap, a refused gather store, or no open peer to fan to. */
-    [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
-        return dropped_tx_.load(std::memory_order_relaxed);
-    }
-
-    /** @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads. */
-    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-        return {dropped_rx(), malformed_rx(), dropped_tx()};
-    }
-
    private:
     struct session_t;  // one peer slot's connection state (defined in the .cpp)
 
@@ -547,11 +508,6 @@ class tcp_server_transport_t final : public stream_server_base_t {
     // framing and its ingress bound.
     mem::mem_backend_t* backend_;
     std::size_t max_frame_ = tcp_transport_t::kMaxFrame;
-    // Drop counters: word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697) —
-    // a 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit
-    // accessors widen on read; a 32-bit target wraps after 2^32.
-    std::atomic<std::size_t> dropped_rx_{0};
-    std::atomic<std::size_t> malformed_rx_{0};
 };
 
 /** @brief The pre-v0.18.0 spelling of @ref tcp_server_transport_t; removed in v0.19.0 (#1723). */

@@ -135,8 +135,9 @@ concept datagram_carrier =
     };
 
 /**
- * @brief A Noise link's counters: reference/23 §11's ten nouns, in that order, then the two
- *        universal ones the link adds to its carrier's.
+ * @brief A Noise link's counters: reference/23 §11's ten nouns, in that order. The two
+ *        universal ones it adds to its carrier's (`malformed_rx`, `dropped_tx`) are kept in
+ *        its @ref tr::net::drop_tally_t instead (#2482).
  */
 enum class counter_t : std::uint8_t {
     HANDSHAKE_FAILED,   /**< @brief `noise_handshake_failed`: tag, flags byte or all-zero `ee`. */
@@ -149,8 +150,6 @@ enum class counter_t : std::uint8_t {
     STALE,              /**< @brief `noise_stale`: well formed, for state this side lacks. */
     EXPIRED,            /**< @brief `noise_expired`: a session discarded by age or nonce limit. */
     OVERSIZE,           /**< @brief `noise_oversize`: a frame above `max_frame`, refused at send. */
-    MALFORMED_RX,       /**< @brief Added to the carrier's `malformed_rx` (§9's first row). */
-    DROPPED_TX,         /**< @brief Added to the carrier's `dropped_tx`: no session, no store. */
     COUNT,              /**< @brief The number of counters. */
 };
 
@@ -344,10 +343,10 @@ class noise_link_t final : public transport_t {
         std::size_t len = 0;
         for (const std::span<const std::byte> s : iov) len += s.size();
         if (len > max_frame_) return bump_locked(noise::counter_t::OVERSIZE);
-        if (len == 0) return bump_locked(noise::counter_t::DROPPED_TX);
+        if (len == 0) return drops_.count_dropped_tx();
         const std::size_t bytes = len + kOverhead;
         auto* const buf = static_cast<std::byte*>(io_src_->try_alloc(bytes, alignof(std::byte)));
-        if (buf == nullptr) return bump_locked(noise::counter_t::DROPPED_TX);
+        if (buf == nullptr) return drops_.count_dropped_tx();
         // One span seals straight from the caller's bytes; a gather is copied in first and
         // sealed in place, so either way the frame is read once.
         const std::span<const std::byte> frame = iov.size() == 1 ? iov[0] : gather(iov, buf, len);
@@ -401,12 +400,12 @@ class noise_link_t final : public transport_t {
         return sending_session() != nullptr;
     }
 
-    /** @brief The carrier's three counters, plus what this link drops itself. */
+    /** @brief The carrier's three counters, plus what this link drops itself (its tally). */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
         transport_drop_stats_t d = carrier_ ? carrier_->drop_stats() : transport_drop_stats_t{};
-        const std::lock_guard lock(mu_);
-        d.malformed_rx += counts_[std::size_t(noise::counter_t::MALFORMED_RX)];
-        d.dropped_tx += counts_[std::size_t(noise::counter_t::DROPPED_TX)];
+        const transport_drop_stats_t own = drops_.snapshot();
+        d.malformed_rx += own.malformed_rx;
+        d.dropped_tx += own.dropped_tx;
         return d;
     }
 
@@ -417,7 +416,7 @@ class noise_link_t final : public transport_t {
             out.add(noise::kCounterNouns[i], counts_[i]);
     }
 
-    /** @brief One counter's value (the `:stats` nouns, plus this link's own drops). */
+    /** @brief One `:stats` noun's value; this link's own drops are in @ref drop_stats. */
     [[nodiscard]] std::uint64_t count(noise::counter_t c) const {
         const std::lock_guard lock(mu_);
         return counts_[std::size_t(c)];
@@ -490,15 +489,15 @@ class noise_link_t final : public transport_t {
             case std::uint8_t(noise::msg_type_t::TRANSPORT_PHASE_1):
                 return on_transport(datagram);
             default:
-                bump(noise::counter_t::MALFORMED_RX);
+                drops_.count_malformed_rx();
                 return {};
         }
     }
 
-    /** @brief The counter a refused handshake message steps: malformed, or a failed handshake. */
-    [[nodiscard]] static noise::counter_t refused(noise::refusal_t r) noexcept {
-        return r == noise::refusal_t::MALFORMED ? noise::counter_t::MALFORMED_RX
-                                                : noise::counter_t::HANDSHAKE_FAILED;
+    /** @brief Count a refused handshake message: malformed, or a failed handshake. */
+    void refuse(noise::refusal_t r) noexcept {
+        if (r == noise::refusal_t::MALFORMED) return drops_.count_malformed_rx();
+        bump(noise::counter_t::HANDSHAKE_FAILED);
     }
 
     /**
@@ -506,8 +505,7 @@ class noise_link_t final : public transport_t {
      *        retransmit, the PSK proof, the flags and the counter, and only then the answer.
      */
     void on_first(std::span<const std::byte> datagram) {
-        if (datagram.size() != noise::kFirstMessageBytes)
-            return bump(noise::counter_t::MALFORMED_RX);
+        if (datagram.size() != noise::kFirstMessageBytes) return drops_.count_malformed_rx();
         if (role_ == conn_role_t::DIAL) return bump(noise::counter_t::STALE);
         const std::uint64_t source = carrier_->inbound_source();
         if (stage_ == stage_t::PENDING &&
@@ -517,7 +515,7 @@ class noise_link_t final : public transport_t {
         }
         noise::handshake_t<B> hs(noise::role_t::RESPONDER, st_->keyed, st_->hs_cipher);
         const auto payload = hs.read_first(datagram);
-        if (!payload) return bump(refused(payload.error()));
+        if (!payload) return refuse(payload.error());
         if (payload->counter <= mark_) return bump(noise::counter_t::HANDSHAKE_REPLAYED);
         mark_ = payload->counter;  // whether or not this handshake completes (§4 step 3)
         answer(hs, datagram, source);
@@ -550,12 +548,11 @@ class noise_link_t final : public transport_t {
 
     /** @brief Initiator: a second message ends the attempt's first half (§4 step 3). */
     void on_second(std::span<const std::byte> datagram) {
-        if (datagram.size() != noise::kSecondMessageBytes)
-            return bump(noise::counter_t::MALFORMED_RX);
+        if (datagram.size() != noise::kSecondMessageBytes) return drops_.count_malformed_rx();
         if (role_ == conn_role_t::LISTEN || stage_ != stage_t::AWAIT_SECOND)
             return bump(noise::counter_t::STALE);
         const auto flags = st_->hs->read_second(datagram);
-        if (!flags) return bump(refused(flags.error()));
+        if (!flags) return refuse(flags.error());
         const auto phase = static_cast<std::uint8_t>(*flags & 1U);
         const bool split = st_->hs->split(next_->cipher).has_value();
         st_->hs.reset();
@@ -576,10 +573,9 @@ class noise_link_t final : public transport_t {
      * @return The frame to deliver, decrypted in place; empty when there is none.
      */
     std::span<std::byte> on_transport(std::span<std::byte> datagram) {
-        if (datagram.size() > max_frame_ + kOverhead)
-            return bump_none(noise::counter_t::MALFORMED_RX);
+        if (datagram.size() > max_frame_ + kOverhead) return malformed();
         const auto h = noise::parse_transport_header(datagram);
-        if (!h) return bump_none(noise::counter_t::MALFORMED_RX);
+        if (!h) return malformed();
         noise::session_t<B>* const s = session_for(h->phase);
         if (s == nullptr) return bump_none(noise::counter_t::STALE);
         if (s->replay_refused(h->nonce)) return bump_none(noise::counter_t::REPLAYED);
@@ -593,7 +589,7 @@ class noise_link_t final : public transport_t {
             if (role_ == conn_role_t::LISTEN) send_empty(*s);  // the answer to an empty message
             return {};
         }
-        if (!one_frame(*pt)) return bump_none(noise::counter_t::MALFORMED_RX);
+        if (!one_frame(*pt)) return malformed();
         return *pt;
     }
 
@@ -637,14 +633,14 @@ class noise_link_t final : public transport_t {
     std::uint64_t seal(std::span<const std::byte> frame, std::span<std::byte> out) {
         noise::session_t<B>* const s = sending_session();
         if (s == nullptr) {
-            bump(noise::counter_t::DROPPED_TX);
+            drops_.count_dropped_tx();
             demand();  // a send on a link with no session is a demand (§1)
             return 0;
         }
         if (!s->cipher.seal(s->phase, s->send_nonce, frame, out)) {
             // In practice only the 2^62 nonce limit refuses here. Discarding the session and
             // counting `noise_expired` (reference/23 §5) come with rekey, #2074.
-            bump(noise::counter_t::DROPPED_TX);
+            drops_.count_dropped_tx();
             return 0;
         }
         ++s->send_nonce;
@@ -654,8 +650,7 @@ class noise_link_t final : public transport_t {
     /** @brief Send one empty transport message on @p s: a confirmation or an answer. */
     void send_empty(noise::session_t<B>& s) {
         std::array<std::byte, kOverhead> buf{};
-        if (!s.cipher.seal(s.phase, s.send_nonce, {}, buf))
-            return bump(noise::counter_t::DROPPED_TX);
+        if (!s.cipher.seal(s.phase, s.send_nonce, {}, buf)) return drops_.count_dropped_tx();
         ++s.send_nonce;
         send_datagram(s.peer, buf);
     }
@@ -756,6 +751,12 @@ class noise_link_t final : public transport_t {
         bump(c);
     }
 
+    /** @brief Count a malformed inbound message and return no frame. */
+    std::span<std::byte> malformed() noexcept {
+        drops_.count_malformed_rx();
+        return {};
+    }
+
     /** @brief Destroy the state block and return it to its store. */
     void release_state() noexcept {
         if (st_ == nullptr) return;
@@ -790,6 +791,9 @@ class noise_link_t final : public transport_t {
     /** @brief The counters, indexed by @ref noise::counter_t. Plain words under `mu_`
      *         (core/STYLE.md §Introspection, counting doctrine rule 5). */
     std::array<std::size_t, std::size_t(noise::counter_t::COUNT)> counts_{};
+    /** @brief This link's own drops (#2482), added to the carrier's by @ref drop_stats. It
+     *         sheds nothing inbound for backpressure, so it has no `dropped_rx` word. */
+    drop_tally_t<drop_classes_t{.dropped_rx = false}> drops_;
 
     /** @brief The carrier, built last and destroyed first, so its receive thread is joined
      *         before anything it calls into goes. */

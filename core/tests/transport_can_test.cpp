@@ -520,11 +520,12 @@ void test_pending_flood_is_capped_and_counted() {
     for (std::uint16_t ep = 1; ep <= kFlood; ++ep) inject_data(injector, /*node=*/1, ep);
 
     const std::uint64_t expect_dropped = kFlood - cfg.max_pending;
-    const bool settled = wait_until([&] { return tx_b.dropped_rx() >= expect_dropped; }, 2s);
-    check(settled, "the flood's evictions were counted on dropped_rx()");
+    const bool settled =
+        wait_until([&] { return tx_b.drop_stats().dropped_rx >= expect_dropped; }, 2s);
+    check(settled, "the flood's evictions were counted on drop_stats().dropped_rx");
     check(tx_b.pending_slices() <= cfg.max_pending,
           "parked slices never exceed the injected max_pending");
-    check(tx_b.dropped_rx() == expect_dropped,
+    check(tx_b.drop_stats().dropped_rx == expect_dropped,
           "every slice above the cap is counted exactly once (evict-and-count)");
     check(tx_b.dropped_groups() == 0, "no reassembly group was involved");
 }
@@ -558,7 +559,8 @@ void test_pending_slices_age_out() {
 
     check(wait_until([&] { return tx_b.pending_slices() <= 1; }, 2s),
           "the stale parked slices were swept");
-    check(tx_b.dropped_rx() >= kParked, "every aged-out slice is counted on dropped_rx()");
+    check(tx_b.drop_stats().dropped_rx >= kParked,
+          "every aged-out slice is counted on drop_stats().dropped_rx");
 }
 
 /**
@@ -596,7 +598,7 @@ void test_zero_peer_ttl_does_not_disable_the_age_out() {
         constexpr std::uint16_t kFlood = 64;
         for (std::uint16_t ep = 1; ep <= kFlood; ++ep) inject_data(injector, /*node=*/1, ep);
 
-        check(wait_until([&] { return tx_b.dropped_rx() >= kFlood - 1; }, 2s),
+        check(wait_until([&] { return tx_b.drop_stats().dropped_rx >= kFlood - 1; }, 2s),
               "a derived rx_ttl of 0 reclaims — it is not read as 'sweep disabled'");
         check(tx_b.pending_slices() <= 1,
               "the parked queue stays bounded with the count cap off (#912 does not re-open)");
@@ -621,7 +623,7 @@ void test_zero_peer_ttl_does_not_disable_the_age_out() {
         inject_data(injector, /*node=*/1, /*endpoint=*/100);
         std::this_thread::sleep_for(50ms);
         check(tx_b.pending_slices() >= kParked, "a live window retains — the sweep is not blind");
-        check(tx_b.dropped_rx() == 0, "nothing was counted as reclaimed");
+        check(tx_b.drop_stats().dropped_rx == 0, "nothing was counted as reclaimed");
     }
 }
 
@@ -721,7 +723,7 @@ void test_max_groups_reaches_the_reassembly_buffer() {
  * binding was ever learned (nothing reached the bus), and — after a window longer than
  * `rx_ttl`, with a real later advertise driving the stale sweep — `dropped_groups()` is
  * still zero, i.e. there was no pinned group for the sweep to find. A test that only
- * checked `dropped_tx()` would pass against a fix that advertised and then retracted.
+ * checked `drop_stats().dropped_tx` would pass against a fix that advertised and then retracted.
  */
 void test_oversized_group_is_refused_before_advertising() {
     std::printf("transport_can oversized group refused before the advertise (#910):\n");
@@ -746,8 +748,8 @@ void test_oversized_group_is_refused_before_advertising() {
         make_payload((tr::net::kCanMaxGroupSlices + 1) * tr::net::can::kCanClassicMaxData);
     tx_a.send(huge);
 
-    check(wait_until([&] { return tx_a.dropped_tx() >= 1; }, 2s),
-          "the oversized frame was refused whole and counted on dropped_tx()");
+    check(wait_until([&] { return tx_a.drop_stats().dropped_tx >= 1; }, 2s),
+          "the oversized frame was refused whole and counted on drop_stats().dropped_tx");
 
     const std::uint32_t base_id = can::encode_can_id({0, 1, tr::net::kCanFirstDataEndpoint});
     std::this_thread::sleep_for(150ms);  // >> rx_ttl, and past anything the bus could carry
@@ -793,8 +795,8 @@ void test_u16_slice_count_wrap_cannot_advertise_a_hello() {
     const std::vector<std::byte> huge = make_payload(slices * tr::net::can::kCanClassicMaxData);
     tx_a.send(huge);
 
-    check(wait_until([&] { return tx_a.dropped_tx() >= 1; }, 2s),
-          "the wrapping frame was refused whole and counted on dropped_tx()");
+    check(wait_until([&] { return tx_a.drop_stats().dropped_tx >= 1; }, 2s),
+          "the wrapping frame was refused whole and counted on drop_stats().dropped_tx");
     std::this_thread::sleep_for(150ms);  // let anything that DID reach the bus arrive
     check(tx_b.pending_slices() == 0,
           "no unbindable data slices were emitted, so none parked at the receiver");
@@ -839,8 +841,8 @@ void test_rx_segment_refusal_drops_the_group_and_counts() {
     // 24 bytes => 3 CLASSIC windows; the admission's one draw is refused.
     tx_a.send(make_payload(24));
 
-    check(wait_until([&] { return tx_b.dropped_rx() >= 3; }, 2s),
-          "each slice of the refused group ticked dropped_rx()");
+    check(wait_until([&] { return tx_b.drop_stats().dropped_rx >= 3; }, 2s),
+          "each slice of the refused group ticked drop_stats().dropped_rx");
     check(!sink.wait_for_count(1, 200ms), "NOTHING was delivered for the refused group");
     check(tx_b.dropped_groups() == 1, "and the refused admission was counted on dropped_groups()");
 
@@ -889,8 +891,8 @@ void test_oversize_advertise_is_refused_and_counted() {
         inject_data(injector, /*node=*/1, static_cast<std::uint16_t>(base + 1));
         base = static_cast<std::uint16_t>(base + 2);
     }
-    check(wait_until([&] { return tx_b.dropped_rx() >= 4; }, 2s),
-          "every slice of both refused groups ticked dropped_rx()");
+    check(wait_until([&] { return tx_b.drop_stats().dropped_rx >= 4; }, 2s),
+          "every slice of both refused groups ticked drop_stats().dropped_rx");
     check(tx_b.dropped_groups() == 2, "both oversize advertises were refused, counted");
     check(counting.allocs.load() == 0, "and the receive backend was never asked for the size");
     check(sink.count() == 0, "nothing was delivered");
@@ -987,8 +989,8 @@ void test_rx_zero_length_slice_drops_the_group_and_counts() {
 
     check(!sink.wait_for_count(1, 500ms),
           "no SHORT frame was delivered for the group the DLC-0 slice completed");
-    check(wait_until([&] { return tx_b.dropped_rx() >= 1; }, 2s),
-          "the zero-length slice ticked dropped_rx()");
+    check(wait_until([&] { return tx_b.drop_stats().dropped_rx >= 1; }, 2s),
+          "the zero-length slice ticked drop_stats().dropped_rx");
     check(tx_b.dropped_groups() >= 1,
           "and the group it would have falsely completed was reclaimed on dropped_groups()");
 
@@ -1146,10 +1148,10 @@ void test_clean_run_counters_are_zero() {
     const std::vector<std::byte> payload = make_payload(40);
     tx_a.send(payload);
     check(sink.wait_for_count(1, 2s), "frame delivered");
-    check(tx_b.dropped_rx() == 0 && tx_b.dropped_groups() == 0,
+    check(tx_b.drop_stats().dropped_rx == 0 && tx_b.dropped_groups() == 0,
           "receiver reports zero RX drops on a clean run");
     check(tx_b.dropped_presink() == 0, "receiver reports zero pre-sink drops on a clean run");
-    check(tx_a.dropped_tx() == 0, "sender reports zero TX drops on a clean run");
+    check(tx_a.drop_stats().dropped_tx == 0, "sender reports zero TX drops on a clean run");
     check(tx_b.pending_slices() == 0, "no slices left parked after delivery");
 }
 
@@ -1184,7 +1186,7 @@ void test_presink_window_drop_is_named() {
 
     check(wait_until([&] { return tx_b.dropped_presink() == 1; }, 2s),
           "the group completing inside the window ticks dropped_presink");
-    check(tx_b.dropped_rx() == 0, "the drop is NOT folded into dropped_rx");
+    check(tx_b.drop_stats().dropped_rx == 0, "the drop is NOT folded into dropped_rx");
     check(tx_b.dropped_groups() == 0, "the drop is NOT folded into dropped_groups");
     check(sink.count() == 0, "nothing was delivered (no sink existed)");
     // Ingestion was never gated, only delivery: the liveness bookkeeping the RX
@@ -1312,7 +1314,7 @@ void test_stale_lap_binding_is_refused_not_welded() {
     check(sink.count() == 3, "NOTHING was delivered from the weld — no fourth group");
     check(tx_b.dropped_groups() >= 1,
           "the stale group's buffered slice was reclaimed, counted on dropped_groups()");
-    check(tx_b.dropped_rx() == 0, "the refusal is NOT folded into dropped_rx");
+    check(tx_b.drop_stats().dropped_rx == 0, "the refusal is NOT folded into dropped_rx");
 
     // Non-vacuity: the guard refuses a prior lap, not the ordinary path. The next group
     // carries its own advertise, so it is delivered byte-exact and moves no counter.
@@ -1356,7 +1358,7 @@ void test_advertise_must_match_its_carrier() {
     can::advertise_t other_version = one_slot_advertise(/*node=*/1, 6);
     other_version.can_id = can::encode_can_id({1, 1, 6});
     inject_advertise(injector, /*node=*/1, other_version);
-    check(wait_until([&] { return tx_b.dropped_rx() == 2; }, 2s),
+    check(wait_until([&] { return tx_b.drop_stats().dropped_rx == 2; }, 2s),
           "both mismatched advertises were refused and counted on dropped_rx");
     check(!tx_b.learned_binding(other_node.can_id).has_value(),
           "an advertise naming another node than its carrier binds nothing");
@@ -1366,7 +1368,7 @@ void test_advertise_must_match_its_carrier() {
     inject_advertise(injector, /*node=*/3, other_node);
     check(wait_until([&] { return tx_b.learned_binding(other_node.can_id).has_value(); }, 2s),
           "the same advertise from its own node binds");
-    check(tx_b.dropped_rx() == 2, "and moves no counter");
+    check(tx_b.drop_stats().dropped_rx == 2, "and moves no counter");
 }
 
 /**
@@ -1406,7 +1408,7 @@ void test_binding_table_is_capped_per_link() {
     }
     check(wait_until([&] { return tx_b.learned_binding(last_id).has_value(); }, 30s),
           "the table filled to the cap");
-    check(tx_b.dropped_binding_cap() == 0 && tx_b.dropped_rx() == 0,
+    check(tx_b.dropped_binding_cap() == 0 && tx_b.drop_stats().dropped_rx == 0,
           "nothing was refused on the way to the cap");
 
     const can::advertise_t over = one_slot_advertise(node, ep);
@@ -1479,7 +1481,8 @@ void test_same_id_reissue_rewrites_in_place() {
     const auto b = tx_b.learned_binding(first.can_id, path);
     check(b && b->path == "new/path" && b->group_total_len == fresh.group_total_len,
           "the slot now holds the fresh manifest and path");
-    check(sink.count() == 1 && tx_b.dropped_rx() == 0, "nothing else delivered or dropped");
+    check(sink.count() == 1 && tx_b.drop_stats().dropped_rx == 0,
+          "nothing else delivered or dropped");
 }
 
 }  // namespace
@@ -1709,7 +1712,8 @@ void test_blocked_group_does_not_hold_a_concurrent_sender() {
         check(at(can::encode_can_id({0, 1, kFirst + kA + kB - 1})) < at(gate.block_id),
               "B's last slice reached the driver before A's parked slice did");
     }
-    check(tx_b.dropped_rx() == 0 && tx_b.dropped_groups() == 0, "the receiver dropped nothing");
+    check(tx_b.drop_stats().dropped_rx == 0 && tx_b.dropped_groups() == 0,
+          "the receiver dropped nothing");
     check(tr::net::can_transport_test_door_t::fence_waits(tx_a) == 0,
           "no send parked at the lap fence: nothing wrapped");
 }

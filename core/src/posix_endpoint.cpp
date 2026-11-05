@@ -407,7 +407,7 @@ std::uint64_t stream_endpoint_t::sweep_one(std::uint64_t now, std::uint64_t dead
 }
 
 void stream_endpoint_t::note_egress(const egress_result_t& r) noexcept {
-    if (r.shed != 0) dropped_tx_.fetch_add(r.shed, std::memory_order_relaxed);
+    if (r.shed != 0) drops_.count_dropped_tx(r.shed);
     if (r.stalled != 0) stalled_tx_.fetch_add(r.stalled, std::memory_order_relaxed);
 }
 

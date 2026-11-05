@@ -238,7 +238,8 @@ int main() {
     check(ok, std::vector<std::byte>(wire.begin() + 4, wire.end()) == out,
           "…and the rest is the frame, untouched");
 
-    check(ok, listener.malformed_rx() == 0, "no prefix on this run was refused as malformed");
+    check(ok, listener.drop_stats().malformed_rx == 0,
+          "no prefix on this run was refused as malformed");
 
     std::printf("tcp: %zu frames reassembled from 4 writes, 4 bytes of framing each\n",
                 at_listener.count());

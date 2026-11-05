@@ -432,7 +432,7 @@ have a residue that nothing else frees:
 
 | Buffer | Count bound | Age bound | Counter |
 | --- | --- | --- | --- |
-| pending data slices (awaiting an advertise) | `max_pending` — evict oldest | `rx_ttl`, swept on every inbound frame | `dropped_rx()` |
+| pending data slices (awaiting an advertise) | `max_pending` — evict oldest | `rx_ttl`, swept on every inbound frame | `drop_stats().dropped_rx` |
 | reassembly groups | `max_groups` — evict oldest | `rx_ttl`, swept on every inbound advertise | `dropped_groups()` |
 
 A fourth counter, `dropped_stale_binding()`, is not a bound either: it counts data slices
@@ -458,12 +458,12 @@ that peer is itself considered gone.
 A third reclamation shares those counters: an inbound slice whose bytes the ingress
 backend refuses (`rx_backend`, the companion injection to the pmr resource — that one
 bounds the reassembly *structure*, this one the slice *bytes*) drops the **whole**
-group, ticking `dropped_rx()` for the slice and `dropped_groups()` for the group.
+group, ticking `drop_stats().dropped_rx` for the slice and `dropped_groups()` for the group.
 Never a placeholder: the reassembly buffer counts entries without inspecting their
 length, so an empty stand-in would satisfy `is_complete`, chain into the rope, and be
 trimmed to a byte-wrong short frame that the receiver could not tell from good data.
 
-Egress has the matching counter, `dropped_tx()`: a send that never reached the bus
+Egress has the matching counter, `drop_stats().dropped_tx`: a send that never reached the bus
 (no storage for the payload, a payload that split into no window, a group needing more
 consecutive endpoint slots than `kCanMaxGroupSlices`, or a manifest that could not be
 encoded) is counted rather than silently discarded.
@@ -535,7 +535,7 @@ base does *not exceed* the last base that node placed **is** the wrap, observed.
 binding of that node is then flagged as belonging to a **prior lap**, and a data slice
 resolving to a prior-lap binding takes the same disposition as a refused-backend slice or a
 DLC-0 one: the whole group is discarded (`dropped_groups()`) and the slice is counted by
-name on `dropped_stale_binding()` — a distinct cause, never folded into `dropped_rx()`.
+name on `dropped_stale_binding()` — a distinct cause, never folded into `drop_stats().dropped_rx`.
 
 The stale binding is deliberately **kept**, not erased. Erasing it would send its slices to
 the pending park, where a later advertise for that run could re-drive them into a fresh

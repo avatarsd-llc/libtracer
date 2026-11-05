@@ -103,7 +103,7 @@ transport_drop_stats_t self_heal_link_t::drop_stats() const noexcept {
         s = inner_;
     }
     transport_drop_stats_t stats = s ? s->link->drop_stats() : transport_drop_stats_t{};
-    stats.dropped_tx += engine_dropped_tx_.load(std::memory_order_relaxed);
+    stats.dropped_tx += engine_drops_.snapshot().dropped_tx;
     return stats;
 }
 
@@ -198,7 +198,7 @@ void self_heal_link_t::send(std::span<const std::span<const std::byte>> iov) {
         s->link->send(iov);
         return;
     }
-    engine_dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+    engine_drops_.count_dropped_tx();
 }
 
 void self_heal_link_t::send(std::span<const std::span<const std::byte>> head,
@@ -210,7 +210,7 @@ void self_heal_link_t::send(std::span<const std::span<const std::byte>> head,
         s->link->send(head, value, lane);
         return;
     }
-    engine_dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+    engine_drops_.count_dropped_tx();
 }
 
 self_heal_link_t::sock_ref_t self_heal_link_t::ready_socket() {

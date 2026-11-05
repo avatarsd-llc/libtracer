@@ -315,8 +315,8 @@ struct result_t {
             frames_fi = sink.frames.load(std::memory_order_relaxed);
         }
         sent = sent_total.load(std::memory_order_relaxed);
-        dropped = server.dropped_rx();
-        malformed = server.malformed_rx();
+        dropped = server.drop_stats().dropped_rx;
+        malformed = server.drop_stats().malformed_rx;
         // Dialers die before the server so the poll thread sees clean hangups rather than
         // racing its own teardown.
         dialers.clear();

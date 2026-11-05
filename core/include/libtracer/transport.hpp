@@ -489,10 +489,11 @@ struct link_memory_t {
  * @brief One transport's shed-frame counters, as a generic `transport_t*` holder
  *        can read them (#932).
  *
- * Every transport already counted *some* of this behind its own concrete accessors
- * (`dropped_rx()`, `malformed_rx()`, `dropped_tx()`), which a consumer that holds
- * only the interface cannot call — so swapping tcp for ws or CAN silently lost all
- * drop observability. This is the ONE shape they all answer with; a transport that
+ * Before #932 each transport counted *some* of this behind its own concrete accessors,
+ * which a consumer that holds only the interface could not call — so swapping tcp for ws
+ * or CAN silently lost all drop observability. This is the ONE shape they all answer
+ * with, and since #2482 the only one: a counting link keeps its counters in a
+ * @ref drop_tally_t and answers with its snapshot. A transport that
  * does not count a given class leaves it zero. Named `drop_stats`, not `stats`: a
  * platform link may already publish a RICHER, kind-specific stats block of its own
  * (`httpd_ws_link_t::stats()`), and this seam is only the shed-frame subset every
@@ -512,6 +513,79 @@ struct transport_drop_stats_t {
     /** @brief Outbound frames the caller believed sent that never reached the wire —
      *         oversize for the peer's cap, no peer/dead socket, or a refused gather. */
     std::uint64_t dropped_tx = 0;
+};
+
+/**
+ * @brief Which of the three @ref transport_drop_stats_t classes a @ref drop_tally_t counts
+ *        (#2482) — a build-time choice, so a link with no such class pays no word for it.
+ */
+struct drop_classes_t {
+    bool dropped_rx = true;   /**< @brief Count inbound frames shed (backpressure). */
+    bool malformed_rx = true; /**< @brief Count inbound frames refused as malformed. */
+    bool dropped_tx = true;   /**< @brief Count outbound frames that never reached the wire. */
+};
+
+/**
+ * @brief A link's shed-frame counters: the storage behind @ref transport_t::drop_stats
+ *        (#2482).
+ *
+ * A counting link embeds one and answers @ref transport_t::drop_stats with @ref snapshot. It
+ * is a member of the link, never of the @ref transport_t base: a per-peer facade counts
+ * nothing of its own, and reports its owner's tally instead.
+ *
+ * Each counter is a relaxed word-wide atomic (core/STYLE.md §Introspection, counting doctrine
+ * rules 1 and 5), stepped on the drop arm only. A class @p Classes leaves out has no storage,
+ * cannot be counted (the count operation does not exist), and reads zero in the snapshot.
+ * Sampled per the snapshot-coherence clause of core/STYLE.md §Introspection.
+ *
+ * @tparam Classes The classes this link can drop; all three by default.
+ */
+template <drop_classes_t Classes = drop_classes_t{}>
+class drop_tally_t {
+   public:
+    /** @brief Count @p n inbound frames shed rather than delivered. */
+    void count_dropped_rx(std::size_t n = 1) noexcept
+        requires(Classes.dropped_rx)
+    {
+        dropped_rx_.fetch_add(n, std::memory_order_relaxed);
+    }
+
+    /** @brief Count @p n inbound frames refused as protocol-malformed. */
+    void count_malformed_rx(std::size_t n = 1) noexcept
+        requires(Classes.malformed_rx)
+    {
+        malformed_rx_.fetch_add(n, std::memory_order_relaxed);
+    }
+
+    /** @brief Count @p n outbound frames that never reached the wire. */
+    void count_dropped_tx(std::size_t n = 1) noexcept
+        requires(Classes.dropped_tx)
+    {
+        dropped_tx_.fetch_add(n, std::memory_order_relaxed);
+    }
+
+    /** @brief The three counters, one relaxed load each; a class not counted reads zero. */
+    [[nodiscard]] transport_drop_stats_t snapshot() const noexcept {
+        transport_drop_stats_t s;
+        if constexpr (Classes.dropped_rx)
+            s.dropped_rx = dropped_rx_.load(std::memory_order_relaxed);
+        if constexpr (Classes.malformed_rx)
+            s.malformed_rx = malformed_rx_.load(std::memory_order_relaxed);
+        if constexpr (Classes.dropped_tx)
+            s.dropped_tx = dropped_tx_.load(std::memory_order_relaxed);
+        return s;
+    }
+
+   private:
+    /** @brief A counter, or nothing when its class is left out; the index keeps the empty
+     *         ones distinct types, so they all fold into no storage. */
+    template <bool Counted, int I>
+    using word_t =
+        std::conditional_t<Counted, std::atomic<std::size_t>, std::integral_constant<int, I>>;
+
+    [[no_unique_address]] word_t<Classes.dropped_rx, 0> dropped_rx_{}; /**< @brief Shed inbound. */
+    [[no_unique_address]] word_t<Classes.malformed_rx, 1> malformed_rx_{}; /**< @brief Malformed. */
+    [[no_unique_address]] word_t<Classes.dropped_tx, 2> dropped_tx_{}; /**< @brief Shed outbound. */
 };
 
 /**
@@ -616,8 +690,8 @@ class transport_t {
      *
      * The DEFAULT is all-zero, which is the honest answer for a link that counts
      * nothing (an in-process or test stub): "no drops observed here", never a
-     * fabricated number. A concrete transport overrides it with its own counters
-     * (#932); the per-transport accessors stay for callers that hold the concrete type.
+     * fabricated number. A counting transport overrides it with its @ref drop_tally_t's
+     * snapshot (#932, #2482); a per-peer facade, with its owner's.
      */
     [[nodiscard]] virtual transport_drop_stats_t drop_stats() const noexcept { return {}; }
 

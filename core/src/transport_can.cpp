@@ -238,7 +238,7 @@ void transport_can::touch_peer(std::uint16_t node, std::chrono::steady_clock::ti
     peer_entry_t* const fresh = mem::make_in<peer_entry_t>(rx_source(cfg_));
     if (fresh == nullptr || !peers_.try_emplace(node, fresh).inserted) {
         if (fresh != nullptr) mem::drop_in(rx_source(cfg_), fresh);
-        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_rx();
         return;
     }
     fresh->last_heard = now;
@@ -356,7 +356,7 @@ void transport_can::emit_advertise(const can::advertise_t& adv) {
     if (!can::encode_advertise_header(header, adv, cfg_.path)) {
         // Over-long: emit nothing. Without the manifest no peer can bind the group,
         // so the whole send is lost — counted, not silent (#912).
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_tx();
         return;
     }
     const std::span<const std::byte> parts[2] = {
@@ -416,12 +416,12 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
     // Own the bytes so the framing can carve zero-copy subviews out of them.
     const auto payload = tr::view::over_bytes(frame);
     if (!payload) {
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // alloc failure => backpressure drop
+        drops_.count_dropped_tx();  // alloc failure => backpressure drop
         return;
     }
     const std::size_t count = tr::net::can::can_frame_count(*payload, cfg_.mode);
     if (count == 0) {
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_tx();
         return;
     }
 
@@ -445,7 +445,7 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
     std::unique_lock lock(tx_m_);
     const std::optional<std::uint16_t> base_ep = alloc_base(count, lock);
     if (!base_ep) {
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // whole group refused, nothing said
+        drops_.count_dropped_tx();  // whole group refused, nothing said
         return;
     }
     const can::can_id_fields_t base_fields{cfg_.version, cfg_.node, *base_ep};
@@ -476,7 +476,7 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
             // range. Kept as a hard, COUNTED stop rather than the silent `break` it was —
             // if the reservation invariant is ever broken the group is reported lost, not
             // half-delivered against a manifest that promised all of it.
-            dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+            drops_.count_dropped_tx();
             break;
         }
 
@@ -526,7 +526,7 @@ void transport_can::on_rx(const can_frame_data_t& frame) {
         if (node == nullptr || !node->control.append(in.data(), in.size())) {
             // The RX store refused the control stream's growth: this frame's bytes are
             // lost, which the resync below recovers from like any lost control frame.
-            dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+            drops_.count_dropped_rx();
             return;
         }
         mem::bytes_t& buf = node->control;
@@ -578,7 +578,7 @@ void transport_can::learn_advertise(const can::advertise_t& adv, std::uint32_t c
     // carry (>29 bits) alike, each counted. The carrier is a decoded 29-bit id of our version,
     // so after it `base` is always engaged.
     if ((adv.can_id >> can::kEndpointBits) != (carrier_id >> can::kEndpointBits)) {
-        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_rx();
         return;
     }
     // Decoded BEFORE the insert: the endpoint run the invalidation below is computed from it.
@@ -617,7 +617,7 @@ void transport_can::learn_advertise(const can::advertise_t& adv, std::uint32_t c
     if (node == nullptr || bound == nullptr || !bound->path.assign(adv.path)) {
         (void)learned_.erase(adv.can_id);
         dropped_binding_cap_.fetch_add(at_cap, std::memory_order_relaxed);
-        dropped_rx_.fetch_add(!at_cap, std::memory_order_relaxed);
+        drops_.count_dropped_rx(!at_cap);
         return;
     }
     // Rewritten whether the entry is new or the reused slot above (a no-op for a new one).
@@ -656,8 +656,7 @@ void transport_can::learn_advertise(const can::advertise_t& adv, std::uint32_t c
         if ((p.frame.id >> can::kEndpointBits) == (adv.can_id >> can::kEndpointBits) &&
             p.frame.id - adv.can_id < adv.slice_count) {
             // A refused lift sheds that slice, counted.
-            dropped_rx_.fetch_add(static_cast<std::size_t>(!ready.push_back(p)),
-                                  std::memory_order_relaxed);
+            drops_.count_dropped_rx(static_cast<std::size_t>(!ready.push_back(p)));
         } else {
             pending_[keep++] = p;
         }
@@ -849,7 +848,7 @@ void transport_can::process_data(const can_frame_data_t& frame) {
     // and `discard` ticks dropped_groups. Never fabricate.
     if (!reasm_.add_slice(key, index, frame.bytes())) {
         reasm_.discard(key);
-        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_rx();
         return;
     }
     // The learned binding is kept: the identity↔path map persists past delivery and is
@@ -876,11 +875,10 @@ void transport_can::park_pending(const can_frame_data_t& frame) {
     if (cfg_.max_pending != 0 && pending_.size() >= cfg_.max_pending) {
         const std::size_t over = pending_.size() + 1 - cfg_.max_pending;
         pending_.erase_front(over);
-        dropped_rx_.fetch_add(over, std::memory_order_relaxed);
+        drops_.count_dropped_rx(over);
     }
     // A refused park is the same counted drop an evicted one is (receiver pays).
-    if (!pending_.push_back(pending_slice_t{frame, rx_now_}))
-        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+    if (!pending_.push_back(pending_slice_t{frame, rx_now_})) drops_.count_dropped_rx();
 }
 
 /**
@@ -903,7 +901,7 @@ void transport_can::expire_pending() {
     while (stale < pending_.size() && pending_[stale].arrived < cutoff) ++stale;
     if (stale == 0) return;
     pending_.erase_front(stale);
-    dropped_rx_.fetch_add(stale, std::memory_order_relaxed);
+    drops_.count_dropped_rx(stale);
 }
 
 void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
