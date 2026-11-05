@@ -247,7 +247,8 @@ class borrowed_fields_t {
  *        (RFC-0028 §4.12, slice 10): either an OWNING table or a BORROWED one (ADR-0058), or
  *        nothing.
  *
- * Replaces the two install verbs (`set_app_fields` / `set_app_fields_static`) with one value.
+ * One value for both storage classes, installed by `graph_t::register_vertex` or
+ * `graph_t::set_policy`.
  * It converts implicitly from each spelling a caller already writes:
  * - a braced list, a `std::vector<app_field_t>` or a span of fields — OWNING: names,
  *   descriptors and initial values are copied, at construction, into ONE block drawn from a

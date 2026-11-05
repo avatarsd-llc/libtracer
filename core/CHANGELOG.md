@@ -174,7 +174,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 - **`vertex_t::set_app_fields` and `vertex_t::set_app_fields_static` (#2547).** Neither had a
   caller. Install an app-field table with `graph_t::set_policy` (a `vertex_policy_t` naming
-  `app_fields`) or at `graph_t::register_vertex`.
+  `app_fields`) or at `graph_t::register_vertex`; both normalize an empty borrowed table to the
+  null span (#2546), which `set_app_fields_static` skipped.
 
 ## [0.22.0] — 2026-11-02
 
