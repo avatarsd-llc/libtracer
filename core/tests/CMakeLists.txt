@@ -2286,6 +2286,15 @@ if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_W
     add_test(NAME transport_conformance COMMAND transport_conformance_test)
 endif()
 
+# #2510 — park.hpp on its own (#2507): a store + wake wakes, no lost wake when they race the
+# park, a spurious or same-stripe wake re-sleeps, colliding words wake apart, and a wake after
+# the word is freed (the TSan leg of the teardown drain).
+add_executable(park_test park_test.cpp)
+target_link_libraries(park_test PRIVATE libtracer)
+libtracer_test_warnings(park_test)
+add_test(NAME park COMMAND park_test)
+set_tests_properties(park PROPERTIES TIMEOUT 120)
+
 if(LIBTRACER_NET_PLANE)
     # #2144 — the shared-frame egress module (ADR-0087 §2): SAMPLE latest-wins, STREAM order
     # and its two pressure arms, part writes, strikes, close, a stalled peer delaying no other
