@@ -605,6 +605,46 @@ void test_refused_copy_keeps_table() {
           "the refused table's field never appeared");
 }
 
+/** @brief Every draw counted, then served by the process root. */
+class counting_source_t final : public tr::mem::block_source_t {
+   public:
+    counting_source_t() noexcept : tr::mem::block_source_t("counting") {}
+    [[nodiscard]] void* try_alloc(std::size_t n, std::size_t a) noexcept override {
+        ++draws;
+        return tr::mem::default_root().try_alloc(n, a);
+    }
+    void release(void* p, std::size_t n, std::size_t a) noexcept override {
+        tr::mem::default_root().release(p, n, a);
+    }
+    std::size_t draws = 0; /**< @brief try_alloc calls so far. */
+};
+
+// ---------------------------------------------------------------------------
+// #2453 — an empty borrowed table is the null one whatever its pointer, so declaring it on a
+// vertex with no table moves nothing and draws nothing (two empties compare equal).
+void test_empty_borrowed_moves_nothing() {
+    std::printf("an empty borrowed table on a vertex with none draws nothing (#2453):\n");
+    counting_source_t src;
+    graph_t g(src);
+    const vertex_handle_t v = g.register_vertex(path_t("/dev/e"), role_t::STORED_VALUE);
+    const std::array<tr::graph::app_field_static_t, 1> backing{};
+    const std::size_t before = src.draws;
+    check(g.set_policy(v, {.app_fields = tr::graph::borrowed_fields_t::unchecked(
+                               std::span<const tr::graph::app_field_static_t>(backing.data(), 0))})
+              .has_value(),
+          "set_policy takes the empty, non-null table");
+    check(src.draws == before, "and draws no block for it");
+    const tr::graph::app_fields_decl_t d = tr::graph::borrowed_fields_t::unchecked(
+        std::span<const tr::graph::app_field_static_t>(backing.data(), 0));
+    const tr::graph::app_fields_decl_t copied(d);
+    check(copied.borrowed().slots().data() == nullptr && copied.empty(),
+          "a copied declaration holds the empty table as the null span");
+    tr::graph::app_fields_decl_t m = d;
+    m = tr::graph::app_fields_decl_t(tr::graph::borrowed_fields_t::unchecked(
+        std::span<const tr::graph::app_field_static_t>(backing.data(), 0)));
+    check(m.borrowed().slots().data() == nullptr, "and so does a moved-into one");
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -780,6 +820,7 @@ int main() {
     test_apply_seam();
     test_table_replace();
     test_refused_copy_keeps_table();
+    test_empty_borrowed_moves_nothing();
     test_borrowed_static_install();
     test_shape_gates_no_test_defended();
     return tr::testing::summary("app_fields");

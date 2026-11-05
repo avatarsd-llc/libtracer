@@ -219,7 +219,9 @@ class borrowed_fields_t {
      * spelling is deliberately unpleasant — it is the caller taking the promise the implicit
      * constructors would otherwise have checked the shape of.
      *
-     * @param table Slots that MUST outlive the vertex, along with the bytes they point at.
+     * @param table Slots that MUST outlive the vertex, along with the bytes they point at. An
+     *        empty one is the empty table whatever its pointer: an @ref app_fields_decl_t
+     *        holds it as the null span once copied or moved, which every install does.
      */
     [[nodiscard]] static constexpr borrowed_fields_t unchecked(
         std::span<const app_field_static_t> table) noexcept {
@@ -290,7 +292,8 @@ class app_fields_decl_t {
     constexpr app_fields_decl_t(  // NOLINT(google-explicit-constructor)
         const std::array<app_field_static_t, N>& table) noexcept
         : borrowed_(table) {}
-    /** @brief A deep copy into a block from @p o's source; @ref failed if it refused. */
+    /** @brief A deep copy into a block from @p o's source; @ref failed if it refused. An empty
+     *         borrowed view is copied as the null span (#2453). */
     app_fields_decl_t(const app_fields_decl_t& o) noexcept;
     /**
      * @brief Take @p o's block; @p o is left empty.
@@ -307,7 +310,9 @@ class app_fields_decl_t {
         if (this != &o) *this = app_fields_decl_t(o);
         return *this;
     }
-    /** @brief Exchange with @p o, whose destructor then returns this declaration's old block. */
+    /** @brief Exchange with @p o, whose destructor then returns this declaration's old block.
+     *         An empty borrowed view lands as the null span (#2453), so every empty table an
+     *         install sees is the same declaration. */
     app_fields_decl_t& operator=(app_fields_decl_t&& o) noexcept;
     /** @brief Returns the owning block to its source. */
     ~app_fields_decl_t();

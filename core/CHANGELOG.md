@@ -117,6 +117,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   ESP-IDF WS client's teardown drain now park here, so no MCU image links the libstdc++
   table. Same contract, no clock; only contended and teardown paths reach the table.
 
+### Fixed
+
+- **An empty borrowed app-field table is the empty table, whatever its pointer (#2453).**
+  `app_fields_decl_t` now holds an empty borrowed view as the null span once copied or moved,
+  which every `register_vertex` and `set_policy` does. Before, a
+  `borrowed_fields_t::unchecked` span with a non-null pointer and no entries compared unequal to
+  the vertex's own empty table, so declaring it on a vertex with none drew an extension block
+  for nothing. `borrowed_fields_t::unchecked` itself is unchanged.
+
 ## [0.22.0] — 2026-11-02
 
 ### Added
