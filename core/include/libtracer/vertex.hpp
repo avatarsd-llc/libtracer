@@ -2987,48 +2987,6 @@ class vertex_t {
 
     // -- application property fields (RFC-0010) ------------------------------------------
 
-    /**
-     * @brief Install (or replace) the field descriptor table — the OWNER naming the holes
-     *        in the closed `ENOTTY` default (RFC-0010 §A.2), one more store-verbatim verb
-     *        on this seam (the `set_acl` pattern).
-     *
-     * Replacement takes effect atomically with respect to concurrent field operations on
-     * this vertex (one lock hold). An empty @p table uninstalls — the vertex reverts to
-     * the closed surface, including the pre-RFC synthesized `:schema` shape — and, on a
-     * vertex that never had an extension block, allocates nothing (#361 §1: a leaf with
-     * no app fields pays nothing).
-     */
-    [[nodiscard]] bool set_app_fields(std::span<const app_field_t> table,
-                                      tr::mem::block_source_t& tables) {
-        if (table.empty() && ext_.load(std::memory_order_acquire) == nullptr) return true;
-        vertex_ext_t* const e = ensure_ext(tables);
-        if (e == nullptr) return false;
-        app_field_table_t built(*e->src);
-        if (!build_owning_table(table, built)) return false;
-        const std::lock_guard lock(vertex_stripe_of(this).m);
-        return install_app_table(*e, std::move(built));
-    }
-
-    /**
-     * @brief Install a BORROWED descriptor table (ADR-0058): the slots view the caller's
-     *        @p table storage directly — zero declaration RAM. The array AND the `name` /
-     *        `descriptor` bytes it points at MUST outlive the vertex (static/flash storage);
-     *        @ref borrowed_fields_t is what constrains the argument's shape to match.
-     *        Declaration only; values are written later via the field-write surface. Same
-     *        uninstall-on-empty and allocate-nothing-on-empty-leaf semantics as
-     *        @ref vertex_policy_t::app_fields.
-     */
-    [[nodiscard]] bool set_app_fields_static(borrowed_fields_t table,
-                                             tr::mem::block_source_t& tables) {
-        if (table.empty() && ext_.load(std::memory_order_acquire) == nullptr) return true;
-        vertex_ext_t* const e = ensure_ext(tables);
-        if (e == nullptr) return false;
-        app_field_table_t built(*e->src);
-        built.slots = table.slots();  // viewed in place — this install allocates NOTHING here
-        const std::lock_guard lock(vertex_stripe_of(this).m);
-        return install_app_table(*e, std::move(built));
-    }
-
     /** @brief The declared access of the app field @p name (`nullopt` ⇒ undeclared —
      *         the graph's `SCHEMA_NOT_FOUND`). */
     [[nodiscard]] std::optional<app_access_t> app_field_access(std::string_view name) {

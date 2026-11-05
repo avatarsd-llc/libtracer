@@ -170,6 +170,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   the vertex's own empty table, so declaring it on a vertex with none drew an extension block
   for nothing. `borrowed_fields_t::unchecked` itself is unchanged.
 
+### Removed
+
+- **`vertex_t::set_app_fields` and `vertex_t::set_app_fields_static` (#2547).** Neither had a
+  caller. Install an app-field table with `graph_t::set_policy` (a `vertex_policy_t` naming
+  `app_fields`) or at `graph_t::register_vertex`.
+
 ## [0.22.0] — 2026-11-02
 
 ### Added
