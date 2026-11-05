@@ -3278,6 +3278,10 @@ void httpd_ws_link_t::deliver_owned(peer_handle_t peer, view::rope_t frame) {
     // A frame no sink took is counted on rx_dropped_pool (#2504): a sink swapped to span-only
     // after the caller's has_rope() check whose materialize the rx pool then refused, or (a
     // sink cleared in that same gap) none at all — dropped either way, never silently.
+    //
+    // Counted only on that branch, never as an unconditional add of 0: a sink that RAN may
+    // have destroyed this link in-call (#814), so after a delivery `this` is touched only
+    // when no sink ran.
     bool delivered = false;
     if (peer_named_) {
         delivered = peer_rx_.deliver_rope(peer, std::move(frame), *rx_backend_);
@@ -3285,7 +3289,7 @@ void httpd_ws_link_t::deliver_owned(peer_handle_t peer, view::rope_t frame) {
         rx_peer_ = peer;
         delivered = rx_.deliver_rope(std::move(frame), *rx_backend_);
     }
-    rx_dropped_pool_.fetch_add(!delivered, std::memory_order_relaxed);
+    if (!delivered) rx_dropped_pool_.fetch_add(1, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------
