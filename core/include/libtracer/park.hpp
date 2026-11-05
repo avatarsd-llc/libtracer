@@ -33,6 +33,8 @@
 
 namespace tr {
 
+namespace detail {
+
 /** @brief Stripes in the park table; a collision is a spurious wake, never a missed one. */
 inline constexpr std::size_t kParkStripes = 8;
 
@@ -52,6 +54,8 @@ inline park_stripe_t& park_stripe_of(const void* word) {
     return stripes[(h >> 4) % kParkStripes];
 }
 
+}  // namespace detail
+
 /**
  * @brief Block until @p word no longer holds @p old, the `std::atomic::wait` contract.
  *
@@ -61,7 +65,7 @@ inline park_stripe_t& park_stripe_of(const void* word) {
  */
 template <class T>
 void park_wait(const std::atomic<T>& word, T old, std::memory_order order) {
-    park_stripe_t& s = park_stripe_of(&word);
+    detail::park_stripe_t& s = detail::park_stripe_of(&word);
     std::unique_lock<std::mutex> lock(s.m);
     s.cv.wait(lock, [&] { return word.load(order) != old; });
 }
@@ -76,7 +80,7 @@ void park_wait(const std::atomic<T>& word, T old, std::memory_order order) {
  */
 template <class T>
 void park_wake(const std::atomic<T>& word) {
-    park_stripe_t& s = park_stripe_of(&word);
+    detail::park_stripe_t& s = detail::park_stripe_of(&word);
     { const std::lock_guard<std::mutex> lock(s.m); }
     s.cv.notify_all();
 }

@@ -10,6 +10,11 @@ the ESP-IDF WS client's teardown drain and the shared egress module started wait
 ``std::atomic::wait``. libtracer parks through ``tr::park_wait`` / ``tr::park_wake``
 (``core/include/libtracer/park.hpp``) instead, and this check keeps the table from coming back.
 
+GCC 16 reworked those internals: the table is ``__waitable_state``, reached through
+``__wait_impl`` / ``__notify_impl``. The check matches the names of both eras, so a toolchain
+bump cannot let the table back in unnoticed (#2510; ``tools/tests/test_check_no_waiter_pool.py``
+feeds it a symbol list from each).
+
 It reads the linked ELF, not the objects: the table is a weak, function-local static that
 lands in the image when ANY translation unit instantiates a wait or a notify, so the image's
 symbol table is the one place the cost is final. An image built on application code that
@@ -27,8 +32,21 @@ import shutil
 import subprocess
 import sys
 
-# Demangled-name fragments of libstdc++'s atomic-wait machinery (GCC 13-15 spellings).
-BANNED_FRAGMENTS = ("__waiter_pool", "__atomic_wait_address")
+# Demangled-name fragments of libstdc++'s atomic-wait machinery, per GCC era.
+BANNED_FRAGMENTS = (
+    # GCC 13-15: the header-only pool.
+    "__waiter_pool",
+    "__atomic_wait_address",
+    # GCC 16: the reworked state table and its entry points.
+    "__waitable_state",
+    "__wait_impl",
+    "__notify_impl",
+)
+
+
+def waiter_pool_hits(lines: list[str]) -> list[str]:
+    """Return the ``nm -C`` lines that name libstdc++'s atomic-wait machinery, of either era."""
+    return [ln for ln in lines if any(f in ln for f in BANNED_FRAGMENTS)]
 
 
 def resolve_nm(explicit: str | None) -> str | None:
@@ -58,7 +76,7 @@ def main() -> int:
         print(f"ERROR: {nm} read {len(lines)} symbol(s) from {args.elf}; an unreadable image "
               "must not read as 'no waiter table'", file=sys.stderr)
         return 2
-    hits = [ln for ln in lines if any(f in ln for f in BANNED_FRAGMENTS)]
+    hits = waiter_pool_hits(lines)
     if hits:
         print("FAIL: the image links libstdc++'s atomic-wait table (2 KB of .bss on esp32c6). "
               "Park through tr::park_wait / tr::park_wake instead of std::atomic::wait:")

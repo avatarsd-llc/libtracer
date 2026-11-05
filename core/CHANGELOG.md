@@ -115,7 +115,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `std::atomic::wait` on a shared 2,048 B waiter table on every target; on esp32c6 that table
   was the whole of v0.22.0's +2 KB `.bss`. `egress_t` (its lane lock and `close`) and the
   ESP-IDF WS client's teardown drain now park here, so no MCU image links the libstdc++
-  table. Same contract, no clock; only contended and teardown paths reach the table.
+  table. Same contract, no clock; only contended and teardown paths reach the table. The stripe
+  table behind them (`park_stripe_t`, `park_stripe_of`, `kParkStripes`) is `tr::detail` (#2510).
 
 ### Fixed
 
