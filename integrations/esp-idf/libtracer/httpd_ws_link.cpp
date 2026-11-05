@@ -1076,6 +1076,19 @@ struct httpd_ws_link_t::session_t {
      *         no draw (tx_m). */
     tx_wait_t tx_spare;
     bool tx_spare_used = false; /**< @brief @ref tx_spare is in the queue (tx_m). */
+    /**
+     * @brief The most frames of this session that waited at once, published as
+     *        `link_counters_t::tx_queue_peak` (#2464).
+     *
+     * Raised by `stage` under @ref tx_m, where it already counts the session's waiting frames,
+     * and cleared on the claim edge with the rest of the counters. Atomic because those two
+     * writers hold different locks and the enumeration reads it under `peers_m_` alone. It
+     * fits the padding before @ref tx_m, so the slot does not grow. A producer that resolved
+     * the departed session just before the claim can still raise it by the one frame it
+     * stores, which the next flush skips.
+     */
+    std::atomic<std::uint8_t> tx_peak{0};
+    static_assert(httpd_ws_link_t::kTxWaitDepth <= 0xFF, "tx_peak is one byte");
     /** @brief Guards the waiting frames. Held for a gather or a flip, never across a socket
      *         write, and never with `peers_m_` taken under it. */
     std::mutex tx_m;
@@ -2365,6 +2378,7 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     // strictly the more accurate of the two instants (#1334).
     slot->st = {};
     slot->st.connected_at_us = esp_timer_get_time();
+    slot->tx_peak.store(0, std::memory_order_relaxed);
     // A link with an auth hook claims a session UNAUTHENTICATED unless the HANDSHAKE already
     // settled it (#1245/#1334), and its auth record starts unseen: the application's next
     // liveness check stamps it (#2257). An authenticated session is never judged by it,
@@ -3385,6 +3399,7 @@ bool httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
                 s->tx_spare_used = true;
             node = raw != nullptr ? new (raw) tx_wait_t : nullptr;
             refused = node == nullptr;
+            waiting += !refused;
         } else if (policy != tx_frame_t::kRefuse && at != nullptr) {
             tx_wait_t* const w = *at;
             old = std::exchange(w->frame, fresh);
@@ -3402,6 +3417,10 @@ bool httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
             (s->tx_tail != nullptr ? s->tx_tail->next : s->tx_head) = node;
             s->tx_tail = node;
         }
+        // The peer's queue peak (#2464), from the count just taken: only an append raises it,
+        // since a replacement, a shed or a refusal leaves no more frames waiting than before.
+        if (waiting > s->tx_peak.load(std::memory_order_relaxed))
+            s->tx_peak.store(static_cast<std::uint8_t>(waiting), std::memory_order_relaxed);
     }
     // A refused frame still rings the doorbell, at most one flush per link (post_flush): a
     // socket that reopened is offered its held frames on this link's own traffic, and the
@@ -4565,7 +4584,10 @@ void httpd_ws_link_t::enumerate_peer_stats(const peer_stats_visitor_t& visit) co
         // The counters are COPIED into the visitor's argument; `name`, `endpoint_str` and
         // `subject` borrow, and only for the duration of the call (same contract as
         // enumerate_peers).
-        visit(peer_stats_t{s->name.view(), i, s->gen, s->st, s->endpoint_str,
+        // The queue peak is the one counter kept under tx_m rather than here (#2464).
+        link_counters_t c = s->st;
+        c.tx_queue_peak = s->tx_peak.load(std::memory_order_relaxed);
+        visit(peer_stats_t{s->name.view(), i, s->gen, c, s->endpoint_str,
                            std::string_view(s->subject, s->subject_len)});
     }
 }

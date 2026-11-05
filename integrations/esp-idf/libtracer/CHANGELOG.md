@@ -10,6 +10,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Both WS links report each peer's TX queue peak (#2464).** `link_counters_t::tx_queue_peak`
+  is the most frames that waited for that peer at once since its connection opened; it is
+  never reset and never lowered while the connection lives, so a saturation pass reads it
+  before and after a ramp. `httpd_ws_link_t` publishes it per peer through
+  `enumerate_peer_stats` (its cap is `kTxWaitDepth`), and `esp_ws_client_link_t` through
+  `stats().c`, where `stats_t::tx_queue_peak_bytes` adds the byte peak of its `tx_bytes`
+  budget. It is in every image, not behind `CONFIG_LIBTRACER_LINK_TRAFFIC_STATS`, and costs
+  no lock and no clock read: the server raises it under the peer's queue lock where the
+  waiting frames are already counted, the client on the budget draw. Neither
+  `link_counters_t` (it fills padding) nor the server session slot grows; the client link
+  object grows by 12 bytes.
+
 ### Fixed
 
 - **`esp_ws_client_link_t` accepts a handshake answer of up to 1024 bytes, and checks it

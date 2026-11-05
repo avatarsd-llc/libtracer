@@ -41,10 +41,11 @@
  *     five fields are ABSENT (reading one does not compile), no success path takes a
  *     lock or reads the clock for them, and the client link carries no counter mutex.
  *     @ref tr::net::kLinkTrafficStats reports the setting.
- *   - The DROP half — `tx_drops`, `tx_conflated`, `rx_drops` — and `connected_at_us` are always
- *     there. The drops bump only when a frame is lost, and the server's auth deadline
- *     is computed from `connected_at_us`, so neither is observability the application
- *     can opt out of.
+ *   - The DROP half — `tx_drops`, `tx_conflated`, `rx_drops` — `tx_queue_peak` and
+ *     `connected_at_us` are always there. The drops bump only when a frame is lost, the peak
+ *     moves only when a frame has to wait (#2464: saturation diagnosis needs it in a default
+ *     image), and the server's auth deadline is computed from `connected_at_us`, so none of
+ *     them is observability the application can opt out of.
  *
  *   This header reads `sdkconfig.h` itself, so every translation unit that includes it
  *   agrees on the layout.
@@ -108,6 +109,19 @@ struct link_counters_t {
      */
     std::uint32_t tx_conflated = 0;
     std::uint32_t rx_drops = 0; /**< @brief Inbound discards (oversize / reassembly). */
+    /**
+     * @brief The most frames that waited for this connection at once since it opened: the
+     *        high-water mark of its TX queue (#2464), never reset and never lowered while
+     *        the connection lives.
+     *
+     * Read before and after a ramp: a peak at the queue's cap says the queue is what filled.
+     * The server link counts the frames waiting behind its peer's wire frame, so its cap is
+     * `httpd_ws_link_t::kTxWaitDepth`. The client link counts the frames drawn from its
+     * `tx_bytes` budget to wait behind a write in flight; its byte peak is
+     * `esp_ws_client_link_t::stats_t::tx_queue_peak_bytes`. Raised where a frame is queued,
+     * under what already guards the queue: no lock of its own, no clock.
+     */
+    std::uint32_t tx_queue_peak = 0;
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     /** @brief `esp_timer_get_time()` of the last delivered message; -1 = never (traffic
      *         half). */

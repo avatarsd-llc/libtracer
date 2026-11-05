@@ -664,6 +664,7 @@ void test_a_second_sender_does_not_wait_on_a_parked_write() {
  * could pin one per lane slot. The budget caps their total at `tx_bytes`: a frame that would
  * pass it is dropped and counted in `tx_drops`, never held. Released, the writer sends A's
  * frame and then exactly the frames that were admitted, in order, and the budget is empty.
+ * The queue's peaks (#2464) still read what waited, in frames and in bytes.
  */
 void test_waiting_frames_are_bounded_by_tx_bytes() {
     std::printf("#2277 frames waiting behind a stalled write never exceed tx_bytes:\n");
@@ -710,6 +711,10 @@ void test_waiting_frames_are_bounded_by_tx_bytes() {
           "the writer sent its own frame, then every admitted one");
     check(fake_ws::last_write_payload() == last, "the admitted frames left in order");
     check(under_test->tx_held_bytes() == 0, "and the budget is empty once they are written");
+    // The queue peaks (#2464) keep the high-water mark after the queue drained.
+    const esp_ws_client_link_t::stats_t st = under_test->stats();
+    check(st.c.tx_queue_peak == fit, "the frame peak reads the frames that waited");
+    check(st.tx_queue_peak_bytes == peak, "and the byte peak the most bytes that waited");
     link.reset();
     check(drained_fake(), "and the link drained");
 }
