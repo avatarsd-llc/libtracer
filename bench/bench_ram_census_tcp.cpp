@@ -448,6 +448,8 @@ int peer_main(int cmd_fd, int rsp_fd) {
         const auto w = g.write(path_t("/net/tcp-client/conn"),
                                tcp_conn_spec("srv", static_cast<std::uint16_t>(port), "127.0.0.1"));
         if (!w.has_value()) {
+            std::fprintf(stderr,
+                         "census peer: the dial SPEC write to /net/tcp-client/conn was refused\n");
             (void)write_all(rsp_fd, "FAIL\n", 5);
             continue;
         }
@@ -462,15 +464,23 @@ int peer_main(int cmd_fd, int rsp_fd) {
 
         // The handshake: one FWD READ whose REPLY proves the census node accepted the
         // connection and its terminus answered. A bare connect() is not observable.
+        //
+        // A SPEC-created dial is dormant at creation, and an op on a link that is not up
+        // is a counted drop that only starts the dial and never waits for it (RFC-0014
+        // Amendment 5, #2303). So the READ is RE-SENT every 200 ms until one is answered:
+        // a single send is always dropped, which failed every arm of this census (#2468).
+        // A READ sent before the link is up draws no REPLY, so only the answered one counts.
         const std::size_t before = sink.n.load(std::memory_order_relaxed);
-        router.on_frame("self", fwd_read(dst_for(0), {"peer-reply"}));
         bool up = false;
         for (int i = 0; i < 400 && !up; ++i) {
+            if (i % 20 == 0) router.on_frame("self", fwd_read(dst_for(0), {"peer-reply"}));
             if (sink.n.load(std::memory_order_relaxed) > before)
                 up = true;
             else
                 std::this_thread::sleep_for(10ms);
         }
+        if (!up)
+            std::fprintf(stderr, "census peer: no REPLY to the handshake FWD read came back\n");
         (void)write_all(rsp_fd, up ? "READY\n" : "FAIL\n", up ? 6 : 5);
         if (!up) continue;
 
@@ -508,6 +518,16 @@ int peer_main(int cmd_fd, int rsp_fd) {
 std::uint16_t free_port() {
     tcp_transport_t probe{std::uint16_t{0}};
     return probe.local_port();
+}
+
+/**
+ * @brief Name why a repetition failed on stderr and return its sample unchanged (`ok` stays
+ *        false), so a failed arm is never silent.
+ */
+sample_t fail(const sample_t& s, const char* why, const std::string& got = {}) {
+    std::fprintf(stderr, "census arm failed: %s%s%s\n", why,
+                 got.empty() ? "" : ", got: ", got.c_str());
+    return s;
 }
 
 /**
@@ -550,8 +570,9 @@ sample_t run_census(mix_t mix, std::size_t ops, int cmd_fd, int rsp_fd) {
     (void)net.register_module(std::string(tr::net::kTcpServerSuggestedModule), "tcp",
                               tr::net::conn_role_t::LISTEN);
     const auto wl = g.write(path_t("/net/tcp-server/conn"), tcp_conn_spec("peer", port));
-    if (!wl.has_value()) return s;
-    if (router.registry().by_name("net/tcp-server/peer") == nullptr) return s;
+    if (!wl.has_value()) return fail(s, "S_C: the listener SPEC write was refused");
+    if (router.registry().by_name("net/tcp-server/peer") == nullptr)
+        return fail(s, "S_C: no net/tcp-server/peer in the router registry");
     quiesce();
     s.b_c = live() - base;
     s.blk_c = blocks() - base_blk;
@@ -561,17 +582,20 @@ sample_t run_census(mix_t mix, std::size_t ops, int cmd_fd, int rsp_fd) {
         char cmd[64];
         const int n = std::snprintf(cmd, sizeof(cmd), "RUN %u %zu %u\n",
                                     static_cast<unsigned>(port), ops, static_cast<unsigned>(mix));
-        if (!write_all(cmd_fd, cmd, static_cast<std::size_t>(n))) return s;
+        if (!write_all(cmd_fd, cmd, static_cast<std::size_t>(n)))
+            return fail(s, "S_D: the RUN command did not reach the peer");
     }
-    if (!read_line(rsp_fd, line) || line != "READY") return s;
+    if (!read_line(rsp_fd, line) || line != "READY")
+        return fail(s, "S_D: the peer did not report READY", line);
     quiesce();
     s.b_d = live() - base;
     s.blk_d = blocks() - base_blk;
 
     // --- S_E: steady state after the op storm --------------------------------
     reset_peak();
-    if (!write_all(cmd_fd, "GO\n", 3)) return s;
-    if (!read_line(rsp_fd, line) || line != "DONE") return s;
+    if (!write_all(cmd_fd, "GO\n", 3)) return fail(s, "S_E: the GO command did not reach the peer");
+    if (!read_line(rsp_fd, line) || line != "DONE")
+        return fail(s, "S_E: the peer did not report DONE", line);
     quiesce();
     s.b_e = live() - base;
     s.blk_e = blocks() - base_blk;
