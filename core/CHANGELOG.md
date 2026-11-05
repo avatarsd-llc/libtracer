@@ -87,6 +87,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   now keeps its own `malformed_rx` and `dropped_tx` in a `drop_tally_t`; read them through
   `drop_stats()`, which adds them to the carrier's, as before.
 
+### Changed
+
+- **`fwd_router_t`'s terminus refusal reply is built by the one addressed-error builder (#2480).**
+  The `STATUS{BACKPRESSURE}` answer to a request the terminus could not serve for want of memory
+  is now `assemble_error_reply` over a 384 B stack store that never overflows into an allocator,
+  the same builder the bus-NAME-hop refusal uses; the frames are byte-identical to before. A
+  request whose two routes are longer than that store can hold (on a 64-bit host, 316 B of route
+  for an unstamped request and 308 B for a stamped one) is no longer answered: the arm's drop counter still moves, and nothing goes on the wire. A
+  stamped request whose stamp straddles a rope link now gets its stamp back. Every error reply and
+  acknowledgement is one link, its echo stamp at the end of the head segment.
+- **Errors and acks draw their echo stamp in the same allocation as the reply (#2480).** A
+  backend with room for the reply but not for 8 more bytes now refuses the reply, where it used
+  to send it unstamped. A reply with a payload still drops only the stamp.
+
 ### Added
 
 - **`tr::net::drop_tally_t` and `tr::net::drop_classes_t` (#2482).** The three shed-frame

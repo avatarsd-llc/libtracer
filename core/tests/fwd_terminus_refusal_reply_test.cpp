@@ -566,6 +566,252 @@ void test_empty_src_refusal_is_not_answered() {
     check(client.count == 1, "and nothing was sent: the empty src declined a reply");
 }
 
+// --- one builder: the terminus refusal and the bus-name-hop refusal agree (#2480) -------
+
+/** @brief A point-to-point endpoint a bus peer would own; counts what it is handed. */
+struct p2p_link_t : transport_t {
+    std::size_t received = 0; /**< @brief Frames this endpoint was handed. */
+    void send(std::span<const std::byte>) override { ++received; }
+};
+
+/**
+ * @brief A multi-peer (bus) link with no peers: a `dst` naming its mount with a residual
+ *        segment is the ADR-0073 §3 / RFC-0020 bus-name-hop refusal (`fwd_flatten_backend_test`).
+ */
+struct bus_link_impl_t : transport_t, tr::net::bus_link_t {
+    std::size_t broadcasts = 0; /**< @brief Frames sent at the bus endpoint itself. */
+    void send(std::span<const std::byte>) override { ++broadcasts; }
+    tr::net::bus_link_t* bus() override { return this; }
+    transport_t* peer_link(std::string_view) override { return nullptr; }
+    void enumerate_peers(const tr::net::bus_link_t::peer_visitor_t&) const override {}
+    [[nodiscard]] std::string_view peer_name(tr::net::peer_handle_t,
+                                             std::span<char>) const override {
+        return {};
+    }
+};
+
+/** @brief A two-link rope over @p bytes, cut at @p cut — where a route header straddles. */
+tr::view::rope_t split_at(std::span<const std::byte> bytes, std::size_t cut) {
+    tr::view::rope_t r;
+    for (const std::span<const std::byte> part : {bytes.first(cut), bytes.subspan(cut)}) {
+        tr::view::segment_ptr_t seg = tr::view::heap_alloc(part.size());
+        std::memcpy(seg->bytes.data(), part.data(), part.size());
+        r.append(tr::view::view_t::over(std::move(seg)));
+    }
+    return r;
+}
+
+/**
+ * @brief The reference refusal frame, built by the TEST's own encoder: `FWD{REPLY,
+ *        dst=req_src, src=req_dst, kind=ERROR, STATUS{ERROR{VALUE u16 code}}}`, stamped with
+ *        @p stamp when non-zero.
+ */
+std::vector<std::byte> reference_refusal(std::span<const std::byte> req_dst,
+                                         std::span<const std::byte> req_src, tr::wire::err_t code,
+                                         std::int64_t stamp) {
+    std::array<std::byte, 2> raw{};
+    tr::detail::store_le(std::span<std::byte>(raw), std::to_underlying(code), 2);
+    std::vector<std::byte> value;
+    tr::wire::emit_tlv(value, type_t::VALUE, opt_t{}, raw);
+    std::vector<std::byte> error;
+    tr::wire::emit_tlv(error, type_t::ERROR, opt_t{.pl = true}, value);
+    std::vector<std::byte> status;
+    tr::wire::emit_tlv(status, type_t::STATUS, opt_t{.pl = true}, error);
+    std::vector<std::byte> reply =
+        tr::testing::b_fwd_reply(reply_kind_t::ERROR, req_src, req_dst, status);
+    return stamp == 0 ? reply : stamped(std::move(reply), stamp);
+}
+
+/**
+ * @brief The differential (#2480): one refused request shape answered by the terminus refusal
+ *        arm and by the bus-name-hop refusal, on the contiguous tier and on a rope whose `src`
+ *        header straddles a link, with and without a stamp — every frame byte-identical to the
+ *        one reference encoding.
+ *
+ * The two arms refuse for different reasons (the terminus for want of memory, the hop for a
+ * bus NAME with a residual), so their `dst` and their status code differ by construction: the
+ * reference takes both as inputs, and nothing else about the frame may differ. Before #2480 the
+ * terminus arm had its own ~115-line encoder; now both are `assemble_error_reply`.
+ */
+void test_terminus_and_bus_hop_refusals_are_one_frame() {
+    std::printf("the terminus refusal and the bus-name-hop refusal build the same frame:\n");
+    const std::vector<std::byte> dst = b_path({"sensor", "temp"});
+    const std::vector<std::byte> bus_dst = b_path({"net", "ws-server", "srv", "sensor", "temp"});
+    const std::vector<std::byte> src = b_path({"client", "way", "home"});
+    // The request is FWD header (4) + op (5) + dst + src: cut two bytes into the src header.
+    const auto src_cut = [](std::span<const std::byte> d) { return 4u + 5u + d.size() + 2u; };
+    constexpr std::int64_t kStamp = 0x0102030405060708;
+
+    for (const std::int64_t stamp : {std::int64_t{0}, kStamp}) {
+        const auto frame = [&](std::span<const std::byte> d) {
+            std::vector<std::byte> f = b_fwd(fwd_op_t::READ, d, src);
+            return stamp == 0 ? f : stamped(std::move(f), stamp);
+        };
+        const char* const tag = stamp == 0 ? "unstamped" : "stamped";
+        const std::vector<std::byte> want_bp =
+            reference_refusal(dst, src, tr::wire::err_t::FLOW_BACKPRESSURE, stamp);
+
+        {  // the terminus refusal, contiguous: the rx source refuses the decode arena
+            graph_t g;
+            (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+            arming_source_t rx;
+            fwd_router_t router(g, {.rx = &rx});
+            fixed_link_t client;
+            (void)router.attach_link("client", client);
+            rx.arm();
+            router.on_frame("client", frame(dst));
+            check(client.count == 1 && std::ranges::equal(client.frame(), want_bp),
+                  std::string("terminus refusal, contiguous, ") + tag + ": the reference frame");
+        }
+        {  // the terminus refusal, rope tier: the egress backend refuses the reply head
+            graph_t g;
+            (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+            arming_backend_t egress;
+            fwd_router_t router(g, {.egress = &egress});
+            fixed_link_t client(/*ropes=*/true);
+            (void)router.attach_link("client", client);
+            const router_stats_t before = router.drop_stats();
+            egress.arm();
+            const std::vector<std::byte> f = frame(dst);
+            client.inject(split_at(f, src_cut(dst)));
+            check(router.drop_stats().assemble_dropped == before.assemble_dropped + 1,
+                  "instrument: the rope-tier refusal arm was taken");
+            check(client.count == 1 && std::ranges::equal(client.frame(), want_bp),
+                  std::string("terminus refusal, src header straddling a link, ") + tag +
+                      ": the reference frame");
+        }
+        if (stamp != 0) {  // the terminus refusal, rope tier, the STAMP itself cut across links
+            graph_t g;
+            (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+            arming_backend_t egress;
+            fwd_router_t router(g, {.egress = &egress});
+            fixed_link_t client(/*ropes=*/true);
+            (void)router.attach_link("client", client);
+            egress.arm();
+            const std::vector<std::byte> f = frame(dst);
+            client.inject(split_at(f, f.size() - 4));
+            check(client.count == 1 && std::ranges::equal(client.frame(), want_bp),
+                  "terminus refusal, stamp straddling a link: the reference frame, stamp echoed");
+        }
+        if constexpr (tr::net::kBusLinks) {
+            const std::vector<std::byte> want_inv =
+                reference_refusal(bus_dst, src, tr::wire::err_t::PATH_INVALID, stamp);
+            for (const bool rope : {false, true}) {
+                graph_t g;
+                fwd_router_t router(g);
+                bus_link_impl_t bus;
+                fixed_link_t client(rope);
+                (void)router.attach_link("net/ws-server/srv", bus);
+                (void)router.attach_link("client", client);
+                const std::vector<std::byte> f = frame(bus_dst);
+                if (rope)
+                    client.inject(split_at(f, src_cut(bus_dst)));
+                else
+                    router.on_frame("client", f);
+                check(client.count == 1 && std::ranges::equal(client.frame(), want_inv) &&
+                          bus.broadcasts == 0,
+                      std::string("bus-name-hop refusal, ") + (rope ? "rope, " : "contiguous, ") +
+                          tag + ": the reference frame");
+            }
+        } else {
+            std::printf("  (bus-name-hop half skipped: this build has no bus links)\n");
+        }
+    }
+}
+
+/** @brief A `src` PATH TLV of exactly @p n bytes, or an empty vector when no spelling hits it. */
+std::vector<std::byte> src_of_size(std::size_t n) {
+    for (std::size_t fill = 0; fill < 64; ++fill) {
+        for (std::size_t k = 1; k < 64; ++k) {
+            std::vector<std::byte> body;
+            for (std::size_t i = 0; i < fill; ++i) (void)tr::wire::emit_path_segment(body, "seg");
+            (void)tr::wire::emit_path_segment(body, std::string(k, 'x'));
+            std::vector<std::byte> out;
+            tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
+            if (out.size() == n) return out;
+        }
+    }
+    return {};
+}
+
+/**
+ * @brief The refusal store's limit, exactly: routes of the most bytes the store can carry are
+ *        answered, one byte more is a counted drop with nothing sent. The limit is 8 B lower for a
+ *        stamped request, whose echo shares the head segment (#2480).
+ */
+void test_refusal_store_limit_is_exact() {
+    std::printf("the refusal store's route limit is exact, stamped and unstamped:\n");
+    // Store less one segment header, the FWD header, op, kind and the 14-byte error tail.
+    constexpr std::size_t kLimit = 384 - sizeof(tr::view::segment_t) - (4 + 5 + 5 + 14);
+    const std::vector<std::byte> dst = b_path({"sensor", "temp"});
+    for (const std::int64_t stamp : {std::int64_t{0}, std::int64_t{0x0102030405060708}}) {
+        const std::size_t limit = kLimit - (stamp == 0 ? 0u : 8u);
+        for (const std::size_t extra : {std::size_t{0}, std::size_t{1}}) {
+            const std::vector<std::byte> src = src_of_size(limit + extra - dst.size());
+            check(!src.empty(), "a src of the exact size was spelled");
+            graph_t g;
+            (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+            arming_source_t rx;
+            fwd_router_t router(g, {.rx = &rx});
+            fixed_link_t client;
+            (void)router.attach_link("client", client);
+            std::vector<std::byte> f = b_fwd(fwd_op_t::READ, dst, src);
+            if (stamp != 0) f = stamped(std::move(f), stamp);
+            const router_stats_t before = router.drop_stats();
+            rx.arm();
+            router.on_frame("client", f);
+            check(router.drop_stats().arena_dropped == before.arena_dropped + 1,
+                  "the refused decode is counted");
+            const std::string tag = std::string(stamp == 0 ? "unstamped" : "stamped") + ", " +
+                                    std::to_string(limit + extra) + " B of route";
+            if (extra == 0)
+                check(
+                    client.count == 1 &&
+                        std::ranges::equal(
+                            client.frame(),
+                            reference_refusal(dst, src, tr::wire::err_t::FLOW_BACKPRESSURE, stamp)),
+                    tag + ": at the limit, answered with the reference frame");
+            else
+                check(client.count == 0, tag + ": one byte over, nothing sent");
+        }
+    }
+}
+
+/**
+ * @brief A refused request whose routes do not fit the 384 B stack store is a counted drop
+ *        with nothing on the wire: the store's overflow refuses, so the reply never reaches
+ *        for the memory that just refused (#2480).
+ */
+void test_route_larger_than_the_store_is_a_counted_drop() {
+    std::printf("a route larger than the refusal store is a counted drop, nothing sent:\n");
+    graph_t g;
+    (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    arming_source_t rx;
+    fwd_router_t router(g, {.rx = &rx});
+    fixed_link_t client;
+    (void)router.attach_link("client", client);
+
+    std::vector<std::string> segs;
+    for (int i = 0; i < 40; ++i) segs.push_back("segment-" + std::to_string(100 + i));
+    std::vector<std::byte> body;
+    for (const std::string& s : segs) (void)tr::wire::emit_path_segment(body, s);
+    std::vector<std::byte> src;
+    tr::wire::emit_tlv(src, type_t::PATH, opt_t{}, body);
+    check(src.size() > 384, "the src route alone is larger than the store");
+    const std::vector<std::byte> read = b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), src);
+
+    // Control: un-armed, the request is well-formed and answered.
+    router.on_frame("client", read);
+    check(client.count == 1, "control: the long-route READ is answered with memory");
+
+    const router_stats_t before = router.drop_stats();
+    rx.arm();
+    router.on_frame("client", read);
+    check(rx.refusals() > 0, "instrument: the rx source refused the decode");
+    check(router.drop_stats().arena_dropped == before.arena_dropped + 1, "the drop is counted");
+    check(client.count == 1, "and nothing was sent: the reply does not fit the stack store");
+}
+
 }  // namespace
 
 int main() {
@@ -584,6 +830,12 @@ int main() {
     test_frame_without_src_is_not_answered();
     std::printf("\n");
     test_empty_src_refusal_is_not_answered();
+    std::printf("\n");
+    test_terminus_and_bus_hop_refusals_are_one_frame();
+    std::printf("\n");
+    test_route_larger_than_the_store_is_a_counted_drop();
+    std::printf("\n");
+    test_refusal_store_limit_is_exact();
 
     return tr::testing::summary("fwd_terminus_refusal_reply");
 }
