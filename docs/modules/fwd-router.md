@@ -481,7 +481,8 @@ tested against hand-built frames with no live transport.
 - **The frame view** (`fwd_hdr_t`, `fwd_pre_t`, `dst_seg_walk_t`,
   `fwd_rebuild_t`, `stack_writer_t`) is the offset-dispatch
   cluster the forward hop reads a frame by: one header read as absolute offsets,
-  the forward-versus-terminus peeks, a fixed-capacity
+  the one routing peek (`peek_fwd_dst_any`) and the one `src` locator
+  (`locate_fwd_src`) every arm reads, a fixed-capacity
   stack byte writer, and the shrunk-`dst` / grown-`src` head rebuild. Everything
   is templated over a cursor concept and yields **offsets, never spans**, so the
   same logic serves a contiguous frame and a link-walking rope and the caller
@@ -597,7 +598,12 @@ at the terminus, which is what makes a per-writer subject reachable at `peer_nam
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::net::peek_fwd_dst
+```{doxygenstruct} tr::net::fwd_src_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::net::locate_fwd_src
 :project: libtracer
 ```
 
@@ -624,14 +630,6 @@ at the terminus, which is what makes a per-writer subject reachable at `peer_nam
 ```
 
 ```{doxygenfunction} tr::net::is_subscribe_request
-:project: libtracer
-```
-
-```{doxygenfunction} tr::net::peek_fwd_first_dst_seg
-:project: libtracer
-```
-
-```{doxygenfunction} tr::net::peek_fwd_op
 :project: libtracer
 ```
 

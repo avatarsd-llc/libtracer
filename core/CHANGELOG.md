@@ -25,6 +25,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `ws_client_transport_t` and `can_transport_t` now count it on their tally's `dropped_rx`, and
   `self_heal_link_t`'s engine tally now carries `dropped_rx` too (the class was off), added to
   `drop_stats().dropped_rx`.
+- **One FWD envelope reader: `peek_fwd_dst`, `peek_fwd_first_dst_seg` and `peek_fwd_op` are
+  removed (#2479).** Only tests and a bench called them. `peek_fwd_dst_any` is the one routing
+  peek: compare its answer with `fwd_dst_kind_t::PATH` for the old gate, read
+  `fwd_pre_t::seg0_off` / `seg0_len` for the first segment, and mask the byte at
+  `fwd_pre_t::op_body_off` (when `op_body_len != 0`) for the opcode. On a `NONE` answer whose
+  `dst` header was read as a `PATH`, `fwd_pre_t` now also carries that `dst` window (`after_dst`
+  non-zero; `valid` stays false). A `dst` that is not a `PATH` container carries none, so no
+  refusal locates a `src` behind it.
+- **New: `tr::net::locate_fwd_src` and `fwd_src_t`,** the one `src` locator, by the spec grammar
+  `FWD{op, PATH dst, FIELD? selector, PATH src, ...}`. The forward rebuild, the bus-NAME-hop
+  refusal, the terminus refusal and the refusal correlation all read `src` through it, so they
+  can no longer disagree. Two visible effects: a child other than a `FIELD` between `dst` and
+  `src` now means "no `src`" at every arm (the refusals used to skip ahead to the next `PATH`),
+  and the bus-NAME-hop refusal no longer validates the whole frame, so a frame malformed past
+  `src` is answered instead of dropped. `rebuild_fwd_forward` also refuses a `src` that runs past
+  the FWD body.
+
 - **One node-level door for the application's clock (#2481).** `transport_vertex_t::sweep(now,
   deadline)` hands the application's `now` and its one deadline to every connection's owned
   link, inside one router frame bracket, and returns the earliest next-due time over all of them

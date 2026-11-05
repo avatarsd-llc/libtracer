@@ -1,26 +1,21 @@
 /**
  * @file
- * @brief #1648 review — the router's in-place ingress read on a bus-NAME-hop rejection spills a
- *        deep walk into the RECEIVING LINK's source, never the process heap.
+ * @brief The bus-NAME-hop refusal reads nothing past `src`, so a deep frame draws nothing from
+ *        the receiving link's source and is answered (#2479; was #1648's spill pin).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * `wire::tlv_node_t::over` walks a frame on a stack of inline slots and spills into a
- * `block_source_t` only when the frame nests deeper than those slots. A peer chooses the depth,
- * so the spill is a peer-provoked cost, and the standing rule (receiver pays) is that it is
- * drawn from the receiving link's own source: `rx_for(inbound_ctx)`, the source the terminus
- * arena and the iov tables already draw from.
+ * The refusal used to validate the whole frame with `wire::tlv_node_t::over`, whose walk spilled
+ * into the receiving link's source once a peer nested a payload deeper than its inline slots: a
+ * peer-provoked cost, drawn there because the receiver pays. The refusal now answers from what
+ * the routing peek read and the one `src` locator (#2479, maintainer ruling: no whole-frame
+ * re-validation), so the cost is gone rather than charged.
  *
  * @section instrument The instrument
  *
- * Each link is registered with its own source that refuses on command, while the router's
- * default `rx` stays the heap. A refused spill is `TLV_NESTING_TOO_DEEP`, so with the link's
- * source refusing, a deep frame is NOT answered. Pointed at the heap instead, the spill would
- * succeed and the frame would be answered: that is the discriminating outcome. (The second
- * read, the `on_inbound` observer's, was deleted with the observer, #2277.) Every case also asserts
- * the link's source was ASKED (so the case is not vacuous), runs a shallow control that needs no
- * spill, and ends with the source serving and the same deep frame going through.
+ * The inbound link is registered with its own source, armed to refuse every draw. A shallow
+ * control is answered; the deep frame must be answered too, with the source never asked.
  */
 
 #include <algorithm>
@@ -69,8 +64,6 @@ class arming_source_t final : public tr::mem::block_source_t {
 
     /** @brief Refuse every subsequent draw. */
     void arm() noexcept { armed_ = true; }
-    /** @brief Serve again. */
-    void disarm() noexcept { armed_ = false; }
     /** @brief Draws asked of this source so far, served or refused. */
     [[nodiscard]] int asked() const noexcept { return asked_; }
 
@@ -154,9 +147,9 @@ std::vector<std::byte> b_nest(int depth) {
 /** @brief Deeper than the walk's eight inline slots (the `tlv_children_test` depth). */
 constexpr int kDeep = 12;
 
-/** @brief The rejection arm, span and rope: a deep refused hop spills into the link's source. */
+/** @brief The rejection arm, span and rope: a deep refused hop draws nothing and is answered. */
 void test_reject_walk_draws_from_the_link(bool ropes) {
-    std::printf("the bus-name rejection's walk spills into the receiving link's source (%s):\n",
+    std::printf("the bus-name rejection of a deep frame draws nothing from the link (%s):\n",
                 ropes ? "rope" : "span");
     graph_t g;
     fwd_router_t router(g);
@@ -181,13 +174,9 @@ void test_reject_walk_draws_from_the_link(bool ropes) {
 
     const int asked_before = link_rx.asked();
     in.inject(deep);
-    check(link_rx.asked() > asked_before, "instrument: the walk ASKED the link's source");
-    check(in.sent.size() == 1, "a refused spill drops the deep frame by value: no answer");
+    check(link_rx.asked() == asked_before, "the deep frame never asks the link's source");
+    check(in.sent.size() == 2, "and is answered like the shallow one");
     check(bus.broadcasts == 0 && alice.received == 0, "and nothing went over the bus");
-
-    link_rx.disarm();
-    in.inject(deep);
-    check(in.sent.size() == 2, "the same deep frame is answered once the link's source serves");
 }
 
 }  // namespace

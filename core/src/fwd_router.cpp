@@ -484,10 +484,10 @@ template <class Cursor>
  * BY VALUE (nowhere to reply to); a well-formed frame ANSWERS, so the peer learns its route
  * was refused instead of seeing a silent timeout. This frame is well-formed — its dst simply
  * names a hop the ruling forbids — so it answers. A `REPLY` is never answered with a reply
- * (the resolver's own rule). The frame is validated once, in place, by `tlv_node_t::over`
- * (#1648), and nothing is built. Its op and refused `dst` are NOT looked for: they are the
- * routing peek's (@p pre — child 0 and child 1 by the peek's own reading), so the only child
- * this function finds is the `src`, the first `PATH` after them (#1794).
+ * (the resolver's own rule). Nothing is re-read and nothing is built: the op, the refused
+ * `dst` and the outer stamp are the routing peek's (@p pre), and `src` is the one locator's
+ * (@ref locate_fwd_src), as at the terminus refusal (#2479). The frame is NOT validated past
+ * `src`, so a frame malformed further on is answered rather than dropped in silence.
  *
  * The reply bytes are not mirrored from the resolver's grammar — they ARE the resolver's
  * grammar (#887): @ref tr::graph::assemble_error_reply is the one definition of
@@ -496,43 +496,27 @@ template <class Cursor>
  * identity, `tr::path::invalid` = 0x0021). This function's job is reduced to the two things
  * only it knows: which frame earns a rejection, and where the two route TLVs come from.
  *
- * The read side allocates nothing for a frame nested no deeper than the walk's inline
- * slots; a deeper frame spills its walk stack into @p rx, the receiving link's own source
- * (receiver pays), so a source that refuses drops the frame as malformed. The only other
- * draw is the reply head, from @p egress, which reports refusal by value.
+ * The read side allocates nothing. The only draw is the reply head, from @p egress, which
+ * reports refusal by value.
  *
  * @param registry     The child registry the answer is routed back through.
  * @param inbound_name This node's name for the link the refused frame arrived on.
  * @param frame        The refused frame's bytes.
  * @param pre          The routing peek's offsets for @p frame.
- * @param rx           The receiving link's source (`rx_for(inbound_ctx)`): the walk's spill
- *                     for a frame nested deeper than its inline slots.
  * @param egress       The byte backend the reply head draws from (#795, ADR-0074) — the
  *                     router's own egress seam, so a bounded node bounds this reply too.
  */
 void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbound_name,
                          std::span<const std::byte> frame, const fwd_pre_t& pre,
-                         mem::block_source_t& rx, mem::mem_backend_t& egress,
-                         graph::status_t status) {
-    const auto dec = wire::tlv_node_t::over(frame, rx);
-    if (!dec) return;  // malformed ⇒ drop by value
+                         mem::mem_backend_t& egress, graph::status_t status) {
     // A one-byte op, or nowhere trustworthy to reply to ⇒ drop by value.
     if (pre.op_body_len != 1) return;
     // The `dst` is child 1, echoed as the refused route whatever its type, and the producer's
-    // step-5 reclaim correlates the echo (`evict_route_edges` classifies its type byte). Every
-    // route is a `PATH` of NAME and PAIR elements (RFC-0029 §5); a `PATH_REF` one is refused as
-    // a `dst` (§5.3), so nothing the library sends is addressed by one. The `src` is the first
-    // `PATH` after it, and `PATH` only (`05-protocol-tlvs.md` hop rules). The scan stops at `src`,
-    // so a subscribe request's TRAILING reverse list (which sits after `src`, typed
-    // `PATH_REF_REVERSE`) can never be mistaken for either route.
-    std::optional<wire::tlv_node_t> src;
-    std::size_t child = 0;
-    for (const wire::tlv_node_t c : dec->children()) {
-        if (child++ > 1 && c.type() == type_t::PATH) {
-            src = c;
-            break;
-        }
-    }
+    // step-5 reclaim correlates the echo (`evict_route_edges` classifies its type byte). The
+    // `src` is the one locator's, and `PATH` only (`05-protocol-tlvs.md` hop rules); a subscribe
+    // request's TRAILING reverse list sits after it and is never read.
+    const wire::grammar::span_cursor cur{frame};
+    const std::optional<fwd_src_t> src = locate_fwd_src(cur, pre);
     if (!src) return;
     // Never answer a REPLY with a reply (the resolver rejects a REPLY by value too): an
     // unroutable reply hop erroring BACK would ping-pong between two confused nodes.
@@ -554,13 +538,17 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     // inside the reply's address (#887). No re-encode, no owning copy. The refused `dst`'s
     // trailer-excluded span runs from its header (right after the op) to its body's end.
     const std::size_t dst_pos = pre.op_pos + pre.op_total;
-    graph::reply_route_t route{.dst_wire = src->wire(),
+    const std::size_t src_end = src->hdr.body_off + src->hdr.body_len;
+    graph::reply_route_t route{.dst_wire = frame.subspan(src->pos, src_end - src->pos),
                                .src_wire = frame.subspan(dst_pos, pre.dst_end - dst_pos)};
     // The wire-time echo (#1109) rides rejections too: an origin probing RTT against a route
     // this node refuses still gets its stamp back with the addressed error, so the same
     // frame answers both questions. TF=1 is not echoed — anchorless at the root, the spec's
-    // own MUST-reject case (the terminus resolver applies the identical filter).
-    if (dec->opt().ts && !dec->opt().tf) route.echo_ts = dec->trailer()->ts;
+    // own MUST-reject case (the terminus resolver applies the identical filter). The stamp is
+    // the trailer's first field, right after the body the peek bounded.
+    if (pre.fwd_opt.ts && !pre.fwd_opt.tf)
+        route.echo_ts =
+            wire::timestamp_t{.value = static_cast<std::int64_t>(cur.load_le(pre.body_end, 8))};
     // The status is the CALLER's, because the refusals a hop makes on its own are different
     // answers to different questions: a bus NAME with a residual is a malformed address
     // (`tr::path::invalid`), while a PAIR this node cannot validate is an address that does not
@@ -632,14 +620,13 @@ constexpr std::size_t kReplyStoreBytes = 256;
  * the egress backend, which on two of the three arms is exactly what refused, and on the
  * third shares the node's memory ceiling with it. So this reply borrows the request instead.
  *
- * The request's routes are located by OFFSET through the one grammar (`read_fwd_header`) with
- * no decode and no arena: `op` is child 0, `dst` the first `PATH` / `PATH_REF` after it, `src`
- * the next `PATH` after `dst` — the routes `reject_bus_name_hop` answers with, found over the
- * raw bytes (this arm is reached from the terminus, past the routing peek's scope), so a
- * `FIELD` selector between the two routes (a `:subscribers[]` SUBSCRIBE carries one) is
- * stepped over. The reply is the resolver's own grammar — routes swapped, each route header
- * re-emitted with its trailer bits cleared and its body sliced exactly as `struct_opt` does,
- * `kind=ERROR`, then `error_status_tail` — so a requester cannot tell which emitter answered.
+ * The request's routes are located by OFFSET with no decode and no arena: the op and `dst` are
+ * the routing peek's (@p pre, handed through the terminus), and `src` is the one locator's
+ * (@ref locate_fwd_src) — the routes `reject_bus_name_hop` answers with, read the same way, so
+ * a `FIELD` selector between the two routes (a `:subscribers[]` SUBSCRIBE carries one) is
+ * stepped over and nothing else is. The reply is the resolver's own grammar — routes swapped, each
+ * route header re-emitted with its trailer bits cleared and its body sliced exactly as `struct_opt`
+ * does, `kind=ERROR`, then `error_status_tail` — so a requester cannot tell which emitter answered.
  * A request whose `src` cannot be located has nowhere to reply to and stays a counted drop,
  * which is the correct answer for it; so does one whose `src` is EMPTY, because that is the
  * origin declining a reply (RFC-0004 Amendment 2), not a route.
@@ -660,50 +647,32 @@ constexpr std::size_t kReplyStoreBytes = 256;
  *
  * @tparam Cursor A grammar byte-source cursor (span or rope) over the request frame.
  * @param  cur    The cursor positioned at the request's first byte.
+ * @param  pre    The routing peek's offsets for the request.
  * @param  link   The link the request arrived on — the reply goes back the way it came.
  * @param  status The refusal; `BACKPRESSURE` at every current caller.
  */
 template <class Cursor>
-[[gnu::noinline, gnu::cold]] void emit_refusal_reply(const Cursor& cur, transport_t& link,
-                                                     graph::status_t status) {
-    const auto outer = read_fwd_header(cur, 0);
-    if (!outer || outer->type != type_t::FWD || !outer->opt.pl) return;
-    const std::size_t end = outer->body_off + outer->body_len;
-    // Child 0 — the op, one byte, masked (RFC-0024 §9.3). A REPLY is never answered with a
-    // reply: an exhausted node erroring BACK at a reply would ping-pong between two nodes.
-    const auto op = read_fwd_header(cur, outer->body_off);
-    if (!op || op->type != type_t::VALUE || op->body_len != 1) return;
-    if (static_cast<fwd_op_t>(cur.byte_at(op->body_off) & graph::kFwdOpcodeMask) == fwd_op_t::REPLY)
+[[gnu::noinline, gnu::cold]] void emit_refusal_reply(const Cursor& cur, const fwd_pre_t& pre,
+                                                     transport_t& link, graph::status_t status) {
+    // The op — one byte, masked (RFC-0024 §9.3). A REPLY is never answered with a reply: an
+    // exhausted node erroring BACK at a reply would ping-pong between two nodes.
+    if (pre.op_body_len != 1 || static_cast<fwd_op_t>(cur.byte_at(pre.op_body_off) &
+                                                      graph::kFwdOpcodeMask) == fwd_op_t::REPLY)
         return;
-    // dst = the first routable child after the op; src = the next PATH after dst. Anything
-    // between them (a FIELD selector) is stepped over; anything after src is never read.
-    std::optional<fwd_hdr_t> dst;
-    std::optional<fwd_hdr_t> src;
-    std::size_t dst_pos = 0;
-    std::size_t src_pos = 0;
-    for (std::size_t pos = outer->body_off + op->total; pos < end && !src;) {
-        const auto h = read_fwd_header(cur, pos);
-        if (!h || pos + h->total > end) return;  // ragged child ⇒ malformed ⇒ nowhere to reply
-        if (!dst) {
-            if (h->type == type_t::PATH || h->type == type_t::PATH_REF) {
-                dst = h;
-                dst_pos = pos;
-            }
-        } else if (h->type == type_t::PATH) {
-            src = h;
-            src_pos = pos;
-        }
-        pos += h->total;
-    }
     // An EMPTY `src` is not a route: it is the origin declining a reply (RFC-0004 Amendment 2,
     // #1491) — the resolver answers such a WRITE with nothing, and so does this arm. Answering
     // it would mint exactly the addressed error on a zero-length route the amendment forbids.
-    if (!dst || !src || src->body_len == 0) return;
+    const std::optional<fwd_src_t> src = locate_fwd_src(cur, pre);
+    if (!src || src->hdr.body_len == 0) return;
+    const std::size_t end = pre.body_end;
+    const std::size_t dst_pos = pre.op_pos + pre.op_total;
+    const std::size_t dst_hdr = pre.dst_body_off - dst_pos;
+    const std::size_t dst_len = pre.dst_end - pre.dst_body_off;
 
     // The echo stamp: the request's TF=0 outer trailer sits right after its body. Echoed only
     // when it is one span, decided BEFORE the head is written so the TS bit tells the truth.
     std::span<const std::byte> echo;
-    if (outer->opt.ts && !outer->opt.tf) {
+    if (pre.fwd_opt.ts && !pre.fwd_opt.tf) {
         std::size_t pieces = 0;
         cur.for_each_span(end, wire::trailer_ts_bytes(false), [&](std::span<const std::byte> s) {
             ++pieces;
@@ -715,22 +684,23 @@ template <class Cursor>
     // A route header re-emitted trailer-less: the same bytes, `opt` cleared of TS/TF/CR/CW as
     // `struct_opt` clears them, because the body copied below excludes the trailer the bits
     // would otherwise announce. The length field is untouched — it never counted the trailer.
-    const auto route_header = [&cur](const fwd_hdr_t& h, std::size_t pos,
+    const auto route_header = [&cur](std::size_t pos, std::size_t len,
                                      std::array<std::byte, 6>& out) {
-        for (std::size_t i = 0; i < h.header_len; ++i) out[i] = std::byte{cur.byte_at(pos + i)};
-        out[1] = static_cast<std::byte>(h.opt.without_trailer().encode());
-        return std::span<const std::byte>(out.data(), h.header_len);
+        for (std::size_t i = 0; i < len; ++i) out[i] = std::byte{cur.byte_at(pos + i)};
+        out[1] = static_cast<std::byte>(
+            opt_t::decode(std::to_integer<std::uint8_t>(out[1])).without_trailer().encode());
+        return std::span<const std::byte>(out.data(), len);
     };
 
     // Reply = FWD{ op=REPLY, dst=req.src, src=req.dst, kind=ERROR, STATUS tail }: the routes
     // swap, so the reply's FIRST route is the request's src.
     constexpr std::size_t kU8Value = 5;
-    const std::size_t body_len = kU8Value + src->header_len + src->body_len + dst->header_len +
-                                 dst->body_len + kU8Value + graph::kErrorStatusTailBytes;
+    const std::size_t body_len = kU8Value + src->hdr.header_len + src->hdr.body_len + dst_hdr +
+                                 dst_len + kU8Value + graph::kErrorStatusTailBytes;
     std::array<std::byte, 6> rdst_hdr{};
     std::array<std::byte, 6> rsrc_hdr{};
-    const std::span<const std::byte> rdst = route_header(*src, src_pos, rdst_hdr);
-    const std::span<const std::byte> rsrc = route_header(*dst, dst_pos, rsrc_hdr);
+    const std::span<const std::byte> rdst = route_header(src->pos, src->hdr.header_len, rdst_hdr);
+    const std::span<const std::byte> rsrc = route_header(dst_pos, dst_hdr, rsrc_hdr);
     const std::array<std::byte, kU8Value> reply_op{
         static_cast<std::byte>(std::to_underlying(type_t::VALUE)), std::byte{0}, std::byte{1},
         std::byte{0}, static_cast<std::byte>(std::to_underlying(fwd_op_t::REPLY))};
@@ -759,9 +729,9 @@ template <class Cursor>
         iov[n++] = s;
     };
     put(head.span());
-    cur.for_each_span(src->body_off, src->body_len, put);
+    cur.for_each_span(src->hdr.body_off, src->hdr.body_len, put);
     put(rsrc);
-    cur.for_each_span(dst->body_off, dst->body_len, put);
+    cur.for_each_span(pre.dst_body_off, dst_len, put);
     put(tail);
     if (!echo.empty()) put(echo);
     if (overflow) return;  // a route straddling more links than the table holds — drop
@@ -802,13 +772,6 @@ template <class Cursor>
     link.send(std::span<const std::byte>(tail).subspan(4));
 }
 
-/** @brief The reply-`src` window @ref peek_refused_route hands back — offsets, not a span,
- *         because the source may be a rope the caller re-slices from its own cursor. */
-struct refused_src_t {
-    std::size_t off = 0; /**< @brief Absolute offset of the echoed route's PATH TLV. */
-    std::size_t len = 0; /**< @brief Its total size (header + body). */
-};
-
 /**
  * @brief Is this terminating `FWD{REPLY}` an addressed RFC-0020 refusal — and if so, where
  *        is the refused route it echoes? (#1223 step 5, the producer-side half.)
@@ -827,7 +790,8 @@ struct refused_src_t {
  * `dst` is required, as the reply's consumed way home always is; a reply whose `dst` the
  * routing peek did not accept as a canonical `PATH` is not one this node's refusal produced.
  *
- * Strict on the shape, deliberately: a reply with a FIELD child, a non-ERROR kind, or any
+ * Its `src` is the one locator's (@ref locate_fwd_src). Strict on the shape, deliberately: a
+ * reply with a FIELD child, a non-ERROR kind, or any
  * status but `tr::path::invalid` (0x0021) — or, for a PAIR-spelled route, the
  * `tr::path::not_found` a PAIR hop refuses with (RFC-0029 §6) — is NOT a route refusal and
  * must not evict: a TIMEOUT or BACKPRESSURE names a live route having a bad day.
@@ -838,34 +802,37 @@ struct refused_src_t {
  * @retval std::nullopt Not an addressed `tr::path::invalid` refusal.
  */
 template <class Cursor>
-[[nodiscard]] std::optional<refused_src_t> peek_refused_route(const Cursor& cur,
-                                                              const fwd_pre_t& pre) {
-    // Children 1 and 2 — the one-byte REPLY op and the PATH `dst`, the reply's consumed way
-    // home — are the routing peek's; neither is read again. A valid peek here is a `PATH`
-    // `dst`: the router refuses a `PATH_REF` one before its REPLY test (RFC-0029 §5.3).
+[[nodiscard]] std::optional<fwd_src_t> peek_refused_route(const Cursor& cur, const fwd_pre_t& pre) {
+    // Children 1 and 2 — the REPLY op the caller classified and the PATH `dst`, the reply's
+    // consumed way home — are the routing peek's; neither is read again. A valid peek here is
+    // a `PATH` `dst`: the router refuses a `PATH_REF` one before its REPLY test (RFC-0029 §5.3).
+    // The op is a u8, as the other two readers of this frame require: a REPLY op of
+    // any other width is malformed, not a refusal, and must never evict.
     if (!pre.valid || pre.op_body_len != 1) return std::nullopt;
     // Every later read is one shape: a header of an expected type that starts inside the FWD
-    // body. Stated once, so the children below differ only in what they then check.
+    // body, with its PL flag as that type is spelled — set on the containers (STATUS, ERROR),
+    // clear on the scalar VALUEs. Stated once, so the children below differ only in what they
+    // then check.
     const std::size_t end = pre.body_end;
     const auto child = [&](std::size_t at, wire::type_t want) -> std::optional<fwd_hdr_t> {
         if (at >= end) return std::nullopt;
         const auto h = read_fwd_header(cur, at);
-        if (!h || h->type != want) return std::nullopt;
+        if (!h || h->type != want || h->opt.pl == (want == wire::type_t::VALUE))
+            return std::nullopt;
         return h;
     };
     // Child 3 — the refused route, echoed whole: a PATH of NAMEs, or (RFC-0024 §7.1
     // amendment 1, spelled per RFC-0029 §4.2) the PAIR-headed `PATH` a reverse-list delivery
-    // was refused as. Non-empty by the same rule as the eviction it feeds (an empty route
-    // names nothing and matches nothing).
-    std::size_t pos = pre.after_dst;
-    const auto rsrc = child(pos, wire::type_t::PATH);
-    if (!rsrc || rsrc->body_len == 0) return std::nullopt;
+    // was refused as. No selector, and non-empty by the same rule as the eviction it feeds (an
+    // empty route names nothing and matches nothing).
+    const std::optional<fwd_src_t> src = locate_fwd_src(cur, pre);
+    if (!src || src->sel_total != 0 || src->hdr.body_len == 0) return std::nullopt;
+    const fwd_hdr_t* const rsrc = &src->hdr;
     // An escape-headed body is an element-spelled route: a PAIR hop refuses it `NOT_FOUND`
     // (RFC-0029 §6.2), which for THAT spelling is the dead-binding answer `tr::path::invalid`
     // is for a NAME route. A canonical route's `NOT_FOUND` stays a live route's bad day.
     const bool pair_echo = cur.byte_at(rsrc->body_off) == wire::kPackedEscapeLen;
-    const refused_src_t out{.off = pos, .len = rsrc->total};
-    pos += rsrc->total;
+    std::size_t pos = src->pos + rsrc->total;
     // Child 4 — VALUE kind == ERROR.
     const auto kind = child(pos, wire::type_t::VALUE);
     if (!kind || kind->body_len != 1 ||
@@ -875,16 +842,16 @@ template <class Cursor>
     pos += kind->total;
     // Child 5 — STATUS{ ERROR{ VALUE u16 LE } }, and the code is tr::path::invalid.
     const auto st = child(pos, wire::type_t::STATUS);
-    if (!st || !st->opt.pl) return std::nullopt;
+    if (!st) return std::nullopt;
     const auto err = child(st->body_off, wire::type_t::ERROR);
-    if (!err || !err->opt.pl) return std::nullopt;
+    if (!err) return std::nullopt;
     const auto code = child(err->body_off, wire::type_t::VALUE);
     if (!code || code->body_len != 2) return std::nullopt;
     const auto code_v = cur.load_le(code->body_off, 2);
     if (code_v != std::to_underlying(wire::err_t::PATH_INVALID) &&
         !(pair_echo && code_v == std::to_underlying(wire::err_t::PATH_NOT_FOUND)))
         return std::nullopt;
-    return out;
+    return src;
 }
 
 }  // namespace
@@ -1148,34 +1115,15 @@ bool fwd_router_t::remove_child(std::string_view name) {
 
 // --- origination (#1645): the reply half — the request half is fwd_originate.cpp --------
 
-namespace {
-
-/**
- * @brief The `[off, len)` of a FWD frame's `dst` PATH body — on a REPLY, the return route that
- *        is left once every hop has stripped its own part. `nullopt` for anything else.
- */
 template <class Cursor>
-[[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> peek_reply_route(
-    const Cursor& cur) {
-    const auto fwd_h = read_fwd_header(cur, 0);
-    if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return std::nullopt;
-    const auto op_h = read_fwd_header(cur, fwd_h->body_off);
-    if (!op_h || op_h->type != wire::type_t::VALUE) return std::nullopt;
-    const std::size_t dst_pos = fwd_h->body_off + op_h->total;
-    if (dst_pos >= fwd_h->body_off + fwd_h->body_len) return std::nullopt;
-    const auto dst_h = read_fwd_header(cur, dst_pos);
-    if (!dst_h || dst_h->type != wire::type_t::PATH || dst_h->opt.pl) return std::nullopt;
-    return std::pair{dst_h->body_off, dst_h->body_len};
-}
-
-}  // namespace
-
-template <class Cursor>
-sink_slot_t<fwd_router_t::reply_fn_t>::snapshot_t fwd_router_t::reply_target(const Cursor& cur) {
-    // No armed record ⇒ the shipped path exactly: one relaxed load, no lock, no peek.
+sink_slot_t<fwd_router_t::reply_fn_t>::snapshot_t fwd_router_t::reply_target(const Cursor& cur,
+                                                                             const fwd_pre_t& pre) {
+    // No armed record ⇒ the shipped path exactly: one relaxed load, no lock. The return route
+    // left on a REPLY is its `dst` body, which the routing peek already opened.
     if (origins_.load(std::memory_order_acquire) != nullptr) {
-        if (const auto route = peek_reply_route(cur)) {
-            const auto [off, len] = *route;
+        if (pre.valid) {
+            const std::size_t off = pre.dst_body_off;
+            const std::size_t len = pre.dst_end - off;
             const auto same_route = [&](std::span<const std::byte> r) {
                 if (r.size() != len) return false;
                 for (std::size_t i = 0; i < len; ++i)
@@ -1951,14 +1899,8 @@ template <class Cursor, class Reject, class Terminus, class Reply>
     bool from_peer, Reject&& reject, Terminus&& terminus, Reply&& reply) {
     // The classification gate is the frame's own TYPE byte, and that is the whole of it: a
     // FWD frame is data-plane, and no peek failure below can turn it back into a control
-    // frame. The rope arm used to gate on `peek_fwd_dst_any` and then on `peek_fwd_op`
-    // answering, and fell through to the control sink when either refused — where
-    // `peek_control` rejects a FWD outright, so the frame was dropped. The span arm reached
-    // its terminus instead. The two peeks do not agree on an EMPTY op VALUE (`peek_fwd_dst_any`
-    // accepts it — see `fwd_pre_t::op_body_len`, which records that reading deliberately —
-    // and `peek_fwd_op` answers nullopt), so a bound-`dst` FWD carrying one was resolved
-    // contiguously and vanished when the same bytes arrived as a multi-link rope. The span
-    // arm's disposition is the one kept: FWD-classified ⇒ terminus, never control.
+    // frame: a FWD the peek refuses (an EMPTY op VALUE among them) reaches the terminus on both
+    // tiers, never the control sink.
     if (static_cast<type_t>(cur.byte_at(0)) != type_t::FWD) return false;
     // A frame from a REMOVED child is dropped here, before any arm can forward or apply it
     // (#2302). Two doors reach a removed child: its transport may still deliver through the
@@ -2014,7 +1956,7 @@ template <class Cursor, class Reject, class Terminus, class Reply>
         // REPLY (a reply's `dst` is canonical, RFC-0029 §6.1), so what reaches here is a
         // request resolved against the element rather than against a name nothing spelled.
         // HANDLED stops here too; only PASS goes on to the canonical path.
-        if (d == head_dst_t::TERMINUS) terminus(&head_target);
+        if (d == head_dst_t::TERMINUS) terminus(&head_target, pre);
         if (d != head_dst_t::PASS) return true;
     }
     {
@@ -2056,7 +1998,7 @@ template <class Cursor, class Reject, class Terminus, class Reply>
         reply(pre);
         return true;
     }
-    terminus(nullptr);
+    terminus(nullptr, pre);
     return true;
 }
 
@@ -2095,29 +2037,24 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                     // a bounded node's memory bound covers this flatten too.
                     const std::expected<view_t, view::flatten_err_t> flat =
                         frame.subrope(0, frame.total_length()).try_materialize(*flat_);
-                    // Flatten REFUSED ⇒ drop the frame. This arm is all-host-guarded above,
-                    // so the refusal is the OOM — named by the error channel now rather than
-                    // inferred from an empty view a zero-byte success could fake (#917). Still
-                    // an early-out: `reject_bus_name_hop` opens
-                    // with a `tlv_node_t::over`, an empty span does not validate, and it returns
-                    // without replying — so the FRAME's fate does not depend on this line.
-                    // What does depend on it is the COUNT (#1503 step 3): the OOM is named
-                    // here rather than left to the codec's leniency, so an operator sees a
-                    // flatten-backend exhaustion instead of silence. The SEAM on the line
-                    // above is the testable part, and `fwd_flatten_backend_test` pins it.
+                    // Flatten REFUSED ⇒ drop the frame, counted (#1503 step 3). This arm is
+                    // all-host-guarded above, so the refusal is the OOM — named by the error
+                    // channel rather than inferred from an empty view a zero-byte success could
+                    // fake (#917), so an operator sees a flatten-backend exhaustion instead of
+                    // silence. `fwd_flatten_backend_test` pins the seam.
                     if (!flat) {
                         count_drop(flatten_dropped_);
                         return;
                     }
-                    reject_bus_name_hop(registry_, inbound_name, flat->bytes(), pre,
-                                        rx_for(inbound_ctx), *egress_, status);
+                    reject_bus_name_hop(registry_, inbound_name, flat->bytes(), pre, *egress_,
+                                        status);
                 },
                 /* terminus */
-                [&](const wire::path_ref_element_t* dst_target) {
+                [&](const wire::path_ref_element_t* dst_target, const fwd_pre_t& pre) {
                     // A request FWD is resolved straight off the rope (ADR-0053 3c-iii — NO
                     // flatten, verify-at-access §4).
-                    resolve_terminus_rope(inbound_name, std::move(frame), dst_target, inbound_ctx,
-                                          peer);
+                    resolve_terminus_rope(inbound_name, std::move(frame), pre, dst_target,
+                                          inbound_ctx, peer);
                 },
                 /* reply */
                 [&](const fwd_pre_t& pre) {
@@ -2125,18 +2062,18 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                     // RFC-0020 refusal pays the one cold flatten (the reject arm's ADR-0052
                     // precedent, same injected backend), because the route compare needs the
                     // echoed src contiguous.
-                    if (const std::optional<refused_src_t> ref = peek_refused_route(cur, pre)) {
+                    if (const std::optional<fwd_src_t> ref = peek_refused_route(cur, pre)) {
                         const std::expected<view_t, view::flatten_err_t> flat =
                             frame.subrope(0, frame.total_length()).try_materialize(*flat_);
                         if (flat)
                             (void)graph_.evict_route_edges(
                                 inbound_name, inbound_pair(inbound_ctx, inbound_name, peer),
-                                flat->bytes().subspan(ref->off, ref->len));
+                                flat->bytes().subspan(ref->pos, ref->hdr.total));
                     }
                     // A REPLY that reaches its originator here is handed to the sink
                     // rope-native (ADR-0055): NO flatten — the sink materializes on demand.
                     // Absent sink ⇒ dropped (as the flatten path would, into a no-op decode).
-                    if (const auto sink = reply_target(cur); sink.fn != nullptr)
+                    if (const auto sink = reply_target(cur, pre); sink.fn != nullptr)
                         sink.fn(sink.ctx, frame);
                 }))
             refuse_unserved_type(std::byte{cur.byte_at(0)}, inbound_name, inbound_ctx);
@@ -2161,12 +2098,11 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
         // the stack and the cursor's 16-byte copy of it stalls store-to-load forwarding on
         // every frame (~9 ns per forwarded frame). `reject_bus_name_hop` itself stays a call.
         [&](graph::status_t status, const fwd_pre_t& pre) __attribute__((always_inline)) {
-            reject_bus_name_hop(registry_, inbound_name, frame, pre, rx_for(inbound_ctx), *egress_,
-                                status);
+            reject_bus_name_hop(registry_, inbound_name, frame, pre, *egress_, status);
         },
         /* terminus */
-        [&](const wire::path_ref_element_t* dst_target) {
-            resolve_terminus(inbound_name, frame, frame_view, inbound_ctx, dst_target, peer);
+        [&](const wire::path_ref_element_t* dst_target, const fwd_pre_t& pre) {
+            resolve_terminus(inbound_name, frame, frame_view, pre, inbound_ctx, dst_target, peer);
         },
         /* reply */
         [&](const fwd_pre_t& pre) {
@@ -2174,15 +2110,15 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             // addressed RFC-0020 refusal evicts the edge that stored the refused route,
             // whether or not anything else is listening for replies. Not a refusal ⇒
             // the peek bails allocation-free.
-            if (const std::optional<refused_src_t> ref = peek_refused_route(cur, pre))
+            if (const std::optional<fwd_src_t> ref = peek_refused_route(cur, pre))
                 (void)graph_.evict_route_edges(inbound_name,
                                                inbound_pair(inbound_ctx, inbound_name, peer),
-                                               frame.subspan(ref->off, ref->len));
+                                               frame.subspan(ref->pos, ref->hdr.total));
             // Hand the FWD{REPLY} to the sink rope-native (ADR-0055): NO decode. A
             // view-delivered frame ropes zero-copy off its owning view; a borrowed span is
             // copied once into an owned segment (the copy the old decode-then-consumer-
             // encode round-trip already paid).
-            if (const auto sink = reply_target(cur); sink.fn != nullptr) {
+            if (const auto sink = reply_target(cur, pre); sink.fn != nullptr) {
                 if (frame_view != nullptr) {
                     sink.fn(sink.ctx, view::rope_t(*frame_view));
                 } else if (view_t owned = view::over_bytes(frame).value_or(view_t{});
@@ -2404,7 +2340,8 @@ transport_t* fwd_router_t::reply_link(std::string_view inbound_name,
 }
 
 void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
-                                    const view_t* frame_view, const child_rx_ctx_t* inbound_ctx,
+                                    const view_t* frame_view, const fwd_pre_t& pre,
+                                    const child_rx_ctx_t* inbound_ctx,
                                     const wire::path_ref_element_t* dst_target,
                                     peer_handle_t peer) {
     // Local request terminus (ADR-0041 §5): arena-decode straight from the
@@ -2432,7 +2369,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
         // from the request's bytes on the stack — it cannot draw from the source that just
         // refused, and it does not draw from anything else either (`emit_refusal_reply`).
         if (transport_t* const in = reply_link(inbound_name, inbound_ctx))
-            emit_refusal_reply(wire::grammar::span_cursor{frame}, *in,
+            emit_refusal_reply(wire::grammar::span_cursor{frame}, pre, *in,
                                graph::status_t::BACKPRESSURE);
         return;
     }
@@ -2466,7 +2403,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
         // needs neither (#1612).
         count_drop(assemble_dropped_);
         if (transport_t* const in = reply_link(inbound_name, inbound_ctx))
-            emit_refusal_reply(wire::grammar::span_cursor{frame}, *in,
+            emit_refusal_reply(wire::grammar::span_cursor{frame}, pre, *in,
                                graph::status_t::BACKPRESSURE);
         return;
     }
@@ -2488,20 +2425,24 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
             // so the answer is the stack-built one (#1612). `reply` is released with the
             // arena; the requester gets BACKPRESSURE and retries.
             count_drop(reply_iov_dropped_);
-            emit_refusal_reply(wire::grammar::span_cursor{frame}, *in,
+            emit_refusal_reply(wire::grammar::span_cursor{frame}, pre, *in,
                                graph::status_t::BACKPRESSURE);
             return;
         }
         in->send(table);
     } else if (inbound_name.empty()) {
         // This node originated the request (`originate`) and terminates it: there is no link
-        // to send the reply over, so it goes where a reply arriving home would — the record.
-        if (const auto sink = reply_target(wire::grammar::rope_cursor{*reply}); sink.fn != nullptr)
-            sink.fn(sink.ctx, *reply);
+        // to send the reply over, so it goes where a reply arriving home would — the record —
+        // read by the same routing peek a reply arriving home is.
+        const wire::grammar::rope_cursor rc{*reply};
+        fwd_pre_t rpre;
+        (void)peek_fwd_dst_any(rc, rpre);
+        if (const auto sink = reply_target(rc, rpre); sink.fn != nullptr) sink.fn(sink.ctx, *reply);
     }
 }
 
 void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame,
+                                         const fwd_pre_t& pre,
                                          const wire::path_ref_element_t* dst_target,
                                          const child_rx_ctx_t* inbound_ctx, peer_handle_t peer) {
     // ADR-0053 3c-iii: the multi-link request terminus, resolved straight off the
@@ -2545,7 +2486,7 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
         // terminus: the rope cursor hands the emitter the same offsets the contiguous one does.
         count_drop(assemble_dropped_);
         if (transport_t* const in = reply_link(inbound_name, inbound_ctx))
-            emit_refusal_reply(wire::grammar::rope_cursor{view->wire()}, *in,
+            emit_refusal_reply(wire::grammar::rope_cursor{view->wire()}, pre, *in,
                                graph::status_t::BACKPRESSURE);
         return;
     }
@@ -2563,7 +2504,7 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
         const auto table = gather_reply_iov(*reply, iov);
         if (table.empty()) {
             count_drop(reply_iov_dropped_);
-            emit_refusal_reply(wire::grammar::rope_cursor{view->wire()}, *in,
+            emit_refusal_reply(wire::grammar::rope_cursor{view->wire()}, pre, *in,
                                graph::status_t::BACKPRESSURE);
             return;
         }
