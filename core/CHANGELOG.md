@@ -24,6 +24,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   graph-owned path object (`path_object.hpp`), which caches it beside the canonical bytes, so no
   in-tree caller held one on a `path_t`. A copy of a `path_t` is now one block, never two. Code
   that sent over a hand-held binding sends the canonical path, or holds a path object.
+- **`graph_t::read_children_materialized` is removed from the public API (#2437).** It was the
+  flat `:children` serialize kept only as the independent oracle the folded listing is diffed
+  against, and only tests called it. The tests now reach the same flat serialize through a
+  test-only friend door (`core/tests/graph_children_test_door.hpp`). The `:children` field read
+  is unchanged: it always served `read_children_folded`, byte-identical on the wire.
 - **`receiver_slot_t::deliver_rope` returns `[[nodiscard]] bool` (#2504)**: true iff a sink
   received the frame, false for an empty slot or a span-only sink whose materialize the backend
   refused. The slot still keeps no counter; the calling link counts a `false` on its own drop

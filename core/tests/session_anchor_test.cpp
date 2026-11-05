@@ -39,6 +39,7 @@
 #include <utility>
 #include <vector>
 
+#include "graph_children_test_door.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_heap.hpp"
@@ -148,7 +149,7 @@ struct gen_regression_t {
 
 /** @brief The mount's `:children[]` bytes, flattened for byte comparison. */
 bytes_t children_bytes(const graph_t& g, vertex_handle_t mount) {
-    const auto r = g.read_children_materialized(mount);
+    const auto r = tr::testing::read_children_materialized(g, mount);
     check(r.has_value(), "the mount answers :children[]");
     const tr::view::view_t flat = (*r)->flatten();
     const std::span<const std::byte> b = flat.bytes();
