@@ -133,25 +133,29 @@ rope_t assemble_reply(const reply_route_t& route, reply_kind_t kind,
     // a task switch between the probe's free and the `reserve` abort()s the node (#850).
     // Refcounted `view_t` links cannot ride `block_array_t`'s memcpy relocation, so this
     // site waits on a move-relocating failable array (#873) rather than migrating.
-    if (!rope.try_reserve(1 + shared.size() + (route.echo_ts ? 1u : 0u))) return rope_t{};
-    // The echo trailer segment, allocated BEFORE the head is written because the head's opt
+    // A reply with no payload (an error or an ack) carries its echo stamp at the end of its head
+    // segment, so it is ONE link and one allocation (#2480): the stamp is the frame's last bytes
+    // either way. A reply with payload views keeps the stamp in a segment of its own after them.
+    const std::size_t ts_len =
+        route.echo_ts ? wire::trailer_ts_bytes(route.echo_ts->relative) : std::size_t{0};
+    const std::size_t head_ts = shared.empty() ? ts_len : std::size_t{0};
+    const bool tail_ts = ts_len != head_ts;
+    if (!rope.try_reserve(1 + shared.size() + static_cast<std::size_t>(tail_ts))) return rope_t{};
+    // The separate echo segment, allocated BEFORE the head is written because the head's opt
     // byte must tell the truth: a `TS` bit whose bytes could not be allocated would be the
     // trailer-claiming footgun this change closes in `emit_tlv` (#1109). A refusal drops the
     // ECHO, not the reply — the echo is a capability (no stamp back = "this peer does not
-    // echo"), while a refused reply is the silent drop the origin cannot act on.
+    // echo"), while a refused reply is the silent drop the origin cannot act on. A stamp in the
+    // head has no such split: the head and its stamp are one draw.
     segment_ptr_t ts_seg;
-    if (route.echo_ts) {
-        ts_seg = view::segment_alloc(egress, wire::trailer_ts_bytes(route.echo_ts->relative));
-        if (ts_seg)
-            wire::store_trailer_ts(ts_seg->bytes, route.echo_ts->relative, route.echo_ts->value);
-    }
-    const bool echo = static_cast<bool>(ts_seg);
+    if (tail_ts) ts_seg = view::segment_alloc(egress, ts_len);
+    const bool echo = head_ts != 0 || ts_seg;
     const wire::opt_t trailer_opt{.ts = echo, .tf = echo && route.echo_ts->relative};
     // The reply head draws from the injected egress backend (#795), not the global heap: this
     // is the last peer-drivable terminus allocation, sized by the swapped route bytes, and a
     // bounded node bounds it by pointing `egress` at its slab. `segment_alloc` is the nothrow
     // form — a refusal is a null handle, degraded below, never a throw.
-    segment_ptr_t seg = view::segment_alloc(egress, head_len);
+    segment_ptr_t seg = view::segment_alloc(egress, head_len + head_ts);
     // A head-alloc failure invalidates the WHOLE reply: the shared payload views WITHOUT
     // the FWD header are a headerless, unroutable frame that the send site's
     // link_count() > 0 guard would wave through as garbage. Return an EMPTY rope instead
@@ -164,10 +168,13 @@ rope_t assemble_reply(const reply_route_t& route, reply_kind_t kind,
     out.tlv_sliced(route.src_wire);
     out.u8_value(std::to_underlying(kind));
     out.raw(inline_tail);
-    rope.append(view_t::over(std::move(seg)));
-    for (const view_t& v : shared) rope.append(v);  // refcount clone — no byte copy
     // The echo trailer is the frame's LAST bytes — after the whole body — because that is where the
     // grammar's `total = header + length + ts_size` reads it.
+    if (echo)
+        wire::store_trailer_ts(ts_seg ? ts_seg->bytes : seg->bytes.subspan(head_len),
+                               route.echo_ts->relative, route.echo_ts->value);
+    rope.append(view_t::over(std::move(seg)));
+    for (const view_t& v : shared) rope.append(v);  // refcount clone — no byte copy
     if (ts_seg) rope.append(view_t::over(std::move(ts_seg)));
     return rope;
 }

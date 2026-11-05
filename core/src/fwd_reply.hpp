@@ -166,11 +166,13 @@ struct reply_route_t {
  * abort.
  *
  * When @p route carries an @ref reply_route_t::echo_ts, the reply's outer header sets
- * `opt.TS` and the stamp's bytes ride a trailing segment AFTER the body (#1109) — the
- * trailer is outside the length field, so nothing else about the frame moves. The echo is a
- * CAPABILITY, not an obligation: if its 8-byte segment cannot be allocated the reply is
- * emitted un-stamped rather than refused — a requester that gets no stamp back learns "no
- * echo", which is a conforming answer, while a refused reply would be a silent drop.
+ * `opt.TS` and the stamp's bytes follow the body (#1109) — the trailer is outside the length
+ * field, so nothing else about the frame moves. A reply with no @p shared payload (an error or
+ * an ack) writes the stamp at the end of its head segment, so it is one link and one draw
+ * (#2480). A reply with payload views puts the stamp in a segment of its own after them, and
+ * there the echo is a CAPABILITY, not an obligation: if that segment cannot be allocated the
+ * reply is emitted un-stamped rather than refused — a requester that gets no stamp back learns
+ * "no echo", which is a conforming answer, while a refused reply would be a silent drop.
  *
  * @param route          The reply's routes and optional wire-time echo (@ref reply_route_t).
  * @param kind           The reply discriminant (RESULT / ERROR).
@@ -196,8 +198,8 @@ struct reply_route_t {
  * @param route          The reply's routes and optional wire-time echo (@ref reply_route_t).
  * @param status         The L4 outcome; mapped to its registered wire code (RFC-0002 §D).
  * @param egress         The byte backend the reply head draws from.
- * @return The reply rope (one link, plus the echo trailer link when @p route stamps), or an
- *         EMPTY rope when @p egress refuses.
+ * @return The reply rope — always ONE link, the echo stamp at the end of the head segment when
+ *         @p route stamps (#2480) — or an EMPTY rope when @p egress refuses.
  */
 [[nodiscard]] view::rope_t assemble_error_reply(const reply_route_t& route, status_t status,
                                                 mem::mem_backend_t& egress);
@@ -212,8 +214,10 @@ struct reply_route_t {
  * the head can live in that frame: @ref alloc places the segment header and its bytes in the
  * storage the caller passed to `op_resolver_t::resolve`, the head is written through the same
  * span-form cursor (@ref emit_cursor_t), and no allocator is reached. A request that does not
- * fit (a long route and an echo beside the head) draws the rest from @p overflow,
- * exactly as before, so the store is a fast path and never a limit.
+ * fit (a long route and an echo in the head) draws from @p overflow, exactly as before, so
+ * for an ack the store is a fast path and never a limit. The terminus refusal reply passes
+ * @ref caller_store_backend as @p overflow, which refuses every draw: there the store IS the
+ * limit, because the reply must not need the memory that just refused (#2480).
  *
  * Lives on the resolve's own stack frame and is used only during it. The segments it places
  * name @ref caller_store_backend as their reclaimer, never this object, so a reply that is
@@ -240,6 +244,8 @@ class reply_store_t final : public mem::mem_backend_t {
 /**
  * @brief The reclaimer of every segment @ref reply_store_t places in caller storage: it ends
  *        the segment's lifetime and frees nothing, because the bytes are the caller's.
+ *
+ * It allocates nothing either, so as a @ref reply_store_t overflow it refuses every draw.
  */
 [[nodiscard]] mem::mem_backend_t& caller_store_backend() noexcept;
 
@@ -251,11 +257,8 @@ inline constexpr std::size_t kErrorStatusTailBytes = 14;
  * @brief The `STATUS{ ERROR{ VALUE u16 LE code } }` tail of an addressed error reply, as a
  *        stack array — the bytes @ref assemble_error_reply appends after `kind`.
  *
- * Split out so a reply that must be built WITHOUT an allocator can carry the identical tail:
- * the terminus refusal reply (#1612) answers a request whose decode the rx source refused, and
- * "the reply must not need the memory that just refused" (reference 04 §Exhaustion is a
- * value) rules out `assemble_error_reply`'s head segment there. One definition of the tail,
- * two emitters — the status code mapping (RFC-0002 §D) cannot drift between them.
+ * Split out so the router's bare `ERROR` answer to a retired outer type (RFC-0032 §6.1) is the
+ * same bytes minus the `STATUS` header: the status code mapping (RFC-0002 §D) has one home.
  *
  * @param status The L4 outcome; mapped to its registered wire code.
  */
