@@ -52,6 +52,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "libtracer/ws.hpp"
@@ -88,6 +89,15 @@ void push_frames(std::vector<frame_t> frames);
 /** @brief Answer every later handshake with a Sec-WebSocket-Accept that does not match its
  *         key, as a server that is not speaking RFC 6455 to this client would. */
 void reject_upgrades(bool on);
+
+/**
+ * @brief Answer every later handshake with this status line and these header lines, then
+ *        the key's Sec-WebSocket-Accept line and the closing CRLF (#2515);
+ *        `std::nullopt` restores the default `101`.
+ *
+ * @param answer The status line without its CRLF, and the header lines, each CRLF-ended.
+ */
+void answer_upgrades_with(std::optional<std::pair<std::string, std::string>> answer);
 
 /** @brief Opening-handshake requests received since the reset. */
 [[nodiscard]] int handshakes();

@@ -12,6 +12,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`esp_ws_client_link_t` accepts a handshake answer of up to 1024 bytes, and checks it
+  strictly (#2515).** The block a dial reads the server's `101` into grows from 512 to 1024
+  bytes, what `esp_transport_ws` defaulted to, so a server or proxy whose answer is 513–1024
+  bytes connects again. It is still drawn from `memory.state` only for the dial, so no
+  connection holds it. The answer must now carry status code `101` on its status line (not
+  "101" anywhere), `Upgrade: websocket` and a `Connection` header with the `Upgrade` token
+  (RFC 6455 §4.1), through core's `ws::upgrade_accepted`.
 - **`esp_ws_client_link_t` follows core's reassembly rule (#2478).** A new BINARY frame that
   arrives while a fragmented message is open now starts a new message and drops the stale
   part, instead of having the stale bytes glued on in front of it; it also ends the discard
