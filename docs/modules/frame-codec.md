@@ -285,8 +285,8 @@ walking a child's own `children()`. Because every node comes from a validated fr
 walk has no error channel and never fails.
 
 Every core reader takes a node: `config_reader_t`, `parse_acl`, `is_batch` / `read_batch`
-and the playout helper, `path_key`, the child and transport factories' config argument, and
-the router's `adopt_binding`. Router ingress uses the walker too: the inbound observer receives a
+and the playout helper, `path_key`, and the child and transport factories' config argument.
+Router ingress uses the walker too: the inbound observer receives a
 `tlv_node_t`, and a refused bus-NAME hop reads its routes in place. The owning tree survives
 only as host-only test support (`core/tests/tlv_tree.hpp`), which the conformance runner uses
 to check that every vector re-encodes byte for byte

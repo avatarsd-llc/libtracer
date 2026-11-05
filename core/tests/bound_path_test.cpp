@@ -673,36 +673,6 @@ void test_reverse_list_is_typed_not_positional() {
     check(!ends_with(stored, reverse_child), "and the reverse list was not stored as one");
 }
 
-void test_path_binding_slot() {
-    std::printf("path_t keeps its value shape and gains the opaque bound slot (§7.4):\n");
-    path_t p("/sensor/temp");
-    check(!p.binding().bound, "a freshly parsed path is unbound");
-
-    std::vector<std::byte> chain;
-    tr::testing::emit_path_pair(chain, tr::wire::path_pair_t{.index = 3, .generation = 1});
-    tr::testing::emit_path_pair(chain, tr::wire::path_pair_t{.index = 9, .generation = 4});
-    check(p.bind(chain), "a two-host chain binds");
-    check(p.binding().bound && p.binding().chain.size() == 2 * tr::wire::kPathPairRecordBytes,
-          "and the chain is kept verbatim");
-
-    // Value semantics: a copy carries the binding, and the canonical bytes survive both.
-    const path_t copy = p;
-    check(copy.binding() == p.binding(), "copying a path copies its binding");
-    check(copy.key().size() == p.key().size(),
-          "and its canonical bytes — the fallback is never discarded");
-
-    p.clear_binding();
-    check(!p.binding().bound && p.binding().chain.empty(),
-          "clearing the binding is the whole of the teardown — no hop holds anything");
-    check(copy.binding().bound, "and it did not reach through to the copy");
-
-    // Refuses past a 16-bit PATH body rather than truncating: a truncated chain is a
-    // valid-LOOKING binding for a different route.
-    const std::vector<std::byte> too_long(0x10000);
-    check(!p.bind(too_long) && !p.binding().bound, "a chain past a 16-bit body does not bind");
-    check(!p.bind({}) && !p.binding().bound, "and neither does an empty one");
-}
-
 /**
  * @brief The RFC-0024 behavioural vectors still standing, as BYTES, against the reference impl.
  *
@@ -760,7 +730,6 @@ int main() {
     test_revocation_is_immediate();
     test_bit7_is_refused();
     test_reverse_list_is_typed_not_positional();
-    test_path_binding_slot();
     test_conformance_vectors();
     return tr::testing::summary("bound_path");
 }

@@ -153,58 +153,24 @@ struct field_path_t {
 };
 
 /**
- * @brief A path's learned chain (RFC-0029 §6.2): the `PATH` body an origin adopted from a
- *        reply's `src` — the opaque slot a @ref path_t carries beside its canonical bytes.
- *
- * Two rules shape it: the chain is held *with* the stamp that invalidates it (each PAIR's
- * generation), and "no chain yet" is expressed OUTSIDE the chain (@ref bound) rather than as
- * an invalid one.
- *
- * The body is a run of path elements, origin-first: element 0 is the origin's own PAIR for its
- * first-hop connection vertex, and every later element — a PAIR, or a hop's NAME run — means
- * something only on the host that issued it. This type carries them, compares them and hands
- * them to an encoder, and never interprets one. Nothing about a chain is
- * authorization-shaped: a revoked right takes effect on the very next operation (§6.4).
- *
- * The canonical bytes stay in the @ref path_t alongside it and are never discarded: they are
- * the fallback a refused chain drops back to, which is what makes "drop and re-learn" a
- * complete recovery (§6.3). A VIEW of the path's own storage, valid while that path is
- * unchanged.
- */
-struct path_binding_t {
-    /** @brief True once a chain has been adopted; false is "never bound", not "invalid". */
-    bool bound = false;
-    /** @brief The chain's `PATH` body, origin-first. Empty exactly when @ref bound is false. */
-    std::span<const std::byte> chain;
-    /** @brief Value equality: both flags, and the chains by content. */
-    bool operator==(const path_binding_t& o) const noexcept {
-        return bound == o.bound && std::ranges::equal(chain, o.chain);
-    }
-};
-
-/**
  * @brief A parsed, canonical path: the PATH-TLV payload bytes (packed records) plus the
  *        optional @ref field_path_t tail. The payload bytes are the vertex-map key.
  *
  * Dispatch keys on the parsed bytes (@ref key), never the string form — parse once,
  * hold the value, and every read/write compares bytes (docs/reference/02 §dispatch).
  *
- * A path also carries the optional learned chain (@ref binding, RFC-0029 §6.2). It stays a
- * **value type**: the binding is an opaque slot the graph and transport tiers fill and
- * validate, never a handle into either of them, so copying a path copies its binding and
- * neither copy can outlive anything.
+ * It is a **value type** that carries no route: a learned chain is held by the graph-owned
+ * path object (`path_object.hpp`), never by this handle, so copying a path copies only its
+ * parse and neither copy can outlive anything.
  *
  * @section storage Storage (#2286)
  *
  * No standard container: the canonical bytes, the field steps and their names live in ONE
- * block sized exactly at parse, and a learned chain in a second, both drawn from a
- * `tr::mem::block_source_t` — the one given to @ref parse, else the process table source (the
- * same default `path_key_t` spills to, ADR-0083). The root path with no field tail owns no
- * block at all. A copy draws its blocks from the source of the path it copies and, like
- * `path_key_t`'s, stops with a sizing message if that source cannot serve the path block; a
- * chain block it cannot serve leaves the copy unbound instead (the canonical bytes are a
- * complete answer, RFC-0029 §6.3). A move takes the blocks. Nothing here grows after the parse
- * except the chain slot, and that is one exact block per adopted chain.
+ * block sized exactly at parse and drawn from a `tr::mem::block_source_t`: the one given to
+ * @ref parse, else the process table source (the same default `path_key_t` spills to,
+ * ADR-0083). The root path with no field tail owns no block at all. A copy draws its block from
+ * the source of the path it copies and, like `path_key_t`'s, stops with a sizing message if that
+ * source cannot serve it. A move takes the block. Nothing here grows after the parse.
  */
 class path_t {
    public:
@@ -247,11 +213,11 @@ class path_t {
     [[nodiscard]] static result_t<path_t> parse(std::string_view text,
                                                 tr::mem::block_source_t& src);
 
-    /** @brief Copy @p o into blocks from @p o's source (see @ref storage). */
+    /** @brief Copy @p o into a block from @p o's source (see @ref storage). */
     path_t(const path_t& o);
     /** @brief Copy-assign (see the copy constructor). */
     path_t& operator=(const path_t& o);
-    /** @brief Take @p o's blocks; @p o is left the empty path. */
+    /** @brief Take @p o's block; @p o is left the empty path. */
     path_t(path_t&& o) noexcept { take(o); }
     /** @brief Move-assign (see the move constructor). */
     path_t& operator=(path_t&& o) noexcept {
@@ -261,7 +227,7 @@ class path_t {
         }
         return *this;
     }
-    /** @brief Return both blocks to their source. */
+    /** @brief Return the block to its source. */
     ~path_t() { release(); }
 
     /** @brief The vertex-map key: the canonical PATH-TLV payload bytes (packed records). */
@@ -278,32 +244,6 @@ class path_t {
     /** @brief The number of segments in the path. */
     [[nodiscard]] std::size_t segment_count() const noexcept { return segments_; }
 
-    /** @brief This path's learned chain, if one has been adopted (RFC-0029 §6.2). */
-    [[nodiscard]] path_binding_t binding() const noexcept {
-        return {.bound = chain_len_ != 0, .chain = {chain_, chain_len_}};
-    }
-
-    /**
-     * @brief Record a learned chain — @p chain is a `PATH` body, origin-first.
-     *
-     * Refuses (leaving the path unbound) an empty chain and one whose body a 16-bit length
-     * cannot spell: the canonical path this object still holds is the answer, and refusing
-     * beats truncating, which would produce a *valid-looking* chain for a different route.
-     * Also refuses, leaving any earlier chain in place, when the source has no block for it.
-     *
-     * @return true iff the chain was recorded.
-     */
-    bool bind(std::span<const std::byte> chain) noexcept;
-
-    /**
-     * @brief Drop the learned chain and fall back to the canonical path (RFC-0029 §6.3).
-     *
-     * What an origin does on a refusal. There is nothing to tear down anywhere else — no hop
-     * holds state for a chain — so forgetting it IS the teardown, and the next operation goes
-     * out canonically and re-learns.
-     */
-    void clear_binding() noexcept;
-
    private:
     [[nodiscard]] std::size_t payload_off() const noexcept {
         return has_field_ ? sizeof(field_path_t) : 0;
@@ -313,27 +253,27 @@ class path_t {
     void release() noexcept;
     void take(path_t& o) noexcept;
 
-    tr::mem::block_source_t* src_ = nullptr;  // who serves both blocks; null ⇒ table source
+    tr::mem::block_source_t* src_ = nullptr;  // who serves the block; null ⇒ table source
     std::byte* block_ = nullptr;  // [field_path_t if has_field_][key bytes][field names]
-    std::byte* chain_ = nullptr;  // the learned chain's PATH body (RFC-0029 §6.2)
     std::uint32_t block_len_ = 0;
-    std::uint16_t chain_len_ = 0;  // a chain body is at most 0xFFFF bytes (`bind`)
-    std::uint16_t key_len_ = 0;    // at most kMaxPathBytes
-    std::uint8_t segments_ = 0;    // at most kMaxSegments
+    std::uint16_t key_len_ = 0;  // at most kMaxPathBytes
+    std::uint8_t segments_ = 0;  // at most kMaxSegments
     bool has_field_ = false;
 };
 
 /**
- * @brief A `path_t` is three pointers and ten bytes of lengths: 40 B on a 64-bit host, 24 B on
+ * @brief A `path_t` is two pointers and eight bytes of lengths: 24 B on a 64-bit host, 16 B on
  *        rv32.
  *
  * Pinned, not observed. A path is a parse-once VALUE the API takes by `const&`, and an origin
  * holds them per subscription and per vertex, so its size is multiplied RAM. #2286 moved its three
  * remaining owning standard containers into source-drawn blocks: 9 pointer-widths → 3 plus the
- * lengths (72 → 40 B on a 64-bit host, 36 → 24 B on rv32). A change here is a deliberate edit, and
- * it is the moment to ask whether the new member wants to be a slot at all.
+ * lengths (72 → 40 B on a 64-bit host, 36 → 24 B on rv32), and #2436 dropped the learned-chain
+ * slot no caller used (the graph-owned path object holds the chain): 40 → 24 B, 24 → 16 B. A change
+ * here is a deliberate edit, and it is the moment to ask whether the new member wants to be a slot
+ * at all.
  */
-static_assert(sizeof(path_t) == (sizeof(void*) == 8 ? 40 : 24),
+static_assert(sizeof(path_t) == (sizeof(void*) == 8 ? 24 : 16),
               "a path_t's shape is a ratchet — grow it deliberately or not at all");
 
 inline path_t::path_t(std::string_view text) {

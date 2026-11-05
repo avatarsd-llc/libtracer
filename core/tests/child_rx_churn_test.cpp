@@ -11,8 +11,8 @@
  * every name-keyed and slot-keyed bound-path lookup walks — never learned it: `remove_child`
  * left the ctx resolving, `add_child` of the same name appended a second, and `ctx_by_name`
  * answers with the FIRST match. So after one create/remove/create cycle every consumer of the
- * name — `connection_ref`, `hop_mint`, and through them `adopt_binding` and the reply-mint
- * contribution — was handed the DEAD context, and one `child_rx_ctx_t` (+ its mount run)
+ * name — `hop_mint`, and through it the reply-mint contribution and the responder's reverse
+ * element — was handed the DEAD context, and one `child_rx_ctx_t` (+ its mount run)
  * leaked per cycle onto a chain the bound hop walks per frame.
  *
  * Two defects, and they are different KINDS of defect. The growth one is a leak, and on a
@@ -25,8 +25,9 @@
  * below are assertion failures, never a sanitizer report, which is the proof of that claim.
  *
  * Asserted:
- *   - a REMOVED child stops answering `connection_ref`, even while its connection vertex is
- *     still registered (the tombstone must be on the ctx, not inferred from the graph);
+ *   - a REMOVED child stops minting its reference (read off a relayed reply's `src`), even
+ *     while its connection vertex is still registered (the tombstone must be on the ctx, not
+ * inferred from the graph);
  *   - a re-added child answers with the NEW tenancy's element, and that element egresses over
  *     the NEW link — including the ordering the shipped wiring does NOT take, where the child
  *     was first registered before its connection vertex existed;
@@ -38,7 +39,6 @@
  *     makes "resolves to the new tenancy" mean delivery and not just a matching integer.
  */
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -51,13 +51,14 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "libtracer/path_pair.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "pair_body.hpp"
 #include "test_support.hpp"
 
 namespace {
 
-using tr::graph::acl_right_t;
 using tr::graph::fwd_op_t;
 using tr::graph::graph_t;
 using tr::graph::path_t;
@@ -66,23 +67,6 @@ using tr::net::fwd_router_t;
 using tr::wire::opt_t;
 using tr::wire::path_ref_element_t;
 using tr::wire::type_t;
-
-/** @brief The link `bound_send` egresses on for a one-element binding of @p e, or null. Only
- *         compared, never sent on: the links are the test's own. */
-tr::net::transport_t* bound_link(const fwd_router_t& r, path_ref_element_t e) {
-    path_t p("/bound");
-    std::array<std::byte, tr::wire::kPathPairRecordBytes> rec{};
-    tr::wire::path_pair_store(rec, e);
-    (void)p.bind(rec);
-    tr::net::transport_t* got = nullptr;
-    (void)r.bound_send(
-        p, acl_right_t::READ,
-        [](void* c, tr::net::transport_t& link, std::span<const std::byte>) {
-            *static_cast<tr::net::transport_t**>(c) = &link;
-        },
-        &got);
-    return got;
-}
 
 using tr::testing::check;
 
@@ -95,6 +79,11 @@ class sink_link_t : public tr::net::transport_t {
 
     /** @brief Number of frames this link was asked to carry. */
     [[nodiscard]] std::size_t sends() const noexcept { return sent_.size(); }
+    /** @brief The last frame this link was asked to carry (empty when none). */
+    [[nodiscard]] std::span<const std::byte> last() const noexcept {
+        return sent_.empty() ? std::span<const std::byte>{}
+                             : std::span<const std::byte>(sent_.back());
+    }
 
    private:
     std::vector<std::vector<std::byte>> sent_;
@@ -127,16 +116,59 @@ using tr::testing::b_fwd;
 /** @brief The mount run the tests churn, and the vertex key that is its connection vertex. */
 constexpr std::string_view kMount = "net/mod/a";
 
+/** @brief The inbound child the probes below send from, and relay replies onto. */
+constexpr std::string_view kIn = "net/mod/in";
+
 /** @brief Register the connection vertex `/net/mod/a` — what makes @ref kMount bindable. */
 void make_conn_vertex(graph_t& g) {
     const auto p = path_t::parse("/net/mod/a");
     (void)g.register_vertex(*p, role_t::STORED_VALUE);
 }
 
+/**
+ * @brief The PAIR this router mints for @ref kMount, read where production reads it: the
+ *        element it prepends to the `src` of a REPLY that came back over that link
+ *        (RFC-0029 §6.2), relayed onto @p in (the child @ref kIn).
+ *
+ * The same `hop_mint` answers the responder's reverse-element seam. `nullopt` is the hop
+ * contributing its NAME run instead, or relaying nothing: it has no reference to give.
+ */
+std::optional<path_ref_element_t> minted_ref(fwd_router_t& r, const sink_link_t& in) {
+    std::vector<std::byte> far;
+    tr::testing::emit_path_pair(far, path_ref_element_t{.index = 7, .generation = 0});
+    std::vector<std::byte> src;
+    tr::wire::emit_tlv(src, type_t::PATH, opt_t{}, far);
+    const std::size_t before = in.sends();
+    r.on_frame(kMount, tr::testing::b_fwd_reply(tr::graph::reply_kind_t::RESULT,
+                                                b_path({"net", "mod", "in", "reply-ep"}), src));
+    // A reply over a REMOVED child is stopped at the ingress (#2302) and relays nothing: that
+    // is the strongest form of "mints no reference", so it answers nullopt too.
+    if (in.sends() == before) return std::nullopt;
+    const auto f = tr::wire::tlv_node_t::over(in.last());
+    if (!f) return std::nullopt;
+    std::size_t at = 0;  // children: op, dst, src, kind, payload
+    for (const tr::wire::tlv_node_t c : f->children())
+        if (at++ == 2) return tr::wire::path_pair_at(c.payload(), 0);
+    return std::nullopt;
+}
+
+/**
+ * @brief Forward a bound `FWD{READ}` from @ref kIn whose `dst` starts at @p e — the hop
+ *        consumes @p e and egresses over the link it names (RFC-0029 §5).
+ */
+void bound_forward(fwd_router_t& r, path_ref_element_t e) {
+    std::vector<std::byte> body;
+    tr::testing::emit_path_pair(body, e);
+    tr::testing::emit_path_pair(body, path_ref_element_t{.index = 7, .generation = 0});
+    std::vector<std::byte> dst;
+    tr::wire::emit_tlv(dst, type_t::PATH, opt_t{}, body);
+    r.on_frame(kIn, b_fwd(fwd_op_t::READ, dst, b_path({"reply-ep"})));
+}
+
 // --- the tests ---------------------------------------------------------------
 
 /**
- * @brief A REMOVED child stops answering `connection_ref` — the tombstone is on the CTX.
+ * @brief A REMOVED child stops minting its reference — the tombstone is on the CTX.
  *
  * The connection vertex is deliberately left registered here. The shipped teardown
  * (`transport_vertex_t::remove_connection`) retires it, and a retired vertex is refused by
@@ -145,17 +177,19 @@ void make_conn_vertex(graph_t& g) {
  * minting references to a link this node no longer has.
  */
 void test_removed_child_stops_referencing() {
-    std::printf("a removed child answers no connection_ref\n");
+    std::printf("a removed child mints no reference\n");
     graph_t g;
     fwd_router_t router(g);
     make_conn_vertex(g);
     sink_link_t link;
+    sink_link_t in;
 
+    check(router.attach_link(std::string(kIn), in), "registered the inbound child");
     check(router.attach_link(std::string(kMount), link), "registered the child");
-    check(router.connection_ref(kMount).has_value(), "a LIVE child has a connection ref");
+    check(minted_ref(router, in).has_value(), "a LIVE child mints a reference");
     check(router.remove_child(kMount), "removed it");
-    check(!router.connection_ref(kMount).has_value(),
-          "a REMOVED child has none — even with its connection vertex still registered");
+    check(!minted_ref(router, in).has_value(),
+          "a REMOVED child mints none — even with its connection vertex still registered");
 }
 
 /**
@@ -172,19 +206,22 @@ void test_readd_resolves_the_new_tenancy() {
     fwd_router_t router(g);
     sink_link_t first;
     sink_link_t second;
+    sink_link_t in;
 
+    check(router.attach_link(std::string(kIn), in), "registered the inbound child");
     check(!router.add_child(std::string(kMount), first),
           "refused while it has no connection vertex");
-    check(!router.connection_ref(kMount).has_value(), "so it has no connection ref");
+    check(!minted_ref(router, in).has_value(), "so it mints no reference");
 
     make_conn_vertex(g);
     check(router.add_child(std::string(kMount), first), "registered once its vertex exists");
     check(router.remove_child(kMount), "removed it");
     check(router.attach_link(std::string(kMount), second), "re-added it over a SECOND link");
 
-    const std::optional<path_ref_element_t> e = router.connection_ref(kMount);
+    const std::optional<path_ref_element_t> e = minted_ref(router, in);
     check(e.has_value(), "the re-added child is bindable now its connection vertex exists");
-    check(e && bound_link(router, *e) == &second, "and element 0 egresses over the NEW link");
+    if (e) bound_forward(router, *e);
+    check(second.sends() == 1 && first.sends() == 0, "and its element egresses over the NEW link");
 }
 
 /**
@@ -196,18 +233,20 @@ void test_readd_resolves_the_new_tenancy() {
  * operation.
  */
 void test_readd_as_bus_drops_the_slot() {
-    std::printf("a name re-added as a BUS mount answers no connection_ref\n");
+    std::printf("a name re-added as a BUS mount mints no reference\n");
     graph_t g;
     fwd_router_t router(g);
     make_conn_vertex(g);
     sink_link_t p2p;
     bus_sink_link_t bus;
+    sink_link_t in;
 
+    check(router.attach_link(std::string(kIn), in), "registered the inbound child");
     check(router.attach_link(std::string(kMount), p2p), "registered it point-to-point");
-    check(router.connection_ref(kMount).has_value(), "bindable while point-to-point");
+    check(minted_ref(router, in).has_value(), "bindable while point-to-point");
     check(router.remove_child(kMount), "removed it");
     check(router.attach_link(std::string(kMount), bus), "re-added the NAME as a bus mount");
-    check(!router.connection_ref(kMount).has_value(),
+    check(!minted_ref(router, in).has_value(),
           "a bus mount is unbindable — it does not inherit the p2p slot");
 }
 
@@ -236,14 +275,17 @@ void test_churn_does_not_grow_the_chain() {
     check(router.receiver_ctx_count() == 1, "51 create/remove rounds still occupy ONE ctx");
     check(router.registry().size() == 1, "and ONE registry slot, as #494 already pinned");
 
-    const std::optional<path_ref_element_t> e = router.connection_ref(kMount);
-    check(e.has_value(), "the churned name is still bindable");
-    check(e && bound_link(router, *e) == &b,
-          "and resolves to the link the LAST add bound, not the first");
-
-    sink_link_t other;
-    check(router.attach_link("net/mod/other", other), "registered a second, distinct name");
+    sink_link_t in;
+    check(router.attach_link(std::string(kIn), in), "registered a second, distinct name");
     check(router.receiver_ctx_count() == 2, "a genuinely new NAME appends");
+
+    const std::optional<path_ref_element_t> e = minted_ref(router, in);
+    check(e.has_value(), "the churned name is still bindable");
+    const std::size_t a_before = a.sends();
+    const std::size_t b_before = b.sends();
+    if (e) bound_forward(router, *e);
+    check(b.sends() == b_before + 1 && a.sends() == a_before,
+          "and resolves to the link the LAST add bound, not the first");
 }
 
 /** @brief A duplicate add of a LIVE name rebinds its ctx rather than shadowing it. */
@@ -254,12 +296,15 @@ void test_duplicate_add_rebinds() {
     make_conn_vertex(g);
     sink_link_t a;
     sink_link_t b;
+    sink_link_t in;
 
     check(router.attach_link(std::string(kMount), a), "registered the child");
     check(router.attach_link(std::string(kMount), b), "registered the SAME name again");
     check(router.receiver_ctx_count() == 1, "no shadow ctx — the registry's rule, one layer out");
-    const std::optional<path_ref_element_t> e = router.connection_ref(kMount);
-    check(e && bound_link(router, *e) == &b,
+    check(router.attach_link(std::string(kIn), in), "registered the inbound child");
+    const std::optional<path_ref_element_t> e = minted_ref(router, in);
+    if (e) bound_forward(router, *e);
+    check(e && b.sends() == 1 && a.sends() == 0,
           "and the name egresses over the link the re-add bound");
 }
 

@@ -24,7 +24,6 @@
  * left destroys it.
  */
 
-#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdio>
@@ -385,35 +384,6 @@ void origination_held_across_collects() {
     (void)router.cancel(slot);
 }
 
-/** @brief An app thread's bound send, held inside the removed link by its callback. */
-void bound_send_held_across_collects() {
-    graph_t g;
-    fwd_router_t router(g);
-    probe_t p;
-    auto net = plane_owning_y(g, router, p);
-    const std::optional<tr::wire::path_ref_element_t> e = router.connection_ref("net/q/y");
-    check(e.has_value(), "the plane's point-to-point connection is bindable");
-    path_t dst("/net/q/y/p0");
-    std::array<std::byte, tr::wire::kPathPairRecordBytes> rec{};
-    if (e) tr::wire::path_pair_store(rec, *e);
-    check(e && dst.bind(rec), "an app path binds to it");
-    std::vector<std::byte> frame = tr::testing::b_fwd(
-        tr::graph::fwd_op_t::READ, tr::testing::b_path({"p0"}), tr::testing::b_path({"reply"}));
-    bool sent = false;
-    collect_with_frame_inside(
-        g, *net, p,
-        [&] {
-            sent = router.bound_send(
-                dst, tr::graph::acl_right_t::READ,
-                [](void* c, tr::net::transport_t& link, std::span<const std::byte>) {
-                    link.send(*static_cast<const std::vector<std::byte>*>(c));
-                },
-                &frame);
-        },
-        "net/q/y");
-    check(sent && p.reached.load() == 1, "the bound send reached the link once");
-}
-
 /** @brief An app thread's `with_link` call, held inside the removed link by its callback. */
 void with_link_held_across_collects() {
     graph_t g;
@@ -499,7 +469,6 @@ int main() {
     surviving_link_forwards_after_destruction();
     forward_in_flight_across_removal();
     bus_children_read_after_destruction();
-    bound_send_held_across_collects();
     with_link_held_across_collects();
     if constexpr (tr::net::kBusLinks) {
         forward_held_across_collects();
