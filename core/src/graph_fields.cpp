@@ -58,7 +58,7 @@ app_fields_decl_t::app_fields_decl_t(std::span<const app_field_t> owned,
 app_fields_decl_t::app_fields_decl_t(const app_fields_decl_t& o) noexcept
     : app_fields_decl_t(o.owned(), o.src_) {
     failed_ = failed_ || o.failed_;
-    borrowed_ = o.borrowed_;
+    if (!o.borrowed_.empty()) borrowed_ = o.borrowed_;  // an empty view stays the null one
 }
 
 app_fields_decl_t::app_fields_decl_t(app_fields_decl_t&& o) noexcept { *this = std::move(o); }
@@ -71,6 +71,11 @@ app_fields_decl_t& app_fields_decl_t::operator=(app_fields_decl_t&& o) noexcept 
     std::swap(off_, o.off_);
     std::swap(failed_, o.failed_);
     std::swap(borrowed_, o.borrowed_);
+    // An empty borrowed view is the null span, so `apply_policy`'s pointer-and-size compare
+    // sees every empty table as the same declaration (#2453). Done here, out of line, because
+    // every policy reaches `apply_policy` through this move (`name_unset`), and the same line
+    // in the inline `borrowed_fields_t::unchecked` grew `graph.cpp`'s hot path.
+    if (borrowed_.empty()) borrowed_ = {};
     return *this;
 }
 
