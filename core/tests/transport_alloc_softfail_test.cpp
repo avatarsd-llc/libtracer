@@ -120,13 +120,15 @@ namespace {
 /** @brief The endpoint run a test group may span: the whole CAN data window. */
 constexpr std::uint32_t kRun = 4095;
 
-/** @brief A whole advertise frame in a `std::vector` — the test-side form of
- *         `can::encode_advertise` (#1780 moved it into a caller's `bytes_t`); empty when
- *         the advertise is unencodable. */
+/** @brief A whole advertise frame in a `std::vector`: the stack header from
+ *         `can::encode_advertise_header`, then the path bytes; empty when the advertise
+ *         is unencodable. */
 [[maybe_unused]] std::vector<std::byte> advertise_vec(const tr::net::can::advertise_t& a) {
-    tr::mem::bytes_t b(tr::mem::heap_source());
-    if (!tr::net::can::encode_advertise(b, a)) return {};
-    return std::vector<std::byte>(b.begin(), b.end());
+    std::array<std::byte, tr::net::can::kAdvertiseHeaderSize> header{};
+    if (!tr::net::can::encode_advertise_header(header, a, a.path)) return {};
+    std::vector<std::byte> out(header.begin(), header.end());
+    for (const char c : a.path) out.push_back(static_cast<std::byte>(c));
+    return out;
 }
 
 thread_local bool t_armed = false;      /**< @brief Count/fail only on the arming thread. */
@@ -1278,7 +1280,6 @@ void test_can_over_long_path_refused() {
     std::array<std::byte, can::kAdvertiseHeaderSize> header{};
     check(!can::encode_advertise_header(header, adv, adv.path),
           "encode_advertise_header refuses it");
-    check(advertise_vec(adv).empty(), "encode_advertise returns no bytes");
 
     auto link = tr::mem::make_poly<recording_link_t>(tr::mem::net_source());
     recording_link_t* raw = link.get();
@@ -1289,10 +1290,10 @@ void test_can_over_long_path_refused() {
     check(raw->count() == 0, "the join hello emits NOTHING rather than an undecodable frame");
 }
 
-/** @brief The advertise a real CAN send emits is byte-identical to the contiguous encoder's,
+/** @brief The advertise a real CAN send emits is the stack header followed by the path,
  *         proving the two-source stack walk did not change the wire. */
 void test_can_emit_advertise_wire_identical() {
-    std::printf("can emit_advertise — the sliced stack walk matches the contiguous encoder:\n");
+    std::printf("can emit_advertise — the sliced stack walk matches header + path:\n");
     auto link = tr::mem::make_poly<recording_link_t>(tr::mem::net_source());
     recording_link_t* raw = link.get();
     tr::net::transport_can_config_t cfg;
@@ -1307,7 +1308,7 @@ void test_can_emit_advertise_wire_identical() {
     hello.slice_count = 0;
     hello.path = cfg.path;
     const std::vector<std::byte> expect = advertise_vec(hello);
-    check(raw->stream() == expect, "the emitted hello byte stream equals encode_advertise(hello)");
+    check(raw->stream() == expect, "the emitted hello byte stream equals header + path");
 }
 
 /**
@@ -1319,9 +1320,9 @@ void test_can_emit_advertise_wire_identical() {
  * hard-coded: a send legitimately owns exactly ONE allocating step, the payload block
  * (`view::over_bytes`), so running it standalone gives the number `send` must not exceed —
  * the framing adds nothing, which is the point asserted just below. Both halves of the
- * deleted allocation show up here as one over budget on EVERY send — `encode_advertise`'s
- * `std::vector`, and the `adv.path = cfg_.path` copy that used to feed it (the path is past
- * the SSO bound on purpose).
+ * deleted allocation show up here as one over budget on EVERY send — the retired contiguous
+ * encoder's `std::vector`, and the `adv.path = cfg_.path` copy that used to feed it (the path is
+ * past the SSO bound on purpose).
  */
 void test_can_send_advertise_allocates_nothing() {
     std::printf("can send — the advertise costs the transport ZERO allocations (A1):\n");

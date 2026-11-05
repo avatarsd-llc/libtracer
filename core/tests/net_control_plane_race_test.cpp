@@ -58,6 +58,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_vertex.hpp"
+#include "pair_body.hpp"
 #include "test_support.hpp"
 
 namespace {
@@ -115,7 +116,8 @@ std::vector<std::byte> make_bound_fwd() {
     std::vector<std::byte> dst;
     const tr::wire::path_ref_element_t route[2] = {{.index = 3, .generation = 0},
                                                    {.index = 4, .generation = 0}};
-    (void)tr::wire::emit_path_ref(dst, std::span<const tr::wire::path_ref_element_t>(route, 2));
+    tr::testing::emit_retired_path_ref(dst,
+                                       std::span<const tr::wire::path_ref_element_t>(route, 2));
     std::vector<std::byte> payload;
     const std::byte pv[2] = {std::byte{0xAB}, std::byte{0xCD}};
     tr::wire::emit_tlv(payload, type_t::VALUE, opt_t{}, std::span<const std::byte>(pv, 2));

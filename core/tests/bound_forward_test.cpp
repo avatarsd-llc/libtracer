@@ -543,7 +543,7 @@ int main() {
         const path_ref_element_t ref_route[2] = {{.index = 1, .generation = 0},
                                                  {.index = 0x0000BEEFu, .generation = 7}};
         std::vector<std::byte> ref_dst;
-        (void)tr::wire::emit_path_ref(ref_dst, std::span<const path_ref_element_t>(ref_route));
+        tr::testing::emit_retired_path_ref(ref_dst, std::span<const path_ref_element_t>(ref_route));
         r.on_frame("cli", b_fwd_raw_op(kRead, ref_dst, b_path({"reply-ep"}), {}, b_value_u32(9)));
         check(up.sent.empty(), "a 0x14 dst is not forwarded");
         check(cli.sent.size() == 1 && error_code_of(cli.sent[0]) != 0,

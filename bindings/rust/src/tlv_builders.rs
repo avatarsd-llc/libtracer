@@ -387,37 +387,6 @@ pub struct PathRefElement {
 }
 
 /**
- * @brief Build a PATH_REF TLV (`type=0x14`, `PL=0`, `LL=0`) — the bound-path form
- * (RFC-0024 §4). Vector-pinned: `path-ref/ref-empty`, `ref-1host`, `ref-2host`, `ref-3host`.
- *
- * The body is a bare array of fixed 8-byte elements in route order: no per-element framing
- * (element *i* is `body[8i .. 8i+8)`, computed rather than parsed) and no count field (the
- * count **is** `length / 8`).
- *
- * # Errors
- * [`BuildError::TooManySegments`] past [`crate::MAX_PATH_REF_ELEMENTS`] — the §4.3 bound. A
- * route with more hosts than that has no bound spelling and falls back to the canonical
- * [`path`], which every bound path is minted from.
- */
-pub fn path_ref(elements: &[PathRefElement]) -> Result<Tlv, BuildError> {
-    if elements.len() > crate::MAX_PATH_REF_ELEMENTS {
-        return Err(BuildError::TooManySegments);
-    }
-    let mut payload = Vec::with_capacity(elements.len() * crate::PATH_REF_ELEMENT_BYTES);
-    for e in elements {
-        payload.extend_from_slice(&e.index.to_le_bytes());
-        payload.extend_from_slice(&e.generation.to_le_bytes());
-    }
-    Ok(Tlv {
-        type_code: type_code::PATH_REF,
-        opt: Opt::default(),
-        payload,
-        children: Vec::new(),
-        trailer: None,
-    })
-}
-
-/**
  * @brief Read element @p `i` out of a decoded PATH_REF's payload (little-endian, both fields).
  *
  * Returns `None` when the payload is too short to hold element `i` — i.e. `i` is at or past

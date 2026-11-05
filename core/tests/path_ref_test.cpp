@@ -16,9 +16,10 @@
  * the bounds check into a host's vertex map, the generation compare and the ACL
  * re-check at the deref'd vertex (RFC-0024 §5-§6) belong to the router and are
  * not testable here. This file also pins the shared conformance vectors under
- * tests/conformance/vectors/v1/path-ref/ against the programmatic builder, so a
- * divergence between `emit_path_ref` and the published bytes fails here rather
- * than only in a binding's byte pin.
+ * tests/conformance/vectors/v1/path-ref/ against hand-written bytes, so a
+ * divergence between the element codec and the published bytes fails here rather
+ * than only in a binding's byte pin. The library emits no `PATH_REF` (#2245), so
+ * the frames are spelled by the test-only `emit_retired_path_ref`.
  */
 
 #include "libtracer/path_ref.hpp"
@@ -35,6 +36,7 @@
 #include "libtracer/grammar.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
+#include "pair_body.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
@@ -42,10 +44,10 @@ namespace {
 
 using tr::testing::check;
 
-/** @brief Encode a `PATH_REF` over @p elements, or an empty buffer past the §4.3 bound. */
+/** @brief Spell a `PATH_REF` over @p elements (the test-only retired-form builder). */
 std::vector<std::byte> emit(std::span<const tr::wire::path_ref_element_t> elements) {
     std::vector<std::byte> out;
-    if (!tr::wire::emit_path_ref(out, elements)) out.clear();
+    tr::testing::emit_retired_path_ref(out, elements);
     return out;
 }
 
@@ -143,10 +145,7 @@ int main() {
               "255 elements is 2040 body bytes — 2044 total, still a u16 length");
         check(decode(bytes).has_value(), "the bound itself (255 elements) decodes");
 
-        std::vector<path_ref_element_t> over(kMaxPathRefElements + 1);
-        check(emit(over).empty(), "emitting 256 elements refuses rather than truncating");
-
-        // Hand-built, because the emitter refuses to produce it: one element over the bound.
+        // One element over the bound, hand-built.
         const std::vector<std::byte> body(kMaxPathRefBodyBytes + kPathRefElementBytes,
                                           std::byte{0});
         check(rejected_invalid(raw_frame(0x00, static_cast<std::uint16_t>(body.size()), body)),
@@ -188,7 +187,7 @@ int main() {
               "the shared header grammar, so it fires at every depth");
     }
 
-    // ===== the published conformance vectors, pinned against the builder =================
+    // ===== the published conformance vectors, pinned against hand-written bytes ===========
     {
         const path_ref_element_t one[] = {{.index = 7, .generation = 3}};
         const path_ref_element_t two[] = {{.index = 7, .generation = 3},
@@ -197,14 +196,14 @@ int main() {
                                             {.index = 19, .generation = 12},
                                             {.index = 42, .generation = 1}};
         // The published input.bin of path-ref/ref-1host, ref-2host and ref-3host, hex-pinned
-        // here so a change to emit_path_ref that no longer produces the published bytes fails
-        // in this suite rather than only in a binding's byte pin.
+        // here so a change to the element codec that no longer produces the published bytes
+        // fails in this suite rather than only in a binding's byte pin.
         check(hex(emit(one)) == "140008000700000003000000",
-              "emit_path_ref reproduces path-ref/ref-1host's input.bin (12 B)");
+              "the element codec reproduces path-ref/ref-1host's input.bin (12 B)");
         check(hex(emit(two)) == "1400100007000000030000002a00000001000000",
-              "emit_path_ref reproduces path-ref/ref-2host's input.bin (20 B)");
+              "the element codec reproduces path-ref/ref-2host's input.bin (20 B)");
         check(hex(emit(three)) == "140018000700000003000000130000000c0000002a00000001000000",
-              "emit_path_ref reproduces path-ref/ref-3host's input.bin (28 B)");
+              "the element codec reproduces path-ref/ref-3host's input.bin (28 B)");
         // The two structurally-invalid vectors, pinned by the same rule that rejects them.
         const std::vector<std::byte> ragged_body = {
             std::byte{0x07}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
@@ -217,8 +216,8 @@ int main() {
         pl_set[1] = std::byte{0x40};
         check(hex(pl_set) == "1440100007000000030000002a00000001000000" && rejected_invalid(pl_set),
               "path-ref/ref-pl-set's reject.bin decodes to FRAME_INVALID");
-        // ref-ll-set is not emittable — emit_path_ref never sets LL — so its bytes are spelled
-        // out: the 6-byte header a set LL forces, then ref-1host's single element.
+        // ref-ll-set's bytes are spelled out: the 6-byte header a set LL forces, then
+        // ref-1host's single element.
         const std::vector<std::byte> ll_set = {
             std::byte{0x14}, std::byte{0x08}, std::byte{0x08}, std::byte{0x00}, std::byte{0x00},
             std::byte{0x00}, std::byte{0x07}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
@@ -227,7 +226,7 @@ int main() {
               "path-ref/ref-ll-set's reject.bin decodes to FRAME_INVALID");
         // The low end of the accepted range: H = 0 is the envelope alone, and it round-trips.
         check(hex(emit(std::span<const path_ref_element_t>{})) == "14000000",
-              "emit_path_ref reproduces path-ref/ref-empty's input.bin (4 B, H = 0)");
+              "the envelope alone reproduces path-ref/ref-empty's input.bin (4 B, H = 0)");
     }
 
     return tr::testing::summary("path_ref");

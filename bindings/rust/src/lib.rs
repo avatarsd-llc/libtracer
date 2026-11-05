@@ -52,9 +52,9 @@ pub use fwd::{
     FieldSel, FwdRequest, ParsedFwd,
 };
 pub use tlv_builders::{
-    name, path_ref, path_ref_element, subscriber, text_name, validate_segment, value, value_opts,
-    value_u16, value_u32, value_u64, value_u8, BuildError, PathRefElement, ValueOptions,
-    MAX_PATH_BYTES, MAX_SEGMENTS, MAX_SEGMENT_BYTES,
+    name, path_ref_element, subscriber, text_name, validate_segment, value, value_opts, value_u16,
+    value_u32, value_u64, value_u8, BuildError, PathRefElement, ValueOptions, MAX_PATH_BYTES,
+    MAX_SEGMENTS, MAX_SEGMENT_BYTES,
 };
 
 /**
@@ -560,9 +560,9 @@ pub fn decode(input: &[u8]) -> Result<Tlv, Error> {
  * forbidden and the length is a bounded multiple of 8 (RFC-0024 §4.2/§4.3) — is applied here
  * through the same [`path_ref_body_valid`] the decoder calls, so this core cannot mint a
  * frame it would itself answer with [`Error::FrameInvalid`] (#1004; the C++ core closed the
- * same asymmetry in #886). The guarded [`path_ref`] builder satisfies the rule by
- * construction, so the door this closes is a [`Tlv`] built by struct literal — [`Tlv`]'s
- * fields are public, which is the ordinary way to build one here.
+ * same asymmetry in #886). The crate has no `PATH_REF` builder, so the door this closes is a
+ * [`Tlv`] built by struct literal — [`Tlv`]'s fields are public, which is the ordinary way to
+ * build one here.
  *
  * # Postcondition
  * This function has no error channel, so refusal is spelled **emits nothing**: an ill-formed

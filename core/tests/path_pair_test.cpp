@@ -623,7 +623,7 @@ void refusals() {
     {
         const std::array<tr::wire::path_ref_element_t, 2> els{conn, temp};
         bytes_t dst;
-        check(tr::wire::emit_path_ref(dst, els), "a PATH_REF body still encodes (0x15 uses it)");
+        tr::testing::emit_retired_path_ref(dst, els);
         const std::size_t before = n.cli.sent.size();
         n.in(b_fwd_raw_op(kRead, dst, reply_ep()));
         check(n.cli.sent.size() == before + 1 && frame_is_error(n.cli.sent.back(), kInvalid),
@@ -631,7 +631,7 @@ void refusals() {
         check(n.b.sent.empty(), "…and is never routed");
         const std::array<tr::wire::path_ref_element_t, 1> one{temp};
         bytes_t dst1;
-        (void)tr::wire::emit_path_ref(dst1, one);
+        tr::testing::emit_retired_path_ref(dst1, one);
         n.in(b_fwd_raw_op(kWrite, dst1, reply_ep(), {}, b_value_u32(4242)));
         check(held(n.g, "/sensor/temp") == b_value_u32(1234),
               "…and a one-element PATH_REF is never applied as a terminus either");

@@ -288,7 +288,8 @@ widened the v1 header with the explicit `target_node` field):
 | 16 | 2 | `path_len` (u16 LE) |
 | 18 | `path_len` | path bytes (UTF-8 libtracer path) |
 
-`encode_advertise` / `decode_advertise` round-trip this; decode rejects a wrong
+`encode_advertise_header` writes the fixed header (the transport sends the path
+bytes after it in place), and `decode_advertise` reads the whole frame; decode rejects a wrong
 magic, an unknown format version, a non-zero reserved byte, a `path_len` beyond the
 declared bound, or a truncated buffer (`nullopt` = need more / malformed), with an
 overflow-safe length check.

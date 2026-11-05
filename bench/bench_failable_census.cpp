@@ -742,10 +742,7 @@ int run_guard() {
              asm volatile("" : : "r"(n) : "memory");
          }},
         // A1 — the CAN advertise header, on the stack; `emit_advertise` slices it in place.
-        // Measure `encode_advertise_header` itself: the contiguous `encode_advertise` twin
-        // returns a std::vector and so allocates by construction, which is why the CAN
-        // transport does not use it. (An ablation that swapped this body to that twin was
-        // left in place on the branch, making the arm's own NOALLOC expectation fail.)
+        // Measure `encode_advertise_header` itself, the only advertise encoder the library has.
         {"can_encode_advertise_header", expect_t::NOALLOC,
          [] {
              std::array<std::byte, can::kAdvertiseHeaderSize> header{};

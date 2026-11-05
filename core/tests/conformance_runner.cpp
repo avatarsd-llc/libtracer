@@ -706,15 +706,11 @@ int main(int argc, char** argv) {
     std::printf("Encode/decode symmetry (every encode() success must decode()):\n");
     {
         // Two well-formed PATH_REF elements, little-endian: (index 7, gen 3), (index 9, gen 1).
-        static constexpr std::array<tr::wire::path_ref_element_t, 2> els{
-            tr::wire::path_ref_element_t{.index = 7, .generation = 3},
-            tr::wire::path_ref_element_t{.index = 9, .generation = 1}};
-        std::vector<std::byte> ref_body;
-        (void)tr::wire::emit_path_ref(ref_body, els);
-        // Drop the emitter's envelope, keep the bare element array — sized from the emitter's
-        // own size function so the split cannot drift from the format.
-        ref_body.erase(ref_body.begin(), ref_body.begin() + static_cast<std::ptrdiff_t>(
-                                                                tr::wire::path_ref_wire_bytes(0)));
+        const std::vector<std::byte> ref_body = {
+            std::byte{0x07}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+            std::byte{0x03}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+            std::byte{0x09}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+            std::byte{0x01}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
         // Bodies are owned here because tlv_t::payload BORROWS. Sizes, not magic numbers: the
         // §4.3 bound and the element stride both come from path_ref.hpp.
@@ -743,12 +739,12 @@ int main(int argc, char** argv) {
         for (const symmetry_case_t& c : cases) check_symmetry(c);
 
         // The accepted spelling must not have drifted either: the generic encode() of a
-        // well-formed PATH_REF is byte-identical to the guarded emitter's output, so applying
-        // the rule on this door changed nothing a caller already had.
-        std::vector<std::byte> via_emitter;
-        (void)tr::wire::emit_path_ref(via_emitter, els);
-        check(tr::wire::encode(path_ref(ref_body)) == via_emitter,
-              "a well-formed PATH_REF encodes byte-identically to emit_path_ref");
+        // well-formed PATH_REF is the 4-byte envelope (`14 00 <u16 LE length>`) and the body.
+        std::vector<std::byte> expect = {std::byte{0x14}, std::byte{0x00}, std::byte{0x10},
+                                         std::byte{0x00}};
+        expect.insert(expect.end(), ref_body.begin(), ref_body.end());
+        check(tr::wire::encode(path_ref(ref_body)) == expect,
+              "a well-formed PATH_REF encodes to its envelope and element bytes");
     }
 
     std::printf("Targeted asserts:\n");

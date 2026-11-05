@@ -23,7 +23,7 @@ use libtracer::fwd::{fwd_kind, fwd_op, FieldSel};
 use libtracer::structured::{self, Ace, DeliveryPolicy, SettingValue};
 use libtracer::{
     decode, decode_fwd, encode, encode_field, encode_fwd, error_code, parse_error, parse_field_tlv,
-    path_ref, path_ref_element, reply_error_code, status_ok, status_with_errors, subscriber, value,
+    path_ref_element, reply_error_code, status_ok, status_with_errors, subscriber, value,
     value_opts, value_u32, BuildError, ErrCode, FwdRequest, Opt, PathRefElement, Tlv, ValueOptions,
 };
 
@@ -485,18 +485,18 @@ fn path_builder_enforces_segment_count() {
 /**
  * @brief The minimal bound path: one element, 12 bytes, byte-pinned against the vector.
  *
- * The hex literal is the pin — a change to `path_ref` that no longer produces the published
- * bytes fails here even if the vector file were regenerated alongside it.
+ * The hex literal is the pin — a change to `encode` that no longer produces the published
+ * bytes fails here even if the vector file were regenerated alongside it. The crate builds no
+ * `PATH_REF` (#2245 retired it as an address), so the test spells the element bytes itself.
  */
 #[test]
 fn path_ref_1host() {
     let bin = assert_vector_consistent("path-ref/ref-1host");
     assert_eq!(hex(&bin), "140008000700000003000000");
-    let built = path_ref(&[PathRefElement {
+    let built = ref_tlv(&[PathRefElement {
         index: 7,
         generation: 3,
-    }])
-    .unwrap();
+    }]);
     assert_eq!(encode(&built), bin);
     let t = decode(&bin).unwrap();
     assert_eq!(t.type_code, libtracer::type_code::PATH_REF);
@@ -529,7 +529,7 @@ fn path_ref_2host() {
             generation: 1,
         },
     ];
-    assert_eq!(encode(&path_ref(&elems).unwrap()), bin);
+    assert_eq!(encode(&ref_tlv(&elems)), bin);
     let t = decode(&bin).unwrap();
     for (i, want) in elems.iter().enumerate() {
         assert_eq!(path_ref_element(&t.payload, i).as_ref(), Some(want));
@@ -558,7 +558,7 @@ fn path_ref_3host() {
             generation: 1,
         },
     ];
-    assert_eq!(encode(&path_ref(&elems).unwrap()), bin);
+    assert_eq!(encode(&ref_tlv(&elems)), bin);
     assert_eq!(
         decode(&bin).unwrap().payload.len() / libtracer::PATH_REF_ELEMENT_BYTES,
         3
@@ -583,11 +583,7 @@ fn path_ref_255_elements() {
             generation: (i * 7) % 65536,
         })
         .collect();
-    assert_eq!(encode(&path_ref(&elems).unwrap()), bin);
-    // One over the bound has no bound spelling at all — the builder refuses rather than
-    // truncating, and the origin falls back to the canonical PATH it minted from.
-    let over = vec![PathRefElement::default(); 256];
-    assert_eq!(path_ref(&over).unwrap_err(), BuildError::TooManySegments);
+    assert_eq!(encode(&ref_tlv(&elems)), bin);
 }
 
 /**
@@ -652,7 +648,7 @@ fn path_ref_ll_set() {
 fn path_ref_empty() {
     let bin = assert_vector_consistent("path-ref/ref-empty");
     assert_eq!(hex(&bin), "14000000");
-    assert_eq!(encode(&path_ref(&[]).unwrap()), bin);
+    assert_eq!(encode(&ref_tlv(&[])), bin);
     let t = decode(&bin).unwrap();
     assert!(t.payload.is_empty());
     assert_eq!(path_ref_element(&t.payload, 0), None);
@@ -661,8 +657,8 @@ fn path_ref_empty() {
 /* ------------------------------- encode/decode symmetry on PATH_REF (#1004) --- */
 
 /**
- * @brief A raw `PATH_REF` node as a caller can spell one — `Tlv`'s fields are all public, so
- * this bypasses the guarded `path_ref` builder, which is the door #1004 is about.
+ * @brief A raw `PATH_REF` node as a caller can spell one — `Tlv`'s fields are all public,
+ * which is the door #1004 is about.
  */
 fn raw_path_ref(pl: bool, ll: bool, payload: Vec<u8>, children: Vec<Tlv>) -> Tlv {
     Tlv {
@@ -676,6 +672,20 @@ fn raw_path_ref(pl: bool, ll: bool, payload: Vec<u8>, children: Vec<Tlv>) -> Tlv
         children,
         trailer: None,
     }
+}
+
+/** @brief A well-formed `PATH_REF` over @p `elems`: each element is `index ++ generation`, LE. */
+fn ref_tlv(elems: &[PathRefElement]) -> Tlv {
+    let payload = elems
+        .iter()
+        .flat_map(|e| {
+            e.index
+                .to_le_bytes()
+                .into_iter()
+                .chain(e.generation.to_le_bytes())
+        })
+        .collect();
+    raw_path_ref(false, false, payload, Vec::new())
 }
 
 /** @brief A structured `FWD` wrapping @p children — the nesting case for the property. */
@@ -798,8 +808,7 @@ fn path_ref_refusal_propagates_to_ancestors() {
  * @brief The guard does not over-refuse: every WELL-FORMED `PATH_REF` still encodes to the
  * bytes it did before, including the two ends of the §4.3 range (#1004).
  *
- * Built by struct literal rather than through `path_ref`, so this covers the door the guard
- * sits on rather than the builder that satisfies the rule by construction.
+ * Built by struct literal, the door the guard sits on.
  */
 #[test]
 fn path_ref_well_formed_is_untouched_by_the_guard() {
@@ -841,13 +850,10 @@ fn encode_fwd_bytes_refuses_an_ill_formed_path_ref_payload() {
     );
 
     // A well-formed PATH_REF payload still builds — the wrapper refuses the shape, not the type.
-    req.payload = Some(
-        path_ref(&[PathRefElement {
-            index: 7,
-            generation: 3,
-        }])
-        .unwrap(),
-    );
+    req.payload = Some(ref_tlv(&[PathRefElement {
+        index: 7,
+        generation: 3,
+    }]));
     let bytes = libtracer::encode_fwd_bytes(&req).unwrap();
     assert_eq!(
         decode_fwd(&bytes).unwrap().payload.unwrap().type_code,
