@@ -16,7 +16,8 @@
  *   1. a stalled peer and a healthy peer on one link: the healthy one receives every update,
  *      the stalled one's past its queue's depth are refused and counted, and no write waits
  *      on a socket;
- *   2. a peer that recovers is sent every frame it held, oldest first;
+ *   2. a peer that recovers is sent every frame it held, oldest first, and its queue peak
+ *      (#2464) still reads the most that waited, until its slot's next session;
  *   3. a frame a non-blocking write left part-way is finished on the next flush, byte-exact,
  *      and is not a desync;
  *   4. anything else written to that socket first finishes it (a close here);
@@ -117,14 +118,14 @@ std::vector<std::vector<std::byte>> frames_to(int fd) {
     return out;
 }
 
-/** @brief The `tx_conflated` count of the open session on @p fd's slot, read through the
- *         public per-peer stats (the peer named `p<slot>`; slots are claimed in order). */
-std::uint32_t conflated(httpd_ws_link_t& link, std::size_t slot) {
-    std::uint32_t n = 0;
+/** @brief The counters of the open session on @p slot, read through the public per-peer
+ *         stats (the peer named `p<slot>`; slots are claimed in order). */
+tr::net::link_counters_t counters(httpd_ws_link_t& link, std::size_t slot) {
+    tr::net::link_counters_t c;
     link.enumerate_peer_stats([&](const httpd_ws_link_t::peer_stats_t& p) {
-        if (p.slot == slot) n = p.c.tx_conflated;
+        if (p.slot == slot) c = p.c;
     });
-    return n;
+    return c;
 }
 
 /** @brief Retire the link, the fake's sessions and its queue settings between cases. */
@@ -222,7 +223,18 @@ void test_a_recovered_peer_gets_the_newest_frame() {
     for (std::size_t i = 0; in_order && i < 6; ++i)
         in_order = got[i].size() == 1 && got[i][0] == tagged(i)[0];
     check(in_order, "oldest first, each one intact");
-    check_eq(conflated(*link, 0), 0, "and none was replaced");
+    check_eq(counters(*link, 0).tx_conflated, 0, "and none was replaced");
+    // The queue peak (#2464): four waited behind the wire frame, and the fifth joined them
+    // before the flush that drained them all.
+    check_eq(counters(*link, 0).tx_queue_peak, 5, "the queue peak reads 5 after it drained");
+    const auto more = tagged(6);
+    link->send(std::span<const std::byte>(more));
+    drain();
+    check_eq(counters(*link, 0).tx_queue_peak, 5, "and a frame that waits alone does not lower it");
+    fake_httpd::instance().close_session(kStalled);
+    claim(kStalled);
+    drain();
+    check_eq(counters(*link, 0).tx_queue_peak, 0, "the next session on the slot starts at 0");
 
     reset(link);
 }
@@ -267,7 +279,7 @@ void test_a_part_written_frame_is_finished_first() {
     want.insert(want.end(), b.begin(), b.end());
     check(wire == want, "the rest of A went out, then all of B: the stream still parses");
     check_eq(link->stats().sessions_condemned, 0, "no session was condemned");
-    check_eq(conflated(*link, 0), 0, "a frame part-way on the wire is never replaced");
+    check_eq(counters(*link, 0).tx_conflated, 0, "a frame part-way on the wire is never replaced");
 
     reset(link);
 }
@@ -347,7 +359,7 @@ void test_a_refused_flush_is_a_counted_drop() {
     fake_httpd::instance().set_queue_refusing(true);
     for (int i = 0; i < 16; ++i) link->send(std::span<const std::byte>(kBody));
     check_eq(link->stats().enqueue_drops - drops_before, 16, "every refused frame is counted");
-    check_eq(conflated(*link, 0), 0, "and none of them was left held to be conflated");
+    check_eq(counters(*link, 0).tx_conflated, 0, "and none of them was left held to be conflated");
     fake_httpd::instance().set_queue_refusing(false);
     const auto frame = tagged(9);
     link->send(std::span<const std::byte>(frame));
@@ -781,7 +793,7 @@ void test_one_path_still_conflates() {
     const auto got = values_on_wire(kStalled);
     check(got.size() == 2 && got[0] == std::byte{0xA3} && got[1] == std::byte{0xB1},
           "A's newest value and B's value went out, nothing else");
-    check_eq(conflated(*link, 0), 2, "the two older A values are counted on the peer");
+    check_eq(counters(*link, 0).tx_conflated, 2, "the two older A values are counted on the peer");
     check_eq(link->stats().tx_conflated, 2, "and in the link's tx_conflated");
     check_eq(link->stats().enqueue_drops, 0, "and neither is a refusal");
 
@@ -810,7 +822,7 @@ void test_one_shots_are_never_replaced() {
     for (std::size_t i = 0; in_order && i < 3; ++i)
         in_order = got[i].size() == 1 && got[i][0] == tagged(0x10 + i)[0];
     check(in_order, "all three delivered, in order");
-    check_eq(conflated(*link, 0), 0, "none conflated");
+    check_eq(counters(*link, 0).tx_conflated, 0, "none conflated");
 
     reset(link);
 }
@@ -836,6 +848,8 @@ void test_a_full_queue_is_a_counted_refusal() {
     check_eq(link->stats().enqueue_drops - drops_before, kOver,
              "every frame past the queue's depth is refused, and counted");
     check_eq(link->stats().tx_conflated, 0, "none replaced a held frame");
+    check_eq(counters(*link, 0).tx_queue_peak, httpd_ws_link_t::kTxWaitDepth,
+             "the queue peak reads the cap: the queue is what filled (#2464)");
     fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL});
     link->flush_held();
     drain();

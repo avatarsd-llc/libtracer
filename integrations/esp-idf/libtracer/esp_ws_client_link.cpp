@@ -817,6 +817,7 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     }
 #endif
     tx_drops_.store(0, std::memory_order_relaxed);
+    held_.restart_peaks();
     connected_at_us_.store(esp_timer_get_time(), std::memory_order_relaxed);
     connect_ms_.store(static_cast<std::uint32_t>(dial_us / 1000), std::memory_order_relaxed);
     reconnects_.fetch_add(1, std::memory_order_relaxed);
@@ -850,9 +851,12 @@ esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
     }
 #endif
     // Relaxed loads, one by one: none of these is used to check another, and each is
-    // written only on a failure or at a (re)connect, never per frame (#1663).
+    // written only on a failure, at a (re)connect or, for the queue peaks, when a frame has
+    // to wait (#2464), never per frame written (#1663).
     out.c.tx_drops = tx_drops_.load(std::memory_order_relaxed);
     out.c.connected_at_us = connected_at_us_.load(std::memory_order_relaxed);
+    out.c.tx_queue_peak = held_.peak_frames();
+    out.tx_queue_peak_bytes = held_.peak_bytes();
     out.reconnects = reconnects_.load(std::memory_order_relaxed);
 #ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
     out.dial_attempts = dial_attempts_.load(std::memory_order_relaxed);

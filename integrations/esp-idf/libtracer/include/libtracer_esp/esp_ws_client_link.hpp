@@ -530,6 +530,10 @@ class esp_ws_client_link_t final : public transport_t {
         std::uint32_t dial_failures = 0;
 #endif
         std::uint32_t connect_ms = 0; /**< @brief Last handshake duration, ms (0 = never). */
+        /** @brief The most bytes that waited for the peer at once on this connection (#2464):
+         *         the high-water mark of @ref tx_held_bytes, at most @ref tx_bytes, reset with
+         *         `c` at each (re)connect. `c.tx_queue_peak` is the same mark in frames. */
+        std::uint32_t tx_queue_peak_bytes = 0;
         bool up = false; /**< @brief @ref link_up at the instant of the snapshot — LIVENESS,
                           *          which is what this field always meant (#1203). */
     };
@@ -760,6 +764,10 @@ class esp_ws_client_link_t final : public transport_t {
      * written at once from the sender's own call is drawn from @ref tx_src_ directly: it is
      * the write in flight, not a waiting one. Declared before @ref egress_, which returns
      * every waiting frame here when it closes the peer.
+     *
+     * It is also where the queue's high-water marks are kept (#2464): every waiting frame is
+     * one draw here, so the frame and byte peaks are raised on the draw, by the same
+     * compare-and-swap discipline as the budget, with no lock and no clock.
      */
     class held_budget_t final : public mem::block_source_t {
        public:
@@ -771,21 +779,50 @@ class esp_ws_client_link_t final : public transport_t {
                 if (bytes > budget_ - had) return nullptr;  // had <= budget_ always
             } while (!held_.compare_exchange_weak(had, had + bytes, std::memory_order_relaxed));
             void* const p = inner_->try_alloc(bytes, align);
-            if (p == nullptr) held_.fetch_sub(bytes, std::memory_order_relaxed);
+            if (p == nullptr) {
+                held_.fetch_sub(bytes, std::memory_order_relaxed);
+                return nullptr;
+            }
+            raise(peak_bytes_, static_cast<std::uint32_t>(had + bytes));
+            raise(peak_frames_, frames_.fetch_add(1, std::memory_order_relaxed) + 1);
             return p;
         }
         void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
             inner_->release(p, bytes, align);
+            frames_.fetch_sub(1, std::memory_order_relaxed);
             held_.fetch_sub(bytes, std::memory_order_relaxed);
         }
         [[nodiscard]] std::size_t held() const noexcept {
             return held_.load(std::memory_order_relaxed);
         }
+        /** @brief The most frames waiting at once since the last @ref restart_peaks. */
+        [[nodiscard]] std::uint32_t peak_frames() const noexcept {
+            return peak_frames_.load(std::memory_order_relaxed);
+        }
+        /** @brief The most bytes waiting at once since the last @ref restart_peaks. */
+        [[nodiscard]] std::uint32_t peak_bytes() const noexcept {
+            return peak_bytes_.load(std::memory_order_relaxed);
+        }
+        /** @brief Start a connection's peaks from what is waiting now (the connect edge). */
+        void restart_peaks() noexcept {
+            peak_frames_.store(frames_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            peak_bytes_.store(static_cast<std::uint32_t>(held()), std::memory_order_relaxed);
+        }
 
        private:
+        /** @brief Raise @p peak to @p now unless a racing draw already put it higher. */
+        static void raise(std::atomic<std::uint32_t>& peak, std::uint32_t now) noexcept {
+            std::uint32_t seen = peak.load(std::memory_order_relaxed);
+            while (now > seen &&
+                   !peak.compare_exchange_weak(seen, now, std::memory_order_relaxed)) {
+            }
+        }
         mem::block_source_t* const inner_;
         const std::size_t budget_;
         std::atomic<std::size_t> held_{0};
+        std::atomic<std::uint32_t> frames_{0};      /**< @brief Frames drawn and not returned. */
+        std::atomic<std::uint32_t> peak_frames_{0}; /**< @brief @ref peak_frames. */
+        std::atomic<std::uint32_t> peak_bytes_{0};  /**< @brief @ref peak_bytes. */
     };
     held_budget_t held_;
     /** @brief The shared egress module (ADR-0087 §2, #1619): the writer role, and the rings

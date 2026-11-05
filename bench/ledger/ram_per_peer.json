@@ -171,7 +171,7 @@
       "value": 288,
       "goal": 85,
       "moved_by": "#2137 (seeded from the peer-cost study)",
-      "basis": "sizeof(httpd_ws_link_t::session_t) on riscv32: subject[128] + endpoint_str[52] + name[23] (203 B of strings), link_counters_t, the fragment assembler (#2483). Goal from #2136 user story 27."
+      "basis": "sizeof(httpd_ws_link_t::session_t) on riscv32: subject[128] + endpoint_str[52] + name[23] (203 B of strings), link_counters_t, the fragment assembler (#2483). The TX queue peak (#2464) adds 0 B: link_counters_t::tx_queue_peak fills that block's padding before connected_at_us (24 B, 48 B with traffic stats, either way), and the slot's one-byte tx_peak the padding after tx_spare_used. Goal from #2136 user story 27."
     },
     {
       "id": "client link task stack",

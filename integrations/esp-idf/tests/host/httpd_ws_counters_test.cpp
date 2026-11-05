@@ -397,13 +397,14 @@ concept has_traffic_counters = requires(counters_t c) {
 };
 
 /**
- * @brief Does @p counters_t carry the half every image keeps — the drops, and the connect
- *        stamp the auth deadline is computed from?
+ * @brief Does @p counters_t carry the half every image keeps — the drops, the TX queue peak
+ *        (#2464), and the connect stamp the auth deadline is computed from?
  */
 template <class counters_t>
 concept has_kept_counters = requires(counters_t c) {
     c.tx_drops;
     c.rx_drops;
+    c.tx_queue_peak;
     c.connected_at_us;
 };
 
