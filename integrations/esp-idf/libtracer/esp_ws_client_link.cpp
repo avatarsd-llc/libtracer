@@ -470,7 +470,10 @@ struct esp_ws_client_link_t::framing_end_t {
         // retry at once rather than a refusal to back off from (#1128).
         exchanged = true;
         if (link.rx_backend_ != nullptr) {
-            link.rx_.deliver_rope(std::move(message), *link.rx_backend_);
+            // A message no sink took (a span-only sink whose materialize the rx source
+            // refused, #2504) is a dropped_rx, as on the borrowed arm below.
+            link.drops_.count_dropped_rx(static_cast<std::size_t>(
+                !link.rx_.deliver_rope(std::move(message), *link.rx_backend_)));
             return;
         }
         const std::expected<view::view_t, view::flatten_err_t> flat = message.try_materialize(rx);
