@@ -397,7 +397,7 @@ class rope_link_t final : public rec_link_t {
             std::memcpy(seg->bytes.data(), part.data(), part.size());
             r.append(tr::view::view_t::over(std::move(seg)));
         }
-        rx_.deliver_rope(std::move(r));
+        (void)rx_.deliver_rope(std::move(r));
     }
 };
 

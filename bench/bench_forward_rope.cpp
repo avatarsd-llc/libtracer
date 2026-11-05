@@ -95,7 +95,7 @@ struct capture_transport_t : transport_t {
 struct rope_transport_t : capture_transport_t {
     [[nodiscard]] bool delivers_ropes() const override { return true; }
     /** @brief Push an inbound rope up this link's installed receiver, as a real one does. */
-    void deliver(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
+    void deliver(tr::view::rope_t frame) { (void)rx_.deliver_rope(std::move(frame)); }
 };
 
 /**

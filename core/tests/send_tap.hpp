@@ -42,7 +42,7 @@ class send_tap_t final : public net::transport_t {
     send_tap_t(net::transport_t& inner, Obs obs) : inner_(inner), obs_(std::move(obs)) {
         inner_.set_rope_receiver(
             [](void* c, view::rope_t f) {
-                static_cast<send_tap_t*>(c)->rx_.deliver_rope(std::move(f));
+                (void)static_cast<send_tap_t*>(c)->rx_.deliver_rope(std::move(f));
             },
             this);
         inner_.set_receiver(

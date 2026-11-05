@@ -31,6 +31,7 @@
 
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/receiver_slot.hpp"
 #include "libtracer/view.hpp"
 #include "test_support.hpp"
 
@@ -279,6 +280,44 @@ void test_flatten_verdicts() {
 }
 
 /**
+ * @brief `receiver_slot_t::deliver_rope` answers whether a sink took the frame (#2504), so the
+ *        link that called it counts a refused materialize on its own drop counter.
+ *
+ * Before, a span-only sink plus a refused materialize returned nothing and moved nothing: the
+ * frame vanished on every link that delivers through the slot. The answer is true for the rope
+ * tier and for a span delivery, false for the refusal and for an empty slot.
+ */
+void test_slot_names_a_refused_materialize() {
+    std::printf("receiver_slot_t::deliver_rope answers whether the frame was delivered (#2504):\n");
+    std::array<std::byte, 3> buf{std::byte{0xE0}, std::byte{0xE1}, std::byte{0xE2}};
+    const auto multi = [&] {
+        rope_t r(byte_view(buf[0]));
+        r.append(byte_view(buf[1]));
+        r.append(byte_view(buf[2]));
+        return r;
+    };
+    int spans = 0;
+    const auto on_span = [](void* c, std::span<const std::byte>) { ++*static_cast<int*>(c); };
+
+    tr::net::receiver_slot_t<> slot;
+    refusing_backend_t oom;
+    check(!slot.deliver_rope(multi(), oom), "an empty slot answers not delivered");
+
+    slot.set(on_span, &spans);
+    check(!slot.deliver_rope(multi(), oom) && spans == 0 && oom.calls() == 1,
+          "a span-only sink plus a refused materialize answers not delivered");
+    check(slot.deliver_rope(rope_t(byte_view(buf[0])), oom) && spans == 1,
+          "a single-link rope reaches the span sink borrowed and answers delivered");
+    check(slot.deliver_rope(multi()) && spans == 2,
+          "a multi-link rope materialized from a willing backend answers delivered");
+
+    int ropes = 0;
+    slot.set_rope([](void* c, rope_t) { ++*static_cast<int*>(c); }, &ropes);
+    check(slot.deliver_rope(multi(), oom) && ropes == 1 && oom.calls() == 1,
+          "the rope tier takes the frame as-is, asks no backend, and answers delivered");
+}
+
+/**
  * @brief The nothrow soft-fail growth API: an impossible count returns false (never
  *        abort()s), a normal reservation makes the following appends non-reallocating,
  *        and try_to_iovec / the tr::detail primitives behave correctly.
@@ -439,6 +478,7 @@ int main() {
     test_self_concat();
     test_accessors();
     test_flatten_verdicts();
+    test_slot_names_a_refused_materialize();
     test_nothrow_growth();
     test_link_table_source();
     return tr::testing::summary("rope");

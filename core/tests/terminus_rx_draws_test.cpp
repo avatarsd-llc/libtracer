@@ -95,7 +95,7 @@ class rec_link_t final : public transport_t {
             std::memcpy(seg->bytes.data(), frame.data() + off, n);
             r.append(tr::view::view_t::over(std::move(seg)));
         }
-        rx_.deliver_rope(std::move(r));
+        (void)rx_.deliver_rope(std::move(r));
     }
     int sent = 0;                 /**< @brief Frames the router handed down. */
     std::size_t iov_entries = 0;  /**< @brief Entries in the last frame's gather table. */

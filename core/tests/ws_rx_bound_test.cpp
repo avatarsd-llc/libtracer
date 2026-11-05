@@ -726,12 +726,13 @@ void test_backend_exhaustion_is_counted_backpressure() {
 }
 
 /** @brief A source over @p upstream that refuses, while armed, every block of exactly
- *         @ref refused_bytes: one request shape, so the refusal lands on one draw. */
+ *         @ref refused_bytes (one request shape, so the refusal lands on one draw), or every
+ *         block of at least @ref refused_from. */
 struct refuse_size_source_t final : tr::mem::block_source_t {
     explicit refuse_size_source_t(tr::mem::block_source_t& upstream) noexcept
         : block_source_t("refuse-size"), up(&upstream) {}
     void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
-        if (armed.load() && bytes == refused_bytes) {
+        if (armed.load() && (bytes == refused_bytes || bytes >= refused_from)) {
             refusals.fetch_add(1);
             return nullptr;
         }
@@ -742,6 +743,7 @@ struct refuse_size_source_t final : tr::mem::block_source_t {
     }
     tr::mem::block_source_t* up;          /**< @brief Where the granted blocks come from. */
     std::size_t refused_bytes = 0;        /**< @brief The one request size refused. */
+    std::size_t refused_from = SIZE_MAX;  /**< @brief Every request this size or wider. */
     std::atomic<bool> armed{false};       /**< @brief Whether the refusal is live. */
     std::atomic<std::size_t> refusals{0}; /**< @brief Requests refused so far. */
 };
@@ -788,6 +790,66 @@ void test_delivered_rope_table_comes_from_the_rx_source() {
     check(wait_until([&] { return sink.messages.load() == 1; }, 2s),
           "the link survived: with room, the message is delivered");
     check(sink.bytes.load() == 3 * piece.size(), "... whole");
+    ::close(cfd);
+}
+
+/** @brief A peer-named span sink that counts messages; the peer handle is not the claim. */
+struct counting_peer_sink_t {
+    counting_sink_t* inner; /**< @brief Where the count lands. */
+    /** @brief The peer receiver callable. */
+    void operator()(tr::net::peer_handle_t, std::span<const std::byte> f) const { (*inner)(f); }
+};
+
+/**
+ * @brief A span-only sink whose fragmented message the rx source refuses to materialize is a
+ *        counted `dropped_rx` (#2504), on the flat tier and the peer-named tier alike.
+ *
+ * A three-fragment message reaches a span sink as one materialized block of all three
+ * pieces, the only draw that wide: every segment holds one piece and every table is a few
+ * views. Refusing that width refuses only the materialize. `receiver_slot_t::deliver_rope`
+ * used to drop that message and move no counter.
+ */
+void test_refused_materialize_is_counted(bool peer_named) {
+    std::printf("ws server (%s) — a refused span-sink materialize is dropped_rx (#2504):\n",
+                peer_named ? "peer-named" : "flat");
+    constexpr std::size_t kPiece = 512;
+    std::vector<std::byte> slab(1u << 20);
+    tr::mem::bump_source_t bump(slab, tr::mem::null_source());
+    refuse_size_source_t gate(bump);
+    gate.refused_from = 3 * kPiece;
+    tr::mem::source_backend_t rx(gate);
+    counting_sink_t sink;
+    counting_peer_sink_t peer_sink{&sink};
+    tr::net::ws_server_transport_t server(0, {.memory = {.rx = &rx}, .peer_named = peer_named});
+    if (server.bus() != nullptr)
+        server.bus()->set_peer_receiver(peer_sink);
+    else
+        server.set_receiver(sink);
+    const int cfd = tcp_connect(server.local_port());
+    check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
+
+    const std::vector<std::byte> piece(kPiece, std::byte{0x55});
+    std::vector<std::byte> wire = masked_client_frame(ws::opcode_t::BINARY, piece, false);
+    for (std::size_t i = 1; i < 3; ++i) {
+        const std::vector<std::byte> f =
+            masked_client_frame(ws::opcode_t::CONT, piece, /*fin=*/i + 1 == 3);
+        wire.insert(wire.end(), f.begin(), f.end());
+    }
+
+    gate.armed.store(true);
+    check(write_bytes(cfd, wire), "a three-fragment message written");
+    check(wait_until([&] { return server.drop_stats().dropped_rx == 1; }, 2s),
+          "the refused materialize shed the message as dropped_rx");
+    check(gate.refusals.load() >= 1, "... the refusal came through the rx source");
+    check(sink.messages.load() == 0 && server.drop_stats().malformed_rx == 0,
+          "... nothing was delivered, and nothing is malformed");
+
+    gate.armed.store(false);
+    check(write_bytes(cfd, wire), "the same message written again");
+    check(wait_until([&] { return sink.messages.load() == 1; }, 2s),
+          "with room, the message is delivered whole");
+    check(sink.bytes.load() == 3 * kPiece && server.drop_stats().dropped_rx == 1,
+          "... byte-exact in length, and no further drop counted");
     ::close(cfd);
 }
 
@@ -893,6 +955,8 @@ int main() {
     test_effective_cap_is_the_min_of_the_two_seams();
     test_backend_exhaustion_is_counted_backpressure();
     test_delivered_rope_table_comes_from_the_rx_source();
+    test_refused_materialize_is_counted(false);
+    test_refused_materialize_is_counted(true);
     test_client_refuses_an_oversize_server_frame();
     return tr::testing::summary("ws_rx_bound");
 }

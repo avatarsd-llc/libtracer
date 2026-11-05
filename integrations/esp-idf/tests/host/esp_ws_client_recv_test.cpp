@@ -562,8 +562,11 @@ class app_source_t final : public tr::mem::block_source_t {
    public:
     app_source_t() noexcept : tr::mem::block_source_t("esp-ws-client-app") {}
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
-        if (refuse.load(std::memory_order_relaxed)) return nullptr;
+        if (refuse.load(std::memory_order_relaxed) ||
+            bytes == refuse_bytes.load(std::memory_order_relaxed))
+            return nullptr;
         served.fetch_add(1, std::memory_order_relaxed);
+        last_bytes.store(bytes, std::memory_order_relaxed);
         return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
     }
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
@@ -571,6 +574,9 @@ class app_source_t final : public tr::mem::block_source_t {
     }
     std::atomic<bool> refuse{false}; /**< @brief Answer every request with `nullptr`. */
     std::atomic<int> served{0};      /**< @brief Blocks handed out since construction. */
+    /** @brief One request size refused while set (0 = none): aims a refusal at one draw. */
+    std::atomic<std::size_t> refuse_bytes{0};
+    std::atomic<std::size_t> last_bytes{0}; /**< @brief The size of the last block served. */
 };
 
 /** @brief An OWNING sink: keeps every rope past the callback, which is the point of it. */
@@ -683,6 +689,65 @@ void test_named_rx_source_delivers_owning_ropes() {
     check_drained();
 }
 
+/** @brief A span sink that records the size of the source's last draw when it is called: the
+ *         materialize that fed it, since that draw is the last before the delivery. */
+struct draw_probe_sink_t {
+    app_source_t* src;                          /**< @brief The source being watched. */
+    std::atomic<std::size_t> calls{0};          /**< @brief Messages delivered. */
+    std::atomic<std::size_t> materialize_at{0}; /**< @brief Last draw size at the first call. */
+    /** @brief The span tier's callable. */
+    void operator()(std::span<const std::byte>) {
+        if (calls.fetch_add(1) == 0) materialize_at.store(src->last_bytes.load());
+    }
+};
+
+/**
+ * @brief #2504 — with a named `rx` source and a span-only sink, a fragmented message whose
+ *        materialize the source refuses is a counted `dropped_rx`, not a silent loss.
+ *
+ * The first message is delivered unarmed and reveals the materialize's request size (the last
+ * draw before the sink runs). The same message is then sent with exactly that size refused.
+ */
+void test_refused_materialize_is_counted() {
+    std::printf("#2504 a span sink's refused materialize on the owning arm is counted:\n");
+    fake_ws::reset();
+    app_source_t src;
+    tr::mem::source_backend_t backend(src);
+    draw_probe_sink_t sink{&src};
+    {
+        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
+                                           tr::net::esp_ws_client_config_t{
+                                               .rx_bytes = 2048,
+                                               .memory = {.rx = &backend},
+                                           });
+        link.start_receiving();
+        check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
+        link.set_receiver(sink);
+        const auto message = [] {
+            return std::vector<fake_ws::frame_t>{
+                fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, false, 300, 0x10),
+                fake_ws::make_frame(tr::net::ws::opcode_t::CONT, false, 300, 0x20),
+                fake_ws::make_frame(tr::net::ws::opcode_t::CONT, true, 300, 0x30)};
+        };
+        fake_ws::push_frames(message());
+        check(wait_until([&] { return sink.calls.load() == 1; }, 5s),
+              "an unarmed fragmented message reaches the span sink");
+        check(link.drop_stats().dropped_rx == 0, "with nothing dropped");
+
+        src.refuse_bytes.store(sink.materialize_at.load());
+        fake_ws::push_frames(message());
+        check(wait_until([&] { return link.drop_stats().dropped_rx == 1; }, 5s),
+              "a refused materialize is a COUNTED dropped_rx");
+        check(sink.calls.load() == 1, "and nothing was delivered for it");
+
+        src.refuse_bytes.store(0);
+        fake_ws::push_frames(message());
+        check(wait_until([&] { return sink.calls.load() == 2; }, 5s),
+              "the next message is delivered once the source has room again");
+    }
+    check_drained();
+}
+
 /** @brief #1661, #2265 — each send's frame is drawn from `memory.io`; a refusal drops that
  *         frame, counted, and leaves the connection up. */
 void test_named_io_store_backs_the_send_frame() {
@@ -739,6 +804,7 @@ int main() {
     test_drop_stats_projects_through_the_base_interface();
     test_default_memory_is_borrowed();
     test_named_rx_source_delivers_owning_ropes();
+    test_refused_materialize_is_counted();
     test_named_io_store_backs_the_send_frame();
     // Defensive: `main` must never return under a detached orphan still inside the fake,
     // whose static state is destroyed on the way out (#1456).

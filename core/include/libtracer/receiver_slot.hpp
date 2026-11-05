@@ -153,20 +153,29 @@ class receiver_slot_t {
      * had a name, its empty view was handed to the span sink as though those were
      * the frame's bytes — a truncated frame reported as a complete one.
      *
+     * The slot keeps no counter: it answers whether a sink took the frame, and the
+     * calling link counts a `false` on its own drop counter (#2504). The answer is
+     * taken from the same snapshot the delivery used, so a sink swapped after a
+     * caller's own @ref has_rope / @ref has_any query is still answered honestly.
+     *
      * @param tag     The transport's delivery tags (the `Tag...` pack).
      * @param frame   The reassembled frame as the rope it already is.
      * @param backend Where a span-only fallback materializes a multi-link rope.
+     * @return True iff a sink received the frame; false for an empty slot or a
+     *         refused materialize, both of them a drop the caller names.
      */
-    void deliver_rope(Tag... tag, view::rope_t frame,
-                      mem::mem_backend_t& backend = mem::heap_backend()) const {
+    [[nodiscard]] bool deliver_rope(Tag... tag, view::rope_t frame,
+                                    mem::mem_backend_t& backend = mem::heap_backend()) const {
         const snapshot_t s = snapshot();
         if (s.rope_fn != nullptr) {
             s.rope_fn(s.rope_ctx, tag..., std::move(frame));
-        } else if (s.span_fn != nullptr) {
-            const std::expected<view::view_t, view::flatten_err_t> flat =
-                frame.try_materialize(backend);
-            if (flat) s.span_fn(s.span_ctx, tag..., flat->bytes());
+            return true;
         }
+        if (s.span_fn == nullptr) return false;
+        const std::expected<view::view_t, view::flatten_err_t> flat =
+            frame.try_materialize(backend);
+        if (flat) s.span_fn(s.span_ctx, tag..., flat->bytes());
+        return flat.has_value();
     }
 
     /**

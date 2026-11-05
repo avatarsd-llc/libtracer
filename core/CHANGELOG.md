@@ -16,6 +16,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed (breaking)
 
+- **`receiver_slot_t::deliver_rope` returns `[[nodiscard]] bool` (#2504)**: true iff a sink
+  received the frame, false for an empty slot or a span-only sink whose materialize the backend
+  refused. The slot still keeps no counter; the calling link counts a `false` on its own drop
+  counter. A caller that ignored the old `void` result must now consume it (a test fixture
+  writes `(void)`). `bus_slot_server_t::deliver_to_peer_rope` forwards the same answer.
+  Before, that refusal dropped the frame and moved no counter on any link: `ws_server_transport_t`,
+  `ws_client_transport_t` and `can_transport_t` now count it on their tally's `dropped_rx`, and
+  `self_heal_link_t`'s engine tally now carries `dropped_rx` too (the class was off), added to
+  `drop_stats().dropped_rx`.
 - **One node-level door for the application's clock (#2481).** `transport_vertex_t::sweep(now,
   deadline)` hands the application's `now` and its one deadline to every connection's owned
   link, inside one router frame bracket, and returns the earliest next-due time over all of them

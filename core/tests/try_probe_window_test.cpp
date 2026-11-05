@@ -277,7 +277,7 @@ class counting_link_t final : public transport_t {
     }
     void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
     /** @brief Push @p frame up the ROPE tier — the second terminus (#1570 case (c)). */
-    void inject_rope(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
+    void inject_rope(tr::view::rope_t frame) { (void)rx_.deliver_rope(std::move(frame)); }
     std::size_t take() {
         const std::lock_guard lock(m_);
         return std::exchange(frames_, 0u);

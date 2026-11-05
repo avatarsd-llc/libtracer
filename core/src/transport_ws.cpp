@@ -190,14 +190,16 @@ struct ws_server_transport_t::framing_t {
      * needs is stamped here instead (#375 Part 2, ADR-0082): the session's handle, on the
      * poll thread, immediately before the delivery that consumes it, and cleared once it is
      * handed up, so the field names a session only while that session's frame is being
-     * delivered (#1915).
+     * delivered (#1915). A message no sink took (a refused materialize, #2504) is a
+     * `dropped_rx`.
      */
     void hand_up(tr::view::rope_t message) const {
         link.delivering_ = s.handle;
-        if (link.bus_mode())
-            link.deliver_to_peer_rope(s.handle, std::move(message), *link.backend_);
-        else
-            link.rx_.deliver_rope(std::move(message), *link.backend_);
+        const bool delivered =
+            link.bus_mode()
+                ? link.deliver_to_peer_rope(s.handle, std::move(message), *link.backend_)
+                : link.rx_.deliver_rope(std::move(message), *link.backend_);
+        link.drops_.count_dropped_rx(static_cast<std::size_t>(!delivered));
         link.delivering_ = {};
     }
 };
@@ -709,9 +711,11 @@ struct ws_client_transport_t::framing_t {
 
     /** @brief Hand one whole message up: a single-link rope reaches a span-only sink
      *         borrowed, a fragmented one materializes once, in the slot, from this link's rx
-     *         source. */
+     *         source. A message no sink took (a refused materialize, #2504) is a
+     *         `dropped_rx`. */
     void hand_up(tr::view::rope_t message) const {
-        link.rx_.deliver_rope(std::move(message), *link.backend_);
+        link.drops_.count_dropped_rx(
+            static_cast<std::size_t>(!link.rx_.deliver_rope(std::move(message), *link.backend_)));
     }
 };
 

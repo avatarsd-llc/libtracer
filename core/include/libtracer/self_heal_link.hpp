@@ -225,8 +225,9 @@ class self_heal_link_t final : public transport_t {
     /** @brief Runtime liveness (#1059): true iff the engine is `UP`. */
     [[nodiscard]] bool link_up() const noexcept override;
 
-    /** @brief The CURRENT socket's counters plus the engine's own fail-fast drops
-     *         (`dropped_tx`). A healed link's previous socket takes its counts with it. */
+    /** @brief The CURRENT socket's counters plus the engine's own drops: its fail-fast sends
+     *         (`dropped_tx`) and the frames its slot could not hand up (`dropped_rx`, #2504).
+     *         A healed link's previous socket takes its counts with it. */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override;
 
     /**
@@ -420,9 +421,10 @@ class self_heal_link_t final : public transport_t {
      *        DIAL is cold — the rv32 libatomic call it costs is paid once per reconnect.
      */
     std::atomic<std::uint64_t> gen_ctr_{0};
-    /** @brief The engine's own fail-fast drops (#2482): outbound only, added to the current
-     *         socket's counters by @ref drop_stats. */
-    drop_tally_t<drop_classes_t{.dropped_rx = false, .malformed_rx = false}> engine_drops_;
+    /** @brief The engine's own drops (#2482): its fail-fast sends, and the frames its slot
+     *         could not hand up — a span-only sink whose materialize was refused, or no sink
+     *         (#2504). Added to the current socket's counters by @ref drop_stats. */
+    drop_tally_t<drop_classes_t{.malformed_rx = false}> engine_drops_;
 };
 
 }  // namespace tr::net

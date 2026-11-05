@@ -152,7 +152,7 @@ class fake_rope_link_t : public transport_t {
         sent_.emplace_back(frame.begin(), frame.end());
     }
     [[nodiscard]] bool delivers_ropes() const override { return true; }
-    void inject(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
+    void inject(tr::view::rope_t frame) { (void)rx_.deliver_rope(std::move(frame)); }
     std::vector<std::vector<std::byte>>& sent() { return sent_; }
 
    private:

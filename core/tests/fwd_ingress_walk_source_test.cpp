@@ -130,7 +130,7 @@ class rec_link_t : public transport_t {
             std::memcpy(seg->bytes.data(), frame.data() + off, n);
             r.append(tr::view::view_t::over(std::move(seg)));
         }
-        rx_.deliver_rope(std::move(r));
+        (void)rx_.deliver_rope(std::move(r));
     }
     std::vector<std::vector<std::byte>> sent; /**< @brief Frames the router handed down. */
 

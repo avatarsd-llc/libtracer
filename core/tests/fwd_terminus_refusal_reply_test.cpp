@@ -208,7 +208,7 @@ class fixed_link_t : public transport_t {
     }
     [[nodiscard]] bool delivers_ropes() const override { return ropes_; }
     /** @brief Push a rope up as a receive (the rope-tier ingress). */
-    void inject(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
+    void inject(tr::view::rope_t frame) { (void)rx_.deliver_rope(std::move(frame)); }
     /** @brief The last recorded frame. */
     [[nodiscard]] std::span<const std::byte> frame() const {
         return std::span<const std::byte>(last.data(), len);
