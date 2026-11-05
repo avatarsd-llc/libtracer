@@ -22,6 +22,7 @@
 #include <string_view>
 #include <vector>
 
+#include "graph_children_test_door.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tlv_view.hpp"
 #include "libtracer/tracer.hpp"
@@ -77,8 +78,8 @@ void assert_parent(graph_t& g, std::string_view parent) {
         return;
     }
 
-    const auto materialized = g.read_children_materialized(*h);  // the flat oracle
-    const auto folded = g.read_children_folded(*h);              // the folded projection
+    const auto materialized = tr::testing::read_children_materialized(g, *h);  // the flat oracle
+    const auto folded = g.read_children_folded(*h);  // the folded projection
     if (!materialized || !folded) {
         check(materialized.has_value(), "materialized :children read succeeds");
         check(folded.has_value(), "folded :children read succeeds");
@@ -184,13 +185,13 @@ void test_hidden_child_is_not_a_member() {
     check(g.find(path_t("/h/secret").key()).has_value(), "the child to hide registers normally");
     (void)g.register_vertex(path_t("/h/also"), role_t::STORED_VALUE);
 
-    const auto before = g.read_children_materialized(*g.find(path_t("/h").key()));
+    const auto before = tr::testing::read_children_materialized(g, *g.find(path_t("/h").key()));
     check(before.has_value() && walk_point_children((*before)->rope()) == 3,
           "three members before hiding");
 
     check(g.hide_from_enumeration(secret).has_value(), "the child is hidden");
     assert_parent(g, "/h");  // the differential: both doors, same bytes
-    const auto after = g.read_children_materialized(*g.find(path_t("/h").key()));
+    const auto after = tr::testing::read_children_materialized(g, *g.find(path_t("/h").key()));
     check(after.has_value() && walk_point_children((*after)->rope()) == 2,
           "the hidden child is gone from the listing — two members remain");
 
@@ -214,7 +215,7 @@ void test_retire_clears_the_hide_bit() {
         g.register_vertex(path_t("/r/c"), role_t::STORED_VALUE);
     check(g.find(path_t("/r/c").key()).has_value() && g.hide_from_enumeration(hidden).has_value(),
           "a child is registered and hidden");
-    const auto empty = g.read_children_materialized(*g.find(path_t("/r").key()));
+    const auto empty = tr::testing::read_children_materialized(g, *g.find(path_t("/r").key()));
     check(empty.has_value() && walk_point_children((*empty)->rope()) == 0,
           "the parent lists no members while its only child is hidden");
 
@@ -226,7 +227,7 @@ void test_retire_clears_the_hide_bit() {
 
     (void)g.register_vertex(path_t("/r/c"), role_t::STORED_VALUE);
     check(g.find(path_t("/r/c").key()).has_value(), "the key is registered again — a NEW occupant");
-    const auto listed = g.read_children_materialized(*g.find(path_t("/r").key()));
+    const auto listed = tr::testing::read_children_materialized(g, *g.find(path_t("/r").key()));
     check(listed.has_value() && walk_point_children((*listed)->rope()) == 1,
           "the new occupant is LISTED: the hide bit belonged to the retired one");
 }

@@ -183,7 +183,6 @@ class graph_t {
 
     // composed reads — they build a value, so they return a reference to a fresh block
     result_t<value_ref_t> read_children_folded(vertex_handle_t) const;
-    result_t<value_ref_t> read_children_materialized(vertex_handle_t) const;
     result_t<value_ref_t> read_subtree_folded(vertex_handle_t, ...) const;
 
     // field plane (`:`-addressed)
@@ -302,7 +301,7 @@ The rule, and the reason the API is not uniform:
 > **A read of a published value returns a reference to it; a read that composes a new
 > value returns the value.**
 
-`read_children_folded`, `read_children_materialized` and `read_subtree_folded` compose a
+`read_children_folded` and `read_subtree_folded` compose a
 tree no vertex ever published, so there is no object to reference and they still return
 `result_t<rope_t>`. The field-read overload likewise serves a control TLV as a `rope_t`.
 The rejected alternative was a uniform `rope_t` return: it makes every read of a shared
