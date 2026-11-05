@@ -71,9 +71,9 @@ int measured_depth(const tr::wire::tlv_t& t) {
 /** @brief A walk sink that models nothing — drives grammar::walk as a validator. */
 struct null_sink_t {
     /** @brief A structured TLV opened — nothing to model. */
-    void on_open(const tr::wire::grammar::header_t&, const tr::wire::grammar::span_cursor&) {}
+    void on_open(const tr::wire::grammar::header_t&, const tr::wire::grammar::span_cursor_t&) {}
     /** @brief An opaque TLV visited — nothing to model. */
-    void on_leaf(const tr::wire::grammar::header_t&, const tr::wire::grammar::span_cursor&) {}
+    void on_leaf(const tr::wire::grammar::header_t&, const tr::wire::grammar::span_cursor_t&) {}
     /** @brief The open node's children completed — nothing to seal. */
     void on_close() {}
 };
@@ -84,10 +84,10 @@ struct null_sink_t {
  */
 std::expected<void, tr::wire::err_t> walk_with_budget(
     const std::vector<std::byte>& bytes,
-    std::span<tr::wire::grammar::walk_frame_t<tr::wire::grammar::span_cursor>> slots) {
+    std::span<tr::wire::grammar::walk_frame_t<tr::wire::grammar::span_cursor_t>> slots) {
     null_sink_t sink;
-    tr::wire::grammar::walk_stack_t<tr::wire::grammar::span_cursor> stack(slots, nullptr);
-    return tr::wire::grammar::walk(tr::wire::grammar::span_cursor{bytes}, sink, stack);
+    tr::wire::grammar::walk_stack_t<tr::wire::grammar::span_cursor_t> stack(slots, nullptr);
+    return tr::wire::grammar::walk(tr::wire::grammar::span_cursor_t{bytes}, sink, stack);
 }
 
 /**
@@ -137,7 +137,7 @@ int main() {
     // with TLV_NESTING_TOO_DEEP ("exceeds this receiver's decode resources").
     {
         constexpr int kBudget = 4;
-        grammar::walk_frame_t<grammar::span_cursor> slots[kBudget];
+        grammar::walk_frame_t<grammar::span_cursor_t> slots[kBudget];
         const std::vector<std::byte> fits = encode(build_nested(kBudget));
         const std::vector<std::byte> deeper = encode(build_nested(kBudget + 1));
         check(walk_with_budget(fits, slots).has_value(),

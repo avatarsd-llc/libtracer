@@ -4,7 +4,7 @@
  *        transports), the point of extracting it from fwd_router.cpp (the length_prefix_framer
  *        precedent): first-dst-seg / op / control peeks over BOTH cursors (contiguous span +
  *        adversarially split rope), the shrunk-dst / grown-src head rebuild proved BYTE-EXACT
- *        against a reference re-encode, stack_writer clamp-to-empty overflow, and malformed
+ *        against a reference re-encode, stack_writer_t clamp-to-empty overflow, and malformed
  *        rejects.
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -44,8 +44,8 @@ namespace {
 using tr::graph::fwd_op_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
-using tr::wire::grammar::rope_cursor;
-using tr::wire::grammar::span_cursor;
+using tr::wire::grammar::rope_cursor_t;
+using tr::wire::grammar::span_cursor_t;
 
 using tr::testing::check;
 using tr::testing::make_value;
@@ -170,7 +170,7 @@ int main() {
     {
         const bytes_t frame =
             b_fwd(fwd_op_t::WRITE, b_path({"child", "x"}), b_path({"c"}), {}, payload);
-        const span_cursor cur{frame};
+        const span_cursor_t cur{frame};
         const auto seg = first_dst_seg(cur);
         check(seg.has_value(), "first-dst-seg peek: a structured FWD yields the segment window");
         const std::string_view want = "child";
@@ -184,12 +184,12 @@ int main() {
     {
         const bytes_t frame =
             b_fwd(fwd_op_t::READ, b_path({"hop", "leaf"}), b_path({}), {}, payload);
-        const auto span_seg = first_dst_seg(span_cursor{frame});
+        const auto span_seg = first_dst_seg(span_cursor_t{frame});
         bool all_equal = span_seg.has_value();
         for (std::size_t cut = 1; cut + 1 < frame.size() && all_equal; ++cut) {
             const std::size_t cuts[] = {cut};
             const tr::view::rope_t r = rope_split(frame, cuts);
-            const auto rope_seg = first_dst_seg(rope_cursor{r});
+            const auto rope_seg = first_dst_seg(rope_cursor_t{r});
             all_equal = rope_seg == span_seg;
         }
         check(all_equal, "first-dst-seg peek: every rope split reads the same window as the span");
@@ -199,7 +199,7 @@ int main() {
     {
         const bytes_t frame =
             b_fwd(fwd_op_t::WRITE, b_path({"child", "x"}), b_path({"c"}), {}, payload);
-        const auto out = forward_bytes(span_cursor{frame}, "in");
+        const auto out = forward_bytes(span_cursor_t{frame}, "in");
         const bytes_t want =
             b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"in", "c"}), {}, payload);
         check(out.has_value(), "rebuild: a forwardable FWD rebuilds");
@@ -211,7 +211,7 @@ int main() {
     {
         const bytes_t frame =
             b_fwd(fwd_op_t::REPLY, b_path({"back", "home"}), b_path({}), {}, payload);
-        const auto out = forward_bytes(span_cursor{frame}, "in");
+        const auto out = forward_bytes(span_cursor_t{frame}, "in");
         const bytes_t want = b_fwd(fwd_op_t::REPLY, b_path({"home"}), b_path({"in"}), {}, payload);
         check(out == want, "rebuild: a REPLY shrinks dst and grows src by the NAME run");
     }
@@ -222,7 +222,7 @@ int main() {
         tr::wire::emit_tlv(sel, type_t::FIELD, opt_t{.pl = true}, b_name("mode"));
         const bytes_t frame =
             b_fwd(fwd_op_t::READ, b_path({"child", "x"}), b_path({"c"}), sel, payload);
-        const auto out = forward_bytes(span_cursor{frame}, "up");
+        const auto out = forward_bytes(span_cursor_t{frame}, "up");
         const bytes_t want =
             b_fwd(fwd_op_t::READ, b_path({"x"}), b_path({"up", "c"}), sel, payload);
         check(out == want, "rebuild: the FIELD selector is carried byte-identically");
@@ -231,7 +231,7 @@ int main() {
     // 3d. A single-segment dst shrinks to an empty PATH (the next hop is the terminus).
     {
         const bytes_t frame = b_fwd(fwd_op_t::WRITE, b_path({"child"}), b_path({}), {}, payload);
-        const auto out = forward_bytes(span_cursor{frame}, "in");
+        const auto out = forward_bytes(span_cursor_t{frame}, "in");
         const bytes_t want = b_fwd(fwd_op_t::WRITE, b_path({}), b_path({"in"}), {}, payload);
         check(out == want, "rebuild: a single-segment dst shrinks to an empty PATH");
     }
@@ -243,12 +243,12 @@ int main() {
         tr::wire::emit_tlv(sel, type_t::FIELD, opt_t{.pl = true}, b_name("f"));
         const bytes_t frame =
             b_fwd(fwd_op_t::WRITE, b_path({"child", "leaf"}), b_path({"c0"}), sel, payload);
-        const auto span_out = forward_bytes(span_cursor{frame}, "bus7");
+        const auto span_out = forward_bytes(span_cursor_t{frame}, "bus7");
         bool all_equal = span_out.has_value();
         for (std::size_t cut = 1; cut + 1 < frame.size() && all_equal; ++cut) {
             const std::size_t cuts[] = {cut};
             const tr::view::rope_t r = rope_split(frame, cuts);
-            all_equal = forward_bytes(rope_cursor{r}, "bus7") == span_out;
+            all_equal = forward_bytes(rope_cursor_t{r}, "bus7") == span_out;
         }
         check(all_equal, "rebuild: every rope split gathers byte-identical egress");
     }
@@ -262,7 +262,7 @@ int main() {
         constexpr std::uint64_t kNs = 0x1122334455667788ull;
         const bytes_t frame = with_ts(
             b_fwd(fwd_op_t::WRITE, b_path({"child", "x"}), b_path({"c"}), {}, payload), kNs);
-        const auto out = forward_bytes(span_cursor{frame}, "in");
+        const auto out = forward_bytes(span_cursor_t{frame}, "in");
         const bytes_t want =
             with_ts(b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"in", "c"}), {}, payload), kNs);
         check(out == want, "rebuild: a TF=0 origin stamp survives the hop byte-exact");
@@ -271,14 +271,14 @@ int main() {
         // strip_at, the rebuild reuses them) must preserve the stamp identically — the peek
         // now carries the outer opt bits forward for exactly this.
         tr::net::fwd_pre_t pre;
-        check(opens_path(span_cursor{frame}, pre), "stamped frame: dst peek accepts");
+        check(opens_path(span_cursor_t{frame}, pre), "stamped frame: dst peek accepts");
         pre.strip_at = pre.seg0_off + pre.seg0_len;  // consume the one leading segment
-        const auto pre_r = tr::net::rebuild_fwd_forward(span_cursor{frame}, pre,
+        const auto pre_r = tr::net::rebuild_fwd_forward(span_cursor_t{frame}, pre,
                                                         std::span<const std::byte>{}, "in");
         check(pre_r.has_value() && pre_r->ok(), "stamped frame: the pre-carried rebuild succeeds");
         if (pre_r) {
             bytes_t pre_out;
-            pre_r->gather(span_cursor{frame}, [&](std::span<const std::byte> s) {
+            pre_r->gather(span_cursor_t{frame}, [&](std::span<const std::byte> s) {
                 pre_out.insert(pre_out.end(), s.begin(), s.end());
             });
             check(pre_out == want, "rebuild(pre): the peek-carried opt preserves the stamp too");
@@ -289,7 +289,7 @@ int main() {
         for (std::size_t cut = 1; cut + 1 < frame.size() && all_equal; ++cut) {
             const std::size_t cuts[] = {cut};
             const tr::view::rope_t r = rope_split(frame, cuts);
-            all_equal = forward_bytes(rope_cursor{r}, "in") == out;
+            all_equal = forward_bytes(rope_cursor_t{r}, "in") == out;
         }
         check(all_equal, "rebuild: every rope split gathers the same stamped egress");
     }
@@ -306,7 +306,7 @@ int main() {
         dec->opt.cr = true;  // CRC-32C over body ++ ts, computed by encode
         const bytes_t frame = tr::wire::encode(*dec);
         check(!frame.empty(), "CRC+TS source frame re-encodes");
-        const auto out = forward_bytes(span_cursor{frame}, "in");
+        const auto out = forward_bytes(span_cursor_t{frame}, "in");
         const bytes_t want =
             with_ts(b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"in", "c"}), {}, payload),
                     static_cast<std::uint64_t>(kNs));
@@ -317,21 +317,22 @@ int main() {
     {
         const bytes_t good = b_fwd(fwd_op_t::WRITE, b_path({"a", "b"}), b_path({}), {}, payload);
         const bytes_t truncated(good.begin(), good.begin() + 3);
-        check(!forward_bytes(span_cursor{truncated}, "in").has_value(),
+        check(!forward_bytes(span_cursor_t{truncated}, "in").has_value(),
               "reject: a truncated frame");
-        check(!forward_bytes(span_cursor{b_path({"a"})}, "in").has_value(),
+        check(!forward_bytes(span_cursor_t{b_path({"a"})}, "in").has_value(),
               "reject: a non-FWD frame");
         bytes_t no_dst_body = b_op(fwd_op_t::WRITE);  // FWD{ op, VALUE } — dst is not a PATH
         append(no_dst_body, payload);
         bytes_t no_dst;
         tr::wire::emit_tlv(no_dst, type_t::FWD, opt_t{.pl = true}, no_dst_body);
-        check(!forward_bytes(span_cursor{no_dst}, "in").has_value(),
+        check(!forward_bytes(span_cursor_t{no_dst}, "in").has_value(),
               "reject: child[1] is not a dst PATH");
         bytes_t no_src_body = b_op(fwd_op_t::WRITE);  // FWD{ op, dst } — src PATH missing
         append(no_src_body, b_path({"a"}));
         bytes_t no_src;
         tr::wire::emit_tlv(no_src, type_t::FWD, opt_t{.pl = true}, no_src_body);
-        check(!forward_bytes(span_cursor{no_src}, "in").has_value(), "reject: a missing src PATH");
+        check(!forward_bytes(span_cursor_t{no_src}, "in").has_value(),
+              "reject: a missing src PATH");
         // dst record[0] is the RFC-0018 §5.4 ESCAPE, not a literal segment — the packed
         // successor of "the first child is a VALUE, not a NAME". Nothing mints an escape,
         // and an address that LEADS with one names no transport child here, so the gate
@@ -346,11 +347,11 @@ int main() {
         // address I can descend". `rebuild_fwd_forward` is frame-path context and steps over
         // an escape by design (§5.4), so a frame that reaches it has already been routed —
         // asserting a refusal THERE would put the key-context rule on the relay path.
-        check(!first_dst_seg(span_cursor{frame}).has_value(),
+        check(!first_dst_seg(span_cursor_t{frame}).has_value(),
               "reject: a dst whose FIRST record is the len==0 escape names no child");
         {
             tr::net::fwd_pre_t esc_pre;
-            check(tr::net::peek_fwd_dst_any(span_cursor{frame}, esc_pre) ==
+            check(tr::net::peek_fwd_dst_any(span_cursor_t{frame}, esc_pre) ==
                       tr::net::fwd_dst_kind_t::PATH_ESCAPE,
                   "reject: the dst gate answers PATH_ESCAPE, never the descent's PATH");
             check(esc_pre.seg0_off == 0 && esc_pre.seg0_len == 0,
@@ -365,17 +366,17 @@ int main() {
         (void)tr::wire::emit_path_segment(skip_body, "sensor");
         const bytes_t skip_dst = tr::testing::b_path_body(skip_body);
         const bytes_t skip_frame = b_fwd(fwd_op_t::WRITE, skip_dst, b_path({}), {}, payload);
-        check(first_dst_seg(span_cursor{skip_frame}).has_value(),
+        check(first_dst_seg(span_cursor_t{skip_frame}).has_value(),
               "an escape BEHIND the leading segment leaves the frame routable");
         {
             // The cursor is NAMED, not a temporary: `dst_seg_walk_t` borrows it and reads
             // through it on every `at()`, unlike the peek above, which consumes its cursor
             // within the call. (Its deleted rvalue constructors now refuse a temporary
             // outright — this line is what taught them to.)
-            const span_cursor skip_cur{skip_frame};
+            const span_cursor_t skip_cur{skip_frame};
             tr::net::fwd_pre_t pre;
             check(opens_path(skip_cur, pre), "...and the dst window still opens");
-            tr::net::dst_seg_walk_t<span_cursor> walk(skip_cur, pre);
+            tr::net::dst_seg_walk_t<span_cursor_t> walk(skip_cur, pre);
             const auto s0 = walk.at(0);
             const auto s1 = walk.at(1);
             check(s0 && s0->second == 2, "segment 0 is the two-byte literal `in`");
@@ -385,42 +386,42 @@ int main() {
         }
         // An empty dst PATH is not forwardable either.
         const bytes_t empty_dst = b_fwd(fwd_op_t::WRITE, b_path({}), b_path({}), {}, payload);
-        check(!first_dst_seg(span_cursor{empty_dst}).has_value(),
+        check(!first_dst_seg(span_cursor_t{empty_dst}).has_value(),
               "reject: an empty dst PATH yields no segment window");
     }
 
     // 5. read_fwd_header — absolute offsets; out-of-range position rejected.
     {
         const bytes_t frame = b_fwd(fwd_op_t::READ, b_path({"a"}), b_path({}));
-        const auto h = tr::net::read_fwd_header(span_cursor{frame}, 0);
+        const auto h = tr::net::read_fwd_header(span_cursor_t{frame}, 0);
         check(
             h && h->type == type_t::FWD && h->total == frame.size() && h->body_off == h->header_len,
             "read_fwd_header: absolute body_off + total over the whole frame");
-        const auto op = tr::net::read_fwd_header(span_cursor{frame}, h->body_off);
+        const auto op = tr::net::read_fwd_header(span_cursor_t{frame}, h->body_off);
         check(op && op->type == type_t::VALUE && op->body_off == h->body_off + op->header_len,
               "read_fwd_header: a child header reads at its absolute offset");
-        check(!tr::net::read_fwd_header(span_cursor{frame}, frame.size() + 1).has_value(),
+        check(!tr::net::read_fwd_header(span_cursor_t{frame}, frame.size() + 1).has_value(),
               "read_fwd_header: a past-the-end position yields nullopt");
     }
 
-    // 6. stack_writer — clamp-to-empty overflow, never an overrun; ll auto-widening.
+    // 6. stack_writer_t — clamp-to-empty overflow, never an overrun; ll auto-widening.
     {
-        tr::net::stack_writer<8> w;
+        tr::net::stack_writer_t<8> w;
         w.header(type_t::FWD, 4);  // 4 bytes — fits
-        check(w.ok() && w.span().size() == 4, "stack_writer: a fitting header is written");
+        check(w.ok() && w.span().size() == 4, "stack_writer_t: a fitting header is written");
         // A runtime-opaque length (volatile) keeps GCC from forking the guarded
         // overflow branch into a -Warray-bounds false positive.
         volatile std::size_t over_len = 19;
         const std::string overflow_name(over_len, 'x');
         w.path_seg(overflow_name);  // 4 + 1 + 19 > 8 — clamps
-        check(!w.ok() && w.span().empty(), "stack_writer: overflow clamps to an empty span");
+        check(!w.ok() && w.span().empty(), "stack_writer_t: overflow clamps to an empty span");
 
-        tr::net::stack_writer<8> wide;
+        tr::net::stack_writer_t<8> wide;
         wide.header(type_t::FWD, 0x10000);  // body > 0xFFFF => the 6-byte LL header
         check(wide.ok() && wide.span().size() == 6 &&
                   std::to_integer<std::uint8_t>(wide.span()[2]) == 0x00 &&
                   std::to_integer<std::uint8_t>(wide.span()[4]) == 0x01,
-              "stack_writer: an oversize body auto-widens to the u32 LL header");
+              "stack_writer_t: an oversize body auto-widens to the u32 LL header");
     }
 
     return tr::testing::summary("fwd_frame_view");

@@ -824,7 +824,7 @@ class fwd_router_t {
      * the peer's @p peer handle, and the router runs that peer's departure: it evicts every
      * edge and pending AWAIT filed under the peer, retires the peer's session anchor if the
      * peer still holds its slot, and drops its cached link token. A CAN peer's handle is
-     * `{node id, transport_can::kAnnouncedPeerGeneration}`, the one its frames arrive under.
+     * `{node id, can_transport_t::kAnnouncedPeerGeneration}`, the one its frames arrive under.
      *
      * Calling it for a peer that already left, or never subscribed, evicts nothing and is
      * safe. The calling discipline is @ref link_down's: callers hold no transport-internal
@@ -1376,7 +1376,7 @@ class fwd_router_t {
      * subview of it (refcount share, zero copy) under the vertex's
      * `share_hint` and the build's block source. A multi-link rope routes a FORWARD hop
      * directly over the rope cursor (ADR-0053 ④b): the dispatch offsets are read
-     * through the link-walking @ref wire::grammar::rope_cursor and the egress
+     * through the link-walking @ref wire::grammar::rope_cursor_t and the egress
      * scatter-gathers the untouched links — no flatten. Only a terminus / reply /
      * control frame, which still needs a contiguous decode (the rope-aware sink is
      * the migration ⑤/⑥ follow-on), pays the one flatten fallback.
@@ -1628,9 +1628,9 @@ class fwd_router_t {
      * Consumes the `dst` records @p pre names (`strip_at`), prepends the inbound link's mount
      * path to `src` (unless a REPLY), and scatter-gather-sends onward via @p child. @p child
      * is the transport the routing decision already resolved to. Templated over the grammar
-     * `Cursor` (ADR-0053 ④b): a @ref wire::grammar::span_cursor reads a contiguous frame
+     * `Cursor` (ADR-0053 ④b): a @ref wire::grammar::span_cursor_t reads a contiguous frame
      * (byte-identical to the pre-rope path, zero heap — a stack `iov` array), a @ref
-     * wire::grammar::rope_cursor reads a scatter-gather frame (the egress gathers each region's
+     * wire::grammar::rope_cursor_t reads a scatter-gather frame (the egress gathers each region's
      * per-link sub-spans into a
      * @ref mem::block_array_t drawn from the injected `rx_` — still no payload copy, and
      * exhaustion DROPS the frame rather than throwing, matching the reply path's own

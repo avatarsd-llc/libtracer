@@ -167,7 +167,7 @@ quic_transport_t::quic_transport_t(std::string_view peer_host, std::uint16_t pee
     i.tx_src = &config.memory.io_or_default();
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = config.memory.rx;
-    i.max_frame = length_prefix_framer::configured_cap(config.max_frame);  // tighten-only (#1035)
+    i.max_frame = length_prefix_framer_t::configured_cap(config.max_frame);  // tighten-only (#1035)
     // Departure seam (RFC-0009 §D extended to peer departure): wire the base's
     // connection-down / one-peer replacement harvest to this transport_t's flat
     // link-down notifier. quic is point-to-point — one peer at a time — so a
@@ -196,7 +196,7 @@ quic_transport_t::quic_transport_t(std::uint16_t bind_port, std::string_view cer
     i.tx_src = &config.memory.io_or_default();
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = config.memory.rx;
-    i.max_frame = length_prefix_framer::configured_cap(config.max_frame);  // tighten-only (#1035)
+    i.max_frame = length_prefix_framer_t::configured_cap(config.max_frame);  // tighten-only (#1035)
     // Departure seam (RFC-0009 §D extended to peer departure): wire the base's
     // connection-down / one-peer replacement harvest to this transport_t's flat
     // link-down notifier. quic is point-to-point — one peer at a time — so a

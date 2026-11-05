@@ -73,7 +73,7 @@ using tr::graph::role_t;
 using tr::net::conn_role_t;
 using tr::net::fwd_router_t;
 using tr::net::transport_vertex_t;
-using tr::net::transport_ws_server;
+using tr::net::ws_server_transport_t;
 using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::tlv_t;
@@ -298,7 +298,7 @@ int main() {
             static_cast<mailbox_t*>(ctx)->push(std::move(b));
         },
         &a_rx);
-    auto* const srv_a = static_cast<transport_ws_server*>(
+    auto* const srv_a = static_cast<ws_server_transport_t*>(
         tr::testing::link_of(net_a, "net/ws-server/l"));  // kind=ws LISTEN
     check(srv_a != nullptr, "A: the SPEC-constructed listener is reachable via link_of");
     if (srv_a == nullptr) return 1;
@@ -326,7 +326,7 @@ int main() {
         check(w.has_value(), "B: ctrl listener /net/ws-server/ctrl created from a SPEC");
     }
     auto* const srv_b =
-        static_cast<transport_ws_server*>(tr::testing::link_of(net_b, "net/ws-server/ctrl"));
+        static_cast<ws_server_transport_t*>(tr::testing::link_of(net_b, "net/ws-server/ctrl"));
     check(srv_b != nullptr, "B: the SPEC-constructed ctrl listener is reachable via link_of");
     if (srv_b == nullptr) return 1;
     const std::uint16_t b_port = srv_b->local_port();

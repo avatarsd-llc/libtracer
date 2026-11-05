@@ -191,8 +191,8 @@ can_transport_t::~can_transport_t() {
     for (const auto& entry : peers_) mem::drop_in(rx_source(cfg_), entry.value);
 }
 
-std::optional<can::advertise_t> transport_can::learned_binding(std::uint32_t base_can_id,
-                                                               std::span<char> path_out) const {
+std::optional<can::advertise_t> can_transport_t::learned_binding(std::uint32_t base_can_id,
+                                                                 std::span<char> path_out) const {
     const std::lock_guard lock(const_cast<std::mutex&>(rx_m_));
     const binding_t* const b = learned_.find(base_can_id);
     if (b == nullptr) return std::nullopt;
@@ -203,28 +203,28 @@ std::optional<can::advertise_t> transport_can::learned_binding(std::uint32_t bas
     return adv;
 }
 
-std::uint64_t transport_can::dropped_groups() const {
+std::uint64_t can_transport_t::dropped_groups() const {
     // reasm_ is plain (non-atomic) RX-thread state, so its counter is read under
     // the ingress lock — introspection, never a hot path.
     const std::lock_guard lock(const_cast<std::mutex&>(rx_m_));
     return reasm_.dropped_groups();
 }
 
-std::size_t transport_can::pending_slices() const {
+std::size_t can_transport_t::pending_slices() const {
     const std::lock_guard lock(const_cast<std::mutex&>(rx_m_));
     return pending_.size();
 }
 
 /** @brief The receive state of @p node, created on first use; null when the RX store
  *         refused a new node's entry. Requires `rx_m_` held. */
-transport_can::node_rx_t* transport_can::node_rx(std::uint16_t node) noexcept {
+can_transport_t::node_rx_t* can_transport_t::node_rx(std::uint16_t node) noexcept {
     if (node_rx_t* const known = nodes_.find(node)) return known;
     return nodes_.try_emplace(node, rx_source(cfg_)).value;
 }
 
 // --- the bus capability (ADR-0044) -------------------------------------------
 
-void transport_can::touch_peer(std::uint16_t node, std::chrono::steady_clock::time_point now) {
+void can_transport_t::touch_peer(std::uint16_t node, std::chrono::steady_clock::time_point now) {
     const std::lock_guard lock(peers_m_);
     // Insert-only, one entry per DISTINCT node id ever heard (unlike learned_, which
     // retires overlapping runs — #909): growth tracks the bus population, structurally
@@ -246,7 +246,7 @@ void transport_can::touch_peer(std::uint16_t node, std::chrono::steady_clock::ti
     fresh->endpoint.node_.store(node, std::memory_order_relaxed);
 }
 
-void transport_can::enumerate_peers(const peer_visitor_t& visit) const {
+void can_transport_t::enumerate_peers(const peer_visitor_t& visit) const {
     const auto now = std::chrono::steady_clock::now();
     const std::lock_guard lock(peers_m_);
     for (const auto& entry : peers_) {
@@ -273,12 +273,12 @@ void transport_can::enumerate_peers(const peer_visitor_t& visit) const {
  * `peer_ttl` stops resolving, and a pointer cached before that keeps sending into a bus
  * nobody is listening on. That is a delivery question, never a misdelivery.
  */
-transport_t* transport_can::peer_link(std::string_view peer) {
+transport_t* can_transport_t::peer_link(std::string_view peer) {
     const std::optional<std::uint16_t> node = parse_peer_name(peer);
     return node ? peer_link_of(peer_handle_t{*node, kAnnouncedPeerGeneration}) : nullptr;
 }
 
-transport_t* transport_can::peer_link_of(peer_handle_t peer) {
+transport_t* can_transport_t::peer_link_of(peer_handle_t peer) {
     // The handle's index IS the node id the table is keyed by (`peer_name` is the pure
     // re-formatting of it), so the lookup is the table's own: no name is rendered or parsed on
     // a delivery (#2237). Every handle this bus mints carries `kAnnouncedPeerGeneration`, so
@@ -291,7 +291,7 @@ transport_t* transport_can::peer_link_of(peer_handle_t peer) {
     return &(*e)->endpoint;
 }
 
-std::string_view transport_can::peer_name(peer_handle_t peer, std::span<char> scratch) const {
+std::string_view can_transport_t::peer_name(peer_handle_t peer, std::span<char> scratch) const {
     // A pure re-formatting of the node id the handle's index IS — no `peers_` lookup and no
     // TTL check, deliberately: this answers "what is this handle's NAME", not "is that peer
     // still audible", which is `peer_link`'s question. A generation this bus never mints
@@ -304,12 +304,12 @@ std::string_view transport_can::peer_name(peer_handle_t peer, std::span<char> sc
     return std::string_view(scratch.data(), view.size());
 }
 
-void transport_can::peer_endpoint_t::send(std::span<const std::byte> frame) {
+void can_transport_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
     owner_->send_impl(frame, node_.load(std::memory_order_relaxed));
 }
 
-std::optional<std::uint16_t> transport_can::alloc_base(std::size_t slice_count,
-                                                       std::unique_lock<std::mutex>& lock) {
+std::optional<std::uint16_t> can_transport_t::alloc_base(std::size_t slice_count,
+                                                         std::unique_lock<std::mutex>& lock) {
     // Everything here stays in std::size_t. The u16 this used to narrow to was the
     // silent half of #910: a >65535-slice group wrapped `span` (65536 became 0), the
     // reservation then trivially "fit", and the manifest advertised the same wrapped
@@ -341,7 +341,7 @@ std::optional<std::uint16_t> transport_can::alloc_base(std::size_t slice_count,
     return base;
 }
 
-void transport_can::emit_advertise(const can::advertise_t& adv) {
+void can_transport_t::emit_advertise(const can::advertise_t& adv) {
     // The advertise rides the control ID as an in-order byte stream, sliced into
     // CLASSIC (≤8B, exact-length) windows so no CAN-FD DLC padding can perturb the
     // stream decoder on the far side.
@@ -392,7 +392,7 @@ void transport_can::emit_advertise(const can::advertise_t& adv) {
     }
 }
 
-void transport_can::emit_hello() {
+void can_transport_t::emit_hello() {
     // The presence form (ADR-0044): slice_count == 0 binds nothing and precedes no
     // data — it only says "this node is on the bus" and carries its identity path.
     can::advertise_t hello;
@@ -406,11 +406,11 @@ void transport_can::emit_hello() {
     emit_advertise(hello);
 }
 
-void transport_can::send(std::span<const std::byte> frame) {
+void can_transport_t::send(std::span<const std::byte> frame) {
     send_impl(frame, can::kCanBroadcastNode);
 }
 
-void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t target) {
+void can_transport_t::send_impl(std::span<const std::byte> frame, std::uint16_t target) {
     if (frame.empty()) return;
 
     // Own the bytes so the framing can carve zero-copy subviews out of them.
@@ -497,7 +497,7 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
     tx_drained_.notify_all();  // a fence waiter re-tests its own predicate
 }
 
-void transport_can::on_rx(const can_frame_data_t& frame) {
+void can_transport_t::on_rx(const can_frame_data_t& frame) {
     const auto fields = can::decode_can_id(frame.id);
     if (!fields) return;
     // Discovery-layer versioning (ADR-0030): a distinct version prefix is a
@@ -562,7 +562,7 @@ void transport_can::on_rx(const can_frame_data_t& frame) {
     process_data(frame);
 }
 
-void transport_can::learn_advertise(const can::advertise_t& adv, std::uint32_t carrier_id) {
+void can_transport_t::learn_advertise(const can::advertise_t& adv, std::uint32_t carrier_id) {
     // The on-advertise stale-group sweep (#912). Every group is created by an
     // advertise, so this is the cadence that sees every group. `erase` is reached
     // only after `is_complete`, so a group a lost advertise or a lost data slice
@@ -705,8 +705,8 @@ void transport_can::learn_advertise(const can::advertise_t& adv, std::uint32_t c
  * @return Whether a binding under the fresh run's own id was kept for rewriting in place.
  * @note Requires `rx_m_` held.
  */
-bool transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
-                                           std::uint16_t slice_count) {
+bool can_transport_t::invalidate_overlapping(const can::can_id_fields_t& base,
+                                             std::uint16_t slice_count) {
     // Half-open runs in the endpoint field's own units. Widened to u32 only so the
     // upper edge of a non-conforming peer's over-long slice_count cannot wrap the u16
     // it is compared in; the values themselves are the wire's.
@@ -782,14 +782,14 @@ bool transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
  *
  * @note Requires `rx_m_` held.
  */
-void transport_can::mark_prior_lap(std::uint16_t node) {
+void can_transport_t::mark_prior_lap(std::uint16_t node) {
     for (auto& entry : learned_) {
         const auto fields = can::decode_can_id(entry.key);
         if (fields && fields->node == node) entry.value.prior_lap = true;
     }
 }
 
-void transport_can::process_data(const can_frame_data_t& frame) {
+void can_transport_t::process_data(const can_frame_data_t& frame) {
     const auto fields = can::decode_can_id(frame.id);
     if (!fields) return;
 
@@ -868,7 +868,7 @@ void transport_can::process_data(const can_frame_data_t& frame) {
  * ceiling is the injected `max_pending`, never a magic number; the age ceiling is
  * @ref expire_pending.
  */
-void transport_can::park_pending(const can_frame_data_t& frame) {
+void can_transport_t::park_pending(const can_frame_data_t& frame) {
     // Evict the OLDEST parked slices to make room — append order is arrival order,
     // so the front is oldest. A newly arrived slice is the one most likely to have
     // its advertise still in flight, so it is the one worth keeping.
@@ -889,7 +889,7 @@ void transport_can::park_pending(const can_frame_data_t& frame) {
  * may never come. Arrival order is insertion order, so every stale entry is a
  * contiguous prefix and the scan stops at the first live one.
  */
-void transport_can::expire_pending() {
+void can_transport_t::expire_pending() {
     // No `rx_ttl <= 0` early-out. The constructor normalized the window to
     // non-negative, and zero here means the same thing it means to the peer
     // enumeration and to `sweep_stale(0)`: nothing but this instant is retained.
@@ -904,7 +904,7 @@ void transport_can::expire_pending() {
     drops_.count_dropped_rx(stale);
 }
 
-void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
+void can_transport_t::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
     // The sender's bus name becomes the FWD hop's inbound NAME (ADR-0044), so a
     // reply routes back to exactly that peer, directed. The slot performs the
     // tier select (ADR-0053 §5): a rope sink takes the reassembled rope as-is,
@@ -922,7 +922,7 @@ void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
         // handle is that id at the announce-census constant generation and the name the
         // router grows into `src` is resolved back from it by `peer_name`.
         drops_.count_dropped_rx(static_cast<std::size_t>(!peer_rx_.deliver_rope(
-            peer_handle_t{src_node, transport_can::kAnnouncedPeerGeneration}, std::move(frame))));
+            peer_handle_t{src_node, can_transport_t::kAnnouncedPeerGeneration}, std::move(frame))));
         return;
     }
     if (rx_.has_any()) {

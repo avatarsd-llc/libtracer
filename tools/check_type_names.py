@@ -46,18 +46,7 @@ STD_PROTOCOL = frozenset({
 """@brief Member names the standard library's traits and concepts look up by spelling."""
 
 ALLOWED = {
-    # The pre-v0.18.0 spellings #1723 keeps as aliases for one release.
-    "transport_ws_server": "#1723 alias, removed in v0.19.0",
-    "transport_ws_client": "#1723 alias, removed in v0.19.0",
-    "transport_tcp_server": "#1723 alias, removed in v0.19.0",
-    "transport_can": "#1723 alias, removed in v0.19.0",
-    "length_prefix_framer": "#1723 alias, removed in v0.19.0",
-    "stack_writer": "#1723 alias, removed in v0.19.0",
-    "span_cursor": "#1723 alias, removed in v0.19.0",
-    "rope_cursor": "#1723 alias, removed in v0.19.0",
-    "crc32c_state": "#1723 alias, removed in v0.19.0",
-    "crc16_ccitt_state": "#1723 alias, removed in v0.19.0",
-    # Outside #1723's list; standing until a ticket renames them.
+    # Standing until a ticket renames them.
     "backend_tag": "tr::mem enum outside #1723's list",
     "sized_guard": "detail metafunction spelled as a standard trait (`::type`)",
     "guard_type": "member alias read by spelling (`publishes_under`, #1715)",

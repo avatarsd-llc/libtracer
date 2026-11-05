@@ -118,9 +118,6 @@ struct span_cursor_t {
     }
 };
 
-/** @brief The pre-v0.18.0 spelling of @ref span_cursor_t; removed in v0.19.0 (#1723). */
-using span_cursor = span_cursor_t;
-
 /**
  * @brief The same bound where a sum CAN wrap — 32-bit `Size` (rv32, the primary MCU target).
  *

@@ -65,8 +65,8 @@ using tr::graph::path_t;
 using tr::graph::reply_kind_t;
 using tr::graph::role_t;
 using tr::net::fwd_router_t;
-using tr::net::transport_ws_client;
-using tr::net::transport_ws_server;
+using tr::net::ws_client_transport_t;
+using tr::net::ws_server_transport_t;
 using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
@@ -164,7 +164,7 @@ int main() {
 
     observed_t b_seen;
     fwd_router_t router_b(graph_b);
-    transport_ws_server srv_b(0);
+    ws_server_transport_t srv_b(0);
     if (!srv_b.ok()) {
         std::fprintf(stderr, "node B: ws server failed to bind\n");
         return 1;
@@ -175,12 +175,12 @@ int main() {
     // ----- node A: the forwarder. ws server (for the client) + ws client (to B). -
     graph_t graph_a;  // A holds no local data — it only forwards.
     fwd_router_t router_a(graph_a);
-    transport_ws_server srv_a(0);
+    ws_server_transport_t srv_a(0);
     if (!srv_a.ok()) {
         std::fprintf(stderr, "node A: ws server failed to bind\n");
         return 1;
     }
-    transport_ws_client a_to_b("127.0.0.1", srv_b.local_port());
+    ws_client_transport_t a_to_b("127.0.0.1", srv_b.local_port());
     a_to_b.start_receiving();
     if (!a_to_b.ok()) {
         std::fprintf(stderr, "node A: ws client to B failed to connect\n");
@@ -207,7 +207,7 @@ int main() {
             static_cast<mailbox_t*>(ctx)->push(std::vector<std::byte>(b.begin(), b.end()));
         },
         &inbox);
-    transport_ws_client c_to_a("127.0.0.1", srv_a.local_port());
+    ws_client_transport_t c_to_a("127.0.0.1", srv_a.local_port());
     c_to_a.start_receiving();
     if (!c_to_a.ok()) {
         std::fprintf(stderr, "client: ws client to A failed to connect\n");

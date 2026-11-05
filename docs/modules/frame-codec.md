@@ -69,8 +69,8 @@ without the extension. The slice-by-8 tables are 8 × 256 × `u32` = 8 KiB of ro
 that a hardware-CRC CPU never touches (`crc32c_slice_tables`, `crc.hpp:crc32c_slice_tables`) —
 the one footprint line a constrained target should know about here.
 
-`crc32c` and `crc16_ccitt` each take one span or two, and a `crc32c_state` /
-`crc16_ccitt_state` accumulator takes any number of chunks: a CRC over a
+`crc32c` and `crc16_ccitt` each take one span or two, and a `crc32c_state_t` /
+`crc16_ccitt_state_t` accumulator takes any number of chunks: a CRC over a
 payload-plus-trailer region, or over a rope crossing link boundaries, is computed
 without concatenating the pieces into a fresh buffer. Trailer CRC placement is
 ADR-0004, [CRC in optional trailer][adr-0004].
@@ -112,8 +112,8 @@ them:
 
 | reader | inline slots | spill source | the depth bound is |
 | --- | --- | --- | --- |
-| `tlv_node_t::over` → in-place node | 8 (`core/src/frame.cpp:span_cursor>, 8> slots`) | the caller's `mem::block_source_t`, the heap by default (`frame.cpp:stack(slots, &spill)`) | the spill source only — nothing else is drawn |
-| `decode_into` → `tlv_arena_t` | 8 (`core/src/tlv_arena.cpp:span_cursor>, 8> slots`) | the caller's `mem::block_source_t` (`tlv_arena.cpp:stack(slots, &src)`) | whatever resource the caller injected |
+| `tlv_node_t::over` → in-place node | 8 (`core/src/frame.cpp:span_cursor_t>, 8> slots`) | the caller's `mem::block_source_t`, the heap by default (`frame.cpp:stack(slots, &spill)`) | the spill source only — nothing else is drawn |
+| `decode_into` → `tlv_arena_t` | 8 (`core/src/tlv_arena.cpp:span_cursor_t>, 8> slots`) | the caller's `mem::block_source_t` (`tlv_arena.cpp:stack(slots, &src)`) | whatever resource the caller injected |
 
 The 8 is the typical FWD nesting (three to four levels) with headroom, not a
 ceiling: the arena test decodes a frame nested 100 deep (`core/tests/tlv_arena_test.cpp:encode(nested(100))`).
@@ -174,7 +174,7 @@ std::expected<tlv_arena_t, err_t> decode_into(std::span<const std::byte>,
 
 namespace tr::crc { constexpr std::uint32_t crc32c(...);        // 1 or 2 spans
                     constexpr std::uint16_t crc16_ccitt(...);
-                    struct crc32c_state; struct crc16_ccitt_state; }  // n chunks
+                    struct crc32c_state_t; struct crc16_ccitt_state_t; }  // n chunks
 ```
 
 `tlv_node_t::over(const view::view_t&)` is the L1→L2 cast — "a TLV is a cast from a
@@ -195,7 +195,7 @@ structural byte-builder in the tree share it instead of each hand-rolling
 | function | what it appends |
 | --- | --- |
 | `emit_header(out, type, opt, body_len)` | the header alone; length is `u16` LE, or `u32` LE when `opt.ll` is set. The width follows `opt.ll` verbatim — this writes a header, it does not decide one |
-| `emit_tlv(out, type, opt, body)` | header + body, auto-setting `opt.ll` when `body` exceeds `0xFFFF`. `encode` routes through here; the forward plane's `fwd_frame_view` / `stack_writer` tiers carry their own copy of the widen rule |
+| `emit_tlv(out, type, opt, body)` | header + body, auto-setting `opt.ll` when `body` exceeds `0xFFFF`. `encode` routes through here; the forward plane's `fwd_frame_view` / `stack_writer_t` tiers carry their own copy of the widen rule |
 | `emit_name(out, bytes)` / `emit_name(out, sv)` | a `NAME` TLV with default `opt` — the metadata-tag workhorse (SETTINGS keys, `:schema` labels, `:children[]` members). It is NO LONGER the PATH-segment emitter: RFC-0018 packed a PATH body into `[u8 len][utf8]` records, which `wire::emit_path_segment` (`packed_path.hpp`) writes. The `string_view` form needs no temporary buffer |
 | `emit_path_segment(out, seg)` | one packed PATH segment record — `[u8 len][utf8]`, RFC-0018 §5. Returns `false`, appending nothing, on an empty segment (it would spell the §5.4 escape) or one past 255 bytes |
 | `emit_path_element(out, element)` | ONE path element, whatever its kind — the byte-exact inverse of `path_element_at` (`path_element.hpp`, [#1347](https://github.com/avatarsd-llc/libtracer/issues/1347)). A `PATH` is a list of **path elements**; an element's kind is NAME or LABEL; a NAME element is encoded as a **segment record**, a LABEL element as an **escape record** — and this switches over the three record emitters so a caller re-spelling a walked body never crosses the two grammars. It lives beside the reader rather than in `packed_path.hpp`, which is deliberately kind-agnostic. Returns `false`, appending nothing, for a `MALFORMED` element and for a LABEL carrying the reserved zero generation |
@@ -541,24 +541,24 @@ The header/trailer rules — the type-`0x00` reject, the reserved-bit reject, th
 `LL` length width, trailer sizing, the two-span CRC — are parsed and validated in
 **one** place, read through a small chunk cursor so the same rules serve every
 byte source. Both materializing decoders funnel through it. The cursor is the
-byte-*source* seam: `span_cursor` is the contiguous case and `rope_cursor` walks
+byte-*source* seam: `span_cursor_t` is the contiguous case and `rope_cursor_t` walks
 links, stitching a straddled header into a bounded scratch.
 
 #### Cursor window containment — what holds in a RELEASE build (#986)
 
 The cursors' bounds contracts are **not** uniformly debug-only, and the split is
-deliberate rather than incidental. It rests on one asymmetry: a `span_cursor`'s
+deliberate rather than incidental. It rests on one asymmetry: a `span_cursor_t`'s
 window *is* its whole object, so overshooting it forms an out-of-range `subspan`
-— undefined behaviour that the fuzz and sanitizer CI reports. A `rope_cursor`'s
+— undefined behaviour that the fuzz and sanitizer CI reports. A `rope_cursor_t`'s
 window is a **soft** bound inside a longer link chain, so an overshooting read
 walks bytes the chain genuinely holds. Nothing faults, no sanitizer can see it,
 and the caller is handed real bytes from the wrong place and told it succeeded.
 
 | reader | violation in a release build |
 | --- | --- |
-| `rope_cursor::for_each_span` | **truncated to the window** and the cursor latches (`poisoned()`); `parse_header` answers `FRAME_TRUNCATED`, the forward-plane gather drops the frame |
-| `span_cursor::for_each_span` | UB — caught by fuzz/ASan CI, the backstop the rope case lacks |
-| `rope_cursor::byte_at` / `load_le` | debug-asserted only; callers bounds-check per read, and a wrong point read is one byte where a wrong feed is an unbounded run |
+| `rope_cursor_t::for_each_span` | **truncated to the window** and the cursor latches (`poisoned()`); `parse_header` answers `FRAME_TRUNCATED`, the forward-plane gather drops the frame |
+| `span_cursor_t::for_each_span` | UB — caught by fuzz/ASan CI, the backstop the rope case lacks |
+| `rope_cursor_t::byte_at` / `load_le` | debug-asserted only; callers bounds-check per read, and a wrong point read is one byte where a wrong feed is an unbounded run |
 | `region` (both) | debug-asserted only |
 
 The guarantee is spent on the bulk reader alone **because it was priced**. Giving
@@ -567,14 +567,14 @@ x0.66 deliveries/s and `compact-terminus` at x0.82 — reproduced in 4/4 and 3/4
 interleaved pairs with disjoint ranges — since a `min()`-derived `subspan` length
 costs the CRC feed loop what a directly-derived one gives it, and carrying a latch
 byte takes the cursor past two registers. A latency regression on the delivery
-path is an automatic reject here, so `span_cursor::poisoned()` is a
+path is an automatic reject here, so `span_cursor_t::poisoned()` is a
 `static constexpr false` that folds the shared grammar's check away entirely.
 
 What the shipped shape costs, measured: **zero** on the pinned symbols
-(`bench/symbol_ratchet.json`, including `route_fwd_forward<rope_cursor>`), **zero**
+(`bench/symbol_ratchet.json`, including `route_fwd_forward<rope_cursor_t>`), **zero**
 on the Cortex-M0 P0 flash footprint — a span-only MCU never instantiates the rope
 cursor at all — and x1.00 on the interleaved delivery-path A/B. Targets that link a
-rope-delivering transport pay +50 B in `parse_header<rope_cursor>` (+3.0%) on rv32.
+rope-delivering transport pay +50 B in `parse_header<rope_cursor_t>` (+3.0%) on rv32.
 
 `rope_cursor_assert_test` gates the debug half; `rope_cursor_release_guard_test`
 gates this one, compiled with `NDEBUG` forced **on** so it cannot pass vacuously.
@@ -619,7 +619,7 @@ gates this one, compiled with `NDEBUG` forced **on** so it cannot pass vacuously
 ### Stream framing
 
 Splitting a byte stream back into frames is the transport's job, and it is one
-state machine rather than one per transport. `length_prefix_framer` reassembles
+state machine rather than one per transport. `length_prefix_framer_t` reassembles
 u32-LE length-prefixed frames from arbitrary chunks: each complete frame lands in
 **one exactly-sized refcounted segment** drawn from the caller's backend, so
 there is no library-owned buffer and exactly one copy off the wire. An allocation

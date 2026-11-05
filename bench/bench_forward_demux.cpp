@@ -537,9 +537,9 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
  *        rebuild runs (#1794). Setup, not timed; out of line so its walker does not grow
  *        @ref run_leg (see @ref rebuild_once for why that matters).
  */
-[[gnu::noinline]] void record_strip(const tr::wire::grammar::span_cursor& cur,
+[[gnu::noinline]] void record_strip(const tr::wire::grammar::span_cursor_t& cur,
                                     tr::net::fwd_pre_t& pre, std::size_t strip_k) {
-    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> w(cur, pre);
+    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor_t> w(cur, pre);
     pre.strip_at = w.end_of(strip_k - 1).value_or(pre.dst_end + 1);
 }
 
@@ -551,7 +551,7 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
  * @ref run_leg. `noinline` keeps the leg timing the call production makes, and keeps the
  * rebuild out of the function that also holds the resolve legs.
  */
-[[gnu::noinline]] std::size_t rebuild_once(const tr::wire::grammar::span_cursor& cur,
+[[gnu::noinline]] std::size_t rebuild_once(const tr::wire::grammar::span_cursor_t& cur,
                                            const tr::net::fwd_pre_t& pre,
                                            std::span<const std::byte> mount_tlv) {
     const auto rb = tr::net::rebuild_fwd_forward(cur, pre, mount_tlv, "in");
@@ -565,7 +565,7 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
     const std::vector<std::byte> frame =
         make_fwd({"net", "ws-client", "out", "sensor", "temp"}, {"reply"},
                  std::span<const std::byte>(payload, 4), form);
-    const tr::wire::grammar::span_cursor cur{frame};
+    const tr::wire::grammar::span_cursor_t cur{frame};
 
     // Accumulated so the optimizer cannot delete the call it is here to time.
     std::size_t sink = 0;
@@ -592,7 +592,7 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
             // `legacy_peek_fwd_dst_any`.
             tr::net::fwd_pre_t local{};
             if (!legacy_peek_fwd_dst(cur, local)) return;
-            legacy_dst_seg_walk_t<tr::wire::grammar::span_cursor> w(cur, local);
+            legacy_dst_seg_walk_t<tr::wire::grammar::span_cursor_t> w(cur, local);
             w.prefill();
             for (std::size_t i = 0; i < 3; ++i) sink += w.at(i).has_value();
             return;
@@ -607,7 +607,7 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
             // The peek no longer materializes the segments — it opens the window and the walk
             // reads them (#523). Timing the peek alone would therefore no longer be timing the
             // work this axis attributes to it, so the walk of the mount run rides with it.
-            tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> w(cur, local);
+            tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor_t> w(cur, local);
             w.prefill();
             for (std::size_t i = 0; i < 3; ++i) sink += w.at(i).has_value();
         }

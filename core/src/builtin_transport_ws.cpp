@@ -22,9 +22,9 @@ namespace tr::net {
 
 void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend,
                            mem::block_source_t* egress_src) {
-    // Built-in `ws`: DIAL = transport_ws_client(addr, port) — a SYNCHRONOUS TCP connect +
+    // Built-in `ws`: DIAL = ws_client_transport_t(addr, port) — a SYNCHRONOUS TCP connect +
     // RFC 6455 opening handshake, run on the engine's first dial rather than at creation
-    // (see the S5 note below); LISTEN = transport_ws_server(port), serving MANY
+    // (see the S5 note below); LISTEN = ws_server_transport_t(port), serving MANY
     // concurrent inbound peers (#362). `keepalive` is ignored by both (PING/PONG is
     // handled at the ws protocol layer).
     //
@@ -61,7 +61,7 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     //    property of a STREAM peer, not of every kind.
     //  - `max_handshake` (VALUE u32, bytes; default 0 = kMaxHandshakeBytes, 16 KiB) — the
     //    PRE-AUTH opening-handshake request budget (#934). TIGHTEN-ONLY through
-    //    transport_ws_server::handshake_cap: a config-writable key may narrow what a host
+    //    ws_server_transport_t::handshake_cap: a config-writable key may narrow what a host
     //    that has done nothing but complete a TCP connect can make this node buffer, and
     //    must never widen it. Kind-private for the same reason `liveness_window` is — an
     //    HTTP Upgrade budget is a property of the WS opening handshake, not of every kind,
@@ -79,7 +79,7 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     // vertex being torn down and re-created.
     // RE-RUNNABILITY: the thunk captures two raw pointers that outlive the vertex, re-parses
     // its kind-private keys from the raw config bytes the engine kept a copy of, and
-    // constructs a FRESH `transport_ws_client` per run — including a fresh masked-frame
+    // constructs a FRESH `ws_client_transport_t` per run — including a fresh masked-frame
     // buffer bound to `egress_src` at construction, so every healed socket is as bounded as
     // the first. As on `tcp`, the engine calls `start_receiving()` once it has wired the
     // socket's sinks.
@@ -121,7 +121,7 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                     // leave that one buffer on the process heap. `with_egress_source` still
                     // runs — it is what wires the LISTEN arm and the base gather — and this
                     // argument is what makes the DIAL arm's own buffer agree with it.
-                    return make_checked<transport_ws_client>(
+                    return make_checked<ws_client_transport_t>(
                         src, s.addr, s.port,
                         ws_client_config_t{.memory = {.rx = rx_backend, .io = egress_src},
                                            .max_frame = s.max_frame,
@@ -129,7 +129,7 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                                            .max_handshake = max_handshake});
                 },
                 [&] {
-                    return make_checked<transport_ws_server>(
+                    return make_checked<ws_server_transport_t>(
                         src, s.port,
                         ws_server_config_t{.memory = {.rx = rx_backend},
                                            .max_frame = s.max_frame,

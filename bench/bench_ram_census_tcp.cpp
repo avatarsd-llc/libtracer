@@ -733,7 +733,8 @@ int main(int argc, char** argv) {
 
     std::printf("# bench_ram_census_tcp vertices=%zu ops=%zu reps=%zu (first discarded)\n",
                 kVertices, ops, reps);
-    std::printf("# transport: tr::net::transport_tcp_server (kind=tcp, LISTEN) — the canonical\n");
+    std::printf(
+        "# transport: tr::net::tcp_server_transport_t (kind=tcp, LISTEN) — the canonical\n");
     std::printf("# TCP transport, constructed in-band via write /net/tcp-server/conn <- SPEC\n");
     std::printf("# sizeof: graph_t=%zu vertex_t=%zu tcp_server=%zu transport_vertex_t=%zu\n",
                 sizeof(tr::graph::graph_t), sizeof(tr::graph::vertex_t),

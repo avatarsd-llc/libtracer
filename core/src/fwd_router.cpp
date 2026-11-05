@@ -47,7 +47,7 @@ constexpr std::uint8_t u8(std::byte b) noexcept { return std::to_integer<std::ui
 }  // namespace
 
 // The FWD offset-dispatch cluster — fwd_hdr_t/read_fwd_header, the forward/op/control
-// peeks, stack_writer, and the shrunk-dst/grown-src head rebuild — lives in the public
+// peeks, stack_writer_t, and the shrunk-dst/grown-src head rebuild — lives in the public
 // fwd_frame_view.hpp (unit-tested directly, the length_prefix_framer precedent); this
 // TU delegates mechanically. Frames are byte-identical.
 
@@ -515,7 +515,7 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     // step-5 reclaim correlates the echo (`evict_route_edges` classifies its type byte). The
     // `src` is the one locator's, and `PATH` only (`05-protocol-tlvs.md` hop rules); a subscribe
     // request's TRAILING reverse list sits after it and is never read.
-    const wire::grammar::span_cursor cur{frame};
+    const wire::grammar::span_cursor_t cur{frame};
     const std::optional<fwd_src_t> src = locate_fwd_src(cur, pre);
     if (!src) return;
     // Never answer a REPLY with a reply (the resolver rejects a REPLY by value too): an
@@ -1948,7 +1948,7 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
     // A device link cannot be CPU-read, so a non-all-host rope skips straight to the
     // fallback (flatten drops it, as before).
     if (frame.total_length() >= 4 && frame.all_host()) {
-        const wire::grammar::rope_cursor cur{frame};
+        const wire::grammar::rope_cursor_t cur{frame};
         // A frame that is not a FWD is a type this router does not serve; a retired one is
         // counted and answered (`refuse_unserved_type`), never dropped in silence (#1951).
         if (!route_fwd_ingress(
@@ -2014,7 +2014,7 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
     // forward-vs-terminus split and the op discriminant are read by OFFSET; a
     // forward hop scatter-gathers with zero heap; a terminus request decodes into
     // the pmr arena; a refused hop reads the frame in place (`wire::tlv_node_t`, #1648).
-    const wire::grammar::span_cursor cur{frame};
+    const wire::grammar::span_cursor_t cur{frame};
     const bool routed = route_fwd_ingress(
         inbound_name, cur, inbound_ctx, from_peer,
         /* reject */
@@ -2075,8 +2075,8 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     // fwd_frame_view.hpp (rebuild_fwd_forward — unit-tested directly); this hop only
     // resolves the child and scatter-gathers the result. Reads AND the egress go
     // through the grammar `Cursor` seam (ADR-0053 ④b): the same code serves a
-    // contiguous `span_cursor` (each region is one sub-span) and a link-walking
-    // `rope_cursor` (a region yields one sub-span per link it crosses).
+    // contiguous `span_cursor_t` (each region is one sub-span) and a link-walking
+    // `rope_cursor_t` (a region yields one sub-span per link it crosses).
     // Grow `src` by the inbound link's FULL mount path, so the reply resolves through the
     // same strip-K descent a forward does (the ADR-0061 erratum). Two shapes:
     //
@@ -2293,7 +2293,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
         // from the request's bytes on the stack — it cannot draw from the source that just
         // refused, and it does not draw from anything else either (`emit_refusal_reply`).
         if (transport_t* const in = reply_link(inbound_name, inbound_ctx))
-            emit_refusal_reply(wire::grammar::span_cursor{frame}, pre, *in,
+            emit_refusal_reply(wire::grammar::span_cursor_t{frame}, pre, *in,
                                graph::status_t::BACKPRESSURE);
         return;
     }
@@ -2327,7 +2327,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
         // needs neither (#1612).
         count_drop(assemble_dropped_);
         if (transport_t* const in = reply_link(inbound_name, inbound_ctx))
-            emit_refusal_reply(wire::grammar::span_cursor{frame}, pre, *in,
+            emit_refusal_reply(wire::grammar::span_cursor_t{frame}, pre, *in,
                                graph::status_t::BACKPRESSURE);
         return;
     }
@@ -2349,7 +2349,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
             // so the answer is the stack-built one (#1612). `reply` is released with the
             // arena; the requester gets BACKPRESSURE and retries.
             count_drop(reply_iov_dropped_);
-            emit_refusal_reply(wire::grammar::span_cursor{frame}, pre, *in,
+            emit_refusal_reply(wire::grammar::span_cursor_t{frame}, pre, *in,
                                graph::status_t::BACKPRESSURE);
             return;
         }
@@ -2358,7 +2358,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
         // This node originated the request (`originate`) and terminates it: there is no link
         // to send the reply over, so it goes where a reply arriving home would — the record —
         // read by the same routing peek a reply arriving home is.
-        const wire::grammar::rope_cursor rc{*reply};
+        const wire::grammar::rope_cursor_t rc{*reply};
         fwd_pre_t rpre;
         (void)peek_fwd_dst_any(rc, rpre);
         if (const auto sink = reply_target(rc, rpre); sink.fn != nullptr) sink.fn(sink.ctx, *reply);
@@ -2410,7 +2410,7 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
         // terminus: the rope cursor hands the emitter the same offsets the contiguous one does.
         count_drop(assemble_dropped_);
         if (transport_t* const in = reply_link(inbound_name, inbound_ctx))
-            emit_refusal_reply(wire::grammar::rope_cursor{view->wire()}, pre, *in,
+            emit_refusal_reply(wire::grammar::rope_cursor_t{view->wire()}, pre, *in,
                                graph::status_t::BACKPRESSURE);
         return;
     }
@@ -2428,7 +2428,7 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
         const auto table = gather_reply_iov(*reply, iov);
         if (table.empty()) {
             count_drop(reply_iov_dropped_);
-            emit_refusal_reply(wire::grammar::rope_cursor{view->wire()}, pre, *in,
+            emit_refusal_reply(wire::grammar::rope_cursor_t{view->wire()}, pre, *in,
                                graph::status_t::BACKPRESSURE);
             return;
         }
@@ -2554,7 +2554,7 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
     // unsubscribed.
     transport_t* out = link;
     std::span<const std::byte> dst = route;
-    stack_writer<6> ref_head;  // the PAIR-chain form's PATH header; empty for the full route
+    stack_writer_t<6> ref_head;  // the PAIR-chain form's PATH header; empty for the full route
     // The chain delivery (RFC-0029 §7.1, learned with no flag since #2245): consume the
     // stored chain's element 0 — this node's OWN pair for the connection vertex the
     // subscribe arrived on — by validating it against this node's vertex map (§5.1 bounds +
@@ -2586,7 +2586,7 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
                                                  std::byte{0x00}};
     const std::size_t body_len =
         op_tlv.size() + ref_head.span().size() + dst.size() + empty_src.size() + val.total_length();
-    stack_writer<20> head;  // FWD header (≤6) + the 5-byte op TLV + the PATH header (≤4)
+    stack_writer_t<20> head;  // FWD header (≤6) + the 5-byte op TLV + the PATH header (≤4)
     head.header(type_t::FWD, body_len);
     head.raw(op_tlv);
     head.raw(ref_head.span());

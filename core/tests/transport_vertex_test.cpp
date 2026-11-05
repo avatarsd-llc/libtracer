@@ -820,7 +820,7 @@ std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst, st
  * @brief #1025 — a SPEC-created `kind=ws` DIAL delivers the message its peer pushed on connect.
  *
  * The other two guards each hold one end and neither covers the middle. The raw-peer case in
- * `ws_transport_test` constructs `transport_ws_client` DIRECTLY, so the factory's argument list
+ * `ws_transport_test` constructs `ws_client_transport_t` DIRECTLY, so the factory's argument list
  * is never read; `test_link_is_armed_after_wiring` above goes in through `provide_link`, which
  * takes the staged-link branch and never calls a factory at all. The built-in `ws` factory
  * (`core/src/builtin_transport_ws.cpp`) sits between them: were its link to start receiving
@@ -1246,20 +1246,20 @@ void test_with_link_accessor() {
     check(w.has_value(), "a SPEC{kind=ws} at the LISTEN endpoint constructs the owned server");
 
     struct seen_t {
-        bool server = false; /**< @brief The owned transport is a transport_ws_server. */
+        bool server = false; /**< @brief The owned transport is a ws_server_transport_t. */
         bool live = false;   /**< @brief It is the live, bound owned socket. */
     } seen;
     const bool found = net.with_link(
         "net/ws-server/srv",
         [](void* c, tr::net::transport_t& link) {
             auto& s = *static_cast<seen_t*>(c);
-            auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(&link);
+            auto* const srv = dynamic_cast<tr::net::ws_server_transport_t*>(&link);
             s.server = srv != nullptr;
             s.live = srv != nullptr && srv->ok() && srv->local_port() != 0;
         },
         &seen);
     check(found, "with_link reaches the owned transport (previously unreachable)");
-    check(seen.server, "the owned transport is a transport_ws_server");
+    check(seen.server, "the owned transport is a ws_server_transport_t");
     check(seen.live, "it is the live, bound owned socket");
     check(!net.with_link(
               "net/ws-client/absent", [](void*, tr::net::transport_t&) {}, nullptr),
@@ -1485,7 +1485,7 @@ void test_ws_peer_named_config() {
     const auto plain =
         node.write(path_t("/net/ws-server/conn"), conn_spec("plain", kEphemeral, "ws"));
     check(plain.has_value(), "SPEC{kind=ws} with no peer_named constructs the server");
-    auto* const plain_srv = dynamic_cast<tr::net::transport_ws_server*>(
+    auto* const plain_srv = dynamic_cast<tr::net::ws_server_transport_t*>(
         tr::testing::link_of(net, "net/ws-server/plain"));
     check(plain_srv != nullptr && plain_srv->bus() == nullptr,
           "without the key the SPEC-created server has a NULL bus (no ADR-0044 facet)");
@@ -1495,9 +1495,9 @@ void test_ws_peer_named_config() {
         node.write(path_t("/net/ws-server/conn"),
                    ws_listener_spec("bus", kEphemeral, /*peer_named=*/true, /*max_peers=*/8));
     check(w.has_value(), "SPEC{kind=ws, peer_named=1} constructs the owned server");
-    auto* const srv =
-        dynamic_cast<tr::net::transport_ws_server*>(tr::testing::link_of(net, "net/ws-server/bus"));
-    check(srv != nullptr && srv->ok(), "the owned transport is a live transport_ws_server");
+    auto* const srv = dynamic_cast<tr::net::ws_server_transport_t*>(
+        tr::testing::link_of(net, "net/ws-server/bus"));
+    check(srv != nullptr && srv->ok(), "the owned transport is a live ws_server_transport_t");
     check(srv != nullptr && srv->bus() != nullptr,
           "the ws-private key exposed the bus_link_t facet on a CONFIG-constructed link");
 
@@ -1508,9 +1508,9 @@ void test_ws_peer_named_config() {
     // Two real ws clients dial the SPEC-created listener; each completes an RFC 6455
     // handshake, so each becomes an audible peer of the bus.
     const std::uint16_t bus_port = srv != nullptr ? srv->local_port() : 0;
-    tr::net::transport_ws_client c1("127.0.0.1", bus_port);
+    tr::net::ws_client_transport_t c1("127.0.0.1", bus_port);
     c1.start_receiving();
-    tr::net::transport_ws_client c2("127.0.0.1", bus_port);
+    tr::net::ws_client_transport_t c2("127.0.0.1", bus_port);
     c2.start_receiving();
     check(c1.ok() && c2.ok(), "both ws clients handshook against the in-band-created listener");
 
@@ -1734,7 +1734,7 @@ void test_builtin_dial_traits_track_the_build_knob() {
     // there is refused. This is the condition the two shapes answer differently.
     std::uint16_t dead_port = 0;
     {
-        const tr::net::transport_tcp_server probe(0);
+        const tr::net::tcp_server_transport_t probe(0);
         check(probe.ok(), "an ephemeral probe listener bound");
         dead_port = probe.local_port();
     }

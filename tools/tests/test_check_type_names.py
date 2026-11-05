@@ -41,7 +41,7 @@ class ViolationsTest(unittest.TestCase):
             "struct alignas(64) slot_t {",
             "using value_type = std::byte;",
             "    using iterator = const T*;",
-            "using rope_cursor = rope_cursor_t;",
+            "using guard_type = int;",
             "template <class C> struct sized_guard {",
         ])
         self.assertEqual(self.names(text), [])

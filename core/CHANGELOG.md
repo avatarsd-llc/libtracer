@@ -101,6 +101,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   backend with room for the reply but not for 8 more bytes now refuses the reply, where it used
   to send it unstamped. A reply with a payload still drops only the stamp.
 
+### Removed (breaking)
+
+- **The ten pre-v0.18.0 type aliases are gone
+  ([#2434](https://github.com/avatarsd-llc/libtracer/issues/2434)).** The
+  [#1723](https://github.com/avatarsd-llc/libtracer/issues/1723) rename kept the old spellings as
+  plain aliases and announced their removal; code that still names one must use the new name.
+  No layout, symbol size or behaviour changes.
+
+  | Removed alias | Use instead |
+  | --- | --- |
+  | `tr::net::transport_ws_server` | `tr::net::ws_server_transport_t` |
+  | `tr::net::transport_ws_client` | `tr::net::ws_client_transport_t` |
+  | `tr::net::transport_tcp_server` | `tr::net::tcp_server_transport_t` |
+  | `tr::net::transport_can` | `tr::net::can_transport_t` |
+  | `tr::net::length_prefix_framer` | `tr::net::length_prefix_framer_t` |
+  | `tr::net::stack_writer<N>` | `tr::net::stack_writer_t<N>` |
+  | `tr::wire::grammar::span_cursor` | `tr::wire::grammar::span_cursor_t` |
+  | `tr::wire::grammar::rope_cursor` | `tr::wire::grammar::rope_cursor_t` |
+  | `tr::crc::crc32c_state` | `tr::crc::crc32c_state_t` |
+  | `tr::crc::crc16_ccitt_state` | `tr::crc::crc16_ccitt_state_t` |
+
 ### Added
 
 - **`tr::net::drop_tally_t` and `tr::net::drop_classes_t` (#2482).** The three shed-frame

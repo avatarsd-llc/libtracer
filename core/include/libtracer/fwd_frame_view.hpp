@@ -768,13 +768,6 @@ class stack_writer_t {
     bool overflow_ = false;          /**< @brief A write exceeded @p N. */
 };
 
-/**
- * @brief The pre-v0.18.0 spelling of @ref stack_writer_t; removed in v0.19.0 (#1723).
- * @tparam N The inline byte capacity, as for @ref stack_writer_t.
- */
-template <std::size_t N>
-using stack_writer = stack_writer_t<N>;
-
 /** @brief Capacity of the forward hop's first head: FWD hdr(≤6) + op TLV(small) + PATH hdr(≤6). */
 inline constexpr std::size_t kFwdHead1Cap = 64;
 /** @brief Capacity of the forward hop's second head: the grown src PATH header alone. */
@@ -993,7 +986,7 @@ struct fwd_rebuild_t {
         // region is a link walk, and up to seven of them inlined into the forward hop grew
         // it by ~1.5 KiB (#2284), so each takes the out-of-line `walk`.
         const auto region = [&](std::size_t off, std::size_t len) {
-            if constexpr (std::is_same_v<Cursor, wire::grammar::span_cursor>)
+            if constexpr (std::is_same_v<Cursor, wire::grammar::span_cursor_t>)
                 cur.for_each_span(off, len, push);
             else
                 walk(cur, off, len, push);

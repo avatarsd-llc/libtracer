@@ -24,7 +24,7 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                             mem::block_source_t* egress_src) {
     // Built-in `tcp`: DIAL = tcp_transport_t(addr, port) — a SYNCHRONOUS TCP connect, run on
     // the engine's first dial rather than at creation time (see the S5 note below);
-    // LISTEN = transport_tcp_server(port), the multi-peer listener (the ws factory's
+    // LISTEN = tcp_server_transport_t(port), the multi-peer listener (the ws factory's
     // shape: a single-client deployment behaves exactly as the one-peer listener always
     // did). Length-prefix framing is internal to the transport. `keepalive` is ignored
     // (TCP's own keepalive is the #66 lifecycle). `rx_backend` is the ADR-0042 §2
@@ -93,7 +93,7 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                                      .liveness_window_ms = liveness_window});
                 },
                 [&] {
-                    return make_checked<transport_tcp_server>(
+                    return make_checked<tcp_server_transport_t>(
                         src, s.port,
                         tcp_server_config_t{.memory = {.rx = rx_backend},
                                             .max_frame = s.max_frame,

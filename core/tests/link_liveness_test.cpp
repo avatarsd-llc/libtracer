@@ -757,7 +757,7 @@ void test_retiring_the_producer_releases_its_holds() {
  *
  * The LISTEN half is checked to be UNTOUCHED (RFC-0014 §4: a LISTEN link ignores refcount and
  * binds eagerly) — it is created here and reports `LISTENING` at creation, with a real
- * `transport_tcp_server` behind it, not an engine.
+ * `tcp_server_transport_t` behind it, not an engine.
  */
 void test_builtin_tcp_kind_runs_through_the_engine() {
     std::printf("S5 flip (#1548): the BUILT-IN `tcp` kind is engine-managed end to end:\n");
@@ -775,7 +775,7 @@ void test_builtin_tcp_kind_runs_through_the_engine() {
     // condition creation used to fail on.
     std::uint16_t port = 0;
     {
-        const tr::net::transport_tcp_server probe(0);
+        const tr::net::tcp_server_transport_t probe(0);
         check(probe.ok(), "an ephemeral probe listener bound");
         port = probe.local_port();
     }
@@ -798,7 +798,7 @@ void test_builtin_tcp_kind_runs_through_the_engine() {
     check(!link->link_up(), "link_up() is false while dormant");
 
     // 3. The peer comes up; a standing binding dials a REAL socket.
-    auto peer = std::make_unique<tr::net::transport_tcp_server>(port);
+    auto peer = std::make_unique<tr::net::tcp_server_transport_t>(port);
     check(peer->ok(), "a real listener bound the same port");
     check(net.acquire_link("net/tcp-client/a").has_value(), "acquire_link takes the standing hold");
     check(await_state(node, "/net/tcp-client/a", link_state_t::UP),
@@ -810,7 +810,7 @@ void test_builtin_tcp_kind_runs_through_the_engine() {
     peer.reset();
     check(await_state(node, "/net/tcp-client/a", link_state_t::RECONNECTING),
           "the remote hangup is seen and, with a standing binding held, publishes RECONNECTING");
-    peer = std::make_unique<tr::net::transport_tcp_server>(port);
+    peer = std::make_unique<tr::net::tcp_server_transport_t>(port);
     check(peer->ok(), "a replacement listener bound the same port (SO_REUSEADDR)");
     // The loss started one attempt, which may have run before the new listener bound. No app
     // clock drives this link, so an op is the event that starts the next one (#2304).
@@ -834,7 +834,7 @@ void test_builtin_tcp_kind_runs_through_the_engine() {
     check(state_byte(node, "/net/tcp-server/srv") ==
               static_cast<std::uint8_t>(link_state_t::LISTENING),
           "a LISTEN link still binds EAGERLY and reports LISTENING at creation (RFC-0014 §4)");
-    check(dynamic_cast<tr::net::transport_tcp_server*>(
+    check(dynamic_cast<tr::net::tcp_server_transport_t*>(
               tr::testing::link_of(net, "net/tcp-server/srv")) != nullptr,
           "and its link is the real listener — the flip is DIAL-only");
 }

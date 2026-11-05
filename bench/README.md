@@ -33,7 +33,7 @@ for a local `preview.html` of the same charts.
 | `bench_conn_ram` | **per-connection RAM census**: what one connection costs on each transport (TCP / WS / UDP / CAN) — link base, per-connection bytes, what a peer keeps after a 16 KiB frame, what survives teardown, and what one remote subscription costs per link kind. **Gated (warn)** on the pinned host — see [the RAM censuses in CI](#the-ram-censuses-in-ci-1228). |
 | `bench_peer_counts` | **the counted-metrics ledger's WIDE rows** (#2137): copies, libc-interposed syscalls and task switches per relayed frame at 64 B to 16 KiB over TCP and WS, and from UDP into every egress kind, and idle wakeups per second with 32 peers. Counts, not times. **Gated (fail) on every PR** — see [the counted-metrics ledger](#the-counted-metrics-ledger-2137). |
 | `bench_ram_census_tcp` | **whole-node RAM census**: the heap a 100-vertex graph (values 4..64 B, mixed int / array / STREAM) holds, staged from an empty `graph_t` through a `/net:children[]`-created TCP listener to steady state under a real remote peer **process**. **Trend-only** on the pinned host. |
-| `bench_forward_rope` | **the forward hop over a MULTI-LINK ROPE** (`on_frame_rope`, ADR-0053 §5), swept over link count — the only bench that instantiates `rope_cursor`, the specialisation `symbol_ratchet.json` pins. Diagnostic, not gated; quote it only off a quiescent host — see [its A/A null](#bench_forward_rope--the-rope-forward-hop-and-what-its-aa-null-is-worth-1358). |
+| `bench_forward_rope` | **the forward hop over a MULTI-LINK ROPE** (`on_frame_rope`, ADR-0053 §5), swept over link count — the only bench that instantiates `rope_cursor_t`, the specialisation `symbol_ratchet.json` pins. Diagnostic, not gated; quote it only off a quiescent host — see [its A/A null](#bench_forward_rope--the-rope-forward-hop-and-what-its-aa-null-is-worth-1358). |
 | `bench_rx_source_topology` | **RX failable-source topology**: T receive threads forwarding rope frames through a shared heap, one shared pool, or one pool per child — the measurement behind [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md) §3. |
 | `bench_pin_ratio` (`run_pin_ratio.sh`) | **RFC-0022 §6, the LATENCY half**: the WRITE store leg over a (payload × segment) grid, every arm rotating inside ONE process. Answered §8 Q3 → Amendment 2 (the on-by-default flip does not land). Its arms were `K` ratios then, then RFC-0028 D3 copy-or-share thresholds; since RFC-0022 Amendment 3 (#2143) they are the copy-or-share hints (`B-copy` control, `D-default` the build's trait, `C-share`). Collated by `collate_pin.py`. |
 | `bench_pin_net` (`run_pin_net.sh`) | **RFC-0022 §6, the RAM half**: two processes over real UDP, deliveries counted by the RECEIVER, receiver backed by a **bounded RX pool** whose free-slot floor and `drop_stats().dropped_rx` are the occupancy instrument. Sweeps the live-vertex count across the slot count — the axis on which a pin's borrow starves receive. See [receive-pool occupancy](#bench_pin_net--rfc-0022-6-receive-pool-occupancy-760). |
@@ -1222,8 +1222,8 @@ taskset -c 24 ./bench/build/bench_forward_rope   # RESULT mode=fwd-rope-hop, fan
 ```
 
 The multi-link arm of the forward hop (`on_frame_rope`, ADR-0053 §5), swept over link count
-at a fixed frame and registry. It is **the only bench that instantiates `rope_cursor`** — the
-specialisation `symbol_ratchet.json` pins `route_fwd_forward<tr::wire::grammar::rope_cursor>`
+at a fixed frame and registry. It is **the only bench that instantiates `rope_cursor_t`** — the
+specialisation `symbol_ratchet.json` pins `route_fwd_forward<tr::wire::grammar::rope_cursor_t>`
 against — so it is the instrument any change to that symbol has to be priced on.
 
 **It was measured at a +0.99…+7.23 % p50 A/A null with bimodal ranges** during #1325 car 5,

@@ -779,7 +779,7 @@ if rawget(_G, "Proto") then
   p.experts = { ef.crc_bad, ef.invalid, ef.trunc, ef.ppair }
 
   local pref_ws  = 80    -- WebSocket TCP port (a WS-serving node commonly uses :80)
-  local pref_tcp = 0     -- raw-TCP length_prefix_framer port; 0 = disabled
+  local pref_tcp = 0     -- raw-TCP length_prefix_framer_t port; 0 = disabled
   p.prefs.ws_port  = Pref.uint("WebSocket port", pref_ws,  "TCP port of the WebSocket carrying libtracer (0 = off)")
   p.prefs.tcp_port = Pref.uint("Raw TCP port", pref_tcp,  "TCP port for raw length-prefixed libtracer (0 = off)")
   p.prefs.heur     = Pref.bool("Heuristic TCP detection", true, "Try to auto-detect libtracer on any TCP stream")

@@ -233,11 +233,11 @@ void test_peek_segments() {
     std::printf("multi-segment dst peek\n");
     const std::vector<std::byte> frame =
         make_fwd({"net", "ws-client", "foo", "sensor", "temp"}, {"reply"});
-    const tr::wire::grammar::span_cursor cur{std::span<const std::byte>(frame)};
+    const tr::wire::grammar::span_cursor_t cur{std::span<const std::byte>(frame)};
     tr::net::fwd_pre_t pre;
     check(tr::net::peek_fwd_dst_any(cur, pre) == tr::net::fwd_dst_kind_t::PATH,
           "a structured FWD opens its dst window");
-    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> walk(cur, pre);
+    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor_t> walk(cur, pre);
     const auto at = [&](std::size_t i) -> std::string {
         const auto s = walk.at(i);
         if (!s) return "<none>";
@@ -258,11 +258,11 @@ void test_peek_segments() {
           "end_of(k-1) is where the consumed run stops");
 
     const std::vector<std::byte> shortf = make_fwd({"net", "can"}, {"reply"});
-    const tr::wire::grammar::span_cursor scur{std::span<const std::byte>(shortf)};
+    const tr::wire::grammar::span_cursor_t scur{std::span<const std::byte>(shortf)};
     tr::net::fwd_pre_t spre;
     check(tr::net::peek_fwd_dst_any(scur, spre) == tr::net::fwd_dst_kind_t::PATH,
           "a short dst still opens");
-    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> swalk(scur, spre);
+    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor_t> swalk(scur, spre);
     check(swalk.at(1).has_value() && !swalk.at(2).has_value(),
           "a short dst yields only what it has");
 }
@@ -272,7 +272,7 @@ void test_strip_k_and_symmetric_src() {
     std::printf("strip-K + symmetric return route\n");
     const std::vector<std::byte> frame =
         make_fwd({"net", "ws-client", "foo", "sensor", "temp"}, {"origin"});
-    const tr::wire::grammar::span_cursor cur{std::span<const std::byte>(frame)};
+    const tr::wire::grammar::span_cursor_t cur{std::span<const std::byte>(frame)};
     const std::string_view mount[3] = {"net", "ws-server", "up"};
     const auto enc = tr::net::encode_mount_tlv(std::span<const std::string_view>(mount));
     check(enc.has_value(), "the mount prefix encodes");
@@ -281,7 +281,7 @@ void test_strip_k_and_symmetric_src() {
     tr::net::fwd_pre_t pre;
     check(tr::net::peek_fwd_dst_any(cur, pre) == tr::net::fwd_dst_kind_t::PATH,
           "the dst window opens");
-    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> walk(cur, pre);
+    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor_t> walk(cur, pre);
     pre.strip_at = walk.end_of(2).value_or(pre.dst_end + 1);
     const auto rb = tr::net::rebuild_fwd_forward(cur, pre, std::span<const std::byte>(*enc), {});
     check(rb.has_value() && rb->ok(), "the hop rebuilds");
@@ -305,13 +305,13 @@ void test_strip_k_and_symmetric_src() {
 void test_short_dst_is_not_forwardable() {
     std::printf("dst shorter than the mount\n");
     const std::vector<std::byte> frame = make_fwd({"net", "ws-client"}, {"origin"});
-    const tr::wire::grammar::span_cursor cur{std::span<const std::byte>(frame)};
+    const tr::wire::grammar::span_cursor_t cur{std::span<const std::byte>(frame)};
     const std::string_view mount[3] = {"net", "ws-server", "up"};
     const auto enc = tr::net::encode_mount_tlv(std::span<const std::string_view>(mount));
     tr::net::fwd_pre_t pre;
     check(tr::net::peek_fwd_dst_any(cur, pre) == tr::net::fwd_dst_kind_t::PATH,
           "the short dst still opens");
-    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> walk(cur, pre);
+    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor_t> walk(cur, pre);
     const std::optional<std::size_t> end = walk.end_of(2);
     check(!end.has_value(), "the walk has no third segment to end a K = 3 strip at");
     // The router records that as a strip past the `dst`, and the rebuild refuses it.
@@ -936,7 +936,7 @@ using src_seen_t = std::optional<std::vector<std::string>>;
 
 /** @brief The `src` the forward rebuild grows, read off the routing peek's offsets. */
 src_seen_t forward_src(std::span<const std::byte> frame) {
-    const tr::wire::grammar::span_cursor cur{frame};
+    const tr::wire::grammar::span_cursor_t cur{frame};
     tr::net::fwd_pre_t pre;
     (void)tr::net::peek_fwd_dst_any(cur, pre);
     const auto rb = tr::net::rebuild_fwd_forward(cur, pre, {}, {});

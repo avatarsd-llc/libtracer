@@ -154,7 +154,7 @@ void test_overshoot_is_clamped_not_served() {
  * regression is an automatic reject, so the guarantee is spent where the defect is.
  */
 void test_span_cursor_is_constexpr_clean() {
-    std::printf("release build: span_cursor stays unlatched by construction (#986):\n");
+    std::printf("release build: span_cursor_t stays unlatched by construction (#986):\n");
     std::array<std::byte, 5> bytes{std::byte{0x10}, std::byte{0x11}, std::byte{0x12},
                                    std::byte{0x20}, std::byte{0x21}};
     const span_cursor_t cur{std::span<const std::byte>(bytes)};
@@ -163,10 +163,10 @@ void test_span_cursor_is_constexpr_clean() {
     check(whole.bytes == 5 && !whole.poisoned, "the whole span feeds and reports no latch");
 
     static_assert(!span_cursor_t::poisoned(),
-                  "span_cursor::poisoned must fold at compile time, so the shared grammar's "
+                  "span_cursor_t::poisoned must fold at compile time, so the shared grammar's "
                   "check costs the contiguous source nothing");
     static_assert(sizeof(span_cursor_t) == sizeof(std::span<const std::byte>),
-                  "span_cursor must stay exactly one span wide — carrying a latch byte is what "
+                  "span_cursor_t must stay exactly one span wide — carrying a latch byte is what "
                   "cost compact-forward a third of its throughput");
 }
 

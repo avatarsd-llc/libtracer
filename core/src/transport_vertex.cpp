@@ -1100,7 +1100,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     // §2) instead of the unaddressable `<ip>:<port>`, so the ADR-0044 promise holds
     // per the enumerable⇒addressable invariant (ADR-0073 §1). Routing a `dst`
     // through a bus link's own connection NAME remains the sharp edge:
-    // `transport_ws_server::send` BROADCASTS, so one request draws one reply per
+    // `ws_server_transport_t::send` BROADCASTS, so one request draws one reply per
     // peer — rejecting that hop is #741. See reference/14 §Forwarding. Kind-neutral in the one
     // sense that matters here: any transport whose
     // bus() is non-null gets this wiring; point-to-point links keep the plain

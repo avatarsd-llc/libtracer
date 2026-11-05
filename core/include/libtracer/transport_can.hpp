@@ -857,9 +857,6 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // peer_rx_) — the ONE tier-select mechanism; no transport-local receivers.
 };
 
-/** @brief The pre-v0.18.0 spelling of @ref can_transport_t; removed in v0.19.0 (#1723). */
-using transport_can = can_transport_t;
-
 /**
  * @brief The ready-to-register `can` transport factory — how the CAN module plugs
  *        into the ADR-0027 connection-vertex catalog.

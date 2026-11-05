@@ -167,7 +167,7 @@ struct point_t {
 int main() {
     const double seconds = window_seconds();
     std::printf(
-        "TCP server fan-in — one transport_tcp_server, N concurrent dialers, %zu B frames\n"
+        "TCP server fan-in — one tcp_server_transport_t, N concurrent dialers, %zu B frames\n"
         "server model: ONE poll thread, O(peers) pollfd scan per wakeup (transport_tcp.cpp run())\n"
         "hardware threads: %u\n\n",
         kFrameBytes, std::thread::hardware_concurrency());

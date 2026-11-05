@@ -302,7 +302,4 @@ class length_prefix_framer_t {
     std::size_t drain_left_ = 0;  // backpressure: dropped-frame bytes left to skip
 };
 
-/** @brief The pre-v0.18.0 spelling of @ref length_prefix_framer_t; removed in v0.19.0 (#1723). */
-using length_prefix_framer = length_prefix_framer_t;
-
 }  // namespace tr::net
