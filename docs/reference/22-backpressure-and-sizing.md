@@ -103,7 +103,9 @@ correct, a setpoint that vanishes is not. It holds even when the seam that refus
 reply would draw from: a request the terminus cannot decode or answer for want of rx or egress
 memory is still answered `BACKPRESSURE`, from a stack-built frame that echoes the request's own
 `src` and allocates nothing — the reply must not need the memory that just refused
-([04 §Exhaustion is a value](04-communication-flows.md), [#1612](https://github.com/avatarsd-llc/libtracer/issues/1612)). The drop is still counted
+([04 §Exhaustion is a value](04-communication-flows.md), [#1612](https://github.com/avatarsd-llc/libtracer/issues/1612)). That frame is built in a fixed
+stack store, so routes too long for the store are a counted drop, nothing sent
+([#2480](https://github.com/avatarsd-llc/libtracer/issues/2480)). The drop is still counted
 (`arena_dropped` / `assemble_dropped` / `reply_iov_dropped`); the reply is what lets the requester
 tell a sizing problem from a dead link.
 A retry is safe only when the operation is: when no reply arrives, the producer cannot tell a

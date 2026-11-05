@@ -680,6 +680,19 @@ void test_terminus_and_bus_hop_refusals_are_one_frame() {
                   std::string("terminus refusal, src header straddling a link, ") + tag +
                       ": the reference frame");
         }
+        if (stamp != 0) {  // the terminus refusal, rope tier, the STAMP itself cut across links
+            graph_t g;
+            (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+            arming_backend_t egress;
+            fwd_router_t router(g, {.egress = &egress});
+            fixed_link_t client(/*ropes=*/true);
+            (void)router.attach_link("client", client);
+            egress.arm();
+            const std::vector<std::byte> f = frame(dst);
+            client.inject(split_at(f, f.size() - 4));
+            check(client.count == 1 && std::ranges::equal(client.frame(), want_bp),
+                  "terminus refusal, stamp straddling a link: the reference frame, stamp echoed");
+        }
         if constexpr (tr::net::kBusLinks) {
             const std::vector<std::byte> want_inv =
                 reference_refusal(bus_dst, src, tr::wire::err_t::PATH_INVALID, stamp);
@@ -702,6 +715,64 @@ void test_terminus_and_bus_hop_refusals_are_one_frame() {
             }
         } else {
             std::printf("  (bus-name-hop half skipped: this build has no bus links)\n");
+        }
+    }
+}
+
+/** @brief A `src` PATH TLV of exactly @p n bytes, or an empty vector when no spelling hits it. */
+std::vector<std::byte> src_of_size(std::size_t n) {
+    for (std::size_t fill = 0; fill < 64; ++fill) {
+        for (std::size_t k = 1; k < 64; ++k) {
+            std::vector<std::byte> body;
+            for (std::size_t i = 0; i < fill; ++i) (void)tr::wire::emit_path_segment(body, "seg");
+            (void)tr::wire::emit_path_segment(body, std::string(k, 'x'));
+            std::vector<std::byte> out;
+            tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
+            if (out.size() == n) return out;
+        }
+    }
+    return {};
+}
+
+/**
+ * @brief The refusal store's limit, exactly: routes of the most bytes the store can carry are
+ *        answered, one byte more is a counted drop with nothing sent. The limit is 8 B lower for a
+ *        stamped request, whose echo shares the head segment (#2480).
+ */
+void test_refusal_store_limit_is_exact() {
+    std::printf("the refusal store's route limit is exact, stamped and unstamped:\n");
+    // Store less one segment header, the FWD header, op, kind and the 14-byte error tail.
+    constexpr std::size_t kLimit = 384 - sizeof(tr::view::segment_t) - (4 + 5 + 5 + 14);
+    const std::vector<std::byte> dst = b_path({"sensor", "temp"});
+    for (const std::int64_t stamp : {std::int64_t{0}, std::int64_t{0x0102030405060708}}) {
+        const std::size_t limit = kLimit - (stamp == 0 ? 0u : 8u);
+        for (const std::size_t extra : {std::size_t{0}, std::size_t{1}}) {
+            const std::vector<std::byte> src = src_of_size(limit + extra - dst.size());
+            check(!src.empty(), "a src of the exact size was spelled");
+            graph_t g;
+            (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+            arming_source_t rx;
+            fwd_router_t router(g, {.rx = &rx});
+            fixed_link_t client;
+            (void)router.attach_link("client", client);
+            std::vector<std::byte> f = b_fwd(fwd_op_t::READ, dst, src);
+            if (stamp != 0) f = stamped(std::move(f), stamp);
+            const router_stats_t before = router.drop_stats();
+            rx.arm();
+            router.on_frame("client", f);
+            check(router.drop_stats().arena_dropped == before.arena_dropped + 1,
+                  "the refused decode is counted");
+            const std::string tag = std::string(stamp == 0 ? "unstamped" : "stamped") + ", " +
+                                    std::to_string(limit + extra) + " B of route";
+            if (extra == 0)
+                check(
+                    client.count == 1 &&
+                        std::ranges::equal(
+                            client.frame(),
+                            reference_refusal(dst, src, tr::wire::err_t::FLOW_BACKPRESSURE, stamp)),
+                    tag + ": at the limit, answered with the reference frame");
+            else
+                check(client.count == 0, tag + ": one byte over, nothing sent");
         }
     }
 }
@@ -763,6 +834,8 @@ int main() {
     test_terminus_and_bus_hop_refusals_are_one_frame();
     std::printf("\n");
     test_route_larger_than_the_store_is_a_counted_drop();
+    std::printf("\n");
+    test_refusal_store_limit_is_exact();
 
     return tr::testing::summary("fwd_terminus_refusal_reply");
 }

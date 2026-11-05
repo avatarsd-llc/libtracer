@@ -579,10 +579,12 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
 constexpr std::size_t kRefusalStoreBytes = 384;
 
 /**
- * @brief The most route bytes a refusal reply in @ref kRefusalStoreBytes can carry: the store
- *        less its one segment header, the FWD header, the two 5-byte `op` / `kind` values and
- *        the error tail. The stack scratch the routes are copied into is this big, and a longer
- *        pair of routes could not fit the store anyway.
+ * @brief The most route bytes an UNSTAMPED refusal reply in @ref kRefusalStoreBytes can carry:
+ *        the store less its one segment header, the FWD header, the two 5-byte `op` / `kind`
+ *        values and the error tail (316 B where a segment header is 40 B). A stamped request's
+ *        reply also holds its 8-byte echo in the head, so its limit is 8 B lower (308 B). The
+ *        stack scratch the routes are copied into is this big, and a longer pair of routes could
+ *        not fit the store anyway.
  */
 constexpr std::size_t kRefusalRouteBytes =
     kRefusalStoreBytes - sizeof(view::segment_t) - (4 + 5 + 5 + graph::kErrorStatusTailBytes);
