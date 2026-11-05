@@ -556,19 +556,29 @@ jobs:
       # The whole-node census forks its own remote peer PROCESS (before any graph,
       # socket or thread exists — forking a threaded process under a counting
       # allocator can deadlock in the child) and reaps it itself, so peer lifetime is
-      # the binary's job, not a manual step. A peer that fails to come up makes the
-      # binary exit non-zero: that costs this commit its census point with a notice,
-      # never the pinned-host job. TREND-ONLY — no pins, no ratchet (see
+      # the binary's job, not a manual step. TREND-ONLY — no pins, no ratchet (see
       # bench/ram_census_pins.json `activation.whole_node_census`).
+      #
+      # A non-zero exit (a peer that did not come up, or any arm that failed) is an
+      # INSTRUMENT failure, and it turns the job red, on the same rule as the
+      # per-connection ratchet below: a failure to measure is not a budget verdict, so
+      # no tier excuses it. It used to be a notice and a skip, and the series stopped
+      # for two weeks with every job green (#2468). The step itself still passes, so
+      # the store, history and publish steps below bank this commit's other series;
+      # the census verdict step after them is the one that fails the job. stderr names
+      # the stage each failed arm stopped at.
       - name: Whole-node RAM census (bench_ram_census_tcp, forks its own peer)
+        id: node_census
         run: |
           if taskset -c "$BENCH_CPU" ./bench/build/bench_ram_census_tcp --reps=6 \
                >bench/bench_ram_census_tcp_raw.txt 2>bench/bench_ram_census_tcp_err.txt; then
             cat bench/bench_ram_census_tcp_raw.txt
+            echo "failed=false" >>"$GITHUB_OUTPUT"
           else
-            cat bench/bench_ram_census_tcp_err.txt || true
+            cat bench/bench_ram_census_tcp_raw.txt bench/bench_ram_census_tcp_err.txt || true
             : >bench/bench_ram_census_tcp_raw.txt
-            echo "::notice::whole-node census skipped (peer process or an arm failed) — its series is not recorded this commit"
+            echo "failed=true" >>"$GITHUB_OUTPUT"
+            echo "::error::whole-node RAM census FAILED (peer process or an arm failed) — its series is not recorded this commit, and the job fails after the other series are banked"
           fi
 
       # WARN-FIRST (#1228). The pins are MEASURED per-connection values, the band is 2x
@@ -907,6 +917,14 @@ jobs:
             git push origin HEAD:gh-pages || echo "::warning::host.txt push raced a concurrent gh-pages write"
           fi
           cd - && git worktree remove ../ghp
+
+      # The whole-node census's instrument verdict (#2468), last so every other series is
+      # banked first. A census that failed to measure reds the job; see that step.
+      - name: Whole-node RAM census must have measured every arm
+        if: steps.node_census.outputs.failed == 'true'
+        run: |
+          echo "::error::bench_ram_census_tcp failed on this commit; see the 'Whole-node RAM census' step for the failed stage"
+          exit 1
 
       # Put the runner's processes back where the move above found them (#1890), whatever
       # the job did. Runner.Listener outlives this job: left on the rest-of-job CPUs (CPU 6),
