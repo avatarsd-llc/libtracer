@@ -77,6 +77,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`link_count()` on both grammar cursors, and `tr::net::kFwdStackRopeLinks` (#2471).**
+  `rope_cursor_t::link_count()` answers the links in the chain it walks and
+  `span_cursor_t::link_count()` answers 1, so one cursor-generic caller can size by it. The
+  forward hop uses it: a rope over at most `kFwdStackRopeLinks` (4) links gathers into the
+  stack table first, as before; a wider rope gathers once, straight into one block from the
+  receiving link's source, sized twice the stack table.
+
+### Performance
+
+- **A rope wider than four links forwards from one gather into one block (#2471).** On
+  `bench_forward_rope` (p50, best of rounds against main): 8 and 16 links at 1 KiB–16 KiB are
+  about 15% faster, 4 links at 1 KiB and up 3–5% faster; 4 links at 4 B is 7.9% slower and 8
+  links at 4–64 B about 2% slower, the cost of the one block draw. Every row is at or better
+  than 0.21.0.
+- **Erratum to 0.22.0's "Rope forwarding changes cost by link count" (#2471).** Those figures
+  were taken on a `bench_forward_rope` that built its `PATH` in the form RFC-0018 replaced, so
+  the router refused every frame and the bench measured the refusal path. With the bench fixed
+  (it now fails a point that forwards nothing), main just after 0.22.0, whose forward path is
+  0.22.0's, was 4–16% faster than 0.21.0 at 1–4 links and slower only at 8 links from 1 KiB
+  and at 16 links, which this release restores.
+
+## [0.22.0] — 2026-11-02
+
+### Added
+
 - **`fwd_router_t::link_down(link_name, peer)`**: evicts one bus peer's subscriber edges by its
   handle (#2237). Since #2103, `link_down(name)` reaches only a registered child's edges, and a
   bus peer's left only through the bus's own peer-down seam. An announce-census CAN bus never
