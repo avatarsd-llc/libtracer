@@ -1142,22 +1142,19 @@ namespace {
 /**
  * @brief The webtransport kind's PRIVATE config keys, parsed module-side from
  *        the raw SPEC config SETTINGS TLV (ADR-0043 §5 leanness — identical to
- *        the quic kind, plus two of its own): NAME "tls" NAME <profile>, NAME
- *        "insecure" VALUE <u8>, NAME "path" NAME <resource>, NAME
- *        "max_handshake" VALUE <u32>; unknown pairs ignored.
+ *        the quic kind, plus two of its own): NAME "insecure" VALUE <u8>, NAME
+ *        "path" NAME <resource>, NAME "max_handshake" VALUE <u32>; unknown pairs
+ *        ignored.
  *
- * `tls` names the app profile (@ref tls_profile_t) that supplies the served
- * credential (LISTEN) and the trust anchor (DIAL) — the SPEC never carries a
- * file path. `insecure` is the DIAL-side dev opt-out (#918), `path` the DIAL-side
- * extended CONNECT `:path` (#1023), and the pre-auth handshake budget (#1408)
- * applies to BOTH roles. The last two are the keys not shared with `quic`, which
- * has no HTTP layer to carry a resource and no H3 handshake to bound.
+ * The `tls` key, which names the app profile (@ref tls_profile_t) that supplies
+ * the served credential (LISTEN) and the trust anchor (DIAL), is read by
+ * @ref select_tls_profile, as for `quic`: the SPEC never carries a file path.
+ * `insecure` is the DIAL-side dev opt-out (#918), `path` the DIAL-side extended
+ * CONNECT `:path` (#1023), and the pre-auth handshake budget (#1408) applies to
+ * BOTH roles. The last two are the keys not shared with `quic`, which has no HTTP
+ * layer to carry a resource and no H3 handshake to bound.
  */
 struct wt_private_cfg_t {
-    std::string_view tls;          /**< @brief The app profile this link uses (@ref
-                                               tls_profile_t::name); empty = the default
-                                               profile. A view into the raw config, valid
-                                               for the factory call only. */
     bool insecure = false;         /**< @brief DEV ONLY: skip server-certificate validation on
                                                the DIAL side entirely. Must be asked for
                                                explicitly — the default is to verify (DIAL). */
@@ -1169,10 +1166,6 @@ struct wt_private_cfg_t {
                                                0 = webtransport_transport_t::
                                                kMaxHandshakeBytes, and TIGHTEN-ONLY
                                                against it (both roles, #1408). */
-    bool retired = false;          /**< @brief The config still carries a retired
-                                               `ca`/`cert`/`key` key: refused, never skipped
-                                               — skipping would silently change the link's
-                                               trust. */
 };
 
 /** @brief Process-wide count of `webtransport` SPECs refused for carrying `insecure` = nonzero on a
@@ -1181,20 +1174,15 @@ struct wt_private_cfg_t {
 std::atomic<std::uint64_t> g_insecure_refusals{0};
 
 /** @brief The shared config_reader_t walk over the webtransport-private keys: NAME
- *         "tls" NAME <profile>, NAME "insecure" VALUE <u8>, NAME "path" NAME
- *         <resource>, NAME "max_handshake" VALUE <u32>; unknown pairs ignored
- *         (forward-compat); the retired `ca`/`cert`/`key` are recorded (any value
- *         type) so the factory refuses the SPEC. Pair-consuming
+ *         "insecure" VALUE <u8>, NAME "path" NAME <resource>, NAME "max_handshake"
+ *         VALUE <u32>; unknown pairs ignored (forward-compat). Pair-consuming
  *         (#927), like every other config parse: a forward-compat pair whose string
- *         value reads `"tls"` must not bind the FOLLOWING child as the profile name. */
-[[nodiscard]] wt_private_cfg_t parse_wt_config(const wire::tlv_node_t* raw_config) {
+ *         value reads `"path"` must not bind the FOLLOWING child as the resource. */
+[[nodiscard]] wt_private_cfg_t parse_wt_config(const wire::config_reader_t& cfg) {
     wt_private_cfg_t out;
-    const wire::config_reader_t cfg(raw_config);
-    if (const auto v = cfg.name("tls")) out.tls = *v;
     if (const auto v = cfg.flag("insecure")) out.insecure = *v;
     if (const auto v = cfg.name("path")) out.path = *v;
     out.max_handshake = static_cast<std::size_t>(cfg.u32("max_handshake").value_or(0));
-    out.retired = cfg.has("ca") || cfg.has("cert") || cfg.has("key");
     return out;
 }
 
@@ -1207,7 +1195,8 @@ transport_factory_t webtransport_transport_factory(std::span<const tls_profile_t
         // BOTH roles carry kind-private keys, so the parse precedes the role split:
         // the DIAL branch used to return before parse_wt_config ever ran, which is
         // why no SPEC could reach the dial-side trust knobs at all (#918).
-        const wt_private_cfg_t priv = parse_wt_config(raw_config);
+        const wire::config_reader_t cfg(raw_config);
+        const wt_private_cfg_t priv = parse_wt_config(cfg);
         // The `insecure` key disables peer authentication, and a SPEC can come from any peer
         // the ACL lets write (every peer, on a default build). Honouring it is a BUILD
         // capability: without kAllowInsecureTls the SPEC is refused and counted — never
@@ -1218,14 +1207,9 @@ transport_factory_t webtransport_transport_factory(std::span<const tls_profile_t
                 return std::unexpected(graph::status_t::PERMISSION_DENIED);
             }
         }
-        // The SPEC names a profile; the app's table decides what that name means. A
-        // name the app never registered is a config error, answered before any file
-        // is opened — the status says nothing about the filesystem. So is a stale
-        // config still carrying a retired path key: skipping it would quietly move a
-        // dial that pinned a private CA onto the system trust store.
-        const tls_profile_t* const prof = find_tls_profile(profiles, priv.tls);
-        if (priv.retired || (prof == nullptr && !priv.tls.empty()))
-            return std::unexpected(graph::status_t::TYPE_MISMATCH);
+        const graph::result_t<const tls_profile_t*> selected = select_tls_profile(profiles, cfg);
+        if (!selected) return std::unexpected(selected.error());
+        const tls_profile_t* const prof = *selected;
         // The link object and its egress (endpoint, stream contexts, send records) are drawn
         // from `src`, the receiving vertex's store (#1780); `make_checked` answers a refused
         // object as BACKPRESSURE and a link that did not come up as TRANSPORT_DOWN (#929).

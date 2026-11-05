@@ -67,10 +67,13 @@
 #include <utility>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/config_reader.hpp"
 #include "libtracer/length_prefix_framer.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_string.hpp"
 #include "libtracer/receiver_slot.hpp"
+#include "libtracer/status.hpp"
+#include "libtracer/tls_profile.hpp"
 #include "libtracer/transport.hpp"
 
 #if defined(__SANITIZE_THREAD__)
@@ -888,5 +891,31 @@ class msquic_endpoint_t {
      *         destructor (while the virtuals still dispatch). */
     ~msquic_endpoint_t() = default;
 };
+
+/**
+ * @brief The app profile a `quic` or `webtransport` creation SPEC selects, or the
+ *        config error that refuses the SPEC; the one selection both TLS kinds share.
+ *
+ * The SPEC names a profile with its kind-private `tls` key (NAME <profile>); the app's
+ * table decides what that name means. A name the table does not hold is a config error,
+ * answered before any file is opened, so the status says nothing about the filesystem.
+ * So is a stale config still carrying a retired `ca`/`cert`/`key` path key, under any
+ * value type: skipping it would quietly move a dial that pinned a private CA onto the
+ * system trust store, so it is refused, never skipped. Run once per connection creation,
+ * never on the frame path.
+ *
+ * @param profiles The app's table (the factory's view of it).
+ * @param cfg      The SPEC's kind-private config.
+ * @return The selected profile; nullptr when the SPEC names none and the table holds no
+ *         default (empty-name) profile. TYPE_MISMATCH for a retired key or an unknown name.
+ */
+[[nodiscard]] inline graph::result_t<const tls_profile_t*> select_tls_profile(
+    std::span<const tls_profile_t> profiles, const wire::config_reader_t& cfg) noexcept {
+    const std::string_view name = cfg.name("tls").value_or(std::string_view{});
+    const tls_profile_t* const prof = find_tls_profile(profiles, name);
+    if (cfg.has("ca") || cfg.has("cert") || cfg.has("key") || (prof == nullptr && !name.empty()))
+        return std::unexpected(graph::status_t::TYPE_MISMATCH);
+    return prof;
+}
 
 }  // namespace tr::net
