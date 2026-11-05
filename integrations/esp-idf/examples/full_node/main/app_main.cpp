@@ -11,12 +11,11 @@
  * libtracer-migration plan Phase 2 / issue #183):
  *
  *   DEVICE node (what an origin-firmware board runs)
- *     - ONE static slab feeding both memory seams (ADR-0039 §one-slab):
+ *     - ONE static slab feeding two seams (ADR-0039 §one-slab):
  *       a synchronised-`pool_t` region for RX segments (ADR-0042 owning
- *       delivery — every
- *       inbound datagram lands in a pool slot, exhaustion is backpressure) and
- *       a `monotonic_buffer_resource` region for the router's containers
- *       (wrapped in a `synchronized_pool_resource` so recv threads share it);
+ *       delivery — every inbound datagram lands in a pool slot, exhaustion is
+ *       backpressure) and a recycling `pool_source_t` region for the router's
+ *       long-lived link state;
  *     - a sensor vertex `/sensor/temp` (a subscriber that requests durability
  *       latches the current value — RFC-0022 §3.A);
  *     - `transport_vertex_t` with the built-in udp/tcp/ws transport catalog;
@@ -49,7 +48,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
-#include <memory_resource>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -209,14 +207,13 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_node_t& f) {
  * @brief ADR-0039 one-slab recipe, concretely: ONE static slab, partitioned
  *        once at bring-up.
  *
- * THREE regions, each behind the seam that owns it:
+ * TWO regions, each behind the seam that owns it:
  *
  * | region | seam | what it bounds |
  * | --- | --- | --- |
  * | front, 12 KiB | a synchronised `pool_t` (`rx_backend`) | RX datagram segments — fixed slots,
  * exhaustion = backpressure (ADR-0042) | | middle, 2 KiB | a `tr::mem::pool_source_t` | the
- * router's long-lived LINK STATE (#603 defect 1) | | back, 10 KiB | `monotonic_buffer_resource` +
- * `synchronized_pool_resource` | the remaining pmr containers (LKV control blocks) |
+ * router's long-lived LINK STATE (#603 defect 1) |
  *
  * The middle region exists to KEEP a bound this example already states rather than to add
  * one. The router's long-lived link state (receive contexts, bus token caches) draws from
@@ -242,7 +239,6 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_node_t& f) {
  * the router's link state wants. See docs/reference/09 §the second L0 seam and
  * docs/interop/esp32-production-node.md.
  */
-constexpr std::size_t kSlabBytes = 24 * 1024;
 constexpr std::size_t kRxRegion = 12 * 1024; /**< @brief Synchronised pool: RX datagram segments. */
 constexpr std::size_t kRxSlotPayload = 1536; /**< @brief One UDP/MTU-sized datagram per slot. */
 constexpr std::size_t kLinkRegion =
@@ -256,6 +252,8 @@ constexpr std::size_t kLinkRegion =
  * printed at bring-up: a non-zero reading there is the signal to raise this number.
  */
 constexpr std::size_t kLinkClasses = 12;
+/** @brief The whole slab: the RX region followed by the link region, nothing else. */
+constexpr std::size_t kSlabBytes = kRxRegion + kLinkRegion;
 alignas(std::max_align_t) std::byte g_slab[kSlabBytes];
 
 /** @brief The device node: the one-slab substrate, graph, router, and transport vertex. */
@@ -293,18 +291,6 @@ struct device_node_t {
     std::array<tr::mem::size_class_t, kLinkClasses> link_classes{};
     tr::mem::pool_source_t<tr::mem::sync_mutex_t> link_src{
         std::span<std::byte>(g_slab + kRxRegion, kLinkRegion), link_classes};
-    /**
-     * @brief Container seam: a monotonic arena over the slab's back region.
-     *
-     * The synchronized pool on top recycles freed blocks and makes the resource safe for
-     * the recv threads. Two things are NOT among them: the terminus arena (since #588 it
-     * draws from the router's `rx` block source, left at its default net sub-pool, the static
-     * arena, here) and the router's link state (since #603 defect 1 it draws from `link_src`
-     * above — a pmr resource cannot report exhaustion by value, which is the whole defect).
-     */
-    std::pmr::monotonic_buffer_resource arena{g_slab + kRxRegion + kLinkRegion,
-                                              kSlabBytes - kRxRegion - kLinkRegion};
-    std::pmr::synchronized_pool_resource mr{&arena};
 
     graph_t graph;
     fwd_router_t router{graph, {.link_src = &link_src}};
@@ -483,7 +469,7 @@ extern "C" void app_main(void) {
     }
     std::printf(
         "device node up: /sensor/temp + udp listener /net/udp-server/host (port %u), one-slab "
-        "recipe (pool %u slots x %u B + link source %u B + pmr arena)\n",
+        "recipe (pool %u slots x %u B + link source %u B)\n",
         static_cast<unsigned>(kNodePort), static_cast<unsigned>(rx_backend_slots()),
         static_cast<unsigned>(kRxSlotPayload), static_cast<unsigned>(kLinkRegion));
 
