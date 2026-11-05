@@ -372,19 +372,24 @@ class posix_endpoint_t {
      */
     static int poll_accept(int listen_fd);
 
-    /**
-     * @brief The shutdown flag every blocking loop polls (set by
-     *        @ref stop_and_join; read with relaxed order — it is a flag, not
-     *        a synchronizer; the join provides the ordering).
-     */
-    std::atomic<bool> stop_{false};
-
    private:
     /** @brief The thread entry trampoline: runs `body_` of the @ref posix_endpoint_t @p self. */
     static void thread_entry(void* self);
 
     thread_body_t body_;     /**< @brief The thread body `thread_entry` runs. */
     static_thread_t thread_; /**< @brief The receive thread (joined by stop_and_join). */
+
+   protected:
+    /**
+     * @brief The shutdown flag every blocking loop polls (set by
+     *        @ref stop_and_join; read with relaxed order — it is a flag, not
+     *        a synchronizer; the join provides the ordering).
+     *
+     * Declared LAST on purpose (#2512): it leaves this class's tail padding open, so a derived
+     * link's first 4 B members pack into it. `static_thread_t` is a member, whose own padding
+     * no derived class may reuse; declared after it, every stream link object would pay 8 B.
+     */
+    std::atomic<bool> stop_{false};
 };
 
 /**
