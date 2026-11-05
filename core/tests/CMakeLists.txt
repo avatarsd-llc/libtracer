@@ -342,11 +342,19 @@ endif()
 # link would emit — platform selection is a build-system concern, never an in-source
 # #ifdef (the same doctrine that picks socketcan_link.cpp over its stub). It also links
 # socketcan_link_t itself, so it needs the CAN module as well as the platform (#1293).
+# #2523: ctest runs it through vcan_private_ns.sh, which gives each run its OWN vcan0 in
+# a fresh unprivileged user + network namespace. The enumeration and bystander checks
+# count every node on the bus, so two runs on one host (two sanitizer jobs on the same
+# runner host) failed each other on a shared vcan0. Where no namespace can be made (a
+# Docker job, no vcan module) the wrapper runs the test as before, unless
+# LIBTRACER_VCAN_NS=required (the CI host jobs), which fails the run instead.
 if(LIBTRACER_TRANSPORT_CAN AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(transport_can_vcan_test transport_can_vcan_test.cpp)
   target_link_libraries(transport_can_vcan_test PRIVATE libtracer)
   libtracer_test_warnings(transport_can_vcan_test)
-  add_test(NAME transport_can_vcan COMMAND transport_can_vcan_test)
+  add_test(NAME transport_can_vcan
+           COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/vcan_private_ns.sh"
+                   $<TARGET_FILE:transport_can_vcan_test>)
 endif()
 
 # #383 — owned in-flight TX storage for asynchronous can_link_t backends (the

@@ -671,7 +671,10 @@ reply completion at the `op_resolver_t` terminus, which resolves synchronously.
   and the vector pins it by giving the two frames distinct ids and payloads, so a
   truncated frame would be witnessed under its own id). It **self-skips** when
   `vcan0` cannot bind, so the required gates never depend on kernel CAN; the dedicated
-  **`can-vcan-e2e`** workflow sets `vcan0` up so the socket path runs for real.
+  **`can-vcan-e2e`** workflow runs it where the socket path is real. ctest runs it
+  through `core/tests/vcan_private_ns.sh`, which gives each run its own `vcan0` in a
+  fresh unprivileged user and network namespace (#2523): the enumeration and bystander
+  checks count every node on the bus, so two runs on one host must never share one.
 
 ## Pitfalls
 

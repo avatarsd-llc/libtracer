@@ -7,14 +7,18 @@
 # gates (build-test / sanitizers / tsan / format / doxygen) must never depend on kernel
 # CAN, which an unprivileged container cannot load.
 #
-# WHERE vcan0 COMES FROM (#2348). The job never creates it: no modprobe, no `ip link
-# add`, nothing that needs root. The self-hosted host creates and raises vcan0 at boot,
-# so on the trusted route this job only checks it is there and FAILS, named, when it is
-# not: a missing vcan0 is broken infra, not a skip. The job runs on the host itself, not
-# in a container, because a job container sits in its own network namespace and cannot
-# see the host's vcan0. On the hosted fallback (CI_SELF_HOSTED=false; a fork PR runs no
-# job at all) there is no vcan0 and no one to create it, so the job says so and skips the
-# build and test.
+# WHERE vcan0 COMES FROM (#2348, #2523). The job never touches the host's network: no
+# modprobe, no `ip link add` on the host, nothing that needs root. ctest runs the test
+# through core/tests/vcan_private_ns.sh, which gives each run its OWN vcan0 inside a
+# fresh unprivileged user + network namespace, so two runs on one host (this job and a
+# sanitizer leg, or the two sanitizer slots) never share a bus. That needs only the
+# host's `vcan` module, which the host loads at boot (a namespace cannot load it), and
+# unprivileged user namespaces. On the trusted route this job checks both are there and
+# FAILS, named, when they are not: that is broken infra, not a skip. The job runs on the
+# host itself, not in a container, because Docker's default seccomp profile denies the
+# user namespace. On the hosted fallback (CI_SELF_HOSTED=false; a fork PR runs no job at
+# all) there is no vcan module loaded and no one to load it, so the job says so and skips
+# the build and test.
 name: can-vcan-e2e
 
 on:
@@ -33,6 +37,7 @@ on:
       - "core/include/libtracer/transport_can.hpp"
       - "core/include/libtracer/can.hpp"
       - "core/tests/transport_can_vcan_test.cpp"
+      - "core/tests/vcan_private_ns.sh"
       - ".github/workflows/can-vcan-e2e.yml"
   workflow_dispatch:
 
@@ -49,16 +54,16 @@ jobs:
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
         # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
         run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
-      - name: vcan0 is up (created by the host at boot, never by this job)
+      - name: A private vcan0 can be made (host vcan module + user namespaces, no root)
         id: vcan
         run: |
-          if ip -details -br link show vcan0 2>/dev/null | grep -q 'UP'; then
+          if unshare --user --map-root-user --net sh -c 'ip link add dev vcan0 type vcan && ip link set up vcan0' 2>/dev/null; then
             echo "up=true" >> "$GITHUB_OUTPUT"
           elif [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            echo "::error::vcan0 is missing or down on this runner host. The host creates it at boot (modprobe vcan; ip link add dev vcan0 type vcan; ip link set up vcan0); this job never does (#2348). Fix the host, this is not a test failure."
+            echo "::error::this runner host cannot make a private vcan0: the host loads the vcan module at boot (modprobe vcan) and allows unprivileged user namespaces; this job never does either (#2348, #2523). Fix the host, this is not a test failure."
             exit 1
           else
-            echo "::notice::hosted fallback runner: no vcan0 here, so the build and the vcan E2E test are skipped"
+            echo "::notice::hosted fallback runner: no vcan module here, so the build and the vcan E2E test are skipped"
           fi
       # Build parallelism (#1637): 2 on the self-hosted host (a host job, outside
       # runners-ci.slice, so it takes core-ci's floor), `nproc` on hosted runners.
@@ -84,6 +89,9 @@ jobs:
 
       - name: Run the real-vcan transport_can E2E smoke test
         if: steps.vcan.outputs.up == 'true'
+        # required: a lost private namespace fails the run, never a shared-bus or skip pass.
+        env:
+          LIBTRACER_VCAN_NS: required
         run: |
           ctest --test-dir core/build --output-on-failure -R '^transport_can_vcan$'
 
