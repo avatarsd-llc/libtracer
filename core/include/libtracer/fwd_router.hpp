@@ -38,6 +38,7 @@
 
 #include <array>
 #include <atomic>
+#include <concepts>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -48,6 +49,7 @@
 #include <string_view>
 
 #include "libtracer/child_registry.hpp"
+#include "libtracer/config.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_heap.hpp"
@@ -73,6 +75,28 @@ struct fwd_pre_t;
  * part of the API; code outside the test suite must not define it.
  */
 struct fwd_router_test_door_t;
+
+/**
+ * @brief The default `config_t::frame_observer_t` (#2580): it observes nothing, so the call
+ *        the router makes on every inbound frame compiles away.
+ */
+struct no_frame_observer_t {
+    /** @brief Does nothing with @p inbound_link_name. */
+    static constexpr void on_frame(std::string_view /*inbound_link_name*/) noexcept {}
+};
+
+/**
+ * @brief What a `config_t::frame_observer_t` must be (#2580): a type with a static
+ *        `noexcept` `on_frame(std::string_view)` returning `void`, so it can only observe.
+ */
+template <class O>
+concept frame_observer = requires(std::string_view inbound_link_name) {
+    { O::on_frame(inbound_link_name) } noexcept -> std::same_as<void>;
+};
+
+static_assert(frame_observer<graph::config_t::frame_observer_t>,
+              "config_t::frame_observer_t needs `static void on_frame(std::string_view) "
+              "noexcept` (#2580); see default_config_t::frame_observer_t in config.hpp.");
 
 /**
  * @brief The router's counted cold-path drops — one snapshot of every frame this router

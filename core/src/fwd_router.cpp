@@ -1860,12 +1860,18 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
     // routing as the borrowed path — the forward hop below never touches the
     // refcount (zero-heap, ADR-0038); only the terminus sees the owner, for the
     // ADR-0042 §3 referenced store. This is the pre-ADR-0053 view path, unchanged.
+    // Every frame `on_frame_impl` does not see is shown to the build's frame observer
+    // (#2580) here instead, once.
     if (frame.link_count() == 1) {
         const view_t& v = frame.links()[0];
-        if (v.is_device()) return;  // CPU routing cannot read a DEVICE frame
+        if (v.is_device()) {  // CPU routing cannot read a DEVICE frame
+            graph::config_t::frame_observer_t::on_frame(inbound_name);
+            return;
+        }
         on_frame_impl(inbound_name, v.bytes(), &v, inbound_ctx, from_peer, peer);
         return;
     }
+    graph::config_t::frame_observer_t::on_frame(inbound_name);
     // Multi-link: route a FORWARD hop directly over the rope — NO flatten
     // (ADR-0053 ④b). The forward-vs-terminus split is read through the link-walking
     // grammar cursor and the egress scatter-gathers the untouched links; a header or
@@ -1935,6 +1941,9 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
 void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
                                  const view_t* frame_view, const child_rx_ctx_t* inbound_ctx,
                                  bool from_peer, peer_handle_t peer) {
+    // The build's frame observer (#2580): once per inbound frame, before anything below can
+    // route, refuse or drop it. The default does nothing and compiles away.
+    graph::config_t::frame_observer_t::on_frame(inbound_name);
     if (frame.size() < 4) return;
 
     // The FWD plane never builds a tlv_t (ADR-0038 inv. #1 / ADR-0041 §5): the

@@ -162,7 +162,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **`default_config_t::kParkStripes` (#2454)**: the stripe count of the park table
   `tr::park_wait` / `tr::park_wake` sleep on, a compile-time knob (default 8, as before). The
   ESP-IDF component sets it from `CONFIG_LIBTRACER_PARK_STRIPES`.
-
+- **`config_t::frame_observer_t`, a compile-time per-frame observer on the router (#2580).**
+  `fwd_router_t` calls `frame_observer_t::on_frame(std::string_view inbound_link_name)` once per
+  inbound frame, on every link and both receive tiers, before dispatch, on the receiving task,
+  including a frame that dispatch then refuses or drops. It is given only the link name (a
+  bus peer's name for a frame from a bus peer), valid for the call, and it is observe-only:
+  `void` and `noexcept`, checked by the `tr::net::frame_observer` concept. The default,
+  `tr::net::no_frame_observer_t`, does nothing and compiles away, so a build that names no
+  observer is unchanged. The router holds no state for it. Bind one in
+  `libtracer/config_override.hpp` with `using frame_observer_t = my_link_tally_t;` for
+  per-link liveness or traffic accounting kept in the application. This is the production
+  shape of the runtime `on_raw` observer #2277 deleted, with no function pointer.
 - **`tr::net::drop_tally_t` and `tr::net::drop_classes_t` (#2482).** The three shed-frame
   counters of `transport_drop_stats_t` as one embeddable value: `count_dropped_rx(n)`,
   `count_malformed_rx(n)`, `count_dropped_tx(n)` and `snapshot()`. Every counting link keeps

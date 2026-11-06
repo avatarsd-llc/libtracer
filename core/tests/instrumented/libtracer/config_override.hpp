@@ -32,6 +32,11 @@
  * is opted in for the same reason: the session-admission seam is exercised, and a build without
  * it has no seam to test.
  *
+ * **A counting frame observer.** `frame_observer_t` defaults to a no-op (#2580). The test build
+ * binds @ref tr::graph::counting_frame_observer_t, so `fwd_frame_observer_test` can prove the
+ * router calls it once per inbound frame, with the link's name, before dispatch. Its tally is
+ * per thread, so no other test's receive threads race on it.
+ *
  * **It yields to a fragment the build already supplies.** A CI leg that binds its own
  * configuration (a reclamation policy, the bus module closed, ...) lists its fragment later on
  * the include path; that fragment is the configuration under test and must not be shadowed.
@@ -51,7 +56,31 @@
 #include_next <libtracer/config_override.hpp>
 #else
 
+#include <array>
+#include <cstddef>
+#include <string_view>
+
 namespace tr::graph {
+
+/**
+ * @brief A frame observer that counts (#2580): how many frames this thread's router calls
+ *        saw, and the link name of the last one.
+ */
+struct counting_frame_observer_t {
+    /** @brief Frames observed on this thread. */
+    static inline thread_local std::size_t calls = 0;
+    /** @brief The last observed link name, truncated to the buffer. */
+    static inline thread_local std::array<char, 64> last{};
+    /** @brief How many bytes of @ref last are the name. */
+    static inline thread_local std::size_t last_len = 0;
+    /** @brief Count one frame on @p inbound_link_name. */
+    static void on_frame(std::string_view inbound_link_name) noexcept {
+        ++calls;
+        last_len = inbound_link_name.copy(last.data(), last.size());
+    }
+    /** @brief The last observed link name. */
+    static std::string_view last_name() noexcept { return {last.data(), last_len}; }
+};
 
 /** @brief The defaults, with the instrumentation counters, both link modules, the
  *         fault-injection hooks, creation hooks and the session-admission seam compiled in. */
@@ -64,6 +93,8 @@ struct instrumented_config_t : default_config_t {
     static constexpr bool kFaultInjection = true;
     static constexpr bool kCreationHooks = true;
     static constexpr bool kSessionAdmission = true;
+    /** @brief Count inbound frames per thread (#2580). */
+    using frame_observer_t = counting_frame_observer_t;
 };
 
 using config_t = instrumented_config_t;
