@@ -165,10 +165,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **`config_t::frame_observer_t`, a compile-time per-frame observer on the router (#2580).**
   `fwd_router_t` calls `frame_observer_t::on_frame(std::string_view inbound_link_name)` once per
   inbound frame, on every link and both receive tiers, before dispatch, on the receiving task,
-  including a frame that dispatch then refuses or drops. It is given only the link name (a
-  bus peer's name for a frame from a bus peer), valid for the call, and it is observe-only:
-  `void` and `noexcept`, checked by the `tr::net::frame_observer` concept. The default,
-  `tr::net::no_frame_observer_t`, does nothing and compiles away, so a build that names no
+  including a frame that dispatch then refuses or drops, but not a frame the node originates
+  itself. It is given only the link name (a bus peer's name for a frame from a bus peer), valid
+  for the call, and it is observe-only: `void` and `noexcept`, checked by the
+  `tr::net::frame_observer` concept. It runs on the receiving task and must not block. The
+  default, `tr::net::no_frame_observer_t`, does nothing and compiles away, so a build that names no
   observer is unchanged. The router holds no state for it. Bind one in
   `libtracer/config_override.hpp` with `using frame_observer_t = my_link_tally_t;` for
   per-link liveness or traffic accounting kept in the application. This is the production

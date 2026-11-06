@@ -8,10 +8,13 @@
  * ## What is being defended
  *
  * An application keeps per-link liveness and traffic accounting by naming a frame observer in
- * its configuration. The router calls `frame_observer_t::on_frame(inbound_link_name)` at the
- * top of both receive tiers and holds nothing for it. A frame that dispatch then refuses (too
- * short, a type the router does not serve, a READ of a vertex that does not exist) is still a
- * frame that arrived, so it is observed too.
+ * its configuration. The router calls `frame_observer_t::on_frame(inbound_link_name)` once per
+ * frame and holds nothing for it: in each span-tier ingress (the link thunk, `on_frame`,
+ * `on_frame_bus`) and at the top of the rope tier, never inside the shared `on_frame_impl` that
+ * a one-link rope and `originate` also enter. A frame that dispatch
+ * then refuses (too short, a type the router does not serve, a READ of a vertex that does not
+ * exist) is still a frame that arrived, so it is observed too. A frame the node originates
+ * itself arrived on no link, so it is not.
  *
  * ## What the tests assert
  *
@@ -25,6 +28,8 @@
  * - BEFORE dispatch: each link records the count at the moment the router sends a reply down
  *   it, and that count already includes the frame being answered.
  * - Refused frames count: a 2-byte runt, a non-`FWD` TLV, and a READ of a missing vertex.
+ * - A single device-link rope, which CPU routing cannot read, is still observed once.
+ * - `originate()` leaves the count unchanged: the node's own frame came in on no link.
  *
  * A CI leg that binds its own fragment has no counting observer; there the behavioural cases
  * print SKIP and the test exits 77.
@@ -95,6 +100,8 @@ class record_link_t : public transport_t {
         }
         (void)rx_.deliver_rope(std::move(r));
     }
+    /** @brief Push @p rope up the rope-tier receiver as it is (a device rope, say). */
+    void deliver_device(tr::view::rope_t rope) { (void)rx_.deliver_rope(std::move(rope)); }
     /** @brief `O::calls` at each send, in order. */
     std::vector<std::size_t> calls_at_send;
 
@@ -177,6 +184,19 @@ void run() {
     expect_observed_before_dispatch(r);
     expect_one<O>("a two-link rope runt on r (dropped)", "r", [&] { r.inject_rope(runt, 2); });
     expect_one<O>("the public by-name span door", "door", [&] { router.on_frame("door", read); });
+    expect_one<O>("a one-link DEVICE rope on r (not CPU-readable, unrouted)", "r", [&] {
+        std::array<std::byte, 8> dev_bytes{};
+        tr::view::rope_t dev(tr::view::view_t::over(tr::view::borrow_device(dev_bytes)));
+        r.deliver_device(std::move(dev));
+    });
+    {
+        std::printf("originate() of a local READ (the node's own frame, on no link):\n");
+        const std::size_t before = O::calls;
+        fwd_router_t::origin_t slot{[](void*, const tr::view::rope_t&) {}, nullptr};
+        check(router.originate(slot, fwd_op_t::READ, path_t("/sensor/temp")).has_value(),
+              "  originate accepted");
+        check(O::calls == before, "  not observed: it arrived on no link");
+    }
 
     if constexpr (tr::net::kBusLinks) {
         (void)router.attach_link("bus", bus);

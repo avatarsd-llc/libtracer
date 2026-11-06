@@ -633,9 +633,11 @@ struct default_config_t {
      * `fwd_router_t` calls `frame_observer_t::on_frame(inbound_link_name)` once per inbound
      * frame, on every link, before dispatch, on the receiving task, including a frame that
      * dispatch then refuses or drops. A frame on a bus whose peer the link cannot name has no
-     * name to give, and is dropped unobserved. The call gets no frame bytes, and the name view is
+     * name to give, and is dropped unobserved; a frame the node originates itself arrived on
+     * no link and is not observed either. The call gets no frame bytes, and the name view is
      * valid only for the duration of the call. It is observe-only: it returns nothing, so it cannot
-     * refuse, alter or delay the frame, and it must be `noexcept`. Its use is per-link
+     * refuse or alter the frame, and it must be `noexcept`. It runs on the receiving task, so it
+     * must not block. Its use is per-link
      * liveness and traffic accounting kept in the application. The router holds no state for
      * it, so whatever the policy keeps lives in the policy itself.
      *

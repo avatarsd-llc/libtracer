@@ -208,8 +208,9 @@ flowchart TB
 link and on both receive tiers, on the receiving task. A frame that is then dropped as a runt,
 refused as an unserved type or answered with an error is still observed; on a bus the name is
 the peer's. The observer gets the link name and nothing else, valid only for the call: no frame
-bytes, no copy, and no way to refuse, alter or delay the frame, since `on_frame` is `void` and
-`noexcept`. It is a compile-time policy, not a registration: the router holds no function
+bytes, no copy, and no way to refuse or alter the frame, since `on_frame` is `void` and
+`noexcept`. It runs on the receiving task, so it must not block. A frame the node originates
+itself (`originate`) arrived on no link and is not observed. It is a compile-time policy, not a registration: the router holds no function
 pointer or state for it, and the default `no_frame_observer_t` does nothing and compiles away.
 An application that keeps per-link liveness or traffic counts binds its own type in its
 `libtracer/config_override.hpp` (`using frame_observer_t = my_link_tally_t;`, a fragment as
