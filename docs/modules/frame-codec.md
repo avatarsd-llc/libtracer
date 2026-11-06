@@ -437,10 +437,6 @@ lives in [fwd-router.md](fwd-router.md) §the bound hop.
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::wire::path_ref_store_element
-:project: libtracer
-```
-
 ```{doxygenfunction} tr::wire::emit_name(std::vector<std::byte>&, std::span<const std::byte>)
 :project: libtracer
 ```
