@@ -253,47 +253,10 @@ transport_drop_stats_t quic_transport_t::drop_stats() const noexcept {
 
 namespace {
 
-/**
- * @brief The quic kind's PRIVATE config keys, parsed module-side from the raw
- *        SPEC config SETTINGS TLV (ADR-0043 §5 leanness: the shared
- *        conn_settings_t carries only the universal keys, so the TLS selection
- *        never touches it).
- *
- * Neither key carries a filesystem path: the files a link trusts and serves are
- * app-owned (@ref tls_profile_t), and the SPEC can at most name which of the
- * app's profiles applies.
- */
-struct quic_private_cfg_t {
-    std::string_view tls;  /**< @brief The app profile this link uses (@ref
-                                       tls_profile_t::name); empty = the default
-                                       profile. A view into the raw config, valid
-                                       for the factory call only. */
-    bool insecure = false; /**< @brief DEV ONLY: skip server-certificate validation on
-                                       the DIAL side entirely. Must be asked for
-                                       explicitly — the default is to verify (DIAL). */
-    bool retired = false;  /**< @brief The config still carries a retired `ca`/`cert`/`key`
-                                       key: refused, never skipped — skipping would
-                                       silently change the link's trust. */
-};
-
 /** @brief Process-wide count of `quic` SPECs refused for carrying `insecure` = nonzero on a
  *         build without @ref tr::graph::default_config_t::kAllowInsecureTls — see
  *         @ref quic_insecure_refusals. Touched only on the refusal, never on a dial. */
 std::atomic<std::uint64_t> g_insecure_refusals{0};
-
-/** @brief The shared config_reader_t walk over the quic-private keys: NAME "tls"
- *         NAME <profile>, NAME "insecure" VALUE <u8>; unknown pairs ignored
- *         (forward-compat). The retired `ca`/`cert`/`key` are the exception: their
- *         presence (any value type) is recorded so the factory refuses the SPEC.
- *         Pair-consuming (#927). */
-[[nodiscard]] quic_private_cfg_t parse_quic_config(const wire::tlv_node_t* raw_config) {
-    quic_private_cfg_t out;
-    const wire::config_reader_t cfg(raw_config);
-    if (const auto v = cfg.name("tls")) out.tls = *v;
-    if (const auto v = cfg.flag("insecure")) out.insecure = *v;
-    out.retired = cfg.has("ca") || cfg.has("cert") || cfg.has("key");
-    return out;
-}
 
 }  // namespace
 
@@ -301,28 +264,26 @@ transport_factory_t quic_transport_factory(std::span<const tls_profile_t> profil
                                            mem::mem_backend_t* rx_backend) {
     return [profiles, rx_backend](const conn_settings_t& s, const wire::tlv_node_t* raw_config,
                                   mem::block_source_t& src) -> graph::result_t<transport_ptr_t> {
-        // BOTH roles carry kind-private keys, so the parse precedes the role split:
-        // the DIAL branch used to return before parse_quic_config ever ran, which is
-        // why no SPEC could reach the dial-side trust knobs at all (#918).
-        const quic_private_cfg_t priv = parse_quic_config(raw_config);
+        // BOTH roles carry kind-private keys (`tls`, `insecure`), read module-side from the
+        // raw config so the shared conn_settings_t never carries them (ADR-0043 §5), and
+        // the read precedes the role split: the DIAL branch used to return before the
+        // parse ever ran, which is why no SPEC could reach the dial-side trust knobs at
+        // all (#918). Pair-consuming (#927); unknown pairs are ignored (forward-compat).
+        const wire::config_reader_t cfg(raw_config);
+        const bool insecure = cfg.flag("insecure").value_or(false);
         // The `insecure` key disables peer authentication, and a SPEC can come from any peer
         // the ACL lets write (every peer, on a default build). Honouring it is a BUILD
         // capability: without kAllowInsecureTls the SPEC is refused and counted — never
         // silently downgraded to a verifying dial, never honoured. `insecure = 0` passes.
         if constexpr (!kAllowInsecureTls) {
-            if (priv.insecure) {
+            if (insecure) {
                 g_insecure_refusals.fetch_add(1, std::memory_order_relaxed);
                 return std::unexpected(graph::status_t::PERMISSION_DENIED);
             }
         }
-        // The SPEC names a profile; the app's table decides what that name means. A
-        // name the app never registered is a config error, answered before any file
-        // is opened — the status says nothing about the filesystem. So is a stale
-        // config still carrying a retired path key: skipping it would quietly move a
-        // dial that pinned a private CA onto the system trust store.
-        const tls_profile_t* const prof = find_tls_profile(profiles, priv.tls);
-        if (priv.retired || (prof == nullptr && !priv.tls.empty()))
-            return std::unexpected(graph::status_t::TYPE_MISMATCH);
+        const graph::result_t<const tls_profile_t*> selected = select_tls_profile(profiles, cfg);
+        if (!selected) return std::unexpected(selected.error());
+        const tls_profile_t* const prof = *selected;
         if (s.role == conn_role_t::DIAL) {
             if (s.addr.empty() || s.port == 0)
                 return std::unexpected(graph::status_t::TYPE_MISMATCH);
@@ -336,7 +297,7 @@ transport_factory_t quic_transport_factory(std::span<const tls_profile_t> profil
             return make_checked<quic_transport_t>(
                 src, s.addr, s.port,
                 quic_dial_tls_t{.ca_file = prof != nullptr ? prof->ca_file : std::string_view{},
-                                .insecure_no_verify = priv.insecure},
+                                .insecure_no_verify = insecure},
                 quic_config_t{.memory = {.rx = rx_backend, .io = &src}, .max_frame = s.max_frame});
         }
         // `port = 0` on a LISTEN is the EPHEMERAL request (#1362), not a missing key: the

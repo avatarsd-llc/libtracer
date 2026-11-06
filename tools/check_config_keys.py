@@ -19,15 +19,18 @@ whose typed accessors take the key as a string literal:
     if (const auto v = cfg.name("ca")) ...      -> key "ca",  value spelling `NAME`
     if (const auto v = cfg.flag("insecure")) ...-> key "insecure", `VALUE` u8 (flag)
 
-So for every file that CONSTRUCTS a reader, the key set and each key's wire value
-type are recoverable by reading the accessor calls on that reader's variable. The
-page declares the same per source file, and the check is a two-way set comparison
-plus a per-key value-spelling comparison.
+So for every file that CONSTRUCTS a reader, or takes one by reference, the key set
+and each key's wire value type are recoverable by reading the accessor calls on that
+reader's variable. The page declares the same per kind: a block names the factory's
+file and, after it, any shared file the factory hands its reader to (`quic` and
+`webtransport` both pass theirs to `select_tls_profile` in `msquic_endpoint.hpp`,
+which reads `tls`). The block's key set is the union over its files, and the check
+is a two-way set comparison plus a per-key value-spelling comparison.
 
 Three ways the page can fail, all of them the ways it would go stale:
   * a key read in source that the page's block for that file does not list;
   * a key the page lists that the file no longer reads (a stale row);
-  * a file that constructs a reader and has no block at all (a whole kind
+  * a file that reads keys and is named by no block at all (a whole kind
     undocumented — the "one kind documented, the others implied to have none"
     failure the page exists to prevent).
 
@@ -65,6 +68,8 @@ EXCLUDED = {
 
 # `const config_reader_t cfg(raw_config);` -> the variable every accessor hangs off.
 READER_CTOR = re.compile(r"\bconfig_reader_t\s+([A-Za-z_]\w*)\s*\(")
+# `const wire::config_reader_t& cfg` -> a reader a shared helper is handed by its caller.
+READER_REF = re.compile(r"\bconfig_reader_t\s*&\s*([A-Za-z_]\w*)\b")
 # A reader construction line carrying this marker (as a trailing comment ON the ctor line
 # — the exemption is matched per line, so a marker in a preceding comment block does not
 # reach it) reads something that is NOT connection
@@ -89,8 +94,10 @@ VALUE_SPELLING = {
     "flag": "`VALUE` u8 (flag)",
 }
 
-# `<!-- config-keys:begin core/src/transport_quic.cpp -->` … `<!-- config-keys:end -->`
-BLOCK_BEGIN = re.compile(r"<!--\s*config-keys:begin\s+(\S+)\s*-->")
+# `<!-- config-keys:begin core/src/transport_quic.cpp core/src/msquic_endpoint.hpp -->`
+# … `<!-- config-keys:end -->`: the kind's own file first, then the shared files it reads
+# through.
+BLOCK_BEGIN = re.compile(r"<!--\s*config-keys:begin\s+(\S+(?:\s+[^\s-]\S*)*)\s*-->")
 BLOCK_END = re.compile(r"<!--\s*config-keys:end\s*-->")
 # A table row's first cell, `| `insecure` | … `, and its second (the value spelling).
 ROW = re.compile(r"^\|\s*`([^`]+)`\s*\|\s*([^|]*?)\s*\|")
@@ -121,7 +128,7 @@ def derive_keys(text):
     is skipped: its reader walks a different grammar (the creation-SPEC envelope), so its
     keys belong to no kind and to no row on this page.
     """
-    readers = set(READER_CTOR.findall(text))
+    readers = set(READER_CTOR.findall(text)) | set(READER_REF.findall(text))
     # Drop the readers marked as reading something other than connection config.
     for line in text.splitlines():
         if NOT_CONFIG.search(line):
@@ -136,7 +143,9 @@ def derive_keys(text):
 
 
 def parse_page(text):
-    """The `{source path: {key: value-spelling}}` the page declares.
+    """The `{(source path, ...): {key: value-spelling}}` the page declares.
+
+    A block is keyed by the tuple of files its marker names, the kind's own file first.
 
     Returns `(blocks, errors)`. A malformed block is an error rather than an empty
     set: silently reading zero keys out of a broken marker would make the gate pass
@@ -150,9 +159,9 @@ def parse_page(text):
         if begin:
             if current is not None:
                 errors.append(f"{PAGE.name}:{lineno}: nested config-keys:begin")
-            current = begin.group(1)
-            if current in blocks:
-                errors.append(f"{PAGE.name}:{lineno}: duplicate block for {current}")
+            current = tuple(begin.group(1).split())
+            if any(k[0] == current[0] for k in blocks):
+                errors.append(f"{PAGE.name}:{lineno}: duplicate block for {current[0]}")
             blocks[current] = {}
             continue
         if BLOCK_END.search(line):
@@ -166,15 +175,20 @@ def parse_page(text):
         if row:
             blocks[current][row.group(1)] = row.group(2).strip()
     if current is not None:
-        errors.append(f"{PAGE.name}: unterminated block for {current}")
+        errors.append(f"{PAGE.name}: unterminated block for {current[0]}")
     return blocks, errors
 
 
-def check():
-    """Compare page against source. Returns a list of human-readable failures."""
-    if not PAGE.is_file():
-        return [f"missing page: {PAGE.relative_to(ROOT)}"]
-    blocks, failures = parse_page(PAGE.read_text(encoding="utf-8"))
+def check(page_text=None):
+    """Compare page against source. Returns a list of human-readable failures.
+
+    @p page_text stands in for the committed page (the unit tests' seam); None reads it.
+    """
+    if page_text is None:
+        if not PAGE.is_file():
+            return [f"missing page: {PAGE.relative_to(ROOT)}"]
+        page_text = PAGE.read_text(encoding="utf-8")
+    blocks, failures = parse_page(page_text)
 
     derived = {}
     for path in source_files():
@@ -182,19 +196,24 @@ def check():
         if keys:
             derived[str(path.relative_to(ROOT))] = keys
 
+    named = {rel for files in blocks for rel in files}
     for rel in sorted(derived):
-        if rel not in blocks:
+        if rel not in named:
             failures.append(
                 f"{rel} reads connection-config keys ({', '.join(sorted(derived[rel]))}) "
                 f"but {PAGE.relative_to(ROOT)} has no config-keys block for it"
             )
-    for rel in sorted(blocks):
-        src = ROOT / rel
-        if not src.is_file():
+    for files in sorted(blocks):
+        missing = [rel for rel in files if not (ROOT / rel).is_file()]
+        for rel in missing:
             failures.append(f"{PAGE.relative_to(ROOT)}: block names a missing file: {rel}")
+        if missing:
             continue
-        want = derived.get(rel, {})
-        have = blocks[rel]
+        want = {}
+        for rel in files:
+            want.update(derived.get(rel, {}))
+        have = blocks[files]
+        rel = " + ".join(files)
         for key in sorted(set(want) - set(have)):
             failures.append(f"{rel}: reads key `{key}` that the page does not document")
         for key in sorted(set(have) - set(want)):

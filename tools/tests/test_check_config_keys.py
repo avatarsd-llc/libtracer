@@ -100,6 +100,15 @@ class DeriveKeys(unittest.TestCase):
         """
         self.assertEqual(cck.derive_keys(src), {"addr": "name"})
 
+    def test_a_reader_taken_by_reference_is_a_reader(self):
+        # A shared helper is handed the factory's reader (`select_tls_profile`, #2440).
+        src = (
+            "graph::result_t<const tls_profile_t*> select(const wire::config_reader_t& cfg) {\n"
+            '    const auto n = cfg.name("tls");\n'
+            "}\n"
+        )
+        self.assertEqual(cck.derive_keys(src), {"tls": "name"})
+
     def test_flag_and_u8_are_distinguishable(self):
         src = """
             const config_reader_t cfg(c);
@@ -127,9 +136,21 @@ class ParsePage(unittest.TestCase):
         blocks, errors = cck.parse_page(page)
         self.assertEqual(errors, [])
         self.assertEqual(
-            blocks["core/src/x.cpp"],
+            blocks[("core/src/x.cpp",)],
             {"ca": "`NAME` utf-8", "insecure": "`VALUE` u8 (flag)"},
         )
+
+    def test_a_block_names_the_kind_file_then_the_shared_files(self):
+        page = "\n".join(
+            [
+                "<!-- config-keys:begin core/src/x.cpp core/src/shared.hpp -->",
+                "| `tls` | `NAME` utf-8 | DIAL | | |",
+                "<!-- config-keys:end -->",
+            ]
+        )
+        blocks, errors = cck.parse_page(page)
+        self.assertEqual(errors, [])
+        self.assertEqual(blocks, {("core/src/x.cpp", "core/src/shared.hpp"): {"tls": "`NAME` utf-8"}})
 
     def test_rows_outside_a_block_are_not_declarations(self):
         page = "| `stray` | `NAME` utf-8 |\n"
@@ -141,7 +162,7 @@ class ParsePage(unittest.TestCase):
         page = "<!-- config-keys:begin core/src/u.cpp -->\nprose only\n<!-- config-keys:end -->"
         blocks, errors = cck.parse_page(page)
         self.assertEqual(errors, [])
-        self.assertEqual(blocks, {"core/src/u.cpp": {}})
+        self.assertEqual(blocks, {("core/src/u.cpp",): {}})
 
     def test_unterminated_block_is_an_error(self):
         page = "<!-- config-keys:begin core/src/x.cpp -->\n| `ca` | `NAME` utf-8 |\n"
@@ -170,9 +191,31 @@ class LivePage(unittest.TestCase):
     def test_the_gate_sees_the_quic_tls_keys(self):
         # The keys #1012 was filed about. If the extractor ever stops seeing them,
         # the whole page could be deleted and the gate would still pass.
-        quic = cck.derive_keys((cck.ROOT / "core" / "src" / "transport_quic.cpp").read_text())
+        # The kind reads `tls` through the shared `select_tls_profile` (#2440), so the
+        # kind's set is the union over the files its page block names.
+        blocks, errors = cck.parse_page(cck.PAGE.read_text(encoding="utf-8"))
+        self.assertEqual(errors, [])
+        files = next(k for k in blocks if k[0] == "core/src/transport_quic.cpp")
+        quic = {}
+        for rel in files:
+            quic.update(cck.derive_keys((cck.ROOT / rel).read_text()))
         self.assertEqual(quic.get("tls"), "name")
         self.assertEqual(quic.get("insecure"), "flag")
+
+    def test_a_dead_key_on_a_shared_block_is_still_caught(self):
+        # The union over a block's files must not hide a row neither file reads.
+        page = "\n".join(
+            [
+                "<!-- config-keys:begin core/src/transport_quic.cpp core/src/msquic_endpoint.hpp -->",
+                "| `tls` | `NAME` utf-8 | | | |",
+                "| `insecure` | `VALUE` u8 (flag) | | | |",
+                "| `ca` | `NAME` utf-8 | | | |",
+                "<!-- config-keys:end -->",
+            ]
+        )
+        failures = cck.check(page)
+        self.assertTrue(any("documents key `ca`" in f for f in failures), failures)
+        self.assertFalse(any("`tls`" in f or "`insecure`" in f for f in failures), failures)
 
 
 if __name__ == "__main__":

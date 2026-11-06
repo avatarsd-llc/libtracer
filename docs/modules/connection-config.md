@@ -274,7 +274,7 @@ factory keeps the span, not a copy, so the table and the strings it views must
 outlive the factory and every transport it builds; a `constexpr` table of string
 literals costs no RAM at all. The SPEC can at most *name* one of those profiles:
 
-<!-- config-keys:begin core/src/transport_quic.cpp -->
+<!-- config-keys:begin core/src/transport_quic.cpp core/src/msquic_endpoint.hpp -->
 
 | key | value | applies to | default | meaning |
 | --- | --- | --- | --- | --- |
@@ -287,7 +287,7 @@ literals costs no RAM at all. The SPEC can at most *name* one of those profiles:
 has no use for — it is the only kind here with an HTTP layer, so it is the only
 one with a resource to name and the only one with an H3 handshake to bound:
 
-<!-- config-keys:begin core/src/transport_webtransport.cpp -->
+<!-- config-keys:begin core/src/transport_webtransport.cpp core/src/msquic_endpoint.hpp -->
 
 | key | value | applies to | default | meaning |
 | --- | --- | --- | --- | --- |

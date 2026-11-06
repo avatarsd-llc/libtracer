@@ -695,7 +695,7 @@ void test_config_constructed_webtransport() {
     const auto bad = node_b.write(path_t("/net/webtransport-server/conn"), wt_conn_spec("bad", 0));
     check(!bad.has_value(), "B: a webtransport listener without cert/key fails creation");
 
-    // #927 against the REAL parse_wt_config, over the REAL wire path (a creator-endpoint
+    // #927 against the REAL `tls` read, over the REAL wire path (a creator-endpoint
     // SPEC → the module's factory). `parse_wt_config` kept a hand-rolled every-offset copy
     // of the SETTINGS walk after the other parsers moved to wire::config_reader_t. The
     // hijack target names no registered profile, so a listener that adopted it would be
