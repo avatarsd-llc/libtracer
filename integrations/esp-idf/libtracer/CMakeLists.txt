@@ -281,6 +281,12 @@ if(CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES)
 else()
     set(LIBTRACER_VERTEX_LOCK_STRIPES 16)
 endif()
+# The park table's stripe count (#2454), the same two-pass fallback (core's default, 8).
+if(CONFIG_LIBTRACER_PARK_STRIPES)
+    set(LIBTRACER_PARK_STRIPES ${CONFIG_LIBTRACER_PARK_STRIPES})
+else()
+    set(LIBTRACER_PARK_STRIPES 8)
+endif()
 # The default root's static arena (#1783, ADR-0083 Decision 4): `kSlabPool = false` below makes
 # the default root a static arena of this many bytes, so nothing the library draws by default
 # comes from the heap. Same two-pass fallback as the stripe count above. The heap-rooted
@@ -380,6 +386,21 @@ else()
     using lkv_slot_t = single_writer_slot_t;
 ")
 endif()
+# The blocking primitives (#2454). On a chip target `std::mutex`, `std::condition_variable` and
+# `std::shared_mutex` are IDF pthread objects, and the pthread layer takes each one's record and
+# FreeRTOS semaphore from the platform heap inside its own code, where the no-heap census of
+# libtracer.a cannot see a malloc. Every chip target binds tr::esp::static_sync_t instead, whose
+# primitives hold their semaphore inline; check_no_heap.py refuses the pthread entry points by
+# name. The `linux` host target keeps core's std_sync_t, as it keeps the host guard. The header
+# includes only FreeRTOS and the standard library, so including it from the fragment is not a
+# cycle.
+if(IDF_TARGET STREQUAL "linux")
+    set(LIBTRACER_SYNC_INCLUDE "")
+    set(LIBTRACER_SYNC_BINDING "")
+else()
+    set(LIBTRACER_SYNC_INCLUDE "#include \"libtracer_esp/static_sync.hpp\"\n")
+    set(LIBTRACER_SYNC_BINDING "    using sync_t = tr::esp::static_sync_t;\n")
+endif()
 # Inline fan-out width (#1708) — DERIVED from the target, like the two facts above. Every
 # publish reserves `kInlineFanout * sizeof(edge_view_t)` bytes of the publishing task's stack
 # for its subscriber snapshot (28 B a view on rv32), whatever the vertex's fan-out. A chip node's
@@ -468,12 +489,13 @@ set(LIBTRACER_CONFIG_OVERRIDE_TEXT
 #pragma once
 
 #include <cstddef>
-${LIBTRACER_SLOT_INCLUDE}
+${LIBTRACER_SLOT_INCLUDE}${LIBTRACER_SYNC_INCLUDE}
 namespace tr::graph {
 
 /** @brief Core's defaults with this component's Kconfig and chip-derived knobs applied. */
 struct esp_config_t : default_config_t {
     static constexpr std::size_t kVertexLockStripes = ${LIBTRACER_VERTEX_LOCK_STRIPES};
+    static constexpr std::size_t kParkStripes = ${LIBTRACER_PARK_STRIPES};
     static constexpr std::size_t kCacheLineBytes = ${LIBTRACER_CACHE_LINE_BYTES};
     static constexpr std::size_t kEdgePinSlots = ${LIBTRACER_EDGE_PIN_SLOTS};
     static constexpr std::size_t kInlineFanout = ${LIBTRACER_INLINE_FANOUT};
@@ -490,7 +512,7 @@ struct esp_config_t : default_config_t {
     static constexpr std::size_t kArenaBytes = ${LIBTRACER_ARENA_BYTES};
     static constexpr std::size_t kThreadStackArenaBytes = ${LIBTRACER_THREAD_STACK_ARENA_BYTES};
     static constexpr share_hint_t kDefaultShareHint = share_hint_t::${LIBTRACER_DEFAULT_SHARE_HINT};
-${LIBTRACER_SLOT_BINDING}};
+${LIBTRACER_SLOT_BINDING}${LIBTRACER_SYNC_BINDING}};
 
 using config_t = esp_config_t;
 

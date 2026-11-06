@@ -193,7 +193,7 @@ can_transport_t::~can_transport_t() {
 
 std::optional<can::advertise_t> can_transport_t::learned_binding(std::uint32_t base_can_id,
                                                                  std::span<char> path_out) const {
-    const std::lock_guard lock(const_cast<std::mutex&>(rx_m_));
+    const std::lock_guard lock(const_cast<tr::mutex_t&>(rx_m_));
     const binding_t* const b = learned_.find(base_can_id);
     if (b == nullptr) return std::nullopt;
     can::advertise_t adv = b->adv;
@@ -206,12 +206,12 @@ std::optional<can::advertise_t> can_transport_t::learned_binding(std::uint32_t b
 std::uint64_t can_transport_t::dropped_groups() const {
     // reasm_ is plain (non-atomic) RX-thread state, so its counter is read under
     // the ingress lock — introspection, never a hot path.
-    const std::lock_guard lock(const_cast<std::mutex&>(rx_m_));
+    const std::lock_guard lock(const_cast<tr::mutex_t&>(rx_m_));
     return reasm_.dropped_groups();
 }
 
 std::size_t can_transport_t::pending_slices() const {
-    const std::lock_guard lock(const_cast<std::mutex&>(rx_m_));
+    const std::lock_guard lock(const_cast<tr::mutex_t&>(rx_m_));
     return pending_.size();
 }
 
@@ -309,7 +309,7 @@ void can_transport_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
 }
 
 std::optional<std::uint16_t> can_transport_t::alloc_base(std::size_t slice_count,
-                                                         std::unique_lock<std::mutex>& lock) {
+                                                         std::unique_lock<tr::mutex_t>& lock) {
     // Everything here stays in std::size_t. The u16 this used to narrow to was the
     // silent half of #910: a >65535-slice group wrapped `span` (65536 became 0), the
     // reservation then trivially "fit", and the manifest advertised the same wrapped

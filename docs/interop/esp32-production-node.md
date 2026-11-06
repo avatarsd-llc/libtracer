@@ -282,9 +282,11 @@ replaces, not by shaving the core.
   reserved at link time, plus the same for the condvar table. Sixteen stripes suit a
   multi-core host — that is the default (`kVertexLockStripes = 16`,
   `core/include/libtracer/config.hpp:default_config_t::kVertexLockStripes`) — while a single-core chip reclaims RAM at
-  **4–8** (`config.hpp:default_config_t::kVertexLockStripes`). A stripe's platform mutex is lazy: on FreeRTOS it
-  costs ~90 B of heap on its first lock, so an untouched stripe costs its struct and
-  no heap.
+  **4**, the component's default on a single-core chip
+  (`config.hpp:default_config_t::kVertexLockStripes`). Each stripe holds its FreeRTOS
+  mutex inline (`tr::esp::static_mutex_t`, #2454), so the table draws no heap: on esp32c6
+  a stripe is 92 B plus a 16 B condvar, 432 B at 4 and 1,728 B at 16.
+  `CONFIG_LIBTRACER_PARK_STRIPES` sizes the park table the same way, at 100 B a stripe.
 - **Turn lwIP core locking on**: `CONFIG_LWIP_TCPIP_CORE_LOCKING=y` and
   `CONFIG_LWIP_TCPIP_CORE_LOCKING_INPUT=y` in `sdkconfig.defaults`. IDF's default sends every
   socket call to the tcpip task and back (2 task switches a call); with locking on, an inbound

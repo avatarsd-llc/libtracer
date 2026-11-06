@@ -21,6 +21,7 @@
 #include <mutex>
 
 #include "libtracer/config.hpp"
+#include "libtracer/sync.hpp"
 
 /**
  * @file
@@ -46,7 +47,7 @@ namespace tr::graph {
  * `static_assert` under the struct proves the request survived.
  */
 inline constexpr std::size_t kStripeAlign =
-    std::max({kCacheLineBytes, alignof(std::mutex), alignof(std::atomic<int>)});
+    std::max({kCacheLineBytes, alignof(tr::mutex_t), alignof(std::atomic<int>)});
 
 struct await_waiter_t;
 
@@ -96,7 +97,7 @@ struct await_waiter_t {
 struct alignas(kStripeAlign) vertex_stripe_t {  // one cache line per stripe where a second
                                                 // core exists to false-share with (see
                                                 // kStripeAlign); packed tight where none does
-    std::mutex m; /**< @brief Serializes the stripe's vertices' verbs. */
+    tr::mutex_t m; /**< @brief Serializes the stripe's vertices' verbs. */
     /** @brief Live `await` waiters on this stripe. Mutated only under @ref m, but READ
      *         without it by a publish that never takes the lock at all (#555), so it is
      *         atomic: the waiterless publish skips the mutex, not just the condvar call
@@ -113,7 +114,7 @@ static_assert(alignof(vertex_stripe_t) == kStripeAlign,
               "less than the payload's natural alignment (see its derivation above)");
 
 /**
- * @brief The stripe table: `constinit` where the platform's `std::mutex` is
+ * @brief The stripe table: `constinit` where `tr::mutex_t` is the platform's `std::mutex` and
  *        constexpr-constructible, so the per-verb lookup is a plain indexed load with
  *        NO function-local-static init-guard check on the hot path (#370). libstdc++
  *        makes the ctor constexpr only when its gthreads port supports static mutex
@@ -155,8 +156,8 @@ inline vertex_stripe_t& vertex_stripe_of(const void* v) noexcept {
  *        `vertex_t::wait_for_change` and from a publish that saw `waiters != 0`:
  *        the waiterless publish (the hot path) never pays this table's init guard.
  */
-inline std::condition_variable& vertex_stripe_cv(std::size_t idx) {
-    static std::array<std::condition_variable, kVertexLockStripes> cvs;
+inline tr::condvar_t& vertex_stripe_cv(std::size_t idx) {
+    static std::array<tr::condvar_t, kVertexLockStripes> cvs;
     return cvs[idx];
 }
 

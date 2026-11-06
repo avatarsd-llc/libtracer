@@ -308,17 +308,16 @@ editing the component's render site or by building libtracer's sources from a CM
 ### Where the bytes are
 
 The lock-stripe table is the only global mutable buffer libtracer links into a node. Its cost
-divides into a part reserved at link time and a part that really is lazy. The table's cost is
-commonly described as lazy in full; only the platform primitive behind each handle is:
+is reserved at link time, in `.bss`: `kVertexLockStripes` stripe structs plus the same number
+of condvars, present whether or not a graph is ever constructed. Nothing behind them is lazy on
+an ESP-IDF chip: `config_t::sync_t` there is `tr::esp::static_sync_t` (#2454), whose mutex holds
+its FreeRTOS semaphore inline, so an esp32c6 stripe is 92 B plus a 16 B condvar and draws no
+heap. The component defaults a single-core chip to 4 stripes (432 B). The park table
+(`kParkStripes`, menuconfig `CONFIG_LIBTRACER_PARK_STRIPES`) is the same shape at 100 B a stripe.
 
-- **Static, not lazy.** `kVertexLockStripes` stripe structs plus the same number of condvar
-  handles, in `.bss`, present whether or not a graph is ever constructed.
-- **Lazy.** The platform primitive *behind* each handle. On FreeRTOS a stripe's mutex costs
-  roughly 90 B of heap on that stripe's first lock, so a stripe no vertex has hashed onto
-  costs its struct and no heap.
-
-Most of the struct is false-sharing padding, which is what `kCacheLineBytes` governs.
-Measured on rv32 (`-Os -fno-exceptions -fno-rtti`, GCC 15.2, compiling the real
+Where the mutex is a one-word handle (a host, or a target whose `sync_t` keeps its primitive
+elsewhere), most of the struct is false-sharing padding, which is what `kCacheLineBytes`
+governs. Measured on rv32 (`-Os -fno-exceptions -fno-rtti`, GCC 15.2, compiling the real
 `core/src/graph.cpp`), 16 stripes:
 
 | `kCacheLineBytes` | stripe table `.bss` | TU `.bss` + `.sbss` |

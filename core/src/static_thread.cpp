@@ -15,11 +15,13 @@
 #include <new>
 
 #if defined(LIBTRACER_STATIC_THREAD_FREERTOS)
+#include <atomic>
 #include <mutex>
 
 #include "freertos/FreeRTOS.h"  // IWYU pragma: keep — ordering: FreeRTOS.h before task.h
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "libtracer/sync.hpp"
 #include "sdkconfig.h"
 #endif
 
@@ -68,9 +70,11 @@ static_assert(kCtlBytes + 64 <= 640,
               "the thread-stack region's per-stack budget no longer "
               "holds a task block; raise it in the ESP CMakeLists.txt");
 
-/** @brief Detached blocks not yet reaped, guarded by @ref g_parked_m. */
-ctl_t* g_parked = nullptr;
-std::mutex g_parked_m;
+/** @brief Detached blocks not yet reaped, edited under @ref g_parked_m. Atomic only so that
+ *         @ref reap_parked can see an empty list without taking the lock. */
+std::atomic<ctl_t*> g_parked{nullptr};
+/** @brief Guards @ref g_parked: a `tr::mutex_t`, which on a chip holds its semaphore inline. */
+tr::mutex_t g_parked_m;
 
 void task_entry(void* p) {
     auto* const c = static_cast<ctl_t*>(p);
@@ -104,19 +108,22 @@ void finish(ctl_t* c) noexcept {
 
 /** @brief Reap every parked block whose body has returned. */
 void reap_parked() noexcept {
+    // Every start, join and detach comes through here, and the list is empty unless a thread
+    // was detached: that common case takes no lock. A block parked concurrently is reaped by
+    // the next call, as one whose body has not yet returned always was.
+    if (g_parked.load(std::memory_order_acquire) == nullptr) return;
     ctl_t* done = nullptr;
     {
         const std::lock_guard lock(g_parked_m);
-        for (ctl_t** at = &g_parked; *at != nullptr;) {
-            ctl_t* const c = *at;
-            if (xSemaphoreTake(c->done, 0) == pdTRUE) {
-                *at = c->next;
-                c->next = done;
-                done = c;
-            } else {
-                at = &c->next;
-            }
+        ctl_t* kept = nullptr;
+        for (ctl_t* c = g_parked.load(std::memory_order_relaxed); c != nullptr;) {
+            ctl_t* const next = c->next;
+            ctl_t*& into = xSemaphoreTake(c->done, 0) == pdTRUE ? done : kept;
+            c->next = into;
+            into = c;
+            c = next;
         }
+        g_parked.store(kept, std::memory_order_release);
     }
     while (done != nullptr) {
         ctl_t* const c = done;
@@ -169,8 +176,8 @@ void static_thread_t::detach() noexcept {
         auto* const c = static_cast<ctl_t*>(ctl_);
         ctl_ = nullptr;
         const std::lock_guard lock(g_parked_m);
-        c->next = g_parked;
-        g_parked = c;
+        c->next = g_parked.load(std::memory_order_relaxed);
+        g_parked.store(c, std::memory_order_release);
     }
     reap_parked();
 }

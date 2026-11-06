@@ -493,6 +493,13 @@ extern "C" void app_main(void) {
     const tr::mem::source_stats_t stacks = tr::mem::stack_source().stats();
     std::printf("thread stacks: %u/%u B peak, %u refused\n", static_cast<unsigned>(stacks.peak),
                 static_cast<unsigned>(stacks.capacity), static_cast<unsigned>(stacks.refused));
+    // The default root's census (#2454): the static arena the graph's tables, the net plane's
+    // records and the transport vertex's endpoint contexts are drawn from. Every object there
+    // that holds a `tr::mutex_t` carries its FreeRTOS semaphore inline on a chip, so a peak
+    // near the capacity means raise CONFIG_LIBTRACER_ARENA_BYTES.
+    const tr::mem::source_stats_t root = tr::mem::default_root().stats();
+    std::printf("default root: %u/%u B peak, %u refused\n", static_cast<unsigned>(root.peak),
+                static_cast<unsigned>(root.capacity), static_cast<unsigned>(root.refused));
     const int stack_failures = tr::mem::kThreadStackArenaBytes != 0 && stacks.refused != 0 ? 1 : 0;
     if (stack_failures != 0) std::printf("FAIL: a library thread's stack was refused\n");
     failures += stack_failures;

@@ -35,6 +35,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/static_thread.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
@@ -81,8 +82,8 @@ class loopback_endpoint_t final : public transport_t {
     loopback_endpoint_t* peer_ = nullptr;
     frame_t* head_ = nullptr;  // the inbox FIFO, guarded by m_
     frame_t* tail_ = nullptr;
-    std::mutex m_;
-    std::condition_variable cv_;
+    tr::mutex_t m_;
+    tr::condvar_t cv_;
     bool stop_ = false;
     bool running_ = false;  // the receive thread started and is not yet stopped (guarded by m_)
     /** @brief The frames @ref send dropped (#2482); this endpoint drops nothing inbound. */

@@ -26,7 +26,7 @@ PAGES = {
     "index.md": ["tracer.hpp"],
     "config.md": [
         "config.hpp", "reclaim.hpp", "guard.hpp", "guard_mutex.hpp",
-        "init_fault.hpp",
+        "init_fault.hpp", "sync.hpp",
     ],
     "status.md": ["status.hpp", "error.hpp"],
     "instrumentation.md": ["pin_instrument.hpp"],

@@ -82,6 +82,7 @@
 #include "libtracer/graph.hpp"
 #include "libtracer/link_kind.hpp"
 #include "libtracer/security_noise.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_factory.hpp"
 
@@ -776,8 +777,8 @@ class noise_link_t final : public transport_t {
     mem::block_source_t* io_src_;    /**< @brief `memory.io`: the per-send seal block's store. */
     std::size_t max_frame_ = 0;      /**< @brief The largest frame a send accepts. */
 
-    mutable std::mutex mu_; /**< @brief Guards everything below. */
-    state_t* st_ = nullptr; /**< @brief The slot block; null when the link is inert. */
+    mutable tr::mutex_t mu_; /**< @brief Guards everything below. */
+    state_t* st_ = nullptr;  /**< @brief The slot block; null when the link is inert. */
     noise::session_t<B>* current_ = nullptr; /**< @brief The current session's slot. */
     noise::session_t<B>* next_ = nullptr;    /**< @brief The unacknowledged or pending slot. */
     stage_t stage_ = stage_t::IDLE;          /**< @brief The handshake slot's stage. */
