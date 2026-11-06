@@ -1521,7 +1521,7 @@ void test_rope_delivery() {
     tr::net::can_transport_t tx_b(std::move(link_b),
                                   {0, 2, tr::net::can::can_frame_mode_t::FD, "q"});
 
-    check(tx_b.delivers_ropes(), "transport_can::delivers_ropes() is true");
+    check(tx_b.delivers_ropes(), "can_transport_t::delivers_ropes() is true");
 
     rx_bus = tx_b.bus();
     tx_b.set_peer_rope_receiver(peer_rope_rx);

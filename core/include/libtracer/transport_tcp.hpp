@@ -510,7 +510,4 @@ class tcp_server_transport_t final : public stream_server_base_t {
     std::size_t max_frame_ = tcp_transport_t::kMaxFrame;
 };
 
-/** @brief The pre-v0.18.0 spelling of @ref tcp_server_transport_t; removed in v0.19.0 (#1723). */
-using transport_tcp_server = tcp_server_transport_t;
-
 }  // namespace tr::net

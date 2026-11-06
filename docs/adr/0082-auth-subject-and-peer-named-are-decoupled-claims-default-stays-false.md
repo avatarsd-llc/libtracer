@@ -10,7 +10,7 @@ Status: **accepted** (maintainer-ratified 2026-08-16, ruling on [#1278](https://
 
 `peer_named` is a wiring-time flag on the stream server links. Constructed `true`, a listener exposes the `bus_link_t` facet and each accepted session becomes an individually addressable peer; constructed `false` — the shipped default — the listener is FLAT: one routing identity for every peer it carries. The default is spelled in two places, both verified against `main` = `218ab50f`:
 
-- `core/include/libtracer/transport_ws.hpp:198` — the `transport_ws_server` constructor's `bool peer_named = false`.
+- `core/include/libtracer/transport_ws.hpp:198` — the `ws_server_transport_t` constructor's `bool peer_named = false`.
 - `core/src/builtin_transport_ws.cpp:67` — the SPEC-created path's `cfg.flag("peer_named").value_or(false)`, so an omitted config key means FLAT.
 
 (The line numbers quoted on [#1278](https://github.com/avatarsd-llc/libtracer/issues/1278) — `builtin_transport_ws.cpp:55`, `transport_ws.hpp:184` — have since drifted; the values they cited are unchanged.)

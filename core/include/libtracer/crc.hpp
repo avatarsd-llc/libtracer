@@ -243,9 +243,6 @@ struct crc32c_state_t {
     [[nodiscard]] constexpr std::uint32_t value() const noexcept { return c ^ 0xFFFFFFFFu; }
 };
 
-/** @brief The pre-v0.18.0 spelling of @ref crc32c_state_t; removed in v0.19.0 (#1723). */
-using crc32c_state = crc32c_state_t;
-
 /**
  * @brief A running CRC-16-CCITT (FALSE) accumulator — the crc16 twin of @ref crc32c_state_t
  *        (init 0xFFFF, no final xor). Same feed-chunks-then-read-value contract.
@@ -259,9 +256,6 @@ struct crc16_ccitt_state_t {
     /** @brief The finalized CRC-16-CCITT over everything fed so far. */
     [[nodiscard]] constexpr std::uint16_t value() const noexcept { return c; }
 };
-
-/** @brief The pre-v0.18.0 spelling of @ref crc16_ccitt_state_t; removed in v0.19.0 (#1723). */
-using crc16_ccitt_state = crc16_ccitt_state_t;
 
 /** @brief CRC-32C (Castagnoli) over @p data. */
 [[nodiscard]] constexpr std::uint32_t crc32c(std::span<const std::byte> data) noexcept {

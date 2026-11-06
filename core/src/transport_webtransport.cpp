@@ -1000,7 +1000,7 @@ webtransport_transport_t::webtransport_transport_t(std::string_view peer_host,
     impl_t& i = *impl_;
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = config.memory.rx;
-    i.max_frame = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
+    i.max_frame = length_prefix_framer_t::configured_cap(max_frame);  // tighten-only (#1035)
     // Resolved BEFORE the dial below, so a link that never comes up still reads its own
     // budget back through effective_max_handshake() (#1408).
     i.max_handshake = handshake_cap(max_handshake);  // tighten-only
@@ -1051,7 +1051,7 @@ webtransport_transport_t::webtransport_transport_t(std::uint16_t bind_port,
     impl_t& i = *impl_;
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = config.memory.rx;
-    i.max_frame = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
+    i.max_frame = length_prefix_framer_t::configured_cap(max_frame);  // tighten-only (#1035)
     // Resolved BEFORE listen_start, so the first peer's very first classification chunk is
     // already measured against the configured budget (#1408).
     i.max_handshake = handshake_cap(max_handshake);  // tighten-only

@@ -345,7 +345,7 @@ int main() {
     if (rev) std::reverse(order.begin(), order.end());
 
     std::printf(
-        "# bench_tcp_baseline: transport_tcp_server (peer-named, one poll thread), %zu B frames\n"
+        "# bench_tcp_baseline: tcp_server_transport_t (peer-named, one poll thread), %zu B frames\n"
         "# hardware threads %u | blast window %.2f s | sweep %s | pace %llu ns | "
         "load sample 1/%zu\n",
         kFrameBytes, std::thread::hardware_concurrency(), seconds, rev ? "REVERSE" : "FORWARD",

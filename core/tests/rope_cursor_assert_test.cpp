@@ -108,7 +108,7 @@ volatile std::uint8_t g_sink = 0;
 
 /** @brief The in-bounds contract still holds — the asserts do not fire on valid reads. */
 void test_in_bounds_unaffected() {
-    std::printf("rope_cursor in-bounds reads are unaffected (#916):\n");
+    std::printf("rope_cursor_t in-bounds reads are unaffected (#916):\n");
     std::array<std::byte, 3> a{std::byte{0x10}, std::byte{0x11}, std::byte{0x12}};
     std::array<std::byte, 2> b{std::byte{0x20}, std::byte{0x21}};
 
@@ -146,7 +146,7 @@ void test_in_bounds_unaffected() {
 
 /** @brief Each out-of-range access trips its debug precondition (the #916 gate). */
 void test_out_of_range_aborts() {
-    std::printf("rope_cursor out-of-range access aborts instead of fabricating a byte (#916):\n");
+    std::printf("rope_cursor_t out-of-range access aborts instead of fabricating a byte (#916):\n");
     std::array<std::byte, 3> a{std::byte{0x10}, std::byte{0x11}, std::byte{0x12}};
     std::array<std::byte, 2> b{std::byte{0x20}, std::byte{0x21}};
 

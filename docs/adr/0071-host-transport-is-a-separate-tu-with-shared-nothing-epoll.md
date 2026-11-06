@@ -8,7 +8,7 @@ Status: **accepted (design); not implemented.** Records two decisions that were 
 
 libtracer serves a single-core ESP32-C6 and a many-core host from one codebase. The TCP transport currently serves both from one file, and the way it does so is a deliberate MCU-shaped choice that no ADR records.
 
-**The shipped server is one thread.** `transport_tcp_server::run` (`core/src/transport_tcp.cpp:521`) multiplexes the listen socket and every live peer in a single `poll()` pass, and says so:
+**The shipped server is one thread.** `tcp_server_transport_t::run` (`core/src/transport_tcp.cpp:521`) multiplexes the listen socket and every live peer in a single `poll()` pass, and says so:
 
 > `// ONE poll pass multiplexes the listen socket and every live peer — no`
 > `// per-peer thread (the MCU-shaped choice, #362)`

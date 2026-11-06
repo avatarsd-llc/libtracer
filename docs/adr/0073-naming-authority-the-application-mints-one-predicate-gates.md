@@ -35,7 +35,7 @@ Rejected: a sanitized `ip_port` name (longer wire segments, needs a canonical co
 
 ### §3 — A bus link's NAME is not a routable next-hop
 
-Routing a `dst` through a bus link's own connection NAME today **broadcasts** (`transport_ws_server::send` fans out to every open peer), so one directed request draws N replies and scrambles FIFO reply correlation — the failure that broke the #409 topology walk. Ruled: an inbound FWD whose next hop is a bus link's NAME is **rejected**; only the link's *peer names* route. A `dst` is a directed route to one terminus; fan-out belongs to the subscription plane, where N deliveries exist because N subscribers asked. Rejected alternatives: keep-and-document (breaks one-request-one-reply by construction) and verb-dependent routing (write broadcasts, read rejects — makes addressability depend on the operation, which no other hop does).
+Routing a `dst` through a bus link's own connection NAME today **broadcasts** (`ws_server_transport_t::send` fans out to every open peer), so one directed request draws N replies and scrambles FIFO reply correlation — the failure that broke the #409 topology walk. Ruled: an inbound FWD whose next hop is a bus link's NAME is **rejected**; only the link's *peer names* route. A `dst` is a directed route to one terminus; fan-out belongs to the subscription plane, where N deliveries exist because N subscribers asked. Rejected alternatives: keep-and-document (breaks one-request-one-reply by construction) and verb-dependent routing (write broadcasts, read rejects — makes addressability depend on the operation, which no other hop does).
 
 This is spec-touching (RFC-0004 §B territory) and lands through the RFC instrument, not a silent patch.
 

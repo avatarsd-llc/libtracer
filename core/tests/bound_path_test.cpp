@@ -597,7 +597,7 @@ void test_bit7_is_refused() {
     // A forwarder masks the op byte rather than switching on it (§9.3), so a peer's stray bit
     // still routes to the terminus that owns the decision...
     const auto flagged = b_fwd_raw_op(kRead | kBit7, b_path({"x"}), b_path({"back"}));
-    const tr::wire::grammar::span_cursor cur{flagged};
+    const tr::wire::grammar::span_cursor_t cur{flagged};
     tr::net::fwd_pre_t pre;
     (void)tr::net::peek_fwd_dst_any(cur, pre);
     const auto peeked =

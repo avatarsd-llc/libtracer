@@ -21,7 +21,7 @@ reassembly *is* rope construction ("zero-copy, never `memcpy`"), a contiguous co
 legal only at a transport-**egress** DMA boundary, and a view boundary may fall anywhere
 — including mid-TLV-header.
 
-The parsing engine already exists: `grammar::rope_cursor` (#225) walks a rope through
+The parsing engine already exists: `grammar::rope_cursor_t` (#225) walks a rope through
 the one grammar core ([ADR-0048](0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md)
 §1), stitching straddled header fields and feeding CRC per-link, with the #227
 differential fuzzer proving it byte-equivalent to the span cursor over 131k adversarial
@@ -45,7 +45,7 @@ placement rule as `view_as_tlv`) representing **one TLV whose bytes live in a ro
 - Holds the decoded header facts (`type`, `opt`, lengths) plus **rope sub-regions** for
   the body and trailer — not copies, not spans: regions of refcounted `view_t` links.
 - **Children are materialized on demand**, one `grammar::parse_header` over a
-  `rope_cursor` per step: `child(i)` / iteration yields the next child's `tlv_view_t`
+  `rope_cursor_t` per step: `child(i)` / iteration yields the next child's `tlv_view_t`
   by parsing only that child's header; the child's *body bytes are never touched*.
 - **Nothing is decoded that is not accessed.** A structured payload handed to a
   consumer that does not descend into it is delivered as an opaque rope region — "up to
@@ -136,7 +136,7 @@ span, at **egress**.
   *as literally proposed* stands for this shape.
 - **Eager rope arena** (`rope_arena_t`, ADR-0052's option (B)) — subsumed. A lazy view
   is strictly more capable (it can always walk fully; an eager arena can never un-walk),
-  uses the same `rope_cursor`, and avoids a second arena + resolver surface.
+  uses the same `rope_cursor_t`, and avoids a second arena + resolver surface.
 - **Flatten-once at ingress** (ADR-0052's option (C)) — demoted to the **interim
   migration recipe** (`validate_rope → flatten → decode_into`) for paths not yet
   converted, and to the explicit `materialize()` escape hatch. It is not the end state;
@@ -216,8 +216,8 @@ storage). Concretely:
 
 - **Forward plane on the grammar cursor** — the peeks (`peek_fwd_first_dst_seg`,
   `peek_fwd_op`) and the forward-hop field walk become templates over
-  `grammar::parse_header<Cursor>` (CRC `DEFER`), instantiated with `span_cursor`
-  (single-link: byte-identical, zero-heap) and `rope_cursor` (multi-link). This deletes
+  `grammar::parse_header<Cursor>` (CRC `DEFER`), instantiated with `span_cursor_t`
+  (single-link: byte-identical, zero-heap) and `rope_cursor_t` (multi-link). This deletes
   `fwd_router.cpp`'s private `read_header` — the last grammar fork outside the
   [ADR-0048](0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md) §1 core.
 - **Multi-link egress iov** — the scatter-gather entry count is `~6 + link_count`,
@@ -241,7 +241,7 @@ storage). Concretely:
   (§4) lives once in the shared walk, gated to the view instantiation.
 - **Value handoff** — a VALUE payload region subropes straight into the vertex slot
   (§6); fixed-width scalars the resolver itself reads (op discriminants, labels)
-  stitch across links via the existing `rope_cursor` loads.
+  stitch across links via the existing `rope_cursor_t` loads.
 
 ### Revised migration order (supersedes steps ④–⑥ of the original list)
 

@@ -48,7 +48,8 @@ std::expected<tlv_view_t, err_t> tlv_view_t::over(view::rope_t frame) {
 
     // The bounds anchor (ADR-0053 §4): root header with the CRC walk DEFERRED,
     // then the exact-total check tlv_node_t::over applies ("trailing bytes").
-    const auto h = grammar::parse_header(grammar::rope_cursor{frame}, grammar::crc_check_t::DEFER);
+    const auto h =
+        grammar::parse_header(grammar::rope_cursor_t{frame}, grammar::crc_check_t::DEFER);
     if (!h) return std::unexpected(h.error());
     if (h->total != frame.total_length()) return std::unexpected(err_t::FRAME_INVALID);
 
@@ -67,7 +68,7 @@ std::expected<std::optional<tlv_view_t>, err_t> tlv_view_t::children_t::next() {
     // subspan-bounded parse_one. The cursor RESUMES at the anchor the previous
     // call left, so it re-enters the chain at this child instead of walking to it
     // from link 0 (#917).
-    const grammar::rope_cursor cur = grammar::rope_cursor::at(links, li_, intra_, len_ - pos_);
+    const grammar::rope_cursor_t cur = grammar::rope_cursor_t::at(links, li_, intra_, len_ - pos_);
     const auto h = grammar::parse_header(cur, grammar::crc_check_t::DEFER);
     if (!h) {
         // Child boundaries beyond a malformed header are unknowable: poison.
@@ -93,14 +94,15 @@ std::expected<void, err_t> tlv_view_t::verify() const {
     // link-by-link, no concatenation) plus the stored-value compare live once,
     // in the grammar core — this is that same code path, just deferred to the
     // access point (ADR-0053 §4).
-    const auto h = grammar::parse_header(grammar::rope_cursor{wire_}, grammar::crc_check_t::VERIFY);
+    const auto h =
+        grammar::parse_header(grammar::rope_cursor_t{wire_}, grammar::crc_check_t::VERIFY);
     if (!h) return std::unexpected(h.error());
     return {};
 }
 
 std::optional<timestamp_t> tlv_view_t::timestamp() const {
     if (!hdr_.opt.ts) return std::nullopt;
-    const grammar::rope_cursor cur{wire_};
+    const grammar::rope_cursor_t cur{wire_};
     const std::size_t off = hdr_.header + hdr_.length;
     timestamp_t t;
     t.relative = hdr_.opt.tf;

@@ -245,7 +245,7 @@ class rope_cursor_t {
             poisoned_ = true;
             n = avail;
         }
-        assert(!poisoned_ && "rope_cursor: feed overshoots the cursor's window");
+        assert(!poisoned_ && "rope_cursor_t: feed overshoots the cursor's window");
         // An empty feed names no byte, so it must not `seek` one: the grammar's CRC
         // feed calls this with n == 0 for an absent payload or trailer, at an offset
         // that is legitimately the end of the window.
@@ -282,7 +282,7 @@ class rope_cursor_t {
         // subscript in byte_at — the form the sanitizers DO see, rather than a real-but-
         // wrong byte they cannot — while for_each_span's `li < links_.size()` guard still
         // stops cleanly on it.
-        assert(li < links_.size() && "rope_cursor: offset is past the end of the link chain");
+        assert(li < links_.size() && "rope_cursor_t: offset is past the end of the link chain");
         return {li, intra};
     }
 
@@ -296,9 +296,6 @@ class rope_cursor_t {
     // cursor trivially copyable, as the walk stack's relocation memcpy needs.
     mutable bool poisoned_ = false;
 };
-
-/** @brief The pre-v0.18.0 spelling of @ref rope_cursor_t; removed in v0.19.0 (#1723). */
-using rope_cursor = rope_cursor_t;
 
 }  // namespace tr::wire::grammar
 

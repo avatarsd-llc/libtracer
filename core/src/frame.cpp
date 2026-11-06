@@ -80,8 +80,8 @@ struct validate_sink {
         root_ = h;
         seen_ = true;
     }
-    void on_leaf(const grammar::header_t& h, const grammar::span_cursor&) noexcept { keep(h); }
-    void on_open(const grammar::header_t& h, const grammar::span_cursor&) noexcept { keep(h); }
+    void on_leaf(const grammar::header_t& h, const grammar::span_cursor_t&) noexcept { keep(h); }
+    void on_open(const grammar::header_t& h, const grammar::span_cursor_t&) noexcept { keep(h); }
     void on_close() noexcept {}
 };
 
@@ -98,16 +98,17 @@ std::expected<tlv_node_t, err_t> tlv_node_t::over(std::span<const std::byte> inp
     // process heap. The RFC-0006 depth bound is therefore the caller's to set:
     // `mem::null_source()` refuses the first spill and the walk answers TLV_NESTING_TOO_DEEP.
     validate_sink sink;
-    std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;
-    grammar::walk_stack_t<grammar::span_cursor> stack(slots, &spill);
-    const auto r = grammar::walk(grammar::span_cursor{input}, sink, stack);
+    std::array<grammar::walk_frame_t<grammar::span_cursor_t>, 8> slots;
+    grammar::walk_stack_t<grammar::span_cursor_t> stack(slots, &spill);
+    const auto r = grammar::walk(grammar::span_cursor_t{input}, sink, stack);
     if (!r) return std::unexpected(r.error());
     return tlv_node_t(sink.root_, input);
 }
 
 void tlv_children_t::iterator::load() noexcept {
     if (rest_.empty()) return;
-    const auto h = grammar::parse_header(grammar::span_cursor{rest_}, grammar::crc_check_t::DEFER);
+    const auto h =
+        grammar::parse_header(grammar::span_cursor_t{rest_}, grammar::crc_check_t::DEFER);
     // Unreachable for a region `tlv_node_t::over` accepted; ending the walk keeps a broken
     // invariant from reading past the region.
     if (!h) {

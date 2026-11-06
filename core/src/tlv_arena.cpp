@@ -89,10 +89,10 @@ struct arena_sink {
         n->body = bytes.subspan(h.header, h.length);
         n->end = static_cast<std::uint32_t>(nodes_.size());  // opaque default: own index + 1
     }
-    void on_leaf(const grammar::header_t& h, const grammar::span_cursor& node) {
+    void on_leaf(const grammar::header_t& h, const grammar::span_cursor_t& node) {
         push(h, node.buf);
     }
-    void on_open(const grammar::header_t& h, const grammar::span_cursor& node) {
+    void on_open(const grammar::header_t& h, const grammar::span_cursor_t& node) {
         const auto index = static_cast<std::uint32_t>(nodes_.size());
         push(h, node.buf);
         if (exhausted_) return;
@@ -130,9 +130,9 @@ std::expected<tlv_arena_t, err_t> decode_into(std::span<const std::byte> input,
     // 8 is the same typical-FWD-nesting figure the walk stack's inline slots use just below.
     if (!arena.nodes_.reserve(8)) return std::unexpected(err_t::TLV_NESTING_TOO_DEEP);
     arena_sink sink(arena.nodes_, &arena.root_ts_);
-    std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;
-    grammar::walk_stack_t<grammar::span_cursor> stack(slots, &src);
-    const auto r = grammar::walk(grammar::span_cursor{input}, sink, stack);
+    std::array<grammar::walk_frame_t<grammar::span_cursor_t>, 8> slots;
+    grammar::walk_stack_t<grammar::span_cursor_t> stack(slots, &src);
+    const auto r = grammar::walk(grammar::span_cursor_t{input}, sink, stack);
     if (!r) return std::unexpected(r.error());
     // The sink's own draws cannot report through the void hooks, so they latch instead.
     if (sink.exhausted_) return std::unexpected(err_t::TLV_NESTING_TOO_DEEP);

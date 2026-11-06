@@ -74,7 +74,7 @@ ADR-0052 escape hatch itself.
    > neither decodes nor flattens a reply — is unchanged and is what `reply_fn_t` carries.
 
 2. **Control-frame delivery is served off the rope.** `on_advertise` / `on_nack` read
-   only a `u16` label — stitched via the existing `grammar::rope_cursor` loads, no
+   only a `u16` label — stitched via the existing `grammar::rope_cursor_t` loads, no
    flatten. `on_compact` still needs a **contiguous payload** for `deliver_local` and a
    forwarding `encode_compact`; that contiguity is an ADR-0052 §"legitimate flatten"
    (a transport-egress / local-store boundary), so it materializes **only the payload

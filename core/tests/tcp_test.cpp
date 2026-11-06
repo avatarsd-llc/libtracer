@@ -796,7 +796,7 @@ struct peer_sink_t {
  * @brief The multi-peer server: two concurrent dialers, peer-named inbound
  *        delivery through the bus_link_t facet, broadcast send, a DIRECTED
  *        peer_link send (span AND gathered iov) reaching exactly one peer, and
- *        live peer enumeration tracking a departure — the transport_ws_server
+ *        live peer enumeration tracking a departure — the ws_server_transport_t
  *        #362 contract over raw length-prefix framing.
  */
 void test_server_multi_peer_bus() {
@@ -808,7 +808,7 @@ void test_server_multi_peer_bus() {
     auto a_rx = [&](std::span<const std::byte> f) { at_a.push(f); };
     auto b_rx = [&](std::span<const std::byte> f) { at_b.push(f); };
 
-    tr::net::transport_tcp_server server(0, {.peer_named = true});
+    tr::net::tcp_server_transport_t server(0, {.peer_named = true});
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     check(server.bus() != nullptr, "peer_named server exposes the bus_link_t facet (ADR-0044)");
@@ -928,7 +928,7 @@ void test_server_max_peers_cap() {
 
     frame_sink_t srv_rx_sink;
     auto srv_rx = [&](std::span<const std::byte> f) { srv_rx_sink.push(f); };
-    tr::net::transport_tcp_server server(0, {.max_peers = 1});
+    tr::net::tcp_server_transport_t server(0, {.max_peers = 1});
     check(server.ok(), "capped server bound");
     check(server.bus() == nullptr, "flat server exposes no bus facet");
     server.set_receiver(srv_rx);
@@ -990,7 +990,7 @@ void test_server_max_peers_cap() {
  * once when the last one goes.
  *
  * The rule lives in `slot_server_t::teardown_slot` (`posix_endpoint.cpp`), shared verbatim
- * with `transport_ws_server` since #871 — one home, so it is guarded once, here.
+ * with `ws_server_transport_t` since #871 — one home, so it is guarded once, here.
  *
  * Both `downs` reads are taken behind an INBOUND-FRAME BARRIER, never on a slot-recycle
  * transition and never after a sleep. `teardown_slot` clears the slot name in its first
@@ -1008,7 +1008,7 @@ void test_flat_server_down_only_on_last_session() {
     auto srv_rx = [&](std::span<const std::byte> f) { srv_rx_sink.push(f); };
     std::atomic<int> downs{0};
 
-    tr::net::transport_tcp_server server(0);
+    tr::net::tcp_server_transport_t server(0);
     check(server.ok(), "flat server bound");
     check(server.bus() == nullptr, "flat server exposes no bus facet (peer_named=false)");
     server.set_receiver(srv_rx);
@@ -1142,7 +1142,7 @@ void test_flat_server_inbound_peer_only_inside_a_delivery() {
         "TCP transport — flat server: inbound_peer() outside a delivery is empty (#1915):\n");
 
     inbound_probe_t probe;
-    tr::net::transport_tcp_server server(0);
+    tr::net::tcp_server_transport_t server(0);
     check(server.ok(), "flat server bound");
     probe.link = &server;
     server.set_receiver(probe);
@@ -1203,10 +1203,10 @@ void test_flat_server_rejects_peer_receiver() {
     auto flat_rx = [&](std::span<const std::byte> f) { flat_sink.push(f); };
     peer_sink_t peer_sink;
 
-    tr::net::transport_tcp_server server(0);
+    tr::net::tcp_server_transport_t server(0);
     check(server.ok(), "flat server bound");
     check(server.bus() == nullptr, "flat server exposes no bus facet");
-    static_assert(std::is_base_of_v<tr::net::bus_link_t, tr::net::transport_tcp_server> == kBus,
+    static_assert(std::is_base_of_v<tr::net::bus_link_t, tr::net::tcp_server_transport_t> == kBus,
                   "the facet is a base of a listener iff this build carries the bus module");
     server.set_receiver(flat_rx);
     // The out-of-contract path itself: the public base, named explicitly. A member-shadowing
@@ -1249,7 +1249,7 @@ void test_peer_named_server_does_not_downgrade_to_flat() {
     auto flat_rx = [&](std::span<const std::byte> f) { flat_sink.push(f); };
     peer_sink_t peer_sink;
 
-    tr::net::transport_tcp_server server(0, {.peer_named = true});
+    tr::net::tcp_server_transport_t server(0, {.peer_named = true});
     check(server.ok(), "peer-named server bound");
     check(server.bus() != nullptr, "peer-named server exposes the bus facet");
     // The WRONG tier for this mode, and the only one wired.
@@ -1299,7 +1299,7 @@ void test_accept_publish_is_atomic_to_senders() {
     std::printf(
         "TCP transport — a broadcast inside the accept publish skips the half-published peer:\n");
 
-    tr::net::transport_tcp_server server(0);
+    tr::net::tcp_server_transport_t server(0);
     check(server.ok(), "listen socket bound");
 
     // The parked window. `reached` is set on the server's poll thread; `released` by this

@@ -85,7 +85,7 @@ writer-vs-writer. `append` is the sharpest: two writers read the same `used`, re
 slot pointer**, both fill it and both publish — one child silently lost.
 
 **Erratum 3 — the reachability example was wrong; the race is real by another route.** "Two peers
-each creating a connection" does **not** race: `transport_ws_server` and `transport_tcp_server`
+each creating a connection" does **not** race: `ws_server_transport_t` and `tcp_server_transport_t`
 multiplex every peer on ONE poll thread (`transport_ws.hpp:61,224`, `transport_tcp.hpp:197,352`) — no
 per-peer thread, because FreeRTOS stacks are the scarce resource. Two peers of one server are
 serialized by construction. The race needs **two distinct links in distinct modules** (a CREATE over

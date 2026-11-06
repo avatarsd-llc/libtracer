@@ -285,8 +285,8 @@ void test_enumeration_and_forwarding() {
     (void)router_t.attach_link("cli", channel.a());
     channel.b().set_receiver(cli_rx);
 
-    tr::net::transport_can tcan_t(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
-                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "transit"});
+    tr::net::can_transport_t tcan_t(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
+                                    {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "transit"});
     // A bus has no dial/listen asymmetry, so `can` is ONE module for both roles (RFC-0014 §1).
     // Declaring it mints the creator endpoint /net/can/conn this SPEC is written to.
     check(net_t.register_module("can", "can", tr::net::conn_role_t::DIAL).has_value(),
@@ -301,15 +301,15 @@ void test_enumeration_and_forwarding() {
     tr::graph::vertex_handle_t vp = graph_p.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
     (void)graph_p.write(vp, owned(b_value_u32(kStored)));
     fwd_router_t router_p(graph_p);
-    tr::net::transport_can tcan_p(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
-                                  {0, 5, tr::net::can::can_frame_mode_t::CLASSIC, "boardB"});
+    tr::net::can_transport_t tcan_p(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
+                                    {0, 5, tr::net::can::can_frame_mode_t::CLASSIC, "boardB"});
     (void)router_p.attach_link("can0", tcan_p);
 
     // ----- bystander Q (CAN node 7): same bus, must never deliver n5 traffic. -
     std::atomic<int> q_deliveries{0};
     auto q_rx = [&](std::span<const std::byte>) { ++q_deliveries; };
-    tr::net::transport_can tcan_q(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
-                                  {0, 7, tr::net::can::can_frame_mode_t::CLASSIC, "boardC"});
+    tr::net::can_transport_t tcan_q(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
+                                    {0, 7, tr::net::can::can_frame_mode_t::CLASSIC, "boardC"});
     tcan_q.set_receiver(q_rx);
 
     // ----- 1) local enumeration: /net/can/can0:children[] == {n5, n7}. ------------
@@ -413,11 +413,11 @@ void test_peer_expiry() {
     std::printf("ADR-0044 expiry (silent peer leaves the listing):\n");
 
     fake_can_bus_t bus;
-    tr::net::transport_can observer(
+    tr::net::can_transport_t observer(
         tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
         {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "obs", std::chrono::milliseconds(150)});
 
-    std::optional<tr::net::transport_can> ghost;
+    std::optional<tr::net::can_transport_t> ghost;
     ghost.emplace(
         tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
         tr::net::transport_can_config_t{0, 9, tr::net::can::can_frame_mode_t::CLASSIC, "ghost"});
@@ -451,7 +451,7 @@ void test_resolved_endpoint_is_identity_scoped() {
     std::printf("#1153 identity-scoped endpoint (a cached pointer never inherits a stranger):\n");
 
     fake_can_bus_t bus;
-    tr::net::transport_can observer(
+    tr::net::can_transport_t observer(
         tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
         {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "obs", std::chrono::milliseconds(150)});
 
@@ -464,7 +464,7 @@ void test_resolved_endpoint_is_identity_scoped() {
     // --- n9 announces; resolve it ONCE and keep the pointer. ------------------
     std::atomic<int> n9_deliveries{0};
     auto n9_rx = [&](std::span<const std::byte>) { ++n9_deliveries; };
-    std::optional<tr::net::transport_can> peer9;
+    std::optional<tr::net::can_transport_t> peer9;
     peer9.emplace(
         tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
         tr::net::transport_can_config_t{0, 9, tr::net::can::can_frame_mode_t::CLASSIC, "n9-first"});
@@ -476,7 +476,7 @@ void test_resolved_endpoint_is_identity_scoped() {
     check(cached != nullptr, "n9 resolves to a directed endpoint");
 
     // #2237: the delivery path resolves by HANDLE, and answers what the name answers.
-    const tr::net::peer_handle_t h9{9, tr::net::transport_can::kAnnouncedPeerGeneration};
+    const tr::net::peer_handle_t h9{9, tr::net::can_transport_t::kAnnouncedPeerGeneration};
     check(observer.peer_link_of(h9) == cached, "peer_link_of(n9's handle) is that endpoint");
     check(observer.peer_link_of(tr::net::peer_handle_t{}) == nullptr,
           "an invalid handle resolves to nothing");
@@ -497,9 +497,9 @@ void test_resolved_endpoint_is_identity_scoped() {
     // --- a different peer arrives while n9 is gone. It cannot inherit the name.
     std::atomic<int> n7_deliveries{0};
     auto n7_rx = [&](std::span<const std::byte>) { ++n7_deliveries; };
-    tr::net::transport_can peer7(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
-                                 {0, 7, tr::net::can::can_frame_mode_t::CLASSIC, "n7-newcomer",
-                                  std::chrono::milliseconds(150)});
+    tr::net::can_transport_t peer7(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
+                                   {0, 7, tr::net::can::can_frame_mode_t::CLASSIC, "n7-newcomer",
+                                    std::chrono::milliseconds(150)});
     peer7.set_receiver(n7_rx);
     check(wait_until([&] { return names().count("n7") == 1; }, kBudget),
           "the newcomer n7 enumerates");
@@ -533,11 +533,11 @@ void test_peer_door_takes_only_minted_handles() {
     fake_can_bus_t bus;
     graph_t graph;
     fwd_router_t router(graph);
-    tr::net::transport_can tcan(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
-                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "obs"});
+    tr::net::can_transport_t tcan(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
+                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "obs"});
     (void)router.attach_link("can0", tcan);
 
-    constexpr std::uint32_t kGen = tr::net::transport_can::kAnnouncedPeerGeneration;
+    constexpr std::uint32_t kGen = tr::net::can_transport_t::kAnnouncedPeerGeneration;
     std::array<char, tr::net::kPeerNameChars> scratch{};
     check(tcan.peer_name(tr::net::peer_handle_t{9, kGen + 1}, scratch).empty(),
           "peer_name refuses a generation this bus never mints");
@@ -557,8 +557,8 @@ void test_peer_table_growth() {
     std::printf("ADR-0044 peer table (per-distinct-node growth, idempotent refresh):\n");
 
     fake_can_bus_t bus;
-    tr::net::transport_can observer(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
-                                    {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "obs"});
+    tr::net::can_transport_t observer(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
+                                      {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "obs"});
 
     // A raw injector announces hellos from many distinct nodes — TWICE, so a
     // re-announce refreshes its entry instead of growing the table.

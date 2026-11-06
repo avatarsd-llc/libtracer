@@ -430,9 +430,6 @@ class ws_server_transport_t final : public stream_server_base_t {
     std::size_t max_handshake_ = kMaxHandshakeBytes;
 };
 
-/** @brief The pre-v0.18.0 spelling of @ref ws_server_transport_t; removed in v0.19.0 (#1723). */
-using transport_ws_server = ws_server_transport_t;
-
 /**
  * @brief A WebSocket (RFC 6455) client transport_t — dials out to one peer.
  *
@@ -645,8 +642,5 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
      *         called at most once per endpoint. */
     std::atomic<bool> recv_started_{false};
 };
-
-/** @brief The pre-v0.18.0 spelling of @ref ws_client_transport_t; removed in v0.19.0 (#1723). */
-using transport_ws_client = ws_client_transport_t;
 
 }  // namespace tr::net
