@@ -24,8 +24,22 @@ and each key's wire value type are recoverable by reading the accessor calls on 
 reader's variable. The page declares the same per kind: a block names the factory's
 file and, after it, any shared file the factory hands its reader to (`quic` and
 `webtransport` both pass theirs to `select_tls_profile` in `msquic_endpoint.hpp`,
-which reads `tls`). The block's key set is the union over its files, and the check
-is a two-way set comparison plus a per-key value-spelling comparison.
+which reads `tls`). The check is a two-way set comparison plus a per-key
+value-spelling comparison.
+
+What a shared file contributes is tracked PER FUNCTION, not per file (#2569). A
+shared file is read through by more than one kind, so a key it reads counts for a
+kind only when that kind's own file calls the function that reads it: a helper in
+`msquic_endpoint.hpp` that only `webtransport` calls must not make a `quic` row
+pass. Concretely, a shared file's keys are attributed to the function whose
+parameter list takes the reader by reference (`select_tls_profile(...,
+const wire::config_reader_t& cfg)`), plus any such function of the same file that
+one calls; a kind's block gets its own file's keys and the keys of the shared
+functions its own file calls (`name(` outside comments). Overloads merge by name.
+A shared file that reads a key OUTSIDE such a function (a reader it constructs
+itself, a lambda) cannot be attributed and is a failure, never a fallback to the
+whole-file union. And a block may not name another kind's own file as "shared":
+a transport source is one kind's, so its keys would leak into the other kind.
 
 Three ways the page can fail, all of them the ways it would go stale:
   * a key read in source that the page's block for that file does not list;
@@ -33,6 +47,9 @@ Three ways the page can fail, all of them the ways it would go stale:
   * a file that reads keys and is named by no block at all (a whole kind
     undocumented — the "one kind documented, the others implied to have none"
     failure the page exists to prevent).
+Two more refuse a block whose shape would let a dead key through:
+  * a "shared" file that is another block's own (kind) file;
+  * a shared file reading a key the gate cannot attribute to a reader-taking function.
 
 Scope, stated because an unreached completeness claim is itself a defect: this
 gate covers CONNECTION config only. Since #985 hoisted the walk to `tr::wire`,
@@ -142,6 +159,112 @@ def derive_keys(text):
     return keys
 
 
+# A string literal (kept) or a comment (blanked): the call search must not see `f(` in a
+# comment, and brace matching must not see a brace in one.
+_LEXEME = re.compile(r'"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*.*?\*/', re.DOTALL)
+_TRAILING_NAME = re.compile(r"([A-Za-z_]\w*)\s*$")
+
+
+def strip_comments(text):
+    """@p text with every comment replaced by spaces (newlines kept), string literals intact."""
+
+    def blank(m):
+        tok = m.group(0)
+        return tok if tok.startswith('"') else re.sub(r"[^\n]", " ", tok)
+
+    return _LEXEME.sub(blank, text)
+
+
+def _match(text, open_at, opener, closer):
+    """Index of the @p closer balancing the @p opener at @p open_at, or -1."""
+    depth = 0
+    for i in range(open_at, len(text)):
+        if text[i] == opener:
+            depth += 1
+        elif text[i] == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def shared_functions(text):
+    """`({function: {key: accessor}}, unattributed)` for a shared file.
+
+    A function is one whose PARAMETER LIST takes a `config_reader_t` by reference; its
+    keys are the accessor calls on that parameter inside its body, plus the keys of the
+    other such functions of this file it calls. `unattributed` is the `{key: accessor}`
+    the file reads that no such function accounts for — a reader the file constructs
+    itself, or a by-reference reader in a lambda — which the caller turns into a failure.
+    """
+    code = strip_comments(text)
+    bodies = {}  # name -> [(param, body text)]
+    spans = []
+    for m in READER_REF.finditer(code):
+        depth, open_at = 0, -1
+        for i in range(m.start() - 1, -1, -1):
+            if code[i] == ")":
+                depth += 1
+            elif code[i] == "(":
+                if depth == 0:
+                    open_at = i
+                    break
+                depth -= 1
+        name = _TRAILING_NAME.search(code[:open_at]) if open_at > 0 else None
+        close_at = _match(code, open_at, "(", ")") if name else -1
+        if close_at < 0:
+            continue
+        tail = re.match(r"[^;{]*", code[close_at + 1 :])
+        brace = close_at + 1 + tail.end()
+        if brace >= len(code) or code[brace] != "{":
+            continue  # a declaration, not a definition
+        end = _match(code, brace, "{", "}")
+        if end < 0:
+            continue
+        bodies.setdefault(name.group(1), []).append((m.group(1), code[brace:end]))
+        spans.append((brace, end, m.group(1)))
+
+    direct = {}
+    for fn, defs in bodies.items():
+        keys = direct.setdefault(fn, {})
+        for param, body in defs:
+            for recv, accessor, key in ACCESSOR.findall(body):
+                if recv == param:
+                    keys[key] = accessor
+    resolved = {}
+    for fn in bodies:
+        keys, seen, todo = {}, set(), [fn]
+        while todo:
+            cur = todo.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            keys.update(direct[cur])
+            for _, body in bodies[cur]:
+                todo.extend(callee for callee in bodies if calls(body, callee))
+        resolved[fn] = keys
+
+    covered = set()
+    for brace, end, param in spans:
+        for m in ACCESSOR.finditer(code, brace, end):
+            if m.group(1) == param:
+                covered.add(m.start())
+    readers = set(READER_CTOR.findall(code)) | set(READER_REF.findall(code))
+    for line in code.splitlines():
+        if NOT_CONFIG.search(line):
+            readers.difference_update(READER_CTOR.findall(line))
+    unattributed = {}
+    for m in ACCESSOR.finditer(code):
+        if m.group(1) in readers and m.start() not in covered:
+            unattributed[m.group(3)] = m.group(2)
+    return resolved, unattributed
+
+
+def calls(text, function):
+    """Whether comment-stripped @p text calls @p function (`function(` as a whole word)."""
+    return re.search(rf"(?<![\w.]){re.escape(function)}\s*\(", text) is not None
+
+
 def parse_page(text):
     """The `{(source path, ...): {key: value-spelling}}` the page declares.
 
@@ -197,6 +320,7 @@ def check(page_text=None):
             derived[str(path.relative_to(ROOT))] = keys
 
     named = {rel for files in blocks for rel in files}
+    owners = {files[0] for files in blocks}
     for rel in sorted(derived):
         if rel not in named:
             failures.append(
@@ -209,11 +333,27 @@ def check(page_text=None):
             failures.append(f"{PAGE.relative_to(ROOT)}: block names a missing file: {rel}")
         if missing:
             continue
-        want = {}
-        for rel in files:
-            want.update(derived.get(rel, {}))
-        have = blocks[files]
         rel = " + ".join(files)
+        own = files[0]
+        want = dict(derived.get(own, {}))
+        own_code = strip_comments((ROOT / own).read_text(encoding="utf-8"))
+        for shared in files[1:]:
+            if shared in owners and shared != own:
+                failures.append(
+                    f"{rel}: names {shared} as shared, but it is the own file of another "
+                    f"kind's block — a transport source is one kind's, never read through"
+                )
+                continue
+            functions, unattributed = shared_functions((ROOT / shared).read_text(encoding="utf-8"))
+            for key in sorted(unattributed):
+                failures.append(
+                    f"{shared}: reads key `{key}` outside a function that takes a "
+                    f"config_reader_t by reference, so no kind can be credited with it"
+                )
+            for fn in sorted(functions):
+                if calls(own_code, fn):
+                    want.update(functions[fn])
+        have = blocks[files]
         for key in sorted(set(want) - set(have)):
             failures.append(f"{rel}: reads key `{key}` that the page does not document")
         for key in sorted(set(have) - set(want)):
