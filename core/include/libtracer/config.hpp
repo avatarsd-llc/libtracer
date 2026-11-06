@@ -196,7 +196,7 @@ struct default_config_t {
     static constexpr std::size_t kVertexLockStripes = 16;
 
     /**
-     * @brief Stripes in the park table `tr::park_wait` / `tr::park_wake` sleep on (#2507).
+     * @brief Stripes in the park table `%tr::park_wait` / `%tr::park_wake` sleep on (#2507).
      *
      * Each stripe is one `tr::mutex_t` and one `tr::condvar_t`, reserved in `.bss` at link time
      * once anything parks: 100 B a stripe on esp32c6 (#2454), a few dozen on a host. A word that
