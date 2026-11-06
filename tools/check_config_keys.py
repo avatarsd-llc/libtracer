@@ -38,8 +38,12 @@ one calls; a kind's block gets its own file's keys and the keys of the shared
 functions its own file calls (`name(` outside comments). Overloads merge by name.
 A shared file that reads a key OUTSIDE such a function (a reader it constructs
 itself, a lambda) cannot be attributed and is a failure, never a fallback to the
-whole-file union. And a block may not name another kind's own file as "shared":
-a transport source is one kind's, so its keys would leak into the other kind.
+whole-file union; so is a reader function that reads keys and that no block's own
+file calls, whose keys would otherwise go unchecked. And a shared entry must be a
+header that no block owns: a transport source is one kind's, so its keys would leak
+into the other kind, and naming it as shared does not count as documenting it.
+Calls are found with comments and string/char literals blanked; member and
+qualified calls count.
 
 Three ways the page can fail, all of them the ways it would go stale:
   * a key read in source that the page's block for that file does not list;
@@ -48,8 +52,9 @@ Three ways the page can fail, all of them the ways it would go stale:
     undocumented — the "one kind documented, the others implied to have none"
     failure the page exists to prevent).
 Two more refuse a block whose shape would let a dead key through:
-  * a "shared" file that is another block's own (kind) file;
-  * a shared file reading a key the gate cannot attribute to a reader-taking function.
+  * a "shared" file that is not a header, or is another block's own (kind) file;
+  * a shared file reading a key the gate cannot attribute to a reader-taking function;
+  * a reader-taking function in a shared file that reads keys no kind calls it for.
 
 Scope, stated because an unreached completeness claim is itself a defect: this
 gate covers CONNECTION config only. Since #985 hoisted the walk to `tr::wire`,
@@ -175,6 +180,19 @@ def strip_comments(text):
     return _LEXEME.sub(blank, text)
 
 
+# A string or character literal in comment-stripped code.
+_LITERAL = re.compile(r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'')
+
+
+def strip_literals(text):
+    """@p text with comments AND string/char literal contents blanked: the call search's input.
+
+    A log message such as `"select_tls_profile(failed)"` is not a call.
+    """
+    return _LITERAL.sub(lambda m: m.group(0)[0] + " " * (len(m.group(0)) - 2) + m.group(0)[-1],
+                        strip_comments(text))
+
+
 def _match(text, open_at, opener, closer):
     """Index of the @p closer balancing the @p opener at @p open_at, or -1."""
     depth = 0
@@ -189,13 +207,15 @@ def _match(text, open_at, opener, closer):
 
 
 def shared_functions(text):
-    """`({function: {key: accessor}}, unattributed)` for a shared file.
+    """`({function: {key: accessor}}, unattributed, reach)` for a shared file.
 
     A function is one whose PARAMETER LIST takes a `config_reader_t` by reference; its
     keys are the accessor calls on that parameter inside its body, plus the keys of the
     other such functions of this file it calls. `unattributed` is the `{key: accessor}`
     the file reads that no such function accounts for — a reader the file constructs
     itself, or a by-reference reader in a lambda — which the caller turns into a failure.
+    `reach` maps each function to the set of this file's reader functions a call to it
+    runs (itself included), so the caller can tell which functions some kind exercises.
     """
     code = strip_comments(text)
     bodies = {}  # name -> [(param, body text)]
@@ -231,7 +251,7 @@ def shared_functions(text):
             for recv, accessor, key in ACCESSOR.findall(body):
                 if recv == param:
                     keys[key] = accessor
-    resolved = {}
+    resolved, reach = {}, {}
     for fn in bodies:
         keys, seen, todo = {}, set(), [fn]
         while todo:
@@ -241,8 +261,10 @@ def shared_functions(text):
             seen.add(cur)
             keys.update(direct[cur])
             for _, body in bodies[cur]:
+                body = strip_literals(body)
                 todo.extend(callee for callee in bodies if calls(body, callee))
         resolved[fn] = keys
+        reach[fn] = seen
 
     covered = set()
     for brace, end, param in spans:
@@ -257,12 +279,17 @@ def shared_functions(text):
     for m in ACCESSOR.finditer(code):
         if m.group(1) in readers and m.start() not in covered:
             unattributed[m.group(3)] = m.group(2)
-    return resolved, unattributed
+    return resolved, unattributed, reach
 
 
 def calls(text, function):
-    """Whether comment-stripped @p text calls @p function (`function(` as a whole word)."""
-    return re.search(rf"(?<![\w.]){re.escape(function)}\s*\(", text) is not None
+    """Whether literal-stripped @p text calls @p function (`function(` as a whole word).
+
+    A qualified (`ns::f(`) or member (`ep.f(`, `ep->f(`) call counts: a reader-taking
+    helper may be a member of an endpoint type, and a miss here is caught anyway by the
+    "no kind calls it" failure rather than passing silently.
+    """
+    return re.search(rf"(?<!\w){re.escape(function)}\s*\(", text) is not None
 
 
 def parse_page(text):
@@ -319,8 +346,17 @@ def check(page_text=None):
         if keys:
             derived[str(path.relative_to(ROOT))] = keys
 
-    named = {rel for files in blocks for rel in files}
     owners = {files[0] for files in blocks}
+    # A shared entry must be a header no block owns. A transport source (`.cpp`) is one
+    # kind's translation unit, never read through by another kind; refusing it here also
+    # keeps it from counting as "named" below, so naming it as shared cannot exempt it
+    # from the "file named by no block" check.
+    refused = {
+        rel for files in blocks for rel in files[1:]
+        if rel != files[0] and (rel in owners or not rel.endswith(".hpp"))
+    }
+    named = {rel for files in blocks for rel in files} - refused
+    shared_seen = {}  # shared file -> (functions, unattributed, reach, credited functions)
     for rel in sorted(derived):
         if rel not in named:
             failures.append(
@@ -336,23 +372,22 @@ def check(page_text=None):
         rel = " + ".join(files)
         own = files[0]
         want = dict(derived.get(own, {}))
-        own_code = strip_comments((ROOT / own).read_text(encoding="utf-8"))
+        own_code = strip_literals((ROOT / own).read_text(encoding="utf-8"))
         for shared in files[1:]:
-            if shared in owners and shared != own:
+            if shared in refused:
                 failures.append(
-                    f"{rel}: names {shared} as shared, but it is the own file of another "
-                    f"kind's block — a transport source is one kind's, never read through"
+                    f"{rel}: names {shared} as shared, but a shared file must be a header "
+                    f"no block owns — a transport source is one kind's, never read through"
                 )
                 continue
-            functions, unattributed = shared_functions((ROOT / shared).read_text(encoding="utf-8"))
-            for key in sorted(unattributed):
-                failures.append(
-                    f"{shared}: reads key `{key}` outside a function that takes a "
-                    f"config_reader_t by reference, so no kind can be credited with it"
-                )
+            if shared not in shared_seen:
+                text = (ROOT / shared).read_text(encoding="utf-8")
+                shared_seen[shared] = (*shared_functions(text), set())
+            functions, _, reach, credited = shared_seen[shared]
             for fn in sorted(functions):
                 if calls(own_code, fn):
                     want.update(functions[fn])
+                    credited.update(reach[fn])
         have = blocks[files]
         for key in sorted(set(want) - set(have)):
             failures.append(f"{rel}: reads key `{key}` that the page does not document")
@@ -364,6 +399,19 @@ def check(page_text=None):
                 failures.append(
                     f"{rel}: key `{key}` is read with .{want[key]}() — the page must "
                     f"spell its value {spelling!r}, not {have[key]!r}"
+                )
+    for shared in sorted(shared_seen):
+        functions, unattributed, _, credited = shared_seen[shared]
+        for key in sorted(unattributed):
+            failures.append(
+                f"{shared}: reads key `{key}` outside a function that takes a "
+                f"config_reader_t by reference, so no kind can be credited with it"
+            )
+        for fn in sorted(set(functions) - credited):
+            if functions[fn]:
+                failures.append(
+                    f"{shared}: {fn}() reads keys ({', '.join(sorted(functions[fn]))}) but no "
+                    f"block naming this file has an own file that calls it"
                 )
     return failures
 
