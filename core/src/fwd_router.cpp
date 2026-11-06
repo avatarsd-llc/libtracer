@@ -1020,7 +1020,7 @@ bool fwd_router_t::remove_child(std::string_view name) {
         // reader may be standing on it right now and the transport still holds its address, but it
         // stops answering `ctx_by_name`. Leaving it RESOLVING was the defect:
         // `add_child` of the same name appended a second ctx, and the name-keyed lookups answer
-        // with the FIRST match, so every `connection_ref`/`hop_mint`/`adopt_binding` after a
+        // with the FIRST match, so every `hop_mint` after a
         // re-add resolved the DEAD context — bound routes for the re-created child were minted
         // against the retired tenancy and never validated. A `release` store, paired with the
         // acquire each walk performs, so a reader either skips this node or has already passed it.
@@ -1101,7 +1101,7 @@ void fwd_router_t::link_down(std::string_view link_name) {
 }
 
 bool fwd_router_t::link_down(std::string_view link_name, peer_handle_t peer) {
-    // Opened before the mount is looked up, as `bound_send` does: a `remove_child` racing this
+    // Opened before the mount is looked up: a `remove_child` racing this
     // door cannot have its ctx, link or bus collected under the lookup and the eviction.
     const frame_scope_t scope;
     // The published walk, as a frame path reads it: a removed mount has no peers to evict.
@@ -1367,14 +1367,6 @@ const fwd_router_t::child_rx_ctx_t* fwd_router_t::ctx_by_name(std::string_view l
     return nullptr;
 }
 
-std::optional<wire::path_ref_element_t> fwd_router_t::connection_ref(
-    std::string_view link_name) const {
-    // The origin's element for its first hop is the forwarder's for its arrival link: the
-    // same door, read the same way. The walk skips tombstones (#884), so a removed child has
-    // no reference to give and a re-added one gives its CURRENT tenancy's.
-    return hop_mint(link_name, nullptr);
-}
-
 std::optional<wire::path_ref_element_t> fwd_router_t::hop_mint(
     std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx) const {
     // The link a REPLY arrived on IS the link its request went out on, so the connection
@@ -1441,71 +1433,6 @@ transport_t* fwd_router_t::bound_egress(wire::path_ref_element_t e, std::string_
     // its `send()` broadcasts (§10, ADR-0073 §3).
     const child_registry_t::egress_t eg = door->egress();
     return eg.multi_peer ? nullptr : eg.link;  // null ⇒ tombstoned ⇒ drop
-}
-
-bool fwd_router_t::adopt_binding(graph::path_t& path, std::string_view link_name,
-                                 const wire::tlv_node_t& reply) {
-    // The reply's `src` IS the forward route from the first link onward (RFC-0029 §6.2): one
-    // element per host, each prepended by the host that relayed or issued the reply. Children
-    // in order: op, dst, src, kind, so the third child is `src` and the fourth says whether
-    // the operation succeeded — a refusal is not a route worth caching.
-    std::optional<wire::tlv_node_t> src;
-    bool result = false;
-    std::size_t at = 0;
-    for (const wire::tlv_node_t c : reply.children()) {
-        if (at == 2) src = c;
-        if (at == 3)
-            result = c.payload().size() == 1 &&
-                     c.payload()[0] ==
-                         static_cast<std::byte>(std::to_underlying(graph::reply_kind_t::RESULT));
-        ++at;
-    }
-    if (!src || !result || src->type() != type_t::PATH || src->payload().empty()) return false;
-    // Element 0 is this node's own, and nobody else could have written it: the hop out of the
-    // origin is the one hop no peer ever sees.
-    const std::optional<wire::path_ref_element_t> own = connection_ref(link_name);
-    if (!own) return false;
-    // Scratch from the link plane's source (#1779): a refusal leaves the path canonical, the
-    // same non-event a reply without a usable `src` is.
-    const std::span<const std::byte> rest = src->payload();
-    mem::block_array_t<std::byte> chain(*link_src_);
-    if (!chain.reserve(wire::kPathPairRecordBytes + rest.size())) return false;
-    for (std::size_t i = 0; i < wire::kPathPairRecordBytes; ++i) (void)chain.push_slot();
-    wire::path_pair_store(std::span<std::byte>(chain.data(), wire::kPathPairRecordBytes)
-                              .first<wire::kPathPairRecordBytes>(),
-                          *own);
-    for (const std::byte b : rest) (void)chain.push_back(b);  // reserved above: cannot grow
-    return path.bind(std::span<const std::byte>(chain.data(), chain.size()));
-}
-
-bool fwd_router_t::bound_send(const graph::path_t& path, graph::acl_right_t right, egress_fn_t send,
-                              void* ctx) const {
-    const graph::path_binding_t& b = path.binding();
-    const std::optional<wire::path_pair_t> e0 =
-        b.bound ? wire::path_pair_at(b.chain, 0) : std::nullopt;
-    if (!e0) return false;
-    // Opened before the link is looked up and held until `send` returns, so a link removed
-    // meanwhile outlives the call (see `frame_scope_t`).
-    const frame_scope_t scope;
-    // The origin's caller is local, so the subject context is empty — the trusted-caller
-    // convention every other local API here uses. The check still runs: it is the same one
-    // line a forwarder runs, and having ONE of them is what keeps the two from drifting.
-    transport_t* const link = bound_egress(*e0, {}, right);
-    if (link == nullptr) return false;
-    // The residual — every element after the origin's own — as the `dst` `PATH` (RFC-0029
-    // §4.2), written straight into a block of exactly its size from the link plane's source
-    // (#1779); a refusal is the same `false` a stale element is. `bind` capped the chain at a
-    // 16-bit body, so the short header always fits.
-    const auto residual = std::span<const std::byte>(b.chain).subspan(wire::kPathPairRecordBytes);
-    mem::block_array_t<std::byte> dst(*link_src_);
-    const std::size_t bytes = wire::header_bytes(wire::opt_t{}) + residual.size();
-    if (!dst.reserve(bytes)) return false;
-    for (std::size_t i = 0; i < bytes; ++i) (void)dst.push_slot();  // reserved: cannot grow
-    const std::span<std::byte> w(dst.data(), bytes);
-    wire::store_header(w, wire::type_t::PATH, wire::opt_t{}, residual.size());
-    std::memcpy(w.data() + wire::header_bytes(wire::opt_t{}), residual.data(), residual.size());
-    send(ctx, *link, w);
-    return true;
 }
 
 std::optional<graph::acl_right_t> fwd_router_t::fwd_op_right(std::uint8_t op_byte) noexcept {

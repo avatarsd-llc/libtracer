@@ -167,13 +167,9 @@ void path_t::copy_from(const path_t& o) {
                        st.name.size()};
         new (block_) field_path_t(f);
     }
-    // A chain the source refuses leaves the copy unbound: the canonical bytes it holds are a
-    // complete answer, and the next operation re-learns (RFC-0029 §6.3).
-    if (o.chain_len_ != 0) (void)bind(o.binding().chain);
 }
 
 void path_t::release() noexcept {
-    clear_binding();
     if (block_ != nullptr) source().release(block_, block_len_, kBlockAlign);
     block_ = nullptr;
     block_len_ = 0;
@@ -182,29 +178,10 @@ void path_t::release() noexcept {
 void path_t::take(path_t& o) noexcept {
     src_ = o.src_;
     block_ = std::exchange(o.block_, nullptr);
-    chain_ = std::exchange(o.chain_, nullptr);
     block_len_ = std::exchange(o.block_len_, 0);
-    chain_len_ = std::exchange(o.chain_len_, 0);
     key_len_ = std::exchange(o.key_len_, 0);
     segments_ = std::exchange(o.segments_, 0);
     has_field_ = std::exchange(o.has_field_, false);
-}
-
-bool path_t::bind(std::span<const std::byte> chain) noexcept {
-    if (chain.empty() || chain.size() > 0xFFFFu) return false;
-    auto* const blk = static_cast<std::byte*>(source().try_alloc(chain.size(), 1));
-    if (blk == nullptr) return false;
-    std::memcpy(blk, chain.data(), chain.size());
-    clear_binding();
-    chain_ = blk;
-    chain_len_ = static_cast<std::uint16_t>(chain.size());
-    return true;
-}
-
-void path_t::clear_binding() noexcept {
-    if (chain_ != nullptr) source().release(chain_, chain_len_, 1);
-    chain_ = nullptr;
-    chain_len_ = 0;
 }
 
 namespace {

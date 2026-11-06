@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief RFC-0024 car 3 — the bound-path FORWARDER hop and the origin-side bind, end to end.
+ * @brief RFC-0024 car 3 — the bound-path FORWARDER hop and the learned chain, end to end.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -14,8 +14,8 @@
  *
  * - the **chain is learned on the way back**, with no flag (RFC-0029 §6.2, #2245): B seeds the
  *   reply's `src` with its PAIR for the target, A prepends its own as it relays the reply
- *   ("never nothing": its NAME run when it holds no PAIR), and the origin prepends the one
- *   only it can know — its reference to its first-hop connection vertex (§4.1);
+ *   ("never nothing": its NAME run when it holds no PAIR), and the origin, which selects its
+ *   first hop itself (§4.1), sends that chain as the bound `dst`;
  * - the **forwarder hop** (§3.4/§5): a bound `dst` with a residual longer than one
  *   element consumes ITS element — bounds, generation, ACL at the dereferenced vertex — and
  *   forwards the remainder, growing `src` exactly as the canonical spelling does. The route
@@ -71,27 +71,6 @@ using tr::net::conn_role_t;
 using tr::net::fwd_router_t;
 using tr::net::transport_vertex_t;
 
-/** @brief What `bound_send` handed its callback, copied out for the test's checks. The links
- *         here are the test's own and outlive every check, so keeping one is safe. */
-struct dispatched_t {
-    tr::net::transport_t* link = nullptr;
-    std::vector<std::byte> dst;
-};
-
-/** @brief The callback a test hands a bracketed send: copy the link and the `dst` out. */
-void keep_dispatch(void* ctx, tr::net::transport_t& link, std::span<const std::byte> dst) {
-    auto& out = *static_cast<dispatched_t*>(ctx);
-    out.link = &link;
-    out.dst.assign(dst.begin(), dst.end());
-}
-
-/** @brief `bound_send` through @ref keep_dispatch: the dispatch, or nullopt on a refusal. */
-std::optional<dispatched_t> bound_dispatch(const fwd_router_t& r, const path_t& path,
-                                           acl_right_t right) {
-    dispatched_t out;
-    if (!r.bound_send(path, right, &keep_dispatch, &out)) return std::nullopt;
-    return out;
-}
 using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::path_ref_element_t;
@@ -268,24 +247,6 @@ constexpr auto kDropBudget = 500ms;
 std::uint8_t value_u8(const tlv_t& v) { return tr::detail::load_le<std::uint8_t>(v.payload); }
 
 /**
- * @brief A heap-backed source a test can CLOSE — the client router's link plane, so the
- *        origin's bind scratch and `dst` block can be refused on cue (#1779).
- */
-class gate_source_t final : public tr::mem::block_source_t {
-   public:
-    gate_source_t() noexcept : tr::mem::block_source_t("gate") {}
-    /** @brief Serve from the heap unless closed. */
-    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
-        return closed ? nullptr : tr::mem::heap_source().try_alloc(bytes, align);
-    }
-    /** @brief Return to the heap. */
-    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
-        tr::mem::heap_source().release(p, bytes, align);
-    }
-    bool closed = false; /**< @brief Refuse every request while set. */
-};
-
-/**
  * @brief The `ERROR` code a `FWD{REPLY}` frame carries, or `0` when it is not an ERROR reply.
  *
  * RFC-0029 §6: every refusal of a PAIR element is ANSWERED, so the refusal cases below assert
@@ -308,12 +269,11 @@ constexpr std::uint16_t kNotFound = 0x0020;
 }  // namespace
 
 int main() {
-    std::printf("RFC-0024 car 3: bound forwarder hop + origin bind, client -> A -> B\n");
+    std::printf("RFC-0024 car 3: bound forwarder hop + learned chain, client -> A -> B\n");
 
     // ----- three nodes, production wiring ------------------------------------------------
-    gate_source_t cli_link_src;
     graph_t g_cli;
-    fwd_router_t r_cli(g_cli, {.link_src = &cli_link_src});
+    fwd_router_t r_cli(g_cli);
     transport_vertex_t net_cli(g_cli, r_cli);
 
     graph_t g_a;
@@ -421,43 +381,17 @@ int main() {
         }
         check(dec.has_value() && dec->children.size() == 5,
               "and nothing trails the payload — the RFC-0024 PATH_REF list is gone");
-
-        // The origin's own element is the one no peer can supply (§4.1), and adopt_binding
-        // is what puts it on the front.
-        // The bind's element scratch is on the link plane (#1779): refused, it binds nothing.
-        cli_link_src.closed = true;
-        check(dec.has_value() && !r_cli.adopt_binding(target, "net/uplink/a",
-                                                      *tr::wire::tlv_node_t::over(*minted)),
-              "a refused element scratch binds nothing");
-        check(!target.binding().bound, "…and the path stays canonical");
-        cli_link_src.closed = false;
-        check(dec.has_value() &&
-                  r_cli.adopt_binding(target, "net/uplink/a", *tr::wire::tlv_node_t::over(*minted)),
-              "the client adopts the binding, stacking its OWN first-hop element under it");
     }
-    check(target.binding().bound &&
-              target.binding().chain.size() == 3 * tr::wire::kPathPairRecordBytes,
-          "the path is bound to a THREE-host route: client, A, B");
-    check(target.key().size() > 0, "and it still holds its canonical bytes — the fallback");
+    // The chain the client would hold is that src behind its own first hop, which selects the
+    // link out and never goes on the wire: what A receives is the two-element residual.
+    const path_ref_element_t chain_ab[2] = {elem_a, elem_b};
+    const std::vector<std::byte> bound_dst = b_path_ref(chain_ab);
 
     // ===== 2) the bound write, forwarded by A, applied at B ==============================
     std::printf("A bound WRITE traverses the same two hops (§3.4/§5):\n");
     const std::uint32_t kWritten = 0x12345678u;
-    cli_link_src.closed = true;
-    check(!bound_dispatch(r_cli, target, acl_right_t::WRITE).has_value(),
-          "a refused `dst` block is no dispatch — the caller falls back to canonical (#1779)");
-    cli_link_src.closed = false;
-    const auto dispatch = bound_dispatch(r_cli, target, acl_right_t::WRITE);
-    check(dispatch.has_value(), "the origin resolves its OWN element 0 to the link out");
-    check(dispatch &&
-              std::ranges::equal(dispatch->dst,
-                                 b_path_body(std::span<const std::byte>(target.binding().chain)
-                                                 .subspan(tr::wire::kPathPairRecordBytes))),
-          "and puts the RESIDUAL on the wire — its own element is consumed here, not sent");
-    if (dispatch) {
-        dispatch->link->send(
-            b_fwd_raw_op(kWrite, dispatch->dst, b_path({"reply-ep"}), {}, b_value_u32(kWritten)));
-    }
+    ch_cli.a().send(
+        b_fwd_raw_op(kWrite, bound_dst, b_path({"reply-ep"}), {}, b_value_u32(kWritten)));
     check(at_b.wait_for_count(2, kBudget), "B received the frame A forwarded on the BOUND route");
     const path_ref_element_t only_b[1] = {elem_b};
     check(at_b.snap_dst() == b_path_ref(only_b),
@@ -539,11 +473,8 @@ int main() {
     // ===== 6) the ablation: the sound binding still lands ================================
     {
         const std::size_t before = at_b.count();
-        const auto again = bound_dispatch(r_cli, target, acl_right_t::WRITE);
-        check(again.has_value(), "the binding is still good");
-        if (again)
-            again->link->send(b_fwd_raw_op(kWrite, again->dst, b_path({"reply-ep"}), {},
-                                           b_value_u32(0x0BADF00Du)));
+        ch_cli.a().send(
+            b_fwd_raw_op(kWrite, bound_dst, b_path({"reply-ep"}), {}, b_value_u32(0x0BADF00Du)));
         check(at_b.wait_for_count(before + 1, kBudget),
               "the SAME frame with a sound mid-chain element lands — every drop above is real");
         (void)inbox.wait(kBudget);
@@ -559,15 +490,12 @@ int main() {
             path_t("/net/uplink/b:acl"),
             owned(allow_acl("net/downlink/cli", static_cast<std::uint32_t>(acl_right_t::READ))));
         const std::size_t before = at_b.count();
-        const auto denied = bound_dispatch(r_cli, target, acl_right_t::WRITE);
-        if (denied)
-            denied->link->send(b_fwd_raw_op(kWrite, denied->dst, b_path({"reply-ep"}), {},
-                                            b_value_u32(0xFEEDFACEu)));
+        ch_cli.a().send(
+            b_fwd_raw_op(kWrite, bound_dst, b_path({"reply-ep"}), {}, b_value_u32(0xFEEDFACEu)));
         check(!at_b.wait_for_count(before + 1, kDropBudget),
               "a bound WRITE through a relay that grants only READ drops at that relay");
 
-        const auto allowed = bound_dispatch(r_cli, target, acl_right_t::READ);
-        if (allowed) allowed->link->send(b_fwd_raw_op(kRead, allowed->dst, b_path({"reply-ep"})));
+        ch_cli.a().send(b_fwd_raw_op(kRead, bound_dst, b_path({"reply-ep"})));
         check(at_b.wait_for_count(before + 1, kBudget),
               "and the bound READ the SAME ACL grants goes through — the denial is the ACL's");
         (void)inbox.wait(kBudget);
@@ -579,17 +507,14 @@ int main() {
         // The ACL from (7) still stands: READ only, at A's connection vertex for `b`, for the
         // inbound subject. A canonical `dst` that walks through that vertex by NAME must be
         // refused the WRITE the bound spelling is refused, and granted the READ it is granted.
-        const auto first_hop = bound_dispatch(r_cli, target, acl_right_t::READ);
-        check(first_hop.has_value(), "the client still has its first-hop link to A");
         const std::vector<std::byte> by_name = b_path({"net", "uplink", "b", "sensor", "temp"});
         const std::size_t before = at_b.count();
-        if (first_hop)
-            first_hop->link->send(
-                b_fwd_raw_op(kWrite, by_name, b_path({"reply-ep"}), {}, b_value_u32(0xFEEDFACEu)));
+        ch_cli.a().send(
+            b_fwd_raw_op(kWrite, by_name, b_path({"reply-ep"}), {}, b_value_u32(0xFEEDFACEu)));
         check(!at_b.wait_for_count(before + 1, kDropBudget),
               "a canonical WRITE through a relay that grants only READ stops at that relay");
         (void)inbox.wait(kBudget);  // its answer (the relay's refusal), so the next is the READ's
-        if (first_hop) first_hop->link->send(b_fwd_raw_op(kRead, by_name, b_path({"reply-ep"})));
+        ch_cli.a().send(b_fwd_raw_op(kRead, by_name, b_path({"reply-ep"})));
         check(at_b.wait_for_count(before + 1, kBudget),
               "and the canonical READ the SAME ACL grants goes through — the denial is the ACL's");
         (void)inbox.wait(kBudget);

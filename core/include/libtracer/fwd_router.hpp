@@ -334,7 +334,7 @@ class fwd_router_t {
         resolver_.on_reverse_ref(
             [](void* ctx,
                std::string_view inbound_link) -> std::optional<wire::path_ref_element_t> {
-                return static_cast<fwd_router_t*>(ctx)->connection_ref(inbound_link);
+                return static_cast<fwd_router_t*>(ctx)->hop_mint(inbound_link, nullptr);
             },
             this);
         // The terminus SUBJECT seam (#375 Part 2 / #1266): the resolver carries the frame's
@@ -617,7 +617,7 @@ class fwd_router_t {
      * The child's receiver ctx is TOMBSTONED, not unlinked (#884): it stays on the published
      * chain — a lock-free reader may be walking it right now — but stops answering every
      * name-keyed and slot-keyed lookup, and a later @ref add_child of the same name revives it
-     * in place. That is what keeps `connection_ref`/`hop_mint` off the dead context after a
+     * in place. That is what keeps `hop_mint` off the dead context after a
      * re-add, and what keeps create/remove churn on a stable name set from growing the chain.
      * @param name The child's registered NAME.
      * @return true if @p name named a live child, false if it named none.
@@ -674,82 +674,6 @@ class fwd_router_t {
      */
     [[nodiscard]] graph::wire_target_split_t split_subscriber_target(
         std::span<const std::byte> key) const;
-
-    // -- bound paths (RFC-0024) -------------------------------------------------------
-    // The origin's half of the bound form. The forwarder's half needs no API: it is a
-    // branch on the inbound frame's own `dst` type, taken inside the routing hop.
-
-    /**
-     * @brief This node's own vertex ref for the connection vertex of child @p link_name —
-     *        element 0 of a route that leaves through it (RFC-0024 §4.1).
-     *
-     * The origin supplies its OWN first element, because no one else can: an element is
-     * node-scoped, and the hop out of this node is the one hop no peer ever sees. A reply's
-     * learned `src` therefore comes back one element short of the route, and this is the element
-     * that completes it (which @ref adopt_binding does for the caller).
-     *
-     * @retval std::nullopt @p link_name names no registered child, the child has no
-     *         connection vertex in this node's graph, or that vertex's generation has
-     *         SATURATED (permanently unbindable, §4.4 rule 3). Every one of those means the
-     *         route has no bound spelling from here, and the canonical path is the answer.
-     */
-    [[nodiscard]] std::optional<wire::path_ref_element_t> connection_ref(
-        std::string_view link_name) const;
-
-    /**
-     * @brief Install the learned chain on @p path from a reply's `src` (RFC-0029 §6.2).
-     *
-     * The origin's side of the exchange. @p reply is a validated `FWD{REPLY}` node (read in
-     * place, #1829); a `RESULT` reply's `src` is the accumulated chain — the terminus's PAIR,
-     * with one PAIR or NAME run prepended by every hop that relayed the reply. This prepends
-     * THIS node's own element for @p link_name (element 0 is the origin's reference to its
-     * first-hop connection vertex) and records the whole chain.
-     *
-     * Nothing is installed unless the complete route is spellable: a refused reply or one with
-     * no `PATH` `src`, a link with no bindable connection vertex, or a chain past the
-     * normative element cap all
-     * leave @p path exactly as it was — bound to nothing, and therefore canonical. A binding
-     * is an optimisation with a fallback that always works, so a partial one is never worth
-     * having.
-     *
-     * @return true iff @p path came out bound.
-     */
-    bool adopt_binding(graph::path_t& path, std::string_view link_name,
-                       const wire::tlv_node_t& reply);
-
-    /**
-     * @brief What a bracketed send hands the app: the egress link and the `dst` to put on the
-     *        wire, both valid only until the callback returns.
-     *
-     * The link is not the app's to keep. The call runs the callback inside the router's frame
-     * bracket, so a link removed meanwhile is not freed until the callback has returned (see
-     * `graph_t::collect`); a pointer kept past the callback has no such guarantee.
-     */
-    using egress_fn_t = void (*)(void* ctx, transport_t& link, std::span<const std::byte> dst);
-
-    /**
-     * @brief Send the next operation over @p path's binding — the origin's own hop (§4.1).
-     *
-     * The origin consumes element 0 exactly as every forwarder consumes its own: it is this
-     * node's reference to its first-hop connection vertex, so it selects the link and does
-     * NOT go on the wire. What goes out is the residual, a `PATH` of `H−1` PAIR elements
-     * (`4 + 11×(H−1)` bytes, RFC-0029 §5.2 — the retired `PATH_REF` array is no longer an
-     * address), and the host that receives it consumes ITS element in turn — the monotone
-     * shrink that makes a bound path loop-free for the same reason a canonical `dst` is.
-     *
-     * @p send composes the frame around `dst` and sends it on `link`, on this thread, inside
-     * the router's frame bracket (@ref egress_fn_t).
-     *
-     * @param right The right the operation carries, evaluated at the dereferenced connection
-     *              vertex like any other hop's (§6.2).
-     * @return false, with @p send not called, when @p path is unbound, or element 0 no longer
-     *         validates — a link removed, a connection vertex retired, an ACL revoked — or the
-     *         link plane's source refused the `dst` bytes. The caller's recovery is the one
-     *         that always works: `clear_binding()` and send the canonical path it still holds,
-     *         whose reply may then teach a fresh chain (RFC-0029 §6.2).
-     */
-    [[nodiscard]] bool bound_send(const graph::path_t& path, graph::acl_right_t right,
-                                  egress_fn_t send, void* ctx) const;
 
     // -- observability / terminus sinks (fn-ptr + context, ADR-0047/ADR-0068 §3) -------
     // Not std::function: these fire on the per-frame RX path, where the erasure
@@ -1027,7 +951,7 @@ class fwd_router_t {
 
     /** @brief The connection registry (test introspection — the shared demux table). A link
      *         it names is for identity checks: nothing here brackets a send on it, so send
-     *         through @ref bound_send instead. */
+     *         through `transport_vertex_t::with_link` instead. */
     [[nodiscard]] const child_registry_t& registry() const noexcept { return registry_; }
 
     /**
@@ -1054,7 +978,7 @@ class fwd_router_t {
      *
      * Every way into a child link goes through one of these: the child receivers, the bus
      * notifiers, `on_frame`, `originate`, `deliver_remote`,
-     * `link_down`, @ref bound_send and a fired AWAIT. A link the transport plane
+     * `link_down` and a fired AWAIT. A link the transport plane
      * removes is parked on the graph at an epoch closed after it was unrouted
      * (`graph_t::park_release`), and `graph_t::collect()` frees it only once every bracket open at
      * that epoch has closed, so a removed link is never freed while a frame is inside it
@@ -1069,14 +993,14 @@ class fwd_router_t {
     /**
      * @brief The egress link a bound element names, after the full §5.1 check.
      *
-     * The forwarder's hop and the origin's first hop are the same act — consume element 0,
-     * dereference it, egress — so they are the same function. It bounds-checks the index,
+     * A forwarder's hop and a stored chain's first element are the same act — consume the
+     * element, dereference it, egress — so they are the same function. It bounds-checks the index,
      * compares the generation, refuses a saturated one, and evaluates the ACL at the
      * dereferenced vertex for @p right (§6.2: a generation match authorizes nothing).
      *
      * @param e      The element to consume.
-     * @param caller The subject context — the inbound link's name at a forwarder, empty for
-     *               this node's own local caller at an origin.
+     * @param caller The subject context — the inbound link's name at a forwarder, the
+     *               subscription's caller on a remote delivery.
      * @param right  The right the operation carries; `nullopt` for an opcode this build names
      *               no right for, which the gate refuses on a graph that enforces an ACL.
      * @retval nullptr Any part of the check failed, or the vertex is not a connection vertex
@@ -1088,7 +1012,7 @@ class fwd_router_t {
      *         directed operation (ADR-0073 §3 / RFC-0020).
      *
      * Private because the link it answers is valid only inside the frame bracket its caller
-     * holds (`frame_scope_t`); the app reaches it through @ref bound_send, which holds one.
+     * holds (`frame_scope_t`).
      */
     [[nodiscard]] transport_t* bound_egress(wire::path_ref_element_t e, std::string_view caller,
                                             std::optional<graph::acl_right_t> right) const;

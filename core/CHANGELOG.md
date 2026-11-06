@@ -16,6 +16,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed (breaking)
 
+- **`path_t` drops its learned-chain slot: 40 → 24 B on a 64-bit host, 24 → 16 B on rv32
+  (#2436).** Removed: `path_binding_t`, `path_t::binding`, `path_t::bind`,
+  `path_t::clear_binding`, and the router calls that only tests reached through it,
+  `fwd_router_t::connection_ref`, `fwd_router_t::adopt_binding`, `fwd_router_t::bound_send` and
+  `fwd_router_t::egress_fn_t` (retired by RFC-0030 B12 with #1943). A learned chain lives in the
+  graph-owned path object (`path_object.hpp`), which caches it beside the canonical bytes, so no
+  in-tree caller held one on a `path_t`. A copy of a `path_t` is now one block, never two. Code
+  that sent over a hand-held binding sends the canonical path, or holds a path object.
 - **`receiver_slot_t::deliver_rope` returns `[[nodiscard]] bool` (#2504)**: true iff a sink
   received the frame, false for an empty slot or a span-only sink whose materialize the backend
   refused. The slot still keeps no counter; the calling link counts a `false` on its own drop

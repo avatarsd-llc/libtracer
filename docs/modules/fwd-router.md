@@ -92,12 +92,10 @@ generation, and a list already at the 255-element cap — because a relayed list
 not a shorter route but a wrong one: the skipped hop would later find one element left, believe
 itself the terminus, and dereference another host's element against its own vertex map.
 
-The router also carries the origin's half — `connection_ref`, `adopt_binding` and `bound_send` —
-because both halves are the same act: consume element 0, dereference it, egress (one private
-`bound_egress` serves both). The origin's element is the one no peer can supply, since the hop out
-of this node is the one hop nobody else sees. `bound_send` hands the egress link and the `dst` to
-a callback that sends, inside the router's frame bracket, so a link removed meanwhile is not freed
-under the send; the link is not the app's to keep past the callback.
+The origin's half lives in the graph-owned path object, which caches the learned chain beside
+the canonical bytes; the router keeps no origin-side calls of its own (#2436). Consuming an element,
+dereferencing it and egressing is one private `bound_egress`, shared by the forwarder hop and the
+remote-delivery leg's stored chain.
 
 Alongside the routing legs the router installs the graph's **remote-delivery sink**: a write to a
 vertex that carries a remote subscriber fans out as `FWD{WRITE}` addressed by that subscriber's
@@ -434,9 +432,9 @@ Inside the process a link is addressed by its connection vertex's handle (the ro
   the child's `child_rx_ctx_t` where it stands — it stays on the lock-free published chain,
   because a receive thread may be walking it, but it answers no lookup — and `add_child` of that
   same NAME revives it rather than appending a second. Two consequences callers rely on: a
-  re-added child resolves to its *current* tenancy on the bound path (`connection_ref` /
-  `hop_mint` read the registry slot's `conn_slot`, the same immortal slot on every registration
-  of the name, and one re-added as a bus mount stops being bindable), and
+  re-added child resolves to its *current* tenancy on the bound path (`hop_mint` reads the
+  registry slot's `conn_slot`, the same immortal slot on every registration of the name, and one
+  re-added as a bus mount stops being bindable), and
   create/remove churn on a stable name set neither leaks a context nor lengthens the chain the
   bound hop walks. `receiver_ctx_count()` is the assertable form of the second, the twin of
   `child_registry_t::size()` — which has had this rule since #494/#521.
