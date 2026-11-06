@@ -3083,3 +3083,29 @@ add_executable(edge_slot_table_test edge_slot_table_test.cpp)
 target_link_libraries(edge_slot_table_test PRIVATE libtracer)
 libtracer_test_warnings(edge_slot_table_test)
 add_test(NAME edge_slot_table COMMAND edge_slot_table_test)
+
+# #2448 — the timing-sensitive suites run alone under `ctest -j`. CI's PR and landing legs
+# run ctest in parallel (core-ci.yml, CTEST_PARALLEL_LEVEL); these suites spend real
+# sleeps, poll loops or socket timeouts (the CI time audit's sleep/poll list) or have
+# failed timeout-shaped under load before (ws_frame_race, #2027), so a crowded runner would
+# stretch the waits they measure. RUN_SERIAL keeps them off a loaded machine; every other
+# test still runs beside its neighbours. Appended here, not beside each add_test, so the
+# list is one place; `if(TEST)` skips a suite a configuration does not build.
+foreach(_serial IN ITEMS
+        send_stall                  # SO_SNDTIMEO send bounds, 200 ms sleeps, 10 ms poll loop
+        transport_alloc_softfail    # 15 real sleeps (200 ms and 150 ms)
+        tcp                         # 16 real sleeps, 2 s receive budgets
+        ws_transport                # 50 / 20 ms sleeps, deadline waits
+        udp                         # 150 ms sleep, 3 s drop-count deadlines
+        ws_frame_race               # failed at ~92 s under TSan three times in Oct (#2027)
+        esp_ws_client_recv          # real dial waits; 200 ms "did not dial" windows
+        esp_ws_client_teardown      # 600 ms held write, 2.5 s hung dial, 1.5 s backoffs
+        esp_ws_client_liveness      # 1.5 s reconnect backoffs; flaked under TSan (#1118)
+        esp_ws_client_dial          # 1.5 s reconnect backoff
+        esp_ws_client_dial_stats    # the dial suite, dial stats on
+        esp_ws_client_traffic_stats # the dial suite, traffic stats on
+)
+    if(TEST ${_serial})
+        set_tests_properties(${_serial} PROPERTIES RUN_SERIAL TRUE)
+    endif()
+endforeach()

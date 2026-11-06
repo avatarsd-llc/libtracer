@@ -460,6 +460,10 @@ that breaks one of them is a finding; cite the rule.
   one pushes to a branch already queued for the train, except the
   rebase-for-landing. Push-only publishing jobs (docs deploy, perf ratchet and
   history, image publish) are unchanged.
+- **ctest runs 4 tests at a time on pushes and landings, serially nightly and on
+  tags** (#2448). core-ci sets `CTEST_PARALLEL_LEVEL`; the sleep- and poll-based
+  suites are `RUN_SERIAL` in `core/tests/CMakeLists.txt`, so they still run alone. A
+  new test that waits on real time joins that list.
 - **Docs-only PRs skip the C++ workflows.** A PR of `docs/` and Markdown alone
   skips core-ci and the other C++ workflows. Required checks still report: a
   skipped job, or a verdict job over skipped jobs, reads as success. doc-citations,
