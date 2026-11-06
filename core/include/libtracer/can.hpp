@@ -5,8 +5,9 @@
  * can_transport_t (#55) — the PURE, host-testable CAN framing layer: the
  * structured 29-bit extended-CAN-ID codec and the in-band `advertise` frame
  * codec. No SocketCAN, no kernel `vcan`, no real socket — this header knows
- * nothing about `socket(PF_CAN…)`; the `can_transport_t : transport_t` SocketCAN
- * binding is a deferred increment (see docs/reference/14-can-transport.md).
+ * nothing about `socket(PF_CAN…)`; the SocketCAN binding is `can_transport_t`
+ * over `socketcan_link_t`, both in transport_can.hpp (see
+ * docs/reference/14-can-transport.md).
  *
  * Header-elided framing (ADR-0022): the CAN ID *is* the path, so the TLV header
  * never hits the constrained bus. A dynamic identity↔path map held inside the
@@ -16,7 +17,7 @@
  * (docs/reference/13-network-formation.md §self-healing).
  *
  * Mirrors the style of ws.hpp (the transport_ws protocol layer): header-only,
- * inline, pure functions with explicit byte vectors.
+ * inline, pure functions over caller-owned buffers.
  */
 #pragma once
 
@@ -27,8 +28,6 @@
 #include <span>
 #include <string_view>
 #include <utility>
-
-#include "libtracer/mem_source.hpp"
 
 /**
  * @file
@@ -244,19 +243,16 @@ struct advertise_t {
  * @brief Serialize ONLY the fixed-size header (@ref kAdvertiseHeaderSize bytes) of an
  *        @ref advertise_t into @p out — on the STACK, nothrow.
  *
- * This is the ONE advertise field-encoding implementation (the `%ws.hpp`
- * `encode_frame_header` / `encode_frame` split, applied to CAN): @ref encode_advertise
- * appends the path after it, and `can_transport_t::emit_advertise` walks this stack header and
- * then the path's bytes in place, so slicing an advertise into 8-byte CAN windows allocates
- * NOTHING — it never needed a contiguous buffer (#848). That matters because
+ * This is the ONE advertise field encoder: `can_transport_t::emit_advertise` walks this stack
+ * header and then the path's bytes in place, so slicing an advertise into 8-byte CAN windows
+ * allocates NOTHING — it never needed a contiguous buffer (#848). That matters because
  * `emit_advertise` runs on *every* CAN send, so the old `std::vector` was a per-send
  * `abort()` risk under `-fno-exceptions`.
  *
  * The path is a SEPARATE parameter because the header is a function of the path's LENGTH,
  * not of who owns its bytes: `can_transport_t` passes its own `cfg_.path` and never copies a
  * path into the @ref advertise_t it emits, which is what keeps the whole emission free of
- * allocation. @ref advertise_t::path on @p a is therefore NOT read here — @ref
- * encode_advertise is the caller that passes it.
+ * allocation. @ref advertise_t::path on @p a is therefore NOT read here.
  *
  * It also enforces the bound @ref kAdvertiseMaxPathLen only documented before: an
  * over-long path used to be cast to `std::uint16_t` unchecked, encoding a frame every
@@ -296,30 +292,6 @@ struct advertise_t {
     put_u16(a.target);
     put_u16(path_len);
     return true;
-}
-
-/**
- * @brief Serialize an @ref advertise_t frame to its on-wire bytes, into @p out.
- *
- * The header comes from @ref encode_advertise_header (the one field-encoding locus); this
- * form appends the path and exists for callers that want the whole frame contiguous. The
- * CAN transport does not use it — it slices the header and the path separately, allocating
- * nothing. Replaces the `std::vector`-returning form (#1780).
- *
- * @param out The frame store; replaced with the frame (left empty on any failure).
- * @param a   The advertise to encode (its @ref advertise_t::path may be empty).
- * @retval false @p a's path exceeds @ref kAdvertiseMaxPathLen (the advertise is
- *               unencodable), or @p out could not be grown.
- */
-[[nodiscard]] inline bool encode_advertise(mem::bytes_t& out, const advertise_t& a) noexcept {
-    std::array<std::byte, kAdvertiseHeaderSize> header{};
-    out.clear();
-    if (!encode_advertise_header(header, a, a.path)) return false;
-    if (out.append(header.data(), header.size()) &&
-        out.append(reinterpret_cast<const std::byte*>(a.path.data()), a.path.size()))
-        return true;
-    out.clear();
-    return false;
 }
 
 /**

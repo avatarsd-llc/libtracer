@@ -99,6 +99,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **`noise::counter_t::MALFORMED_RX` and `DROPPED_TX` are removed (#2482).** `noise_link_t`
   now keeps its own `malformed_rx` and `dropped_tx` in a `drop_tally_t`; read them through
   `drop_stats()`, which adds them to the carrier's, as before.
+- **Two retired encoders are removed (#2435): `wire::emit_path_ref` (both the `std::vector`
+  and the `mem::bytes_t` overloads), `wire::emit_path_ref_into` and its size helper
+  `wire::path_ref_wire_bytes` (`tlv_emit.hpp`), and `net::can::encode_advertise` (`can.hpp`).**
+  Only tests and a bench called them: the library has emitted no `0x14 PATH_REF` since #2245,
+  and the CAN transport sends an advertise as `encode_advertise_header`'s stack header followed
+  by the path bytes in place, allocating nothing. No wire byte moves and no receiver changes:
+  `type_t::PATH_REF`, `is_path_ref_type`, `path_ref_body_valid`, the element accessors
+  (`path_ref_element_count`, `path_ref_element_at`, `path_ref_store_element`),
+  `kAdvertiseFormatVersion`, `encode_advertise_header` and `decode_advertise` stay, and every
+  `path-ref/*` conformance vector still passes. A caller that must spell a `PATH_REF` writes
+  the body with `path_ref_store_element` and frames it with `emit_tlv`; a caller that wants a
+  contiguous advertise appends the path after `encode_advertise_header`'s 18 bytes.
+  `tlv_emit.hpp` no longer includes `path_ref.hpp`, and `can.hpp` no longer includes
+  `mem_source.hpp`.
 
 ### Changed
 

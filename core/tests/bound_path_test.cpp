@@ -86,7 +86,7 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
 /** @brief A `PATH_REF` over @p elements — the RETIRED bound spelling, refused as a `dst`. */
 std::vector<std::byte> b_path_ref(std::span<const path_ref_element_t> elements) {
     std::vector<std::byte> out;
-    (void)tr::wire::emit_path_ref(out, elements);
+    tr::testing::emit_retired_path_ref(out, elements);
     return out;
 }
 

@@ -69,7 +69,7 @@
   "core/include/libtracer/tlv_emit.hpp": {
     "owner": "#1781 step 3 (contract): removed once callers use the core-array form added in step 1",
     "counts": {
-      "vector": 7
+      "vector": 6
     }
   },
   "core/include/libtracer/value.hpp": {

@@ -72,9 +72,6 @@ void test_emitters_match() {
     wire::emit_value_le(v, std::uint32_t{0xA1B2C3D4}, 3);
     wire::emit_trailer_ts(v, false, 1'700'000'000'000'000'000);
     wire::emit_trailer_ts(v, true, -42);
-    const std::array<wire::path_ref_element_t, 2> refs{
-        {{.index = 7, .generation = 1}, {.index = 9, .generation = 3}}};
-    check(wire::emit_path_ref(v, refs), "vector PATH_REF emitted");
     check(wire::emit_path_segment(v, std::string_view{"seg"}), "vector segment emitted");
     check(wire::emit_path_escape(v, 0x33, bytes_of("xy")), "vector escape emitted");
     tr::detail::append_le(v, std::uint16_t{0xBEEF});
@@ -85,7 +82,7 @@ void test_emitters_match() {
               wire::emit_name(b, "sensor") && wire::emit_name(b, bytes_of("raw")) &&
               wire::emit_value_le(b, std::uint32_t{0xA1B2C3D4}, 3) &&
               wire::emit_trailer_ts(b, false, 1'700'000'000'000'000'000) &&
-              wire::emit_trailer_ts(b, true, -42) && wire::emit_path_ref(b, refs) &&
+              wire::emit_trailer_ts(b, true, -42) &&
               wire::emit_path_segment(b, std::string_view{"seg"}) &&
               wire::emit_path_escape(b, 0x33, bytes_of("xy")) &&
               tr::detail::append_le(b, std::uint16_t{0xBEEF}),
@@ -96,8 +93,6 @@ void test_emitters_match() {
     mem::bytes_t r(mem::heap_source());
     check(!wire::emit_path_segment(r, std::string_view{}) && r.empty(),
           "an empty segment is refused");
-    check(!wire::emit_path_ref(r, refs, type_t::VALUE) && r.empty(),
-          "a non-bound-path type is refused");
 }
 
 void test_path_elements_match() {

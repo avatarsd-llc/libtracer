@@ -54,13 +54,15 @@
 
 namespace {
 
-/** @brief A whole advertise frame in a `std::vector` — the test-side form of
- *         `can::encode_advertise` (#1780 moved it into a caller's `bytes_t`); empty when
- *         the advertise is unencodable. */
+/** @brief A whole advertise frame in a `std::vector`: the stack header from
+ *         `can::encode_advertise_header`, then the path bytes; empty when the advertise
+ *         is unencodable. */
 [[maybe_unused]] std::vector<std::byte> advertise_vec(const tr::net::can::advertise_t& a) {
-    tr::mem::bytes_t b(tr::mem::heap_source());
-    if (!tr::net::can::encode_advertise(b, a)) return {};
-    return std::vector<std::byte>(b.begin(), b.end());
+    std::array<std::byte, tr::net::can::kAdvertiseHeaderSize> header{};
+    if (!tr::net::can::encode_advertise_header(header, a, a.path)) return {};
+    std::vector<std::byte> out(header.begin(), header.end());
+    for (const char c : a.path) out.push_back(static_cast<std::byte>(c));
+    return out;
 }
 
 using namespace std::chrono_literals;

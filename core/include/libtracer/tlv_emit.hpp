@@ -27,7 +27,6 @@
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/mem_source.hpp"
-#include "libtracer/path_ref.hpp"
 #include "libtracer/tlv.hpp"
 
 namespace tr::wire {
@@ -46,7 +45,7 @@ namespace tr::wire {
  * decide one.
  *
  * @note This is a **deliberate second spelling** of the same four bytes, not an oversight, and
- *       it joins the ones `emit_header` already names below (`emit_path_ref_into`, the
+ *       it joins the ones `emit_header` already names below (the
  *       `fwd_frame_view` / `stack_writer_t` tiers). Making `emit_header` delegate here was tried
  *       and **reverted on measurement**: the `resize`-then-store body re-partitioned the
  *       inliner's budget on the forward hop, growing
@@ -79,7 +78,7 @@ inline void store_header(std::span<std::byte> out, type_t type, opt_t opt,
  *
  * `emit_tlv` is NOT the only home of that rule, and a caller must not assume it is: the
  * subscribe sugar in `graph.cpp` calls this directly (safe only because `kMaxPathBytes`
- * bounds the length), `emit_path_ref_into` hand-rolls its own header, and the forward plane's
+ * bounds the length), and the forward plane's
  * `fwd_frame_view` / `stack_writer_t` tiers each carry a separate copy of the widen rule. A
  * caller reaching for `emit_header` owns the width decision itself.
  */
@@ -170,75 +169,6 @@ inline void emit_value_le(std::vector<std::byte>& out, T value, std::size_t widt
     detail::append_le(out, value, width);
 }
 
-/**
- * @brief Bytes a `PATH_REF` over @p n elements occupies — the 4-byte envelope plus the array.
- *
- * The whole size function, so a caller can size a STACK buffer for the shape it is about to
- * emit rather than discovering the size from a container that grew to hold it.
- */
-[[nodiscard]] constexpr std::size_t path_ref_wire_bytes(std::size_t n) noexcept {
-    return 4u + n * kPathRefElementBytes;
-}
-
-/**
- * @brief Write a `PATH_REF` TLV over @p elements into @p out — the ALLOCATION-FREE form.
- *
- * Emits the 4-byte envelope (`0x14`, `opt = 0x00` — `PL = 0` and `LL = 0` are both MUSTs of
- * §4.2) followed by the bare 8-byte element array, in route order, with no per-element
- * framing and no count field: the count IS `length / 8`.
- *
- * A `PATH_REF`'s size is a pure function of its element count, so the buffer can be a caller's
- * stack array and the emit cannot fail for want of memory. The library itself emits no
- * `PATH_REF` since #2245; this is the codec's spelling of the retired form, for a peer or test
- * that must produce one to see it refused.
- *
- * @param out      Destination buffer, at least `path_ref_wire_bytes(elements.size())` bytes.
- * @param elements The route, in route order.
- * @param type     `type_t::PATH_REF`, the only code with this body since the reverse list
- *                 became a `PATH` body (#2245); kept as a parameter so a caller names it.
- *
- * @return False — writing nothing — when @p elements exceeds @ref kMaxPathRefElements (the
- *         §4.3 bound; such a caller has no bound spelling and falls back to the canonical
- *         `PATH`), when @p out is smaller than `path_ref_wire_bytes`, or when @p type is
- *         not `PATH_REF`.
- */
-[[nodiscard]] inline bool emit_path_ref_into(std::span<std::byte> out,
-                                             std::span<const path_ref_element_t> elements,
-                                             type_t type = type_t::PATH_REF) {
-    if (elements.size() > kMaxPathRefElements) return false;
-    if (!is_path_ref_type(type)) return false;
-    const std::size_t body_len = elements.size() * kPathRefElementBytes;
-    if (out.size() < path_ref_wire_bytes(elements.size())) return false;
-    out[0] = static_cast<std::byte>(std::to_underlying(type));
-    out[1] = static_cast<std::byte>(opt_t{}.encode());
-    out[2] = static_cast<std::byte>(body_len & 0xFFu);
-    out[3] = static_cast<std::byte>((body_len >> 8) & 0xFFu);
-    for (std::size_t i = 0; i < elements.size(); ++i) {
-        path_ref_store_element(out.subspan(4u + i * kPathRefElementBytes, kPathRefElementBytes),
-                               elements[i]);
-    }
-    return true;
-}
-
-/**
- * @brief Append a `PATH_REF` TLV over @p elements to a growing buffer — the container form.
- *
- * Same bytes as `emit_path_ref_into`, which it delegates to, so the two spellings cannot
- * drift. For the reply path use the span form: it does not allocate.
- *
- * @return False — emitting nothing — when @p elements exceeds @ref kMaxPathRefElements (the
- *         §4.3 bound) or @p type is not `PATH_REF`.
- */
-[[nodiscard]] inline bool emit_path_ref(std::vector<std::byte>& out,
-                                        std::span<const path_ref_element_t> elements,
-                                        type_t type = type_t::PATH_REF) {
-    if (elements.size() > kMaxPathRefElements) return false;
-    if (!is_path_ref_type(type)) return false;
-    const std::size_t base = out.size();
-    out.resize(base + path_ref_wire_bytes(elements.size()));
-    return emit_path_ref_into(std::span<std::byte>(out).subspan(base), elements, type);
-}
-
 /** @brief Append a NAME TLV over a text segment (no temporary buffer). */
 inline void emit_name(std::vector<std::byte>& out, std::string_view name) {
     emit_name(out, std::span<const std::byte>(reinterpret_cast<const std::byte*>(name.data()),
@@ -317,27 +247,6 @@ template <std::unsigned_integral T>
     std::byte body[sizeof(T)];
     detail::store_le(std::span<std::byte>(body, width), value, width);
     return emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(body, width));
-}
-
-/**
- * @brief Append a `PATH_REF` TLV over @p elements — the core-array form of @ref emit_path_ref.
- * @retval false @p elements exceeds @ref kMaxPathRefElements, @p type is not `PATH_REF`,
- *         or the source refused — @p out is unchanged on all three.
- */
-[[nodiscard]] inline bool emit_path_ref(mem::bytes_t& out,
-                                        std::span<const path_ref_element_t> elements,
-                                        type_t type = type_t::PATH_REF) noexcept {
-    if (elements.size() > kMaxPathRefElements || !is_path_ref_type(type)) return false;
-    const std::size_t body = elements.size() * kPathRefElementBytes;
-    if (!out.reserve(out.size() + header_bytes(opt_t{}) + body) ||
-        !emit_header(out, type, opt_t{}, body))
-        return false;
-    for (const path_ref_element_t& e : elements) {
-        std::byte rec[kPathRefElementBytes];
-        path_ref_store_element(std::span<std::byte, kPathRefElementBytes>(rec), e);
-        if (!out.append(rec, kPathRefElementBytes)) return false;
-    }
-    return true;
 }
 
 /** @} */
