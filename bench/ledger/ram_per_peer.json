@@ -168,10 +168,11 @@
       "id": "httpd-ws session",
       "target": "MID",
       "source": "static",
-      "value": 288,
+      "value": 376,
       "goal": 85,
-      "moved_by": "#2137 (seeded from the peer-cost study)",
-      "basis": "sizeof(httpd_ws_link_t::session_t) on riscv32: subject[128] + endpoint_str[52] + name[23] (203 B of strings), link_counters_t, the fragment assembler (#2483). The TX queue peak (#2464) adds 0 B: link_counters_t::tx_queue_peak fills that block's padding before connected_at_us (24 B, 48 B with traffic stats, either way), and the slot's one-byte tx_peak the padding after tx_spare_used. Goal from #2136 user story 27."
+      "moved_by": "#2548 (re-measured; the 288 B seed was never read from an image)",
+      "basis": "sizeof(httpd_ws_link_t::session_t) on riscv32, read as DW_AT_byte_size of session_t in httpd_ws_link.cpp.obj of the esp32c6 full_node build (espressif/idf:release-v6.0) at 408c6e4e2: subject[128] + endpoint_str[52] + name[25] (205 B of strings), link_counters_t (24 B), ws_assembler_t (20 B, #2483), the TX frame + wait queue (48 B, #2195), live_since (8 B, #2198). The TX queue peak (#2464) adds 0 B: link_counters_t::tx_queue_peak fills that block's padding before connected_at_us (24 B, 48 B with traffic stats, either way), and the slot's one-byte tx_peak the padding after tx_spare_used. Goal from #2136 user story 27.",
+      "waiver": "Bookkeeping waiver granted by the maintainer (ruling 37, 2026-11-06): none of this growth had been waived when it shipped. The same method at the seed commit f6007ae39 (#2137) reads 336 B, so the 288 B seed was 48 B short from the start. Since the seed, +40 B: +20 B #2196/#2197 (#2195: tx_frame_t gains the 4 B lane word, tx_wire gives way to tx_head/tx_tail/tx_spare/tx_spare_used); +12 B #2207 (#2198: live_since 8 B plus 4 B of alignment; tx_moved and tx_frozen sit in padding); +4 B #2233 (kSlotNameChars 22 -> 24, name 23 -> 25 B, plus alignment); +4 B #2502 (#2483: ws_assembler_t 20 B replaces the 16 B asm_buf)."
     },
     {
       "id": "client link task stack",
