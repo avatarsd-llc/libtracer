@@ -418,7 +418,8 @@ FAMILIES: list[dict] = [
               "stage from an empty graph to steady state under a real remote peer process. "
               "TREND-ONLY: nothing here is gated. Points before the #2542 instrument marker are "
               "KNOWN-BLIND from S_B1 to S_E: the census counted only operator new, which the "
-              "default slab root bypasses, so those stages read flat",
+              "default slab root bypasses, so those stages read flat. S_A changes meaning at "
+              "the same marker: a default graph before it, an injected-root graph after",
          names=[("node-census mixed S_A_bytes", "empty graph"),
                 ("node-census mixed S_B1_bytes", "+ 100 vertices registered"),
                 ("node-census mixed S_B_bytes", "+ their values written"),
