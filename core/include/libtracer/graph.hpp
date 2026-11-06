@@ -2145,8 +2145,8 @@ class graph_t {
     /**
      * @brief Apply the members @p policy NAMES to @p v (RFC-0028 §4.12, D12; #2239) — the one
      *        owner-side wiring verb that replaced `set_retention`, `set_share_threshold_bytes`,
-     *        `set_ring_source`, `set_delivery_mode`, `set_app_fields` and
-     *        `set_app_fields_static`.
+     *        `set_ring_source`, `set_delivery_mode` and the graph-level app-field installers
+     *        (the matching `vertex_t` members went in #2547).
      *
      * A member left unset keeps what @p v holds, so a caller names only what it changes and
      * needs nothing to read first; a named member that already holds is skipped, so
