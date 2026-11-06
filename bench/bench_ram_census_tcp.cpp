@@ -55,6 +55,18 @@
  * emit temporaries, parse scratch) cancels and what remains is *held* memory. Blocks
  * (allocs − frees) are reported beside the bytes.
  *
+ * That override alone is blind on the default host build. Since ADR-0083 the default root
+ * is the slab pool, which takes whole 256 KiB slabs from the platform heap and hands out
+ * blocks from them, so a vertex, a value, a router entry or a link's receive segment never
+ * reaches `operator new`. Before #2542 every stage after S_B1 read the same number and
+ * `per_vertex_val` read 0. The census node therefore injects a @ref counting_source_t on every
+ * seam it has: the graph's one source (over `default_root()`), the router's four planes and
+ * the transport vertex's receive backend and egress store (over `net_source()`). Each draw
+ * lands where it would by default and is counted at its slab class, the `bench_conn_ram`
+ * rule of #2134. A slab the wrapped root takes meanwhile is not counted again. Values the
+ * census writes itself are drawn from the graph's own segment seam
+ * (`graph_t::value_backend()`), as a peer's are.
+ *
  * Two rules every arm obeys: (1) a NULL arm — two readings with nothing but the
  * quiesce between them — is printed with the rest and must read 0, so the reader can
  * confirm the instrument is not itself allocating inside a window; (2) every arm runs
@@ -67,7 +79,11 @@
  * it — on glibc a few resident pages of an 8 MiB mapping, on ESP-IDF a FreeRTOS task
  * stack that IS heap and dominates every number here. Read the thread count alongside
  * the bytes. Nor does it count `.bss`/`.data` (static RAM), which the footprint
- * sentinel prices separately.
+ * sentinel prices separately. Nor does it count a SPEC-created link's connection-STATE
+ * store or its receive thread's boot record (`link_memory_t::state` and `::stack`): the
+ * built-in `tcp` factory leaves both at their defaults, `net_source()`, and the transport
+ * vertex has no seam to inject them through, so the per-peer session reaches the census
+ * only as a slab. `bench_conn_ram` prices that session, through the link it builds by hand.
  */
 
 #include <arpa/inet.h>
@@ -99,6 +115,7 @@
 #endif
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/mem_source_backend.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
@@ -115,6 +132,10 @@ std::atomic<long long> g_allocs{0};
 std::atomic<long long> g_frees{0};
 /** @brief Counting is on. */
 std::atomic<bool> g_armed{false};
+/** @brief Set while a @ref counting_source_t forwards a draw: the slabs the default root
+ *         takes from the platform heap then are not the node's bytes, and a block the
+ *         source already counted must not be counted twice. */
+thread_local bool t_in_source = false;
 
 /** @brief Raise the recorded peak to @p now if it is higher. */
 void bump_peak(long long now) {
@@ -126,7 +147,7 @@ void bump_peak(long long now) {
 /** @brief `malloc` plus the counting side effects (usable size, block count, peak). */
 void* counted_alloc(std::size_t size) {
     void* p = std::malloc(size != 0 ? size : 1);
-    if (g_armed.load(std::memory_order_relaxed) && p != nullptr) {
+    if (g_armed.load(std::memory_order_relaxed) && !t_in_source && p != nullptr) {
         g_allocs.fetch_add(1, std::memory_order_relaxed);
 #ifdef BENCH_HAS_USABLE_SIZE
         const auto usable = static_cast<long long>(malloc_usable_size(p));
@@ -139,7 +160,7 @@ void* counted_alloc(std::size_t size) {
 /** @brief `free` plus the counting side effects. */
 void counted_free(void* p) {
     if (p == nullptr) return;
-    if (g_armed.load(std::memory_order_relaxed)) {
+    if (g_armed.load(std::memory_order_relaxed) && !t_in_source) {
         g_frees.fetch_add(1, std::memory_order_relaxed);
 #ifdef BENCH_HAS_USABLE_SIZE
         g_live.fetch_sub(static_cast<long long>(malloc_usable_size(p)), std::memory_order_relaxed);
@@ -147,6 +168,76 @@ void counted_free(void* p) {
     }
     std::free(p);
 }
+
+/**
+ * @brief The bytes the default slab root charges for a @p bytes block at @p align: the
+ *        smallest row of `config_t::kSizeClasses` that holds it, as `slab_pool_t::class_of`
+ *        picks it. An over-aligned request is padded to @p align and takes only a row that
+ *        is a multiple of it. A request past the last row passes straight through to the
+ *        platform heap and is charged as asked. The `bench_conn_ram` rule (#2134).
+ */
+long long charged(std::size_t bytes, std::size_t align) {
+    const bool over = align > alignof(std::max_align_t);
+    if (over) bytes = (bytes + align - 1) / align * align;
+    for (const std::size_t row : tr::graph::config_t::kSizeClasses)
+        if (row >= bytes && (!over || row % align == 0)) return static_cast<long long>(row);
+    return static_cast<long long>(bytes);
+}
+
+/**
+ * @brief A @ref tr::mem::block_source_t that forwards to a default source and counts what it
+ *        hands out into the same live balance as the `operator new` counter (#2542, the
+ *        `bench_conn_ram` wrapper of #2134).
+ *
+ * Since ADR-0083 the host default root is the slab pool: the graph's tables and values, the
+ * router's link state and the link's receive and egress draws reach the platform heap only
+ * as whole 256 KiB slabs, so the `operator new` counter alone read every stage after S_B1
+ * as the same number. The census node takes this wrapper on every seam it injects, over the
+ * very source that seam defaults to, so each draw lands where it would by default and the
+ * census sees every block, charged at its slab class.
+ */
+class counting_source_t final : public tr::mem::block_source_t {
+   public:
+    /** @brief Count the draws served by @p inner, which must outlive this source. */
+    explicit counting_source_t(tr::mem::block_source_t& inner) noexcept
+        : block_source_t("counting"), inner_(&inner) {}
+
+    /** @brief A block from the wrapped source, added to the live balance when armed. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        t_in_source = true;
+        void* p = inner_->try_alloc(bytes, align);
+        t_in_source = false;
+        if (p != nullptr && g_armed.load(std::memory_order_relaxed)) {
+            g_allocs.fetch_add(1, std::memory_order_relaxed);
+            const long long c = charged(bytes, align);
+            bump_peak(g_live.fetch_add(c, std::memory_order_relaxed) + c);
+        }
+        return p;
+    }
+
+    /** @brief Return a block to the wrapped source, taken off the live balance when armed. */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        if (p != nullptr && g_armed.load(std::memory_order_relaxed)) {
+            g_frees.fetch_add(1, std::memory_order_relaxed);
+            g_live.fetch_sub(charged(bytes, align), std::memory_order_relaxed);
+        }
+        t_in_source = true;
+        inner_->release(p, bytes, align);
+        t_in_source = false;
+    }
+
+   private:
+    tr::mem::block_source_t* inner_; /**< @brief The default source the draws come from. */
+};
+
+/** @brief The default root, counted: the census graph's one source (tables and values). */
+counting_source_t g_graph{tr::mem::default_root()};
+/** @brief The net sub-pool, counted: the router's link state and terminus arena, the
+ *         transport vertex's tables and every SPEC-created link's object and egress store. */
+counting_source_t g_net{tr::mem::net_source()};
+/** @brief The segment backend over @ref g_net: what `net_backend()` is, counted. The router's
+ *         flatten and egress backend and every link's receive seam. */
+tr::mem::source_backend_t g_net_rx{g_net};
 
 }  // namespace
 
@@ -240,9 +331,11 @@ struct sample_t {
 
 // --- wire helpers (the tcp_test shapes, verbatim in intent) -------------------
 
-/** @brief Wrap @p bytes in an owning heap segment view — what `graph_t::write` stores. */
-view_t owned(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
+/** @brief Wrap @p bytes in an owning segment view drawn from @p g's own segment seam — what
+ *         `graph_t::write` stores, so the census counts it. */
+view_t owned(const graph_t& g, std::span<const std::byte> bytes) {
+    tr::view::segment_ptr_t seg = tr::view::segment_alloc(g.value_backend(), bytes.size());
+    if (!seg) return view_t{};
     if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
     return view_t::over(std::move(seg));
 }
@@ -368,7 +461,7 @@ void write_census_values(graph_t& g, mix_t mix) {
         const std::size_t n = value_bytes_for(i, mix);
         const std::vector<std::byte> v = i % 3 == 1 ? array_value(n, static_cast<std::uint8_t>(i))
                                                     : scalar_value(n, static_cast<std::uint8_t>(i));
-        (void)g.write(path_t(std::string("/") + vname(i)), owned(v));
+        (void)g.write(path_t(std::string("/") + vname(i)), owned(g, v));
     }
 }
 
@@ -544,7 +637,7 @@ sample_t run_census(mix_t mix, std::size_t ops, int cmd_fd, int rsp_fd) {
     // --- S_A: the empty graph -----------------------------------------------
     // Declaration order: the router outlives the transport vertex that feeds it, so
     // the sockets (and their recv threads) destruct FIRST.
-    graph_t g;
+    graph_t g(g_graph);
     quiesce();
     s.b_a = live() - base;
     s.blk_a = blocks() - base_blk;
@@ -565,8 +658,10 @@ sample_t run_census(mix_t mix, std::size_t ops, int cmd_fd, int rsp_fd) {
 
     // --- S_C: router + transport vertex + the SPEC-created TCP listener ------
     const std::uint16_t port = free_port();
-    tr::net::fwd_router_t router(g);
-    tr::net::transport_vertex_t net(g, router);
+    tr::net::fwd_router_t router(
+        g, tr::net::router_planes_t{
+               .link_src = &g_net, .rx = &g_net, .flat = &g_net_rx, .egress = &g_net_rx});
+    tr::net::transport_vertex_t net(g, router, "/net", &g_net_rx, &g_net);
     (void)net.register_module(std::string(tr::net::kTcpServerSuggestedModule), "tcp",
                               tr::net::conn_role_t::LISTEN);
     const auto wl = g.write(path_t("/net/tcp-server/conn"), tcp_conn_spec("peer", port));

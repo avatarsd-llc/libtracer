@@ -416,7 +416,9 @@ FAMILIES: list[dict] = [
          title="Whole-node RAM census — a 100-vertex node, stage by stage",
          cond="bench_ram_census_tcp · pinned host · the 4..64 B mixed arm, live heap at each "
               "stage from an empty graph to steady state under a real remote peer process. "
-              "TREND-ONLY: nothing here is gated",
+              "TREND-ONLY: nothing here is gated. Points before the #2542 instrument marker are "
+              "KNOWN-BLIND from S_B1 to S_E: the census counted only operator new, which the "
+              "default slab root bypasses, so those stages read flat",
          names=[("node-census mixed S_A_bytes", "empty graph"),
                 ("node-census mixed S_B1_bytes", "+ 100 vertices registered"),
                 ("node-census mixed S_B_bytes", "+ their values written"),
