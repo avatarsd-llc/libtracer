@@ -273,13 +273,24 @@ cmake --build bench/build --target bench_ram_census_tcp -j
 ```
 
 `bench_conn_ram` prices one **connection**; this prices the **node** around it. A counting
-`operator new` (all variants — sized, array, aligned, **nothrow**) reads the LIVE heap
-balance at five points: an empty `graph_t`, +100 vertices registered, +their values written
-once, +the `fwd_router_t` / `transport_vertex_t` / SPEC-created TCP listener, +a peer
-**process** connected over loopback, and +steady state after N mixed FWD read/write ops from
-that peer. The listener is created the way the wire creates one — `write /net/tcp-server/conn
-<- SPEC{name, config{kind=tcp, port}}`, the RFC-0014 creator endpoint — so no byte is counted
-on a hand-wired path.
+`operator new` (all variants — sized, array, aligned, **nothrow**), plus a counting wrapper on
+every memory seam the node injects (the `bench_conn_ram` wrapper of #2134, counted at the slab
+class), reads the LIVE balance at five points: an empty `graph_t`, +100 vertices registered,
++their values written once, +the `fwd_router_t` / `transport_vertex_t` / SPEC-created TCP
+listener, +a peer **process** connected over loopback, and +steady state after N mixed FWD
+read/write ops from that peer. The listener is created the way the wire creates one — `write
+/net/tcp-server/conn <- SPEC{name, config{kind=tcp, port}}`, the RFC-0014 creator endpoint — so
+no byte is counted on a hand-wired path.
+
+The counted seams are the graph's source, the router's four planes, the transport vertex's
+receive backend and egress store, and all four `link_memory_t` planes of the listener. The
+last come from the census's own `tcp` factory, the built-in LISTEN arm with every plane
+counted, registered on a slim transport vertex: the built-in factory leaves the per-peer
+session (`state`) and the thread boot record (`stack`) on `net_source()`. Injecting the graph's
+source makes the census graph an **injected-root** graph: it builds no table pool of its own
+(#1882) and draws values from the injected root. S_A..S_E therefore price an injected-root
+node, and `S_A_default_bytes` keeps the default graph's floor visible — a plain `graph_t`,
+read by the `operator new` counter, which sees its own pool's slabs.
 
 Three arms differing in exactly one variable (every value 4 B, the 4..64 B mix, every value
 64 B) give the value-size sensitivity. A NULL arm is printed with the rest and must read 0;
@@ -289,6 +300,15 @@ few bytes means an unwaited thread or a broken instrument, not noise.
 Not a `perf.yml` gate: it runs on the **pinned host** (`perf-local.yml`), where it is
 **trend-only** — see below. It does not count pthread stacks (`mmap`ed, invisible to any
 `operator new` counter) or static RAM — the footprint sentinel prices those.
+
+**Recorded points before #2542 are known-blind (S_B1..S_E).** Until #2542 the census counted
+only through `operator new`, and on the default slab root (ADR-0083) the graph, router and
+link draw their blocks from slabs that never reach it. Every `node-census` series from S_B1
+to S_E therefore read flat (S_C = S_D = S_E = S_B1, `per_vertex_val` 0) up to and including
+the last recorded point before the fix, 2026-10-23. Those points are not a trend; the
+series restarts at the #2542 instrument marker. S_A also changes meaning at that marker:
+before it, S_A priced a default graph with its own table pool; after it, an injected-root
+graph, so the two sides cannot be compared.
 
 ### The RAM censuses in CI (#1228)
 

@@ -22,7 +22,7 @@
  *
  * ### The five stages (each a LIVE-balance reading, relative to the pre-graph baseline)
  *
- *   S_A  an empty `graph_t`                                   (the fixed graph core)
+ *   S_A  an empty injected-root `graph_t`                     (the fixed graph core)
  *   S_B1 + 100 vertices REGISTERED, none written yet          (per-vertex IDENTITY)
  *   S_B  + each of those written once with its value          (per-vertex + VALUE)
  *   S_C  + `fwd_router_t` + `transport_vertex_t` + the SPEC-created TCP listener
@@ -54,6 +54,31 @@
  * added on allocation, subtracted on free, so transient churn (vector regrowth, TLV
  * emit temporaries, parse scratch) cancels and what remains is *held* memory. Blocks
  * (allocs − frees) are reported beside the bytes.
+ *
+ * That override alone is blind on the default host build. Since ADR-0083 the default root
+ * is the slab pool, which takes whole 256 KiB slabs from the platform heap and hands out
+ * blocks from them, so a vertex, a value, a router entry or a link's receive segment never
+ * reaches `operator new`. Before #2542 every stage after S_B1 read the same number and
+ * `per_vertex_val` read 0. The census node therefore injects a @ref counting_source_t on every
+ * seam it has, each counted at its slab class (the `bench_conn_ram` rule of #2134); a slab
+ * the wrapped source takes meanwhile is not counted again:
+ *
+ *   - the graph's one source, over `default_root()`. This makes the census graph an
+ *     INJECTED-ROOT graph, not a default one: it builds no table pool of its own (the
+ *     default graph's per-graph 4 KiB-slab pool, #1882) and draws its values from that root
+ *     too, not from the value sub-pool. So S_A..S_E price an injected-root node. The default
+ *     graph's floor stays visible in `S_A_default_bytes`: a plain `graph_t`, read by the
+ *     `operator new` counter (which sees its pool and slabs) before each census graph exists;
+ *   - the router's four planes and the transport vertex's receive backend and egress store,
+ *     over `net_source()`. Nothing tests those sources' identity, so each draw lands exactly
+ *     where it would by default;
+ *   - every plane of the SPEC-created listener (`link_memory_t` rx, io, state and stack),
+ *     through the census's own `tcp` factory (@ref register_counted_tcp). The built-in
+ *     factory leaves state and stack on `net_source()` with no seam to inject them, which is
+ *     where a connected peer's session lives.
+ *
+ * Values the census writes itself are drawn from the graph's own segment seam
+ * (`graph_t::value_backend()`), as a peer's are.
  *
  * Two rules every arm obeys: (1) a NULL arm — two readings with nothing but the
  * quiesce between them — is printed with the rest and must read 0, so the reader can
@@ -98,7 +123,9 @@
 #define BENCH_HAS_USABLE_SIZE 1
 #endif
 
+#include "libtracer/builtin_transports.hpp"
 #include "libtracer/byteorder.hpp"
+#include "libtracer/mem_source_backend.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
@@ -115,6 +142,10 @@ std::atomic<long long> g_allocs{0};
 std::atomic<long long> g_frees{0};
 /** @brief Counting is on. */
 std::atomic<bool> g_armed{false};
+/** @brief Set while a @ref counting_source_t forwards a draw: the slabs the default root
+ *         takes from the platform heap then are not the node's bytes, and a block the
+ *         source already counted must not be counted twice. */
+thread_local bool t_in_source = false;
 
 /** @brief Raise the recorded peak to @p now if it is higher. */
 void bump_peak(long long now) {
@@ -126,7 +157,7 @@ void bump_peak(long long now) {
 /** @brief `malloc` plus the counting side effects (usable size, block count, peak). */
 void* counted_alloc(std::size_t size) {
     void* p = std::malloc(size != 0 ? size : 1);
-    if (g_armed.load(std::memory_order_relaxed) && p != nullptr) {
+    if (g_armed.load(std::memory_order_relaxed) && !t_in_source && p != nullptr) {
         g_allocs.fetch_add(1, std::memory_order_relaxed);
 #ifdef BENCH_HAS_USABLE_SIZE
         const auto usable = static_cast<long long>(malloc_usable_size(p));
@@ -139,7 +170,7 @@ void* counted_alloc(std::size_t size) {
 /** @brief `free` plus the counting side effects. */
 void counted_free(void* p) {
     if (p == nullptr) return;
-    if (g_armed.load(std::memory_order_relaxed)) {
+    if (g_armed.load(std::memory_order_relaxed) && !t_in_source) {
         g_frees.fetch_add(1, std::memory_order_relaxed);
 #ifdef BENCH_HAS_USABLE_SIZE
         g_live.fetch_sub(static_cast<long long>(malloc_usable_size(p)), std::memory_order_relaxed);
@@ -147,6 +178,76 @@ void counted_free(void* p) {
     }
     std::free(p);
 }
+
+/**
+ * @brief The bytes the default slab root charges for a @p bytes block at @p align: the
+ *        smallest row of `config_t::kSizeClasses` that holds it, as `slab_pool_t::class_of`
+ *        picks it. An over-aligned request is padded to @p align and takes only a row that
+ *        is a multiple of it. A request past the last row passes straight through to the
+ *        platform heap and is charged as asked. The `bench_conn_ram` rule (#2134).
+ */
+long long charged(std::size_t bytes, std::size_t align) {
+    const bool over = align > alignof(std::max_align_t);
+    if (over) bytes = (bytes + align - 1) / align * align;
+    for (const std::size_t row : tr::graph::config_t::kSizeClasses)
+        if (row >= bytes && (!over || row % align == 0)) return static_cast<long long>(row);
+    return static_cast<long long>(bytes);
+}
+
+/**
+ * @brief A @ref tr::mem::block_source_t that forwards to a default source and counts what it
+ *        hands out into the same live balance as the `operator new` counter (#2542, the
+ *        `bench_conn_ram` wrapper of #2134).
+ *
+ * Since ADR-0083 the host default root is the slab pool: the graph's tables and values, the
+ * router's link state and the link's receive and egress draws reach the platform heap only
+ * as whole 256 KiB slabs, so the `operator new` counter alone read every stage after S_B1
+ * as the same number. The census node takes this wrapper on every seam it injects, over the
+ * very source that seam defaults to, so each draw lands where it would by default and the
+ * census sees every block, charged at its slab class.
+ */
+class counting_source_t final : public tr::mem::block_source_t {
+   public:
+    /** @brief Count the draws served by @p inner, which must outlive this source. */
+    explicit counting_source_t(tr::mem::block_source_t& inner) noexcept
+        : block_source_t("counting"), inner_(&inner) {}
+
+    /** @brief A block from the wrapped source, added to the live balance when armed. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        t_in_source = true;
+        void* p = inner_->try_alloc(bytes, align);
+        t_in_source = false;
+        if (p != nullptr && g_armed.load(std::memory_order_relaxed)) {
+            g_allocs.fetch_add(1, std::memory_order_relaxed);
+            const long long c = charged(bytes, align);
+            bump_peak(g_live.fetch_add(c, std::memory_order_relaxed) + c);
+        }
+        return p;
+    }
+
+    /** @brief Return a block to the wrapped source, taken off the live balance when armed. */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        if (p != nullptr && g_armed.load(std::memory_order_relaxed)) {
+            g_frees.fetch_add(1, std::memory_order_relaxed);
+            g_live.fetch_sub(charged(bytes, align), std::memory_order_relaxed);
+        }
+        t_in_source = true;
+        inner_->release(p, bytes, align);
+        t_in_source = false;
+    }
+
+   private:
+    tr::mem::block_source_t* inner_; /**< @brief The default source the draws come from. */
+};
+
+/** @brief The default root, counted: the census graph's one source (tables and values). */
+counting_source_t g_graph{tr::mem::default_root()};
+/** @brief The net sub-pool, counted: the router's link state and terminus arena, the
+ *         transport vertex's tables and every SPEC-created link's object and egress store. */
+counting_source_t g_net{tr::mem::net_source()};
+/** @brief The segment backend over @ref g_net: what `net_backend()` is, counted. The router's
+ *         flatten and egress backend and every link's receive seam. */
+tr::mem::source_backend_t g_net_rx{g_net};
 
 }  // namespace
 
@@ -222,10 +323,11 @@ enum class mix_t {
 
 /** @brief One repetition's five stage readings, in bytes and in live blocks. */
 struct sample_t {
-    long long b_a = 0;    /**< @brief S_A: the empty graph_t. */
-    long long b_b1 = 0;   /**< @brief S_B1: + kVertices vertices REGISTERED, none written yet. */
-    long long b_b = 0;    /**< @brief S_B: + each of those written once with its value. */
-    long long b_c = 0;    /**< @brief S_C: + router + transport vertex + SPEC-created listener. */
+    long long b_a_def = 0; /**< @brief A plain default `graph_t`, by the operator-new counter. */
+    long long b_a = 0;     /**< @brief S_A: the empty graph_t. */
+    long long b_b1 = 0;    /**< @brief S_B1: + kVertices vertices REGISTERED, none written yet. */
+    long long b_b = 0;     /**< @brief S_B: + each of those written once with its value. */
+    long long b_c = 0;     /**< @brief S_C: + router + transport vertex + SPEC-created listener. */
     long long b_d = 0;    /**< @brief S_D: + the peer process connected, one round-trip verified. */
     long long b_e = 0;    /**< @brief S_E: + steady state after the mixed op storm. */
     long long peak_e = 0; /**< @brief The high-water balance seen during the op storm. */
@@ -240,9 +342,11 @@ struct sample_t {
 
 // --- wire helpers (the tcp_test shapes, verbatim in intent) -------------------
 
-/** @brief Wrap @p bytes in an owning heap segment view — what `graph_t::write` stores. */
-view_t owned(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
+/** @brief Wrap @p bytes in an owning segment view drawn from @p g's own segment seam — what
+ *         `graph_t::write` stores, so the census counts it. */
+view_t owned(const graph_t& g, std::span<const std::byte> bytes) {
+    tr::view::segment_ptr_t seg = tr::view::segment_alloc(g.value_backend(), bytes.size());
+    if (!seg) return view_t{};
     if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
     return view_t::over(std::move(seg));
 }
@@ -368,7 +472,7 @@ void write_census_values(graph_t& g, mix_t mix) {
         const std::size_t n = value_bytes_for(i, mix);
         const std::vector<std::byte> v = i % 3 == 1 ? array_value(n, static_cast<std::uint8_t>(i))
                                                     : scalar_value(n, static_cast<std::uint8_t>(i));
-        (void)g.write(path_t(std::string("/") + vname(i)), owned(v));
+        (void)g.write(path_t(std::string("/") + vname(i)), owned(g, v));
     }
 }
 
@@ -514,6 +618,50 @@ int peer_main(int cmd_fd, int rsp_fd) {
 
 // --- the census arm ----------------------------------------------------------
 
+/**
+ * @brief Register the census's `tcp` factory on the slim transport vertex @p net: the
+ *        built-in factory's LISTEN arm (`builtin_transport_tcp.cpp`), with every
+ *        `link_memory_t` plane on the counted net source.
+ *
+ * The built-in factory sets only `rx`, so a connected peer's session (`state`) and the
+ * receive thread's boot record (`stack`) land on `net_source()`, uncounted. This one sets all
+ * four; the SPEC write and `register_module` are unchanged, so the listener is still created
+ * the way the wire creates one and only the factory's memory planes differ.
+ *
+ * @warning Drift risk: the census LISTEN never sets the kind-private keys, so this factory
+ *          does not parse them and leaves `max_peers`, `peer_named` and `liveness_window` at
+ *          their defaults. If the built-in LISTEN arm gains a construction step, mirror it
+ *          here. A DIAL is refused: the census never dials.
+ */
+void register_counted_tcp(tr::net::transport_vertex_t& net) {
+    net.register_transport_type(
+        "tcp",
+        [](const tr::net::conn_settings_t& s, const tr::wire::tlv_node_t*,
+           tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
+            if (s.role != tr::net::conn_role_t::LISTEN || !s.port_set)
+                return std::unexpected(tr::graph::status_t::TYPE_MISMATCH);
+            return tr::net::with_egress_source(
+                tr::net::make_checked<tr::net::tcp_server_transport_t>(
+                    src, s.port,
+                    tr::net::tcp_server_config_t{
+                        .memory = {.rx = &g_net_rx, .io = &g_net, .state = &g_net, .stack = &g_net},
+                        .max_frame = s.max_frame}),
+                &g_net);
+        });
+}
+
+/**
+ * @brief A plain default `graph_t`, as the operator-new counter sees it: the default graph's
+ *        floor, its own 4 KiB-slab table pool included, which the injected-root census graph
+ *        does not build. Trend-only.
+ */
+long long default_graph_floor() {
+    const long long base = live();
+    graph_t g;
+    quiesce();
+    return live() - base;
+}
+
 /** @brief Reserve a free localhost port (a SPEC-created listener refuses port 0). */
 std::uint16_t free_port() {
     tcp_transport_t probe{std::uint16_t{0}};
@@ -538,13 +686,14 @@ sample_t run_census(mix_t mix, std::size_t ops, int cmd_fd, int rsp_fd) {
     sample_t s{};
     std::string line;
 
+    s.b_a_def = default_graph_floor();
     const long long base = live();
     const long long base_blk = blocks();
 
     // --- S_A: the empty graph -----------------------------------------------
     // Declaration order: the router outlives the transport vertex that feeds it, so
     // the sockets (and their recv threads) destruct FIRST.
-    graph_t g;
+    graph_t g(g_graph);
     quiesce();
     s.b_a = live() - base;
     s.blk_a = blocks() - base_blk;
@@ -565,8 +714,11 @@ sample_t run_census(mix_t mix, std::size_t ops, int cmd_fd, int rsp_fd) {
 
     // --- S_C: router + transport vertex + the SPEC-created TCP listener ------
     const std::uint16_t port = free_port();
-    tr::net::fwd_router_t router(g);
-    tr::net::transport_vertex_t net(g, router);
+    tr::net::fwd_router_t router(
+        g, tr::net::router_planes_t{
+               .link_src = &g_net, .rx = &g_net, .flat = &g_net_rx, .egress = &g_net_rx});
+    tr::net::transport_vertex_t net(g, router, "/net", &g_net_rx, tr::net::slim_net, &g_net);
+    register_counted_tcp(net);
     (void)net.register_module(std::string(tr::net::kTcpServerSuggestedModule), "tcp",
                               tr::net::conn_role_t::LISTEN);
     const auto wl = g.write(path_t("/net/tcp-server/conn"), tcp_conn_spec("peer", port));
@@ -630,19 +782,21 @@ void report(const char* arm, const char* metric, std::vector<long long>& v) {
 
 /** @brief One arm's retained repetitions, column by column. */
 struct series_t {
-    std::vector<long long> b_a, b_b1, b_b, b_c, b_d, b_e, peak_e;
+    std::vector<long long> b_a_def, b_a, b_b1, b_b, b_c, b_d, b_e, peak_e;
     std::vector<long long> per_vertex, per_vertex_id, per_vertex_val;
     std::vector<long long> blk_a, blk_b1, blk_b, blk_c, blk_d, blk_e;
 
     /** @brief Reserve for @p n repetitions so no push_back allocates inside a window. */
     void reserve(std::size_t n) {
-        for (auto* c : {&b_a, &b_b1, &b_b, &b_c, &b_d, &b_e, &peak_e, &per_vertex, &per_vertex_id,
-                        &per_vertex_val, &blk_a, &blk_b1, &blk_b, &blk_c, &blk_d, &blk_e})
+        for (auto* c :
+             {&b_a_def, &b_a, &b_b1, &b_b, &b_c, &b_d, &b_e, &peak_e, &per_vertex, &per_vertex_id,
+              &per_vertex_val, &blk_a, &blk_b1, &blk_b, &blk_c, &blk_d, &blk_e})
             c->reserve(n);
     }
     /** @brief Retain one repetition. */
     void push(const sample_t& s) {
         constexpr auto kN = static_cast<long long>(kVertices);
+        b_a_def.push_back(s.b_a_def);
         b_a.push_back(s.b_a);
         b_b1.push_back(s.b_b1);
         b_b.push_back(s.b_b);
@@ -662,6 +816,7 @@ struct series_t {
     }
     /** @brief Print every column of this arm. */
     void emit(const char* arm) {
+        report(arm, "S_A_default_bytes", b_a_def);
         report(arm, "S_A_bytes", b_a);
         report(arm, "S_B1_bytes", b_b1);
         report(arm, "S_B_bytes", b_b);
