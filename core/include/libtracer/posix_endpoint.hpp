@@ -39,6 +39,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/static_thread.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/transport.hpp"
 
 /** @brief The POSIX scatter-gather descriptor (`<sys/uio.h>`), forward-declared
@@ -1240,7 +1241,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *        accept/teardown. See the class-level threading rule. Never held across a write
      *        (#2263): a broadcast walks @ref first_ instead.
      */
-    mutable std::mutex peers_m_;
+    mutable tr::mutex_t peers_m_;
     /** @brief The peer slots: insert-only, recycled in place, never freed early. */
     mem::block_array_t<mem::poly_ptr_t<session_base_t>> slots_;
     /** @brief The slot admitted last, or null: the head of the @ref session_base_t::next

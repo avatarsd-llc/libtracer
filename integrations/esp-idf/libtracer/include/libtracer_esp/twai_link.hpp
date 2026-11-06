@@ -39,6 +39,7 @@
 #include "freertos/semphr.h"
 #include "libtracer/can_tx_pool.hpp"
 #include "libtracer/static_thread.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/transport_can.hpp"
 
 namespace tr::net {
@@ -221,8 +222,8 @@ class twai_link_t final : public can_link_t {
     void* rx_queue_storage_ = nullptr;        /**< @brief Its records, drawn from @ref src_. */
     std::size_t rx_queue_bytes_ = 0;          /**< @brief Their size, for the release. */
     rx_fn_t rx_;                              /**< @brief Guarded by m_. */
-    std::mutex m_;                            /**< @brief Guards rx_. */
-    std::mutex write_m_;                      /**< @brief Serializes writes / teardown. */
+    tr::mutex_t m_;                           /**< @brief Guards rx_. */
+    tr::mutex_t write_m_;                     /**< @brief Serializes writes / teardown. */
     can_tx_pool_t<tx_slot_t> tx_pool_;        /**< @brief In-flight TX storage, freed on tx-done. */
     StaticSemaphore_t tx_free_sem_buf_{};     /**< @brief @ref tx_free_sem_'s control block. */
     SemaphoreHandle_t tx_free_sem_ = nullptr; /**< @brief Counts free pool slots; taken in

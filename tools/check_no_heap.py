@@ -22,7 +22,18 @@ function that only calls an allocating helper (``vector::push_back`` into
   ``pvPortMalloc``, ``vPortFree``;
 * calls out of the archive that allocate without naming any of those: starting a
   ``std::thread``, ``pthread_create``, the FreeRTOS creators that are not ``...Static``
-  (``xTaskCreate``, ``xQueueGenericCreate``, ...), and ``std::pmr::new_delete_resource``.
+  (``xTaskCreate``, ``xQueueGenericCreate``, and ``xQueueCreateMutex`` /
+  ``xQueueCreateCountingSemaphore``, which ``xSemaphoreCreateMutex``,
+  ``xSemaphoreCreateRecursiveMutex`` and ``xSemaphoreCreateCounting`` expand to, ...), and
+  ``std::pmr::new_delete_resource``;
+* the pthread synchronization objects (#2454): every ``pthread_mutex_*``, ``pthread_cond_*``
+  and ``pthread_rwlock_*`` call, every out-of-line ``std::condition_variable`` /
+  ``std::condition_variable_any`` member, and ``std::notify_all_at_thread_exit``. ESP-IDF's pthread layer gives each mutex, condition
+  variable and rwlock a record from the heap on its init (and a mutex its FreeRTOS semaphore
+  too), inside IDF's code, so no allocator
+  symbol ever shows in the archive. A ``std::mutex`` lowers to exactly these calls; core
+  spells ``tr::mutex_t`` / ``tr::condvar_t`` / ``tr::shared_mutex_t`` instead, which a chip
+  binds to ``tr::esp::static_sync_t``. On the cortex-m0 archive (no threads) none appears.
 
 The limit: a call out of the archive into other code that allocates, and is not in that
 list (newlib stdio, a libstdc++ member defined out of line), is not seen. The closure stops at
@@ -69,7 +80,11 @@ RTOS_HEAP = ("pvPortMalloc", "vPortFree")
 # Out-of-archive calls that allocate without naming an entry point above.
 EXTERNAL = re.compile(r"^(?:_ZNSt6thread15_M_start_thread\w*|pthread_create|xTaskCreate|"
                       r"xTaskCreatePinnedToCore|xQueueGenericCreate|xEventGroupCreate|"
-                      r"xTimerCreate|xStreamBufferGenericCreate|_ZNSt3pmr20new_delete_resourceEv)$")
+                      r"xTimerCreate|xStreamBufferGenericCreate|xQueueCreateMutex|"
+                      r"xQueueCreateCountingSemaphore|_ZNSt3pmr20new_delete_resourceEv|"
+                      r"_ZSt25notify_all_at_thread_exit\w*|"
+                      r"pthread_(?:mutex|cond|rwlock)_\w+|"
+                      r"_ZNSt(?:18condition_variable|22condition_variable_any)\w*)$")
 HEAP_CAPS = re.compile(r"^heap_caps_\w*(?:alloc\w*|free)$")
 # Itanium mangling: _Znw = operator new, _Zna = new[], _Zdl = delete, _Zda = delete[].
 CXX_HEAP = {"_Znw": "operator new", "_Zna": "operator new[]",

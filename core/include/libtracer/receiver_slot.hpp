@@ -25,6 +25,7 @@
 #include <utility>
 
 #include "libtracer/rope.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/view.hpp"
 
 #if defined(__SANITIZE_THREAD__)
@@ -206,7 +207,7 @@ class receiver_slot_t {
         return {span_fn_, span_ctx_, rope_fn_, rope_ctx_};
     }
 
-    mutable std::mutex m_;
+    mutable tr::mutex_t m_;
     span_fn_t span_fn_ = nullptr;
     void* span_ctx_ = nullptr;
     rope_fn_t rope_fn_ = nullptr;

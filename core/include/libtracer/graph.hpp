@@ -57,6 +57,7 @@
 #include "libtracer/seq_latch.hpp"
 #include "libtracer/sink_slot.hpp"
 #include "libtracer/status.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/vertex.hpp"
 #include "libtracer/vertex_handle.hpp"
 #include "libtracer/view.hpp"
@@ -3835,7 +3836,7 @@ class graph_t {
      *         three words, and making it optional would cost the same space plus a branch. */
     mem::source_backend_t src_backend_;
 
-    mutable std::shared_mutex map_mutex_;
+    mutable tr::shared_mutex_t map_mutex_;
     // The Composite vertex tree's root (ADR-0057): an unregistered structural node whose
     // children container (`vertex_t::children_t`) owns every top-level vertex, each child
     // its own block, recursively. INSERT-ONLY (mutation under a unique map_mutex_ hold):
@@ -3910,7 +3911,7 @@ class graph_t {
     // cold — one vertex creation — so the arm that costs nothing where it lands is a lock,
     // and it is taken here rather than on any hot path. It buys a defined outcome for a
     // caller that violates the setup-only contract instead of a corrupted tree walk.
-    mutable std::shared_mutex child_types_mutex_;
+    mutable tr::shared_mutex_t child_types_mutex_;
     mem::sorted_map_t<mem::string_t, child_factory_t> child_types_;
     // The five CONFIGURATION sinks (#1049). Each is the ADR-0047 {fn, ctx} pair published
     // through a sink_slot_t — the mechanism #914 established for fwd_router_t's five, hoisted
@@ -3984,7 +3985,7 @@ class graph_t {
     // else, calling no allocator. That is what keeps it free of a lock-ordering obligation
     // once #873 injects a `block_source_t` (whose `Sync` policy may take its own lock) at
     // the allocation site.
-    mutable std::shared_mutex identity_mutex_;
+    mutable tr::shared_mutex_t identity_mutex_;
     mem::bytes_t identity_record_;
     /**
      * @brief The two test/bench instrumentation counters, present only when
@@ -4058,7 +4059,7 @@ class graph_t {
     // still one run in key order, found by binary search.
     key_set_t pending_;
     key_set_t unconditional_;
-    std::mutex sweep_mutex_;
+    tr::mutex_t sweep_mutex_;
     // pending_.size() mirrored as a relaxed atomic: the observed-write fast path
     // (clear_pending on every eager delivery) skips the key render + sweep lock while no
     // assign has marked anything — losing a race with a concurrent mark_pending leaves the

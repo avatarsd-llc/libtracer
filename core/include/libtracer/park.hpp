@@ -13,6 +13,9 @@
 #include <cstdint>
 #include <mutex>
 
+#include "libtracer/config.hpp"
+#include "libtracer/sync.hpp"
+
 /**
  * @file
  * @brief `%tr::park_wait` and `%tr::park_wake`: `std::atomic::wait` and `notify_all` spelled
@@ -22,8 +25,10 @@
  * one shared waiter table, `std::__detail::__waiter_pool_base::_S_for::__w`, 2,048 B of
  * static RAM on esp32c6 the moment any translation unit instantiates a wait or a notify.
  * These two functions keep the same contract (block while the word still holds the value
- * the caller read, wake every sleeper on the word) at the cost of eight pairs: 64 B of
- * static RAM on ESP-IDF, where both the mutex and the condition variable are one word.
+ * the caller read, wake every sleeper on the word) at the cost of `detail::kParkStripes`
+ * pairs (`default_config_t::kParkStripes`): 100 B of static RAM a pair on esp32c6, where each is
+ * a `tr::esp::static_mutex_t` holding its FreeRTOS semaphore inline and a 16 B
+ * `tr::esp::static_condvar_t`, and no heap at all (#2454).
  *
  * Only contended or teardown paths reach either function; an uncontended caller never
  * touches the table. A word sharing a stripe with another costs a spurious wake and a
@@ -35,14 +40,16 @@ namespace tr {
 
 namespace detail {
 
-/** @brief Stripes in the park table; a collision is a spurious wake, never a missed one. */
-inline constexpr std::size_t kParkStripes = 8;
+/** @brief Stripes in the park table (`default_config_t::kParkStripes`); a collision is a
+ *         spurious wake, never a missed one. */
+inline constexpr std::size_t kParkStripes = graph::config_t::kParkStripes;
+static_assert(kParkStripes >= 1, "the park table has at least one stripe");
 
 /** @brief One stripe of the park table: the lock a sleeper re-checks its word under, and
  *         the condition variable it sleeps on. */
 struct park_stripe_t {
-    std::mutex m;               /**< @brief Orders a sleeper's re-check against a wake. */
-    std::condition_variable cv; /**< @brief Where sleepers on this stripe's words wait. */
+    tr::mutex_t m;    /**< @brief Orders a sleeper's re-check against a wake. */
+    tr::condvar_t cv; /**< @brief Where sleepers on this stripe's words wait. */
 };
 
 /** @brief The stripe @p word parks on. A guarded function-local static: the condition
@@ -66,7 +73,7 @@ inline park_stripe_t& park_stripe_of(const void* word) {
 template <class T>
 void park_wait(const std::atomic<T>& word, T old, std::memory_order order) {
     detail::park_stripe_t& s = detail::park_stripe_of(&word);
-    std::unique_lock<std::mutex> lock(s.m);
+    std::unique_lock<tr::mutex_t> lock(s.m);
     s.cv.wait(lock, [&] { return word.load(order) != old; });
 }
 
@@ -81,7 +88,7 @@ void park_wait(const std::atomic<T>& word, T old, std::memory_order order) {
 template <class T>
 void park_wake(const std::atomic<T>& word) {
     detail::park_stripe_t& s = detail::park_stripe_of(&word);
-    { const std::lock_guard<std::mutex> lock(s.m); }
+    { const std::lock_guard<tr::mutex_t> lock(s.m); }
     s.cv.notify_all();
 }
 

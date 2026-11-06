@@ -46,6 +46,7 @@
 #include "libtracer/mem_sorted_map.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_string.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/thread_id.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_factory.hpp"
@@ -858,8 +859,8 @@ class transport_vertex_t {
         void release_lock();
 
         const transport_vertex_t& owner_;
-        std::unique_lock<std::mutex> ops_lock_;     /**< @brief Engaged for an `OPERATION`. */
-        std::unique_lock<std::mutex> lock_;         /**< @brief `ctl_m_`; dropped by phase 2. */
+        std::unique_lock<tr::mutex_t> ops_lock_;    /**< @brief Engaged for an `OPERATION`. */
+        std::unique_lock<tr::mutex_t> lock_;        /**< @brief `ctl_m_`; dropped by phase 2. */
         mem::string_t unroute_{mem::null_source()}; /**< @brief Empty = no un-route. */
         self_heal_link_t* stop_ = nullptr;          /**< @brief Null = no engine to stop. */
         transport_ptr_t destroy_;                   /**< @brief Null = nothing to destroy. */
@@ -1035,7 +1036,7 @@ class transport_vertex_t {
      * mutex in the class, the discharge is its destructor's, and the ownership stamps make
      * a re-entry an assertion rather than a hang (`net_lock_order_test`).
      */
-    mutable std::mutex ctl_m_;
+    mutable tr::mutex_t ctl_m_;
 
     /**
      * @brief Serializes whole control-plane OPERATIONS — the outer half of the pair.
@@ -1058,7 +1059,7 @@ class transport_vertex_t {
      * assertion rather than deadlock; that is a restriction, and a deliberate one: a
      * teardown re-entered from inside its own teardown's fan-out has no defined meaning.
      */
-    mutable std::mutex ops_m_;
+    mutable tr::mutex_t ops_m_;
 
     /**
      * @brief The thread inside a `%ctl_txn_t`'s phase 1 — the S6 lock-order self-check.
@@ -1128,9 +1129,9 @@ class transport_vertex_t {
         /** @brief The endpoint vertex the destructor retires; engaged once it is registered,
          *         which every entry of `endpoints_` is. */
         std::optional<graph::vertex_handle_t> vertex{};
-        std::mutex m{};               /**< @brief Guards `self` and `calls`. */
-        std::condition_variable cv{}; /**< @brief Signalled when `calls` returns to zero. */
-        std::size_t calls = 0;        /**< @brief Calls inside `endpoint_write` right now. */
+        tr::mutex_t m{};       /**< @brief Guards `self` and `calls`. */
+        tr::condvar_t cv{};    /**< @brief Signalled when `calls` returns to zero. */
+        std::size_t calls = 0; /**< @brief Calls inside `endpoint_write` right now. */
     };
     /** @brief One context per minted creator endpoint, each in its own block that never moves.
      *         Appended under `ctl_m_`; handed to the graph to free by the destructor. */

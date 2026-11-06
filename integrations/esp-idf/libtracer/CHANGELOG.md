@@ -26,6 +26,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **No mutex or condition variable draws from the IDF heap any more (#2454).** On a chip target
+  `std::mutex`, `std::condition_variable` and `std::shared_mutex` are pthread objects, and the
+  IDF pthread layer took each one's record (and a mutex's FreeRTOS semaphore) from the heap,
+  where the no-heap check could not see it. Every chip target now binds
+  `tr::esp::static_sync_t` (`libtracer_esp/static_sync.hpp`) as `config_t::sync_t`: a mutex over
+  a static FreeRTOS mutex (priority inheritance kept), a condition variable whose waiter sleeps
+  on a binary semaphore on its own stack (as IDF's own condition wait already did), and a
+  reader-preferring shared mutex. A timed wait blocks for its duration in ticks plus one, so it
+  never reports a timeout early. The component's own links use them too. The `linux` target
+  keeps the standard primitives. `check_no_heap.py` now refuses every `pthread_mutex_*`,
+  `pthread_cond_*` and `pthread_rwlock_*` call, every out-of-line `std::condition_variable`
+  member, and `xQueueCreateMutex` / `xQueueCreateCountingSemaphore`.
+
+  **The cost moves from the heap into the objects.** On esp32c6 a mutex is 84 B (a 4 B handle
+  before), a condition variable 16 B (4 B) and a shared mutex 32 B (4 B), so every object holding
+  one grows, wherever it lives:
+
+  | type | before | after |
+  | --- | ---: | ---: |
+  | `graph_t` | 340 B | 584 B |
+  | `fwd_router_t` | 180 B | 592 B |
+  | `transport_vertex_t` | 128 B | 288 B |
+  | `transport_vertex_t::endpoint_ctx_t` (from the table source) | 52 B | 144 B |
+  | `link_index_t` | 44 B | 124 B |
+  | `loopback_endpoint_t` | 72 B | 244 B |
+  | `self_heal_link_t` | 200 B | 376 B |
+  | `can_transport_t` | 368 B | 776 B |
+  | `httpd_ws_link_t` | 912 B | 1,152 B |
+  | `esp_ws_client_link_t` | 176 B | 432 B |
+  | `twai_link_t` | 268 B | 428 B |
+
+  An object drawn from a block source or the static arena now draws that much more from it, so
+  a `CONFIG_LIBTRACER_ARENA_BYTES` sized tightly against the old footprint should be re-checked:
+  `full_node` prints the default root's peak at bring-up (10,592 of 32,768 B on esp32c3 under
+  QEMU). The process-wide tables are `.bss`: a vertex stripe is 92 B plus a 16 B condvar and a
+  park stripe 100 B.
+
+- **A single-core chip defaults to 4 vertex lock stripes, and the park table's size is a knob
+  (#2454).** `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` now defaults to 4 under
+  `CONFIG_FREERTOS_UNICORE` (16 otherwise), and the new `CONFIG_LIBTRACER_PARK_STRIPES` (default
+  4 single-core, 8 otherwise) sizes `tr::park_wait`'s table (`default_config_t::kParkStripes`).
+  On esp32c6 the three tables drop from 2,528 B to 832 B of static RAM (image `.bss` + `.data`
+  477,642 B at 16/8, 475,946 B at 4/4). A collision on either table costs a spurious wake,
+  never a lost one.
 - **`esp_ws_client_link_t` accepts a handshake answer of up to 1024 bytes, and checks it
   strictly (#2515).** The block a dial reads the server's `101` into grows from 512 to 1024
   bytes, what `esp_transport_ws` defaulted to, so a server or proxy whose answer is 513–1024

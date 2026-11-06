@@ -151,6 +151,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`config_t::sync_t` and `%sync.hpp`: the build's blocking primitives, bound at compile time
+  (#2454).** Every mutex, shared mutex and condition variable core holds or waits on is now
+  `tr::mutex_t`, `tr::shared_mutex_t` or `tr::condvar_t`, the members of `config_t::sync_t`.
+  The default, `tr::std_sync_t`, names `std::mutex`, `std::shared_mutex` and
+  `std::condition_variable`, so a host build is unchanged. A target whose standard primitives
+  allocate binds its own: the ESP-IDF component binds `tr::esp::static_sync_t` on every chip.
+  A member or parameter that was spelled `std::unique_lock<std::mutex>` is now
+  `std::unique_lock<tr::mutex_t>` (the same type on a host).
+- **`default_config_t::kParkStripes` (#2454)**: the stripe count of the park table
+  `tr::park_wait` / `tr::park_wake` sleep on, a compile-time knob (default 8, as before). The
+  ESP-IDF component sets it from `CONFIG_LIBTRACER_PARK_STRIPES`.
+
 - **`tr::net::drop_tally_t` and `tr::net::drop_classes_t` (#2482).** The three shed-frame
   counters of `transport_drop_stats_t` as one embeddable value: `count_dropped_rx(n)`,
   `count_malformed_rx(n)`, `count_dropped_tx(n)` and `snapshot()`. Every counting link keeps
