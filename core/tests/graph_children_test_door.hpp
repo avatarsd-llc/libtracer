@@ -25,9 +25,7 @@ struct graph_children_test_door_t {
      */
     static result_t<value_ref_t> read_children_materialized(const graph_t& g,
                                                             graph::vertex_handle_t v) {
-        const result_t<view::view_t> mv = g.read_children(v);
-        if (!mv) return std::unexpected(mv.error());
-        return g.composed_or_backpressure(view::rope_t{*mv});
+        return g.read_children_materialized(v);
     }
 };
 

@@ -3565,12 +3565,17 @@ class graph_t {
     [[nodiscard]] result_t<view::view_t> read_identity() const;
     // ":children[]" read => member enumeration (write-spec / read-members asymmetry,
     // reference 05 §SPEC): a POINT whose children are POINT{NAME} member descriptors.
-    // The FLAT serialize: production serves the folded listing, and this is the independent
-    // oracle the tests diff it against, reached through `graph_children_test_door_t` (#2437).
     // A vertex carrying handlers.on_children serves that synthesized listing instead
     // (ADR-0044 — a transport vertex lists live bus peers, no vertices created);
     // otherwise the direct child vertices registered under v's key are enumerated.
-    [[nodiscard]] result_t<view::view_t> read_children(vertex_handle_t v) const;
+    [[nodiscard]] result_t<view::view_t> read_children(vertex_t* v) const;
+    // The MATERIALIZED `:children` listing: the flat single-link serialize of the same
+    // `POINT{ POINT{NAME}… }` the fold gathers. Production serves the folded listing; this is
+    // the independent oracle the tests diff it against, reached only through
+    // `graph_children_test_door_t` (#2437). Out of line here on purpose: deleting it from this
+    // TU re-partitions GCC's inline budget onto the fan-out copy loop
+    // (`vertex_t::copy_published` +75 B on the symbol ratchet).
+    [[nodiscard]] result_t<value_ref_t> read_children_materialized(vertex_handle_t v) const;
     // ":acl" read => the stored ACEs RE-ENCODED (#81-A, ADR-0018/0020, #907) — a projection
     // of the list acl_allows walks. The READ gate runs in read(v, field, caller).
     [[nodiscard]] result_t<view::view_t> read_acl(vertex_t* v) const;

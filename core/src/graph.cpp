@@ -3752,8 +3752,7 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     return {};
 }
 
-result_t<view::view_t> graph_t::read_children(vertex_handle_t vh) const {
-    vertex_t* const v = vh.get();
+result_t<view::view_t> graph_t::read_children(vertex_t* v) const {
     // The synthesized listing wins (ADR-0044): a transport/connection vertex serves
     // its live bus peers here — a snapshot of traffic, never stored graph structure.
     // Load once — a concurrent retire may swap the seam out between check and call.
@@ -3798,6 +3797,12 @@ result_t<view::view_t> graph_t::read_children(vertex_handle_t vh) const {
     const auto res = view::over_bytes(mem::as_span(out), *value_backend_);
     if (!res) return std::unexpected(status_t::BACKPRESSURE);
     return *res;
+}
+
+result_t<value_ref_t> graph_t::read_children_materialized(vertex_handle_t vh) const {
+    const result_t<view::view_t> mv = read_children(vh.get());
+    if (!mv) return std::unexpected(mv.error());
+    return composed_or_backpressure(view::rope_t{*mv});
 }
 
 namespace {
