@@ -26,8 +26,8 @@ The one-slab recipe
 [ADR-0042 — refcounted receiver seam](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md)):
 
 ```cpp
-/** @brief One static slab feeds BOTH memory seams — nothing grows at runtime. */
-static std::byte g_slab[24 * 1024];
+/** @brief One static slab feeds the RX pool and the link source — nothing grows at runtime. */
+static std::byte g_slab[14 * 1024];
 
 // Front region: the RX segment pool. The receive seam is a mem_backend_t like
 // the other two and carries the same thread-safety obligation — every endpoint
@@ -39,25 +39,20 @@ static std::byte g_slab[24 * 1024];
 tr::esp::critical_pool_t rx_pool{std::span<std::byte>(g_slab, kRxRegion), 1536};
 // ... transport_vertex_t net{graph, router, "/net", &rx_pool};
 
-// Back region: monotonic + synchronized arena — the pmr seam (LKV control
-// blocks). Nothing a peer provokes draws from it: the router keeps no per-link
-// route state (chain delivery), so there is no label store to feed.
-std::pmr::monotonic_buffer_resource arena{back_region(g_slab).data(),
-                                          back_region(g_slab).size()};
-std::pmr::synchronized_pool_resource shared{&arena};
-
-// The FAILABLE seams are separate: everything a PEER can provoke — the terminus
-// decode arena and the router's receive path — draws from one, and reports
-// exhaustion by value instead of throwing (ADR-0065). Injecting only `shared`
-// above leaves those allocations on the global heap.
+// There is no pmr region: no core seam takes a std::pmr::memory_resource any more.
+// The graph takes ONE tr::mem::block_source_t (below) and builds its containers over it.
+//
+// The FAILABLE seams: everything a PEER can provoke — the terminus decode arena and
+// the router's receive path — draws from one, and reports exhaustion by value
+// instead of throwing (ADR-0065). Leaving them defaulted draws from the default root.
 //
 // `blocks` is the per-child RX source (see the warning below: give each receive
 // thread its own).
 //
-// The two BYTE-BUFFER seams — graph_t's `value_backend` and fwd_router_t's `flat`
-// — stay on heap_backend() here; the warning below says why a BARE pool_t is never
-// the alternative (both are reached from several threads). They may take a
-// critical_pool_t of their own, sized from what this node actually stores.
+// The BYTE-BUFFER seams fwd_router_t's `flat` and `egress` stay on heap_backend()
+// here; the warning below says why a BARE pool_t is never the alternative (both are
+// reached from several threads). They may take a critical_pool_t of their own,
+// sized from what this node actually stores.
 //
 // `link_blocks` is ONE source shared by the whole router (it feeds the NAME->link
 // demux chunks) and therefore takes a locking policy — it is touched only when a
@@ -65,15 +60,14 @@ std::pmr::synchronized_pool_resource shared{&arena};
 static tr::mem::size_class_t link_classes[12];
 static tr::mem::pool_source_t<tr::mem::sync_mutex_t> link_blocks{link_region, link_classes};
 //
-// ... graph_t graph{&shared, /*value_backend=*/&tr::mem::heap_backend(),
-// ...               /*ctl=*/&blocks};
+// ... graph_t graph{graph_src};  // one tr::mem::block_source_t, or default-constructed
 // ... fwd_router_t router{graph, {.link_src = &link_blocks, .rx = &blocks,
 // ...                             .flat = &tr::mem::heap_backend(),
 // ...                             .egress = &tr::mem::heap_backend()}};
 ```
 
-`integrations/esp-idf/examples/full_node` is this recipe as running code: three slab
-regions (RX pool / link source / pmr arena) and a self-proof that prints the link
+`integrations/esp-idf/examples/full_node` is this recipe as running code: two slab
+regions (RX pool / link source) and a self-proof that prints the link
 source's own census (bytes used, size classes used, blocks overflowed), so the sizing above
 is a number to check against your own node rather than one to copy.
 
