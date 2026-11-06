@@ -21,12 +21,16 @@ These pin its decisions against the shapes the real tree actually has:
   kind-private keys;
 * the accessor determines the documented wire type, so `flag` and `u8` must not
   collapse to the same spelling;
-* a malformed marker block is an ERROR, not an empty declaration that passes.
+* a malformed marker block is an ERROR, not an empty declaration that passes;
+* a shared file's keys count for a kind only through the functions that kind's own
+  file calls, and a block cannot name another kind's own file as shared (#2569).
 
 Run with ``python3 -m unittest discover -s tools/tests`` (no third-party deps).
 """
 import os
+import pathlib
 import sys
+import tempfile
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -180,6 +184,184 @@ class ParsePage(unittest.TestCase):
         )
         _, errors = cck.parse_page(page)
         self.assertTrue(any("duplicate" in e for e in errors), errors)
+
+
+class SharedFunctions(unittest.TestCase):
+    """Per-function attribution inside a shared file (#2569)."""
+
+    def test_keys_belong_to_the_function_that_takes_the_reader(self):
+        src = """
+            inline int select(std::span<const p_t> ps, const wire::config_reader_t& cfg) noexcept {
+                const auto n = cfg.name("tls");
+            }
+            inline void wt_only(const config_reader_t& r) {
+                if (const auto v = r.name("path")) {}
+            }
+        """
+        functions, unattributed, _ = cck.shared_functions(src)
+        self.assertEqual(functions, {"select": {"tls": "name"}, "wt_only": {"path": "name"}})
+        self.assertEqual(unattributed, {})
+
+    def test_a_declaration_is_not_a_definition(self):
+        functions, _, _ = cck.shared_functions("int select(const config_reader_t& cfg);\n")
+        self.assertEqual(functions, {})
+
+    def test_a_call_inside_the_shared_file_carries_its_callee_keys(self):
+        src = """
+            inline void inner(const config_reader_t& r) { (void)r.u32("max_frame"); }
+            inline void outer(const config_reader_t& cfg) { (void)cfg.name("tls"); inner(cfg); }
+        """
+        functions, _, reach = cck.shared_functions(src)
+        self.assertEqual(functions["outer"], {"tls": "name", "max_frame": "u32"})
+        self.assertEqual(functions["inner"], {"max_frame": "u32"})
+        self.assertEqual(reach["outer"], {"outer", "inner"})
+
+    def test_a_reader_the_shared_file_builds_itself_is_unattributed(self):
+        src = """
+            inline void parse(const wire::tlv_t* raw) {
+                const config_reader_t cfg(raw);
+                (void)cfg.name("ca");
+            }
+        """
+        functions, unattributed, _ = cck.shared_functions(src)
+        self.assertEqual(functions, {})
+        self.assertEqual(unattributed, {"ca": "name"})
+
+    def test_a_mention_in_a_comment_or_literal_is_not_a_call(self):
+        code = cck.strip_literals(
+            '/** @brief see wt_only(cfg) */\n// wt_only(cfg)\nlog("wt_only(cfg) failed");\n'
+        )
+        self.assertFalse(cck.calls(code, "wt_only"))
+
+    def test_qualified_and_member_calls_are_calls(self):
+        self.assertTrue(cck.calls("auto s = net::wt_only(cfg);", "wt_only"))
+        self.assertTrue(cck.calls("auto s = ep.wt_only(cfg);", "wt_only"))
+        self.assertTrue(cck.calls("auto s = ep->wt_only(cfg);", "wt_only"))
+        self.assertFalse(cck.calls("auto s = not_wt_only(cfg);", "wt_only"))
+
+
+class GateOnAFakeTree(unittest.TestCase):
+    """The whole gate over a throwaway tree: two kinds sharing one helper header."""
+
+    SHARED = """
+        inline int select_tls(const wire::config_reader_t& cfg) { return cfg.name("tls") ? 1 : 0; }
+        inline int wt_path(const wire::config_reader_t& cfg) { return cfg.name("path") ? 1 : 0; }
+    """
+    QUIC = """
+        // wt_path(cfg) is webtransport's, not ours.
+        const wire::config_reader_t cfg(raw_config);
+        (void)cfg.flag("insecure");
+        (void)select_tls(cfg);
+    """
+    WT = """
+        const wire::config_reader_t cfg(raw_config);
+        (void)cfg.flag("insecure");
+        (void)select_tls(cfg);
+        (void)wt_path(cfg);
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self._tmp.name)
+        src = root / "core" / "src"
+        src.mkdir(parents=True)
+        (src / "shared.hpp").write_text(self.SHARED)
+        (src / "quic.cpp").write_text(self.QUIC)
+        (src / "wt.cpp").write_text(self.WT)
+        (root / "docs" / "modules").mkdir(parents=True)
+        saved = {n: getattr(cck, n) for n in ("ROOT", "PAGE", "SOURCE_DIRS", "EXCLUDED")}
+        self.addCleanup(lambda: [setattr(cck, n, v) for n, v in saved.items()])
+        self.addCleanup(self._tmp.cleanup)
+        cck.ROOT = root
+        cck.PAGE = root / "docs" / "modules" / "connection-config.md"
+        cck.SOURCE_DIRS = (src,)
+        cck.EXCLUDED = set()
+
+    @staticmethod
+    def page(quic_files, quic_rows, wt_rows=("tls", "insecure", "path")):
+        spell = {"tls": "`NAME` utf-8", "path": "`NAME` utf-8", "ca": "`NAME` utf-8",
+                 "insecure": "`VALUE` u8 (flag)"}
+        lines = [f"<!-- config-keys:begin {quic_files} -->"]
+        lines += [f"| `{k}` | {spell[k]} |" for k in quic_rows]
+        lines += ["<!-- config-keys:end -->",
+                  "<!-- config-keys:begin core/src/wt.cpp core/src/shared.hpp -->"]
+        lines += [f"| `{k}` | {spell[k]} |" for k in wt_rows]
+        lines += ["<!-- config-keys:end -->"]
+        return "\n".join(lines)
+
+    def test_the_honest_page_passes(self):
+        page = self.page("core/src/quic.cpp core/src/shared.hpp", ("tls", "insecure"))
+        self.assertEqual(cck.check(page), [])
+
+    def test_a_key_only_the_other_kind_calls_into_fails(self):
+        # Case 1 of #2569: `path` is read in the shared file, but only by a helper `wt`
+        # calls. Under a per-file union `quic` documenting it would pass.
+        page = self.page("core/src/quic.cpp core/src/shared.hpp", ("tls", "insecure", "path"))
+        failures = cck.check(page)
+        self.assertEqual(
+            failures,
+            ["core/src/quic.cpp + core/src/shared.hpp: page documents key `path` that the file does not read"],
+        )
+
+    def test_another_kinds_source_as_shared_is_refused(self):
+        # Case 2 of #2569: listing `wt.cpp` as shared would union its `path` into `quic`.
+        page = self.page("core/src/quic.cpp core/src/wt.cpp", ("insecure", "path"))
+        failures = cck.check(page)
+        self.assertTrue(any("names core/src/wt.cpp as shared" in f for f in failures), failures)
+        self.assertTrue(any("documents key `path`" in f for f in failures), failures)
+
+    def test_a_shared_function_no_kind_calls_fails(self):
+        # The per-file union used to fail an unreached helper's key as undocumented; per
+        # function it must still fail, not drop out of view.
+        (cck.ROOT / "core" / "src" / "shared.hpp").write_text(
+            self.SHARED + 'inline int orphan(const config_reader_t& c) { return c.u16("port") ? 1 : 0; }\n'
+        )
+        page = self.page("core/src/quic.cpp core/src/shared.hpp", ("tls", "insecure"))
+        self.assertEqual(
+            cck.check(page),
+            ["core/src/shared.hpp: orphan() reads keys (port) but no block naming this file "
+             "has an own file that calls it"],
+        )
+
+    def test_a_member_call_credits_the_helper(self):
+        (cck.ROOT / "core" / "src" / "quic.cpp").write_text(self.QUIC + "(void)ep.wt_path(cfg);\n")
+        page = self.page("core/src/quic.cpp core/src/shared.hpp", ("tls", "insecure", "path"))
+        self.assertEqual(cck.check(page), [])
+
+    def test_a_call_in_a_log_string_does_not_credit_the_helper(self):
+        (cck.ROOT / "core" / "src" / "quic.cpp").write_text(self.QUIC + 'log("wt_path(cfg)");\n')
+        page = self.page("core/src/quic.cpp core/src/shared.hpp", ("tls", "insecure", "path"))
+        self.assertIn(
+            "core/src/quic.cpp + core/src/shared.hpp: page documents key `path` that the file does not read",
+            cck.check(page),
+        )
+
+    def test_a_transport_source_with_no_block_is_refused_as_shared(self):
+        # A `.cpp` no block owns, named only as shared, is refused AND still reported as
+        # undocumented: a shared entry is not a block for the file.
+        (cck.ROOT / "core" / "src" / "can.cpp").write_text(
+            'const config_reader_t reader(raw);\n(void)reader.name("ifname");\n'
+        )
+        page = self.page("core/src/quic.cpp core/src/shared.hpp core/src/can.cpp", ("tls", "insecure"))
+        failures = cck.check(page)
+        self.assertTrue(any("names core/src/can.cpp as shared" in f for f in failures), failures)
+        self.assertTrue(any(f.startswith("core/src/can.cpp reads connection-config keys") for f in failures), failures)
+
+    def test_a_dead_key_still_fails(self):
+        page = self.page("core/src/quic.cpp core/src/shared.hpp", ("tls", "insecure", "ca"))
+        failures = cck.check(page)
+        self.assertEqual(
+            failures,
+            ["core/src/quic.cpp + core/src/shared.hpp: page documents key `ca` that the file does not read"],
+        )
+
+    def test_a_shared_key_no_function_owns_fails(self):
+        (cck.ROOT / "core" / "src" / "shared.hpp").write_text(
+            self.SHARED + 'inline void own(const wire::tlv_t* t) { const config_reader_t c(t); (void)c.name("ca"); }\n'
+        )
+        page = self.page("core/src/quic.cpp core/src/shared.hpp", ("tls", "insecure"))
+        failures = cck.check(page)
+        self.assertTrue(any("shared.hpp: reads key `ca` outside a function" in f for f in failures), failures)
 
 
 class LivePage(unittest.TestCase):
