@@ -39,6 +39,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "libtracer/egress.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/ws_assembler.hpp"
 
 namespace tr::net {
@@ -758,8 +759,8 @@ struct httpd_ws_link_t::gate_t {
     /** @brief Where this gate and every work item queued through it were drawn
      *         (`memory.state`); set once, before the gate is published. */
     mem::block_source_t* src = nullptr;
-    std::mutex m;                    /**< @brief Guards every member below. */
-    std::condition_variable cv;      /**< @brief Signalled as @ref depth falls. */
+    tr::mutex_t m;                   /**< @brief Guards every member below. */
+    tr::condvar_t cv;                /**< @brief Signalled as @ref depth falls. */
     httpd_ws_link_t* link = nullptr; /**< @brief The link, or null once it is going. */
     /**
      * @brief Frames the destructor must join: live URI-handler frames, plus a departure
@@ -1091,7 +1092,7 @@ struct httpd_ws_link_t::session_t {
     static_assert(httpd_ws_link_t::kTxWaitDepth <= 0xFF, "tx_peak is one byte");
     /** @brief Guards the waiting frames. Held for a gather or a flip, never across a socket
      *         write, and never with `peers_m_` taken under it. */
-    std::mutex tx_m;
+    tr::mutex_t tx_m;
     /**
      * @brief Refused large draws while this session pinned the class and its last write
      *        moved no byte (tx_m).

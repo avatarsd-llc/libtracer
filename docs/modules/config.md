@@ -152,6 +152,23 @@ supersedes the other.
 :project: libtracer
 ```
 
+```{doxygenstruct} tr::std_sync_t
+:project: libtracer
+:members:
+```
+
+```{doxygentypedef} tr::mutex_t
+:project: libtracer
+```
+
+```{doxygentypedef} tr::shared_mutex_t
+:project: libtracer
+```
+
+```{doxygentypedef} tr::condvar_t
+:project: libtracer
+```
+
 ```{doxygenvariable} tr::graph::kVertexLockStripes
 :project: libtracer
 ```

@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "libtracer/frame.hpp"
+#include "libtracer/sync.hpp"
 
 namespace tr::net {
 
@@ -258,7 +259,7 @@ void self_heal_link_t::ensure_worker_locked() {
                                     kSelfHealWorkerStackBytes, "tr_heal", stack_);
 }
 
-void self_heal_link_t::publish_unlocked(std::unique_lock<std::mutex>& l, link_state_t s) {
+void self_heal_link_t::publish_unlocked(std::unique_lock<tr::mutex_t>& l, link_state_t s) {
     // Snapshot the sink and publish with `m_` RELEASED: the write fans out to
     // subscribers under graph locks, and a subscriber edge routed through THIS link
     // re-enters `send` (which takes `m_`).
@@ -268,7 +269,7 @@ void self_heal_link_t::publish_unlocked(std::unique_lock<std::mutex>& l, link_st
     l.lock();
 }
 
-void self_heal_link_t::reap_locked(std::unique_lock<std::mutex>& l) {
+void self_heal_link_t::reap_locked(std::unique_lock<tr::mutex_t>& l) {
     sock_t* const dead = std::exchange(corpses_, nullptr);
     l.unlock();
     drop_corpses(dead);  // joins each dead socket's receive thread — hence outside `m_`
@@ -328,7 +329,7 @@ void self_heal_link_t::on_socket_down(sock_t& sock) {
     cv_.notify_all();
 }
 
-bool self_heal_link_t::attempt_locked(std::unique_lock<std::mutex>& l) {
+bool self_heal_link_t::attempt_locked(std::unique_lock<tr::mutex_t>& l) {
     l.unlock();
     // Validate the stored config bytes fresh per attempt and read them in place (the node
     // borrows raw_config_, which outlives it); the factory re-parses its kind-private keys

@@ -103,9 +103,20 @@ class FamilyTest(unittest.TestCase):
                          ("xTaskCreate", "xTaskCreate"), ("pthread_create", "pthread_create")]:
             self.assertEqual(cnh.family(sym), fam, sym)
 
+    def test_pthread_sync_objects_reach_the_heap(self):
+        # #2454: ESP-IDF's pthread layer heap-allocates every mutex, condvar and rwlock.
+        for sym in ("pthread_mutex_lock", "pthread_mutex_init", "pthread_cond_timedwait",
+                    "pthread_rwlock_rdlock", "_ZNSt18condition_variableC1Ev",
+                    "_ZNSt18condition_variable4waitERSt11unique_lockISt5mutexE",
+                    "_ZNSt22condition_variable_anyC1Ev", "xQueueCreateMutex",
+                    "xQueueCreateCountingSemaphore",
+                    "_ZSt25notify_all_at_thread_exitRSt18condition_variableSt11unique_lockISt5mutexE"):
+            self.assertEqual(cnh.family(sym), sym, sym)
+
     def test_not_heap(self):
         for sym in ("memcpy", "_ZN2tr3mem13heap_source_t9try_allocEjj", "freeaddrinfo",
                     "heap_caps_get_free_size", "xTaskCreateStatic", "xQueueGenericCreateStatic",
+                    "xQueueCreateMutexStatic", "pthread_once", "pthread_self",
                     "*ABS*"):
             self.assertIsNone(cnh.family(sym), sym)
 

@@ -27,6 +27,7 @@
 
 #include "libtracer/config.hpp"
 #include "libtracer/static_thread.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/thread_id.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_factory.hpp"
@@ -328,7 +329,7 @@ class self_heal_link_t final : public transport_t {
     /** @brief One dial: run the factory (UNLOCKED — it may block for its connect
      *         deadline), wire the socket's sinks, adopt it as `inner_`. Returns true on
      *         `UP`. @p l is held on entry and exit. */
-    [[nodiscard]] bool attempt_locked(std::unique_lock<std::mutex>& l);
+    [[nodiscard]] bool attempt_locked(std::unique_lock<tr::mutex_t>& l);
 
     /** @brief Install the engine's trampolines on a fresh socket and start it receiving
      *         (frames land in this engine's `rx_`, i.e. whatever the router installed).
@@ -342,11 +343,11 @@ class self_heal_link_t final : public transport_t {
 
     /** @brief Destroy parked corpses with the lock RELEASED (each destruction joins a
      *         receive thread that may itself be blocked reporting down against `m_`). */
-    void reap_locked(std::unique_lock<std::mutex>& l);
+    void reap_locked(std::unique_lock<tr::mutex_t>& l);
 
     /** @brief Publish @p s through the installed sink with the lock RELEASED (the write
      *         fans out to subscribers, which may re-enter this engine's `send`). */
-    void publish_unlocked(std::unique_lock<std::mutex>& l, link_state_t s);
+    void publish_unlocked(std::unique_lock<tr::mutex_t>& l, link_state_t s);
 
     /** @brief Spawn the worker if it is not running and the engine is not stopping;
      *         caller holds `m_`. */
@@ -373,8 +374,8 @@ class self_heal_link_t final : public transport_t {
     /** @brief Serializes every engine transition. Ordering: `m_` is taken AFTER the
      *         owner's control mutex (acquire/release under `ctl_m_`) and never before it;
      *         nothing under `m_` calls back into `transport_vertex_t` or the router. */
-    mutable std::mutex m_;
-    std::condition_variable cv_; /**< @brief Worker wake. */
+    mutable tr::mutex_t m_;
+    tr::condvar_t cv_; /**< @brief Worker wake. */
 
     const transport_factory_t factory_;           /**< @brief Re-run per dial. */
     const conn_settings_t settings_;              /**< @brief Universal keys, defaults resolved. */

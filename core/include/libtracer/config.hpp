@@ -40,6 +40,7 @@ struct basic_mutex_guard_t;  // guard_mutex.hpp — the host guard: address-stri
 using mutex_guard_t = basic_mutex_guard_t<64, 64>;  // its default sizing (guard_mutex.hpp)
 struct no_guard_t;           // guard.hpp — guards nothing; single-threaded builds only
 struct stderr_fault_sink_t;  // init_fault.hpp — the host default: one line on stderr
+struct std_sync_t;           // sync.hpp — the host blocking primitives: std::mutex and kin
 
 }  // namespace tr
 
@@ -186,11 +187,25 @@ struct default_config_t {
      *
      * What N costs, precisely: `N * sizeof(vertex_stripe_t)` bytes of `.bss` reserved at LINK
      * time (plus the same for the condvar table) — the table is not lazy, whatever the platform
-     * does. What IS lazy is the platform primitive behind each handle: on FreeRTOS a stripe's
-     * mutex costs ~90 B of heap on its first lock, so an untouched stripe costs its struct and
-     * no heap. Most of the struct is padding, and @ref kCacheLineBytes decides how much.
+     * does, and it holds the whole of each stripe's mutex: on an ESP-IDF chip that is the
+     * FreeRTOS semaphore `tr::esp::static_mutex_t` keeps inline (#2454), never a heap draw on
+     * first lock. Elsewhere most of the struct is padding, and @ref kCacheLineBytes decides how
+     * much. On esp32c6 a stripe is 92 B plus its 16 B condvar, so 16 stripes are 1,728 B; the
+     * ESP-IDF component defaults a single-core chip to 4 (432 B).
      */
     static constexpr std::size_t kVertexLockStripes = 16;
+
+    /**
+     * @brief Stripes in the park table `%tr::park_wait` / `%tr::park_wake` sleep on (#2507).
+     *
+     * Each stripe is one `tr::mutex_t` and one `tr::condvar_t`, reserved in `.bss` at link time
+     * once anything parks: 100 B a stripe on esp32c6 (#2454), a few dozen on a host. A word that
+     * shares a stripe with another costs a spurious wake and a re-check, never a lost one, and
+     * only contended and teardown paths park, so a small table costs little. Override fragment:
+     * `static constexpr std::size_t kParkStripes = 4;`; ESP-IDF: menuconfig
+     * `CONFIG_LIBTRACER_PARK_STRIPES`.
+     */
+    static constexpr std::size_t kParkStripes = 8;
 
     /**
      * @brief The target's cache-line size for false-sharing padding — or **0 where false
@@ -584,6 +599,26 @@ struct default_config_t {
      * Override fragment: `using fault_sink_t = my_uart_fault_sink_t;`.
      */
     using fault_sink_t = ::tr::stderr_fault_sink_t;
+
+    /**
+     * @brief The target's BLOCKING primitives (#2454): the mutex, shared mutex and condition
+     *        variable every control-plane section and teardown drain sleeps on.
+     *
+     * Not the @ref guard_t, whose window is a few instructions and, on a chip, masks interrupts,
+     * so nothing may block inside it. These are held across work that can block (a send, a
+     * dial, a drain) and are waited on. The binding is a policy type naming three members,
+     * `mutex_t`, `shared_mutex_t` and `condvar_t`, which `%sync.hpp` lifts to `tr::mutex_t`,
+     * `tr::shared_mutex_t` and `tr::condvar_t`; core names nothing else. `condvar_t` waits on a
+     * `std::unique_lock<mutex_t>`.
+     *
+     * `std_sync_t` by default: `std::mutex`, `std::shared_mutex`, `std::condition_variable`.
+     * Every ESP-IDF chip target binds `tr::esp::static_sync_t` instead, because there each
+     * standard primitive is a pthread object whose FreeRTOS semaphore the IDF pthread layer
+     * draws from the platform heap, out of the archive's sight; the static spelling holds its
+     * semaphore inline and allocates nothing. Override fragment:
+     * `using sync_t = my_rtos_sync_t;`.
+     */
+    using sync_t = ::tr::std_sync_t;
 
     /**
      * @brief Locks in the host guard's process-wide stripe table (#1716); a power of two.

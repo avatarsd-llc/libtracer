@@ -30,6 +30,7 @@
 #include "libtracer/link_id.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_string.hpp"
+#include "libtracer/sync.hpp"
 
 namespace tr::graph {
 
@@ -293,7 +294,7 @@ class link_index_t {
     std::size_t name_lookups_ = 0;
     /** @brief Guards `slots_`, `free_head_` and `long_names_` ONLY. A leaf: never held across a
      *         map, stripe, or sweep acquisition, so it orders against nothing else. */
-    mutable std::mutex mutex_;
+    mutable tr::mutex_t mutex_;
 };
 
 }  // namespace tr::graph

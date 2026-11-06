@@ -513,28 +513,24 @@ menu "libtracer"
     config LIBTRACER_VERTEX_LOCK_STRIPES
         int "Vertex lock-stripe count"
         range 1 256
+        default 4 if FREERTOS_UNICORE
         default 16
         help
             Number of process-wide mutex/condvar lock stripes shared by every
-            graph vertex (libtracer #361 section 2). This is the ONLY global
-            mutable buffer libtracer links into a node, and its cost has two
-            halves that behave differently — independent, either way, of how
-            many vertices you register:
-
-              * STATIC RAM, reserved at link time and NOT lazy: N stripe structs
-                plus N condvar handles of .bss. On a unicore build the component
-                strips their false-sharing padding, so 16 stripes cost 128 B
-                rather than 1,024 B (measured, esp32c6 -Os).
-              * HEAP, and this half IS lazy: the FreeRTOS mutex behind a stripe's
-                handle (~90 B) is created on that stripe's first lock, so a
-                stripe no vertex has hashed onto costs no heap at all.
+            graph vertex (libtracer #361 section 2). Its cost is STATIC RAM
+            only, reserved at link time and independent of how many vertices
+            you register: each stripe holds its FreeRTOS mutex inline
+            (tr::esp::static_mutex_t, #2454), so nothing comes from the heap,
+            lazily or otherwise. On esp32c6 a stripe is 92 B of .bss plus a
+            16 B condvar: 4 stripes cost 432 B, 16 cost 1,728 B. A dual-core
+            build pads each stripe to a cache line as well.
 
             The stripe a vertex rides is chosen by hashing its pinned address,
             so lowering the count only raises CONTROL-PLANE lock contention
             (ring trim, edge/ACL mutation, await wake); the lock-free LKV
-            read/write hot path is unaffected. On a single-core chip target a
-            small count (4-8) reclaims RAM at negligible contention cost; the
-            host/multi-core default stays 16.
+            read/write hot path is unaffected. A single-core chip defaults to
+            4, which reclaims RAM at negligible contention cost; the
+            multi-core default stays 16.
 
             The value is delivered as the ordinary constexpr
             tr::graph::kVertexLockStripes in a generated <libtracer/config.hpp>
@@ -544,5 +540,23 @@ menu "libtracer"
             function-local static, not the host's `inline constinit` one:
             libstdc++ makes std::mutex's constructor constexpr only where its
             gthreads port supports static init, which ESP-IDF's does not.)
+
+    config LIBTRACER_PARK_STRIPES
+        int "Park-table stripe count"
+        range 1 64
+        default 4 if FREERTOS_UNICORE
+        default 8
+        help
+            Number of mutex/condvar pairs in the park table, where a task
+            blocks until an atomic word changes (tr::park_wait, libtracer
+            #2507): a contended write-sequence bump, a teardown drain. Its
+            cost is STATIC RAM, reserved at link time: each pair holds its
+            FreeRTOS mutex inline (#2454), 100 B a stripe on esp32c6, so 4
+            stripes cost 400 B and 8 cost 800 B. Nothing comes from the heap.
+            Two words that share a stripe cost a spurious wake and a re-check,
+            never a lost wake, and only contended or teardown paths park, so
+            a small count is safe. Delivered as
+            tr::graph::default_config_t::kParkStripes in the generated
+            config fragment.
 
 endmenu

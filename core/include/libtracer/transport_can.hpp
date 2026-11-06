@@ -45,6 +45,7 @@
 #include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/mem_sorted_map.hpp"
 #include "libtracer/mem_string.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_factory.hpp"
 
@@ -314,8 +315,8 @@ class socketcan_link_t final : public can_link_t {
     int fd_ = -1;
     std::size_t recv_stack_ = 0;  // receive-thread stack hint, applied at start()
     rx_fn_t rx_;                  // guarded by m_
-    std::mutex m_;                // guards rx_
-    std::mutex write_m_;          // serializes writes / fd teardown
+    tr::mutex_t m_;               // guards rx_
+    tr::mutex_t write_m_;         // serializes writes / fd teardown
     std::atomic<bool> stop_{false};
     // pthread (not std::thread): its ctor throws on failure → std::abort under
     // -fno-exceptions; pthread_create returns an error code (see posix_endpoint).
@@ -743,7 +744,7 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // learn that BEFORE it advertises a slice_count it cannot deliver.
     // At a wrap it waits on `lock` (tx_m_, held) until no group of the lap is in flight (#2262).
     std::optional<std::uint16_t> alloc_base(std::size_t slice_count,
-                                            std::unique_lock<std::mutex>& lock);
+                                            std::unique_lock<tr::mutex_t>& lock);
     // Slices adv's 18-byte header and cfg_.path (in place, never copied — this node only
     // ever advertises its OWN path, so adv.path is left empty) into CLASSIC windows.
     void emit_advertise(const can::advertise_t& adv);  // requires tx_m_ held
@@ -761,13 +762,13 @@ class can_transport_t final : public transport_t, public bus_link_t {
 
     // egress
     // Serializes the reservation and the advertise, never the data slices (#2262).
-    std::mutex tx_m_;
+    tr::mutex_t tx_m_;
     std::uint16_t next_base_ = kCanFirstDataEndpoint;
     // Groups advertised whose last slice is not out yet; guarded by tx_m_. A wrap of
     // next_base_ waits on tx_drained_ for this to reach zero, so no slice id is re-issued
     // while its group is still being sent.
     std::size_t tx_in_flight_ = 0;
-    std::condition_variable tx_drained_;
+    tr::condvar_t tx_drained_;
 
     // ingress. A learned binding remembers whether its group is for THIS node —
     // a directed group addressed elsewhere is consumed but never reassembled.
@@ -816,7 +817,7 @@ class can_transport_t final : public transport_t, public bus_link_t {
         std::chrono::steady_clock::time_point arrived{}; /**< @brief When it was parked. */
     };
 
-    std::mutex rx_m_;         // guards the map + buffers
+    tr::mutex_t rx_m_;        // guards the map + buffers
     can_reassembly_t reasm_;  // data-slice reassembly
     // base CAN ID -> binding. NOT insert-only: a fresh advertise retires every
     // same-node entry whose endpoint run it overlaps (#909), which is what keeps a
@@ -850,7 +851,7 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // the last-heard peer table (ADR-0044) — node id -> entry, insert-only. Each entry
     // is its own block (drawn from the RX store, freed with the transport) because
     // `peer_link` hands out a pointer to its endpoint that must never move.
-    mutable std::mutex peers_m_;
+    mutable tr::mutex_t peers_m_;
     mem::sorted_map_t<std::uint16_t, peer_entry_t*> peers_;
 
     // Inbound delivery goes through the inherited peer-named slot (bus_link_t::

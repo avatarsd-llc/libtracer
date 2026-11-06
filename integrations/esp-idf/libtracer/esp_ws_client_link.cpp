@@ -38,6 +38,7 @@
 #include "libtracer/mem_source_backend.hpp"
 #include "libtracer/mem_string.hpp"
 #include "libtracer/park.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/ws.hpp"
 #include "libtracer/ws_assembler.hpp"
 #include "libtracer/ws_framing.hpp"
@@ -308,7 +309,7 @@ constexpr std::size_t kHandshakeBytes = 1024;
 struct esp_ws_client_link_t::dial_t {
     /** @brief Guards the two flags below and the handle hand-off. A LEAF: never taken with
      *         `write_m_`, `st_m_` or `backoff_m_` held, and never held across the connect. */
-    std::mutex m;
+    tr::mutex_t m;
     /** @brief True between the publish and the resolve — i.e. exactly while a thread is
      *         inside `esp_transport_connect` on this link's behalf. */
     bool in_flight = false;
@@ -460,7 +461,7 @@ struct esp_ws_client_link_t::framing_end_t {
         if (len == 0) return;
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
         {
-            const std::lock_guard<std::mutex> lk(link.st_m_);
+            const std::lock_guard<tr::mutex_t> lk(link.st_m_);
             ++link.traffic_.rx_frames;
             link.traffic_.rx_bytes += static_cast<std::uint32_t>(len);
             link.traffic_.last_rx_us = esp_timer_get_time();
@@ -566,7 +567,7 @@ void esp_ws_client_link_t::shut_down() {
         // against a recv thread that has evaluated the predicate but not yet parked:
         // either it is already waiting (and this notify reaches it), or it evaluates
         // the predicate after this store and never waits at all.
-        const std::lock_guard<std::mutex> lk(backoff_m_);
+        const std::lock_guard<tr::mutex_t> lk(backoff_m_);
     }
     backoff_cv_.notify_all();
     // CONDEMN an in-flight dial rather than wait for it (#1058). `esp_transport_connect`
@@ -583,7 +584,7 @@ void esp_ws_client_link_t::shut_down() {
     // the remainder of kDialTimeoutMs. That is the price of not charging this task for a
     // blocking call it cannot interrupt, and it is stated in the header's threading note.
     {
-        const std::lock_guard<std::mutex> lk(dial_->m);
+        const std::lock_guard<tr::mutex_t> lk(dial_->m);
         if (dial_->in_flight) {
             dial_->condemned = true;
             dial_orphaned_ = true;
@@ -611,7 +612,7 @@ void esp_ws_client_link_t::shut_down() {
         // resolved when the top-of-function store ran was not condemned, so it may have
         // stored `true` since, and the joined thread then broke on `stop_` without a
         // departure arm. The last store wins, so link_up() is false once this returns.
-        const std::lock_guard<std::mutex> lk(write_m_);
+        const std::lock_guard<tr::mutex_t> lk(write_m_);
         release_tcp(tcp_);
         connected_.store(false, std::memory_order_release);
     }
@@ -672,7 +673,7 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
 #endif
     dial_t* const slot = dial_;
     {
-        const std::lock_guard<std::mutex> lk(slot->m);
+        const std::lock_guard<tr::mutex_t> lk(slot->m);
         if (stop_.load(std::memory_order_acquire)) return dial_outcome_t::FAILED;
         slot->in_flight = true;
     }
@@ -704,7 +705,7 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     // slot's pair — so the pair is this thread's alone below, lock or no lock.
     bool orphaned = false;
     {
-        const std::lock_guard<std::mutex> lk(slot->m);
+        const std::lock_guard<tr::mutex_t> lk(slot->m);
         slot->in_flight = false;
         orphaned = slot->condemned;
     }
@@ -812,7 +813,7 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     // than carrying the previous session's staleness forward.
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     {
-        const std::lock_guard<std::mutex> lk(st_m_);
+        const std::lock_guard<tr::mutex_t> lk(st_m_);
         traffic_ = {};
     }
 #endif
@@ -842,7 +843,7 @@ esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
         // would drag any caller — the embedder's periodic publisher, which may hold
         // its own lock across this call — into that wait. This mutex is only ever
         // held for a counter bump or this copy, so the snapshot is bounded-brief.
-        const std::lock_guard<std::mutex> lk(st_m_);
+        const std::lock_guard<tr::mutex_t> lk(st_m_);
         out.c.rx_frames = traffic_.rx_frames;
         out.c.rx_bytes = traffic_.rx_bytes;
         out.c.tx_frames = traffic_.tx_frames;
@@ -899,7 +900,7 @@ void esp_ws_client_link_t::drop() {
     // a failed or short write without ever calling this. The one place that observes
     // EVERY transition to down is the recv loop's own `!connected_` arm, so that is
     // where the report is made (see recv_loop, #957).
-    const std::lock_guard<std::mutex> lk(write_m_);
+    const std::lock_guard<tr::mutex_t> lk(write_m_);
     if (tcp_ != nullptr) esp_transport_close(tcp_);
     connected_.store(false, std::memory_order_release);
 }
@@ -1019,7 +1020,7 @@ std::size_t esp_ws_client_link_t::frame_into(std::byte* dst,
 }
 
 void esp_ws_client_link_t::write_locked(std::span<const std::byte> wire) {
-    const std::lock_guard<std::mutex> lk(write_m_);
+    const std::lock_guard<tr::mutex_t> lk(write_m_);
     // Re-checked, not re-read for tidiness: teardown may have run while this record waited,
     // and it disarms `stop_` BEFORE it takes this very lock to null the handles, so a writer
     // that sees a set `stop_` leaves without touching either handle. NOT counted as a drop:
@@ -1059,7 +1060,7 @@ void esp_ws_client_link_t::write_locked(std::span<const std::byte> wire) {
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     // The success path counts only when the application asked for traffic counters
     // (#1663). Nesting is write_m_ -> st_m_, never the reverse.
-    const std::lock_guard<std::mutex> st_lk(st_m_);
+    const std::lock_guard<tr::mutex_t> st_lk(st_m_);
     ++traffic_.tx_frames;
     // Payload bytes, as every kind counts them. A client frame's header is 6, 8 or 14 bytes,
     // and its second byte's length code (126, 127, or the length itself) says which (#2265).
@@ -1141,7 +1142,7 @@ void esp_ws_client_link_t::recv_loop() {
                 // handle only under it, past the `connected_` gate — and `connected_` is
                 // already false. Before notify_down: no transport lock may be held across it.
                 {
-                    const std::lock_guard<std::mutex> lk(write_m_);
+                    const std::lock_guard<tr::mutex_t> lk(write_m_);
                     release_tcp(tcp_);
                 }
                 // The departure seam (RFC-0009 §D extended to peer departure), and the
@@ -1205,7 +1206,7 @@ void esp_ws_client_link_t::recv_loop() {
                 // dial and detaches this thread, so what the destroying task inherits is
                 // one poll turn plus one write bound, and the orphaned dial pays its own
                 // kDialTimeoutMs out on this thread.
-                std::unique_lock<std::mutex> lk(backoff_m_);
+                std::unique_lock<tr::mutex_t> lk(backoff_m_);
                 backoff_cv_.wait_for(lk, std::chrono::milliseconds(kReconnectBackoffMs),
                                      [this] { return stop_.load(std::memory_order_acquire); });
             }

@@ -176,6 +176,7 @@
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_source_backend.hpp"
 #include "libtracer/mem_string.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer_esp/fixed_array.hpp"
 #include "libtracer_esp/link_stats.hpp"
@@ -2260,7 +2261,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief Guards the slot vector and each slot's name/fd/open — the cross-thread
      *         reads (enumerate_peers / peer_link / a send's fd snapshot) against the
      *         httpd task's accept/close. The fragment assembler is httpd-task-only. */
-    mutable std::mutex peers_m_;
+    mutable tr::mutex_t peers_m_;
     /**
      * @brief The session table, grown on demand from `memory.state` and recycled in place.
      *

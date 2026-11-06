@@ -56,6 +56,7 @@
 #include "libtracer/path_pair.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/sink_slot.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
@@ -1836,8 +1837,8 @@ class fwd_router_t {
      * waiter with no stripe lock held, so it may take `m`.
      */
     struct await_plane_t {
-        mutable std::mutex m;            /**< @brief Guards every field below. */
-        std::condition_variable cv;      /**< @brief Teardown drain. */
+        mutable tr::mutex_t m;           /**< @brief Guards every field below. */
+        tr::condvar_t cv;                /**< @brief Teardown drain. */
         pending_await_t* head = nullptr; /**< @brief Pending waiters, doubly linked. */
         std::size_t count = 0;           /**< @brief Length of the `head` list. */
         bool stop = false;               /**< @brief Set by the destructor. */
@@ -1905,7 +1906,7 @@ class fwd_router_t {
      * point of the chunked list is that readers need no lock. Lock order, where more than one
      * is held: `transport_vertex_t::ctl_m_` → this → `graph_t::map_mutex_` → the vertex stripe.
      */
-    mutable std::mutex ctl_m_;
+    mutable tr::mutex_t ctl_m_;
     /**
      * @brief Serializes the reply-sink SETTER — never taken by a reader (#914).
      *
@@ -1914,7 +1915,7 @@ class fwd_router_t {
      * Deliberately NOT `ctl_m_`: that one is held across socket construction for milliseconds, and
      * installing an observer has no business waiting on a connect. The frame path takes neither.
      */
-    mutable std::mutex sink_m_;
+    mutable tr::mutex_t sink_m_;
     /**
      * @brief The reply-terminus sink, a `sink_slot_t` (#914).
      *
@@ -1981,7 +1982,7 @@ class fwd_router_t {
      * armed?" hint that keeps the reply terminus lock-free when nothing is.
      * @{
      */
-    mutable std::mutex origin_m_;
+    mutable tr::mutex_t origin_m_;
     /**
      * @brief Serializes the session-slot transitions: an arrival's store and anchor revival,
      *        a departure's compare, retire and clear, and a tenancy table's growth (#2234).
@@ -1990,7 +1991,7 @@ class fwd_router_t {
      * handle cannot retire an anchor a successor has just revived. Cold: only the arrival and
      * departure seams take it, never a frame. Lock order: this → `graph_t::map_mutex_`.
      */
-    std::mutex tenancy_m_;
+    tr::mutex_t tenancy_m_;
     std::atomic<origin_t*> origins_{nullptr};
     std::atomic<std::uint32_t> origin_seq_{0};
     /** @} */

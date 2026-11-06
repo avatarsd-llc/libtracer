@@ -212,6 +212,7 @@
 #include "esp_transport.h"
 #include "libtracer/egress.hpp"
 #include "libtracer/static_thread.hpp"
+#include "libtracer/sync.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer_esp/fixed_array.hpp"
 #include "libtracer_esp/link_stats.hpp"
@@ -837,7 +838,7 @@ class esp_ws_client_link_t final : public transport_t {
     // Serializes the esp_transport read/write SYSCALLS (the write is bounded). It does
     // NOT cover the re-dial's rebuild of the handles above — assuming it did is the
     // premise the pre-#952 destructor was written on.
-    std::mutex write_m_;
+    tr::mutex_t write_m_;
     /** @brief Senders that have RAISED this tally and not yet returned from @ref send.
      *         Raised BEFORE the sender queues on `write_m_`, so the destructor's drain
      *         covers exactly the callers that could already be parked on that mutex —
@@ -848,8 +849,8 @@ class esp_ws_client_link_t final : public transport_t {
     /** @brief Guards the recv thread's parked wait — the reconnect backoff — which
      *         @ref shut_down has to be able to cut short, hence a condition variable rather
      *         than `sleep_for` (#952). Never taken with `write_m_` held. */
-    std::mutex backoff_m_;
-    std::condition_variable backoff_cv_; /**< @brief Signalled by @ref shut_down. */
+    tr::mutex_t backoff_m_;
+    tr::condvar_t backoff_cv_; /**< @brief Signalled by @ref shut_down. */
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     /**
      * @brief The per-message TRAFFIC half of @ref link_counters_t (#1663), kept only when
@@ -875,7 +876,7 @@ class esp_ws_client_link_t final : public transport_t {
      * uncontended and syscall-free from any task. Nesting is always
      * `write_m_ -> st_m_`, never the reverse. `mutable` for the const snapshot.
      */
-    mutable std::mutex st_m_;
+    mutable tr::mutex_t st_m_;
     /** @brief Per-connection traffic counters — st_m_. Reset at every handshake. */
     traffic_t traffic_;
 #endif

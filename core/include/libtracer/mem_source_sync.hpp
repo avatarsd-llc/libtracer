@@ -9,10 +9,11 @@
 #include <mutex>
 
 #include "libtracer/guard.hpp"
+#include "libtracer/sync.hpp"
 
 /**
  * @file
- * @brief A `std::mutex`-backed synchronization policy for @ref tr::mem::pool_source_t.
+ * @brief A `tr::mutex_t`-backed synchronization policy for @ref tr::mem::pool_source_t.
  *
  * Deliberately a separate header. `%mem_source.hpp` is compiled into the freestanding
  * footprint sentinel, where `<mutex>` is not available; putting the only threading
@@ -23,7 +24,7 @@
 namespace tr::mem {
 
 /**
- * @brief The hosted synchronization policy — a plain `std::mutex`.
+ * @brief The hosted synchronization policy — a plain `tr::mutex_t` (`std::mutex` on a host).
  *
  * For a source shared across threads at **wiring frequency**: a graph's control source,
  * where registration runs once per connection and an uncontended mutex is unmeasurable.
@@ -38,7 +39,7 @@ namespace tr::mem {
  *       supplies an interrupt-disable policy of its own; the seam only asks for
  *       `lock()`/`unlock()` (`tr::lockable`, `%guard.hpp`).
  *
- * It stays a `std::mutex` rather than becoming an alias of the host guard `tr::mutex_guard_t`
+ * It stays a `tr::mutex_t` rather than becoming an alias of the host guard `tr::mutex_guard_t`
  * (#1703): a contender here parks in the kernel instead of napping, and the shared-pool arms of
  * the store-topology benches measure exactly this type.
  */
@@ -50,7 +51,7 @@ class sync_mutex_t {
     void unlock() noexcept { m_.unlock(); }
 
    private:
-    std::mutex m_; /**< @brief The lock itself; uncontended at wiring frequency. */
+    tr::mutex_t m_; /**< @brief The lock itself; uncontended at wiring frequency. */
 };
 
 static_assert(::tr::lockable<sync_mutex_t>, "the hosted pool policy models tr::lockable");
