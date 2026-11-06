@@ -36,13 +36,12 @@ for a local `preview.html` of the same charts.
 | `bench_forward_rope` | **the forward hop over a MULTI-LINK ROPE** (`on_frame_rope`, ADR-0053 §5), swept over link count — the only bench that instantiates `rope_cursor_t`, the specialisation `symbol_ratchet.json` pins. Diagnostic, not gated; quote it only off a quiescent host — see [its A/A null](#bench_forward_rope--the-rope-forward-hop-and-what-its-aa-null-is-worth-1358). |
 | `bench_rx_source_topology` | **RX failable-source topology**: T receive threads forwarding rope frames through a shared heap, one shared pool, or one pool per child — the measurement behind [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md) §3. |
 | `bench_pin_ratio` (`run_pin_ratio.sh`) | **RFC-0022 §6, the LATENCY half**: the WRITE store leg over a (payload × segment) grid, every arm rotating inside ONE process. Answered §8 Q3 → Amendment 2 (the on-by-default flip does not land). Its arms were `K` ratios then, then RFC-0028 D3 copy-or-share thresholds; since RFC-0022 Amendment 3 (#2143) they are the copy-or-share hints (`B-copy` control, `D-default` the build's trait, `C-share`). Collated by `collate_pin.py`. |
-| `bench_pin_net` (`run_pin_net.sh`) | **RFC-0022 §6, the RAM half**: two processes over real UDP, deliveries counted by the RECEIVER, receiver backed by a **bounded RX pool** whose free-slot floor and `drop_stats().dropped_rx` are the occupancy instrument. Sweeps the live-vertex count across the slot count — the axis on which a pin's borrow starves receive. See [receive-pool occupancy](#bench_pin_net--rfc-0022-6-receive-pool-occupancy-760). |
+| `bench_pin_net` (recipe below) | **RFC-0022 §6, the RAM half**: two processes over real UDP, deliveries counted by the RECEIVER, receiver backed by a **bounded RX pool** whose free-slot floor and `drop_stats().dropped_rx` are the occupancy instrument. Sweeps the live-vertex count across the slot count — the axis on which a pin's borrow starves receive. See [receive-pool occupancy](#bench_pin_net--rfc-0022-6-receive-pool-occupancy-760). |
 | `bench_store_sweep` + `bench_store_escape` (`run_store_sweep.sh`) | **ADR-0079's per-configuration allocation-store sweep (#941)**: H-baseline / WIDE / MID / NARROW over ONE whole-node workload that draws all four ADR-0079 channels, reporting latency by leg, fan-out throughput across T={1,2,4,8,16,24}, deterministic store high-water, and what still escapes to the process heap. Collated by `collate_store_sweep.py`. Its two **deterministic** columns are **banked per `main` push and warn-ratcheted** on the pinned host; the T-sweep and the escape high-water are **never** gated — see [what it resolves, and what it cannot](#bench_store_sweep--the-adr-0079-per-configuration-store-sweep-941) and [which columns are gated](#which-columns-are-gated-and-which-can-never-be-1428). |
 | `bench_subscribe_index` (`run_subscribe_index.sh`) | **#1266's subscriber-index interning A/B**: what keying `link_index_` by an interned token instead of a link NAME costs and saves, in latency and in bytes at rest, over 4/8/16/32/65 links. Five index arms in one binary — including `idx-token-carry`, the shape #1417 shipped, which pays for obtaining the token — plus the live `subscribe_wire` path and the name-door cost, and the A/A null is collected in the same window. Collated by `collate_subscribe_index.py`. See [what it resolves](#bench_subscribe_index--link-identity-interning-1266). |
 | `bench_scale_sweep` (`run_scale_sweep.sh`) | **#1485's vertex-count scaling sweep**: registered-vertex population over 10³/10⁴/10⁵/10⁶, built to **decompose** the topic-count growth #1480 measured rather than reproduce it — bound-handle delivery, resolution alone, a fixed-shape probe address (the ADR-0057 flatness claim), and a working-set control that keeps N resident while touching one. Plus `register_vertex_key` descent, the O(N) `vertex_slot` scan, `for_each_vertex`, and a **measured** bytes-per-vertex census. Diagnostic, never gated — see [what it decomposed](#bench_scale_sweep--the-vertex-count-scaling-sweep-1485). |
 | `bench_source_role` + `bench_source_role_alloc` | **#1505's retention-role write asymmetry**: the same write at a vertex that RETAINS a last-known-value (`STORED_VALUE`) and at one that retains nothing (`HANDLER`), swept over subscriber width 0/1/4 and value link count 1/4. The axis `inproc-target-*` does not cover — that pair sweeps the role of the delivery TARGET, this one the role of the vertex being WRITTEN, which is where the notify clone a `HANDLER` built before storing was paid — #1505 removed that clone, and these rows are the before/after. Fan-out **zero** is the isolating arm. The `_alloc` twin counts what each write allocates, which is what turned the shed-on-OOM exposure into a number; it is a separate binary for the reason `bench_store_escape` gives. Diagnostic, never gated — see [what it prices](#bench_source_role--the-retention-role-write-asymmetry-1505). |
 | `run_topics.sh` | **the topic-count comparison, in both address spellings on both engines** (#1485 addendum C): `topics-bound` (pre-bound handle / declared `Publisher`) and `topics-addr` (destination resolved inside every operation), over `kTopicLadder` = 1/100/10 000. Exists because the previous comparison put libtracer's resolve-per-write row against Zenoh's declared-publisher row — see [the asymmetry it removes](#run_topicssh--the-topic-count-comparison-both-spellings-both-engines-1485). |
-| `run_noise.sh` | **the Noise link harness (#2065)**: libtracer's plain UDP link (and the Noise link, #2064, behind a switch), Zenoh over UDP, TLS and QUIC, and ChaCha20-Poly1305 / NNpsk0 handshake cost per crypto backend, with RAM and an ESP-IDF flash census. One warm session per arm, setup on its own row. Diagnostic — see [the Noise link harness](#noise-link-harness--bench_noise_link-bench_zenoh_link-bench_noise_crypto-2065). |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
 
@@ -758,14 +757,20 @@ transcript (`--emit-pins`), quoted in that PR — never a widened band.
 
 ### `bench_pin_net` — RFC-0022 §6 receive-pool occupancy (#760)
 
-```sh
+```bash
 cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
 cmake --build bench/build --target bench_pin_net -j
 python3 bench/host_guard.py wait
-VERTEX_SET="1 8 24 32 48" COUNT=200000 WINDOW_MS=6000 \
-  bash bench/run_pin_net.sh bench/build 12 512 1024 24 > /tmp/pinnet-512.tsv
-VERTEX_SET="1 8 24 32 48" COUNT=200000 WINDOW_MS=6000 \
-  bash bench/run_pin_net.sh bench/build 12 64  1024 24 > /tmp/pinnet-64.tsv
+# sub <port> <hint> <payload> <slot> <slots> <window_ms> <V> <label>; pub <port> <payload> <count> <V>
+# four arms rotated every round; B2-null is the in-band A/A null collate_pin.py needs
+bash -c 'for P in 512 64; do port=47300
+  for r in $(seq 0 11); do for V in 1 8 24 32 48; do
+    arms=(B-copy:2 B2-null:2 D-default:0 C-share:1)
+    for j in 0 1 2 3; do IFS=: read -r L K <<<"${arms[$(((r+j)%4))]}"; port=$((port+2))
+      bench/build/bench_pin_net sub $port $K $P 1024 24 6000 $V $L & sleep 0.25
+      bench/build/bench_pin_net pub $port $P 200000 $V >/dev/null; wait
+    done; done; done > /tmp/pinnet-$P.tsv
+done'
 python3 bench/collate_pin.py /tmp/pinnet-512.tsv /tmp/pinnet-64.tsv
 ```
 
@@ -1550,8 +1555,8 @@ commit by a harness that was ready before it. Three binaries, one driver (`link_
 **One session, warm, on both engines.** Each arm builds one pair and completes one exchange
 before any clock starts, then keeps that pair for every size. Setup is its own row: a fresh pair
 timed to its first reply, so the handshake is never amortized into the per-frame rows.
-`run_noise.sh` runs every arm and every crypto backend in its own fresh process (`--arm=`,
-`--backend=`; the #1809 rule), pinned to one CPU set (`BENCH_CPUS`, default the caller's).
+Run every arm and every crypto backend in its own fresh process (`--arm=`,
+`--backend=`; the #1809 rule), pinned to one CPU set.
 
 **Link against session: the streaming rows compare different shapes.** A libtracer arm is a
 **libtracer link, unbatched**: one `send` is one frame, one datagram, one syscall. A Zenoh arm
@@ -1582,7 +1587,12 @@ cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release \
       -DLIBTRACER_NOISE_CRYPTO=openssl -DLIBTRACER_BENCH_NOISE_LINK=ON \
       -DLIBTRACER_BENCH_MBEDTLS_SOURCE=$IDF_PATH/components/mbedtls/mbedtls
 cmake --build bench/build --target bench_noise_link bench_zenoh_link bench_noise_crypto -j
-BENCH_CPUS=2-6 flock ../bench.lock bench/run_noise.sh bench/build 3   # bench CPUs, best of 3
+# each binary's --list names its arms/backends; 3 rounds, best of rounds, on the bench CPUs under the bench lock
+flock ../bench.lock sh -c 'for r in 1 2 3; do
+  for b in bench_noise_link bench_zenoh_link; do [ -x bench/build/$b ] || continue
+    for a in $(bench/build/$b --list | grep -E "^[a-z0-9-]+$"); do taskset -c 2-6 bench/build/$b --arm=$a; done; done
+  for k in $(bench/build/bench_noise_crypto --list); do taskset -c 2-6 bench/build/bench_noise_crypto --backend=$k; done
+done' | python3 bench/best_of_rounds.py
 ```
 
 **Flash and RAM on the chip.** `bench/esp_noise_crypto/` is an ESP-IDF app running the same
