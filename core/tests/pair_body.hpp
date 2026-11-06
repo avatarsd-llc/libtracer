@@ -35,7 +35,7 @@ inline void emit_retired_path_ref(std::vector<std::byte>& out,
                                   std::span<const tr::wire::path_ref_element_t> elements) {
     std::vector<std::byte> body(elements.size() * tr::wire::kPathRefElementBytes);
     for (std::size_t i = 0; i < elements.size(); ++i) {
-        tr::wire::path_ref_store_element(
+        tr::wire::pair_store_le(
             std::span<std::byte>(body).subspan(i * tr::wire::kPathRefElementBytes,
                                                tr::wire::kPathRefElementBytes),
             elements[i]);

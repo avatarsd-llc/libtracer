@@ -117,18 +117,4 @@ using path_ref_element_t = pair_t;
     return pair_load_le(e);
 }
 
-/**
- * @brief Write one element into the 8 bytes at @p out (little-endian, both fields).
- *
- * @note Precondition: `out.size() >= 8` (debug-asserted). The inverse of
- *       @ref path_ref_element_at, and the same contract: the emitter sizes the buffer
- *       from the element count before the first store, so the check belongs there once
- *       rather than here per element.
- */
-constexpr void path_ref_store_element(std::span<std::byte> out,
-                                      const path_ref_element_t& e) noexcept {
-    assert(out.size() >= kPathRefElementBytes);
-    pair_store_le(out, e);
-}
-
 }  // namespace tr::wire

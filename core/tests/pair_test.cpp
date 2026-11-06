@@ -59,7 +59,7 @@ void wire_form() {
 void aliases() {
     constexpr pair_t p{.index = 7, .generation = 3};
     std::array<std::byte, 2 * tr::wire::kPathRefElementBytes> ref{};
-    tr::wire::path_ref_store_element(std::span<std::byte>(ref).subspan(8), p);
+    tr::wire::pair_store_le(std::span<std::byte>(ref).subspan(8), p);
     check(tr::wire::path_ref_element_at(ref, 1) == p, "the path-ref element round-trips a PAIR");
 
     std::array<std::byte, tr::wire::kPathPairRecordBytes> rec{};

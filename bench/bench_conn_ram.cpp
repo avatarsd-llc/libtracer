@@ -781,7 +781,7 @@ sample_t arm_can(std::size_t k, const char* ifname, bool with_group) {
         return out;
     }
 
-    // Pre-encode every peer's hello OUTSIDE the measured window (encode_advertise
+    // Pre-encode every peer's hello OUTSIDE the measured window (advertise_vec
     // returns a std::vector — it must not allocate inside an armed window).
     std::vector<std::vector<std::byte>> hellos;
     hellos.reserve(k);

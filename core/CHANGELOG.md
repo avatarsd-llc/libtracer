@@ -106,10 +106,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   and the CAN transport sends an advertise as `encode_advertise_header`'s stack header followed
   by the path bytes in place, allocating nothing. No wire byte moves and no receiver changes:
   `type_t::PATH_REF`, `is_path_ref_type`, `path_ref_body_valid`, the element accessors
-  (`path_ref_element_count`, `path_ref_element_at`, `path_ref_store_element`),
+  (`path_ref_element_count`, `path_ref_element_at`),
   `kAdvertiseFormatVersion`, `encode_advertise_header` and `decode_advertise` stay, and every
   `path-ref/*` conformance vector still passes. A caller that must spell a `PATH_REF` writes
-  the body with `path_ref_store_element` and frames it with `emit_tlv`; a caller that wants a
+  each element with `pair_store_le` and frames the body with `emit_tlv`; a caller that wants a
   contiguous advertise appends the path after `encode_advertise_header`'s 18 bytes.
   `tlv_emit.hpp` no longer includes `path_ref.hpp`, and `can.hpp` no longer includes
   `mem_source.hpp`.
@@ -191,6 +191,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Removed
 
+- **`wire::path_ref_store_element` (`path_ref.hpp`, #2557).** It was a one-line wrapper around
+  `pair_store_le` and the last public function that wrote a `PATH_REF` element; only tests
+  called it. Write an element with `pair_store_le`, which has the same byte layout. The decode
+  side (`path_ref_element_count`, `path_ref_element_at`, `path_ref_body_valid`) is unchanged
+  and no wire byte moves.
 - **`vertex_t::set_app_fields` and `vertex_t::set_app_fields_static` (#2547).** Neither had a
   caller. Install an app-field table with `graph_t::set_policy` (a `vertex_policy_t` naming
   `app_fields`) or at `graph_t::register_vertex`; both normalize an empty borrowed table to the
