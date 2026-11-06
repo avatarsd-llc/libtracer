@@ -97,12 +97,6 @@
       ],
       "file": "core/src/transport_vertex.cpp"
     },
-    "tr::net::webtransport_transport_factory": {
-      "ccn": [
-        16
-      ],
-      "file": "core/src/transport_webtransport.cpp"
-    },
     "tr::net::webtransport_transport_t::impl_t::classify_bidi": {
       "ccn": [
         32
