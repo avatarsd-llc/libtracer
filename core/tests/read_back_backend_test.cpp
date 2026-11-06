@@ -24,7 +24,7 @@
  *   - `:settings.app.<name>` — one declared app field's stored bytes;
  *   - `:acl` — the re-encoded ACE list (`read_acl`);
  *   - `:identity` — the pre-serialized node record (`read_identity`);
- *   - `read_children_materialized` — the MATERIALIZED listing (`read_children`), which is a
+ *   - the MATERIALIZED listing (`read_children`, through `graph_children_test_door_t`), a
  *     different encoder from the `:children` fold `folded_read_backend_test` already pins.
  *
  * Two are reached as SUBSCRIBES, whose encoded record never crosses back to the caller, so the
@@ -65,6 +65,7 @@
 #include <utility>
 #include <vector>
 
+#include "graph_children_test_door.hpp"
 #include "graph_sinks.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_source_backend.hpp"
@@ -358,7 +359,7 @@ int main() {
             return v;
         },
         [](const graph_t& g, vertex_handle_t v) {
-            return record_width(g.read_children_materialized(v));
+            return record_width(tr::testing::read_children_materialized(g, v));
         });
 
     // `graph.cpp:subscribe` — the owned `SUBSCRIBER{PATH}` the sugar enters the field-write

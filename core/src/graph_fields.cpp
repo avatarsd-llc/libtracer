@@ -791,7 +791,7 @@ struct graph_t::field_surface_t {
      * The read dual of the SPEC-creating append is served FOLDED (L4 fold, Slice 0): a
      * scatter-gather rope (outer POINT header + per-child borrowed NAME), byte-identical on
      * flatten() to the materialized listing (`folded_children_test` gates the differential
-     * against `read_children_materialized`). A single `[N]` slot has no meaning here (members
+     * against the flat `read_children` oracle). A single `[N]` slot has no meaning here (members
      * are named, not indexed) and is SCHEMA_NOT_FOUND below the READ gate, as are `[*]` and a
      * tail — the same `field_selector` classification the write door switches on (#869), so
      * the two halves cannot drift on which shape they are looking at. The ANSWER stays per

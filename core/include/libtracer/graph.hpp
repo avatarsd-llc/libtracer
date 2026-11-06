@@ -2340,17 +2340,6 @@ class graph_t {
     [[nodiscard]] result_t<value_ref_t> read_children_folded(vertex_handle_t v) const;
 
     /**
-     * @brief MATERIALIZED `:children` listing — the flat single-link serialize of the same
-     *        `POINT{ POINT{NAME}… }` the fold gathers.
-     *
-     * The production field read serves the FOLDED value; this flat form exists as the
-     * independent oracle `folded_children_test` diffs the fold against (byte identity on
-     * flatten() over many graph shapes) — without it the differential would be
-     * tautological.
-     */
-    [[nodiscard]] result_t<value_ref_t> read_children_materialized(vertex_handle_t v) const;
-
-    /**
      * @brief COMPOSED BRANCH READ (RFC-0005 §C follow-on): the POINT tree of @p v's
      *        registered subtree, folded as a scatter-gather link chain of views over the
      *        live last-known values (zero flatten, zero byte copies), answered as one
@@ -2366,8 +2355,7 @@ class graph_t {
      * whole subtree (siblings unaffected). A branch with no descendant values folds to a
      * names-only (topology) POINT tree.
      *
-     * This is what a plain @ref read serves when the target has ≥ 1 registered child; it
-     * is public for the same oracle reason as @ref read_children_materialized's split.
+     * This is what a plain @ref read serves when the target has ≥ 1 registered child.
      * Per node: one atomic `read_stored()` load, LKV links refcount-**cloned** (no byte
      * copy), the child's NAME record borrowed **in place** over the pinned vertex, and an
      * owned per-level POINT header (`opt.ll` auto-widened at the same 0xFFFF boundary as
@@ -3107,6 +3095,8 @@ class graph_t {
     [[nodiscard]] reclaim_refusals_t reclaim_refusals() const noexcept;
 
    private:
+    friend struct graph_children_test_door_t;  // test-only: the flat `:children` oracle.
+
     /**
      * @brief The `:`-field surface (#1711): one constant row per colon field, defined in
      *        `core/src/graph_fields.cpp` beside the two doors (`read_field_composed`,
@@ -3579,6 +3569,13 @@ class graph_t {
     // (ADR-0044 — a transport vertex lists live bus peers, no vertices created);
     // otherwise the direct child vertices registered under v's key are enumerated.
     [[nodiscard]] result_t<view::view_t> read_children(vertex_t* v) const;
+    // The MATERIALIZED `:children` listing: the flat single-link serialize of the same
+    // `POINT{ POINT{NAME}… }` the fold gathers. Production serves the folded listing; this is
+    // the independent oracle the tests diff it against, reached only through
+    // `graph_children_test_door_t` (#2437). Out of line here on purpose: deleting it from this
+    // TU re-partitions GCC's inline budget onto the fan-out copy loop
+    // (`vertex_t::copy_published` +75 B on the symbol ratchet).
+    [[nodiscard]] result_t<value_ref_t> read_children_materialized(vertex_handle_t v) const;
     // ":acl" read => the stored ACEs RE-ENCODED (#81-A, ADR-0018/0020, #907) — a projection
     // of the list acl_allows walks. The READ gate runs in read(v, field, caller).
     [[nodiscard]] result_t<view::view_t> read_acl(vertex_t* v) const;
