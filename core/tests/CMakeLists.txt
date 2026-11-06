@@ -1289,6 +1289,12 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(removed_child_ingress_test PRIVATE libtracer)
     libtracer_test_warnings(removed_child_ingress_test)
     add_test(NAME removed_child_ingress COMMAND removed_child_ingress_test)
+    # #2560 — `hop_mint` refuses a removed child itself (ctx_by_name skip + retired re-check),
+    # called through a test-only friend door, since the #2302 ingress drop hides it end to end.
+    add_executable(hop_mint_tombstone_test hop_mint_tombstone_test.cpp)
+    target_link_libraries(hop_mint_tombstone_test PRIVATE libtracer)
+    libtracer_test_warnings(hop_mint_tombstone_test)
+    add_test(NAME hop_mint_tombstone COMMAND hop_mint_tombstone_test)
 endif()
 
 add_executable(retire_test retire_test.cpp)
