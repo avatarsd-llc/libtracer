@@ -66,6 +66,14 @@ namespace tr::net {
 struct fwd_pre_t;
 
 /**
+ * @brief Test-only door into @ref fwd_router_t's private reply-mint path (#2560).
+ *
+ * Declared here and never defined by the library: only the test suite defines it. It is not
+ * part of the API; code outside the test suite must not define it.
+ */
+struct fwd_router_test_door_t;
+
+/**
  * @brief The router's counted cold-path drops — one snapshot of every frame this router
  *        lost rather than forwarded (#1503 step 3).
  *
@@ -973,6 +981,8 @@ class fwd_router_t {
     }
 
    private:
+    friend struct fwd_router_test_door_t;  // test-only: calls hop_mint for a removed child.
+
     /**
      * @brief Brackets one inbound frame, or one origination, on this thread.
      *
