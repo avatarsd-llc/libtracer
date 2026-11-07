@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "libtracer/view.hpp"
+#include "test_await.hpp"
 #include "test_support.hpp"
 
 namespace {
@@ -135,12 +136,14 @@ void test_seq_cursor_and_empty_lkv() {
 void test_await_wake_and_timeout() {
     std::printf("wait_for_change — wake on a write bump, timeout when idle:\n");
     vertex_t v{role_t::STORED_VALUE, key_of({0x03}), {}};
-    check(!v.wait_for_change(v.current_seq(), 20ms), "no writer => timeout (returns false)");
+    tr::graph::graph_t g;  // owns the waits' deadlines; its expire_awaits ends them
+    check(!tr::testing::wait_for_change_within(g, v, v.current_seq(), 20ms),
+          "no writer => timeout (returns false)");
 
     const tr::graph::write_seq_t seq0 = v.current_seq();
     std::atomic<bool> woke{false};
     std::thread waiter([&] {
-        if (v.wait_for_change(seq0, 2s)) woke.store(true);
+        if (tr::testing::wait_for_change_within(g, v, seq0, 2s)) woke.store(true);
     });
     // NOT the #1418 sleep-synchronization defect, and the contrast is the discriminator: `seq0`
     // is captured ABOVE, on THIS thread, BEFORE the waiter is spawned. The predicate is
@@ -153,7 +156,8 @@ void test_await_wake_and_timeout() {
     v.note_write();
     waiter.join();
     check(woke.load(), "a write bump wakes a blocked waiter (write_seq_ != seq0)");
-    check(v.wait_for_change(seq0, 0ns), "a stale seq0 observes the change without blocking");
+    check(tr::testing::wait_for_change_within(g, v, seq0, 0ns),
+          "a stale seq0 observes the change without blocking");
 }
 
 /**

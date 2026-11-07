@@ -382,7 +382,7 @@ role and schema).
 | Plane | Needs the LKV because |
 | --- | --- |
 | Local + remote `READ` | a leaf read serves the stored pointer (`core/src/graph.cpp:graph_t::read(vertex_handle_t vh, std::string_view caller)`; the `FWD{READ}` terminus is the same call) — null ⇒ `NOT_FOUND`, unless the vertex composes an answer from its `on_read` seam (`core/src/graph.cpp:graph_t::read_handler_gated`) |
-| `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:graph_t::await(vertex_handle_t vh, std::chrono::nanoseconds`) |
+| `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:graph_t::await(vertex_handle_t vh, std::uint64_t now`) |
 | `assign` / `propagate` sweep | **the hard dependency** — RFC-0008 §C: `propagate` takes no value argument, "the last-known-value is the single source of truth" (`core/src/graph.cpp:graph_t::deliver_current`) |
 | Composed subtree reads | RFC-0016 serves **landed** LKVs only, one atomic load per node (`core/src/graph.cpp:n.lkv = w.v->read_stored();`); a non-retaining child contributes nothing |
 | Late-joiner replay | the durability latch snapshots the LKV at edge-add (RFC-0022 §3.A bit 5, `core/include/libtracer/vertex.hpp:vertex_t::add_edge`) |

@@ -32,6 +32,7 @@
 
 #include "graph_sinks.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_await.hpp"
 #include "test_history.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
@@ -168,7 +169,7 @@ void test_assign_lkv_and_seq_bump() {
             std::this_thread::sleep_for(2ms);
         }
     });
-    const auto woke = g.await(hv, 2s);
+    const auto woke = tr::testing::await_within(g, hv, 2s);
     awaited.store(true, std::memory_order_release);
     writer.join();
     check(!woke.has_value() && woke.error() == status_t::NOT_FOUND,
@@ -296,7 +297,7 @@ void test_await() {
             std::this_thread::sleep_for(2ms);
         }
     });
-    auto r = g.await(v, 2s);
+    auto r = tr::testing::await_within(g, v, 2s);
     awaited.store(true, std::memory_order_release);
     writer.join();
     check(r.has_value() && std::to_integer<int>((*r)->only().bytes()[0]) == 0x7E,
@@ -304,8 +305,43 @@ void test_await() {
 
     tr::graph::vertex_handle_t idle =
         g.register_vertex(path_t("/sensor/idle"), role_t::STORED_VALUE);
-    auto t = g.await(idle, 20ms);
+    auto t = tr::testing::await_within(g, idle, 20ms);
     check(!t.has_value() && t.error() == status_t::TIMEOUT, "await times out with no write");
+
+    // The deadline is the application's (#2579): a past one answers at once, a pending one
+    // ends only through expire_awaits, which answers the next deadline still owed.
+    tr::graph::await_waiter_t no_fire;
+    const auto refused = g.arm_await(idle, no_fire);
+    check(!refused && refused.error() == status_t::TYPE_MISMATCH && !no_fire.armed,
+          "arm_await refuses a waiter with no fire (the blocking form's shape)");
+    auto past = g.await(idle, 5, 5);
+    check(!past.has_value() && past.error() == status_t::TIMEOUT,
+          "a deadline at or before now answers TIMEOUT without waiting");
+    check(g.expire_awaits(0) == 0, "no blocking await: nothing is owed");
+    tr::graph::result_t<tr::graph::value_ref_t> timed;
+    std::thread waiter([&] { timed = g.await(idle, 10, 100); });
+    while (g.expire_awaits(50) != 100) std::this_thread::yield();  // armed, not yet due
+    graph_t other;
+    (void)other.expire_awaits(tr::graph::kNoDeadline);
+    check(g.expire_awaits(50) == 100, "another graph's expiry leaves this graph's await pending");
+    check(g.expire_awaits(100) == 0, "a now that reaches the deadline ends the await");
+    waiter.join();
+    check(!timed.has_value() && timed.error() == status_t::TIMEOUT,
+          "the expired await answers TIMEOUT");
+
+    tr::graph::result_t<tr::graph::value_ref_t> forever;
+    std::atomic<bool> back{false};
+    std::thread unbounded([&] {
+        forever = g.await(idle, 0, tr::graph::kNoDeadline);
+        back.store(true, std::memory_order_release);
+    });
+    while (!back.load(std::memory_order_acquire)) {
+        (void)g.expire_awaits(tr::graph::kNoDeadline);
+        std::this_thread::yield();
+    }
+    unbounded.join();
+    check(!forever.has_value() && forever.error() == status_t::TIMEOUT,
+          "expire_awaits(kNoDeadline) ends even an await with no deadline");
 }
 
 void test_concurrent_stress() {

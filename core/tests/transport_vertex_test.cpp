@@ -63,6 +63,7 @@
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
 #include "send_tap.hpp"
+#include "test_await.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
 #include "transport_vertex_test_access.hpp"
@@ -181,7 +182,7 @@ void test_await_link_state() {
     std::promise<bool> woke;
     auto fut = woke.get_future();
     std::thread waiter([&] {
-        const auto r = node.await(path_t("/net/ws-client/up"), 2s);
+        const auto r = tr::testing::await_within(node, path_t("/net/ws-client/up"), 2s);
         woke.set_value(r.has_value());
     });
     // `await` is EDGE-triggered: `graph_t::await` snapshots `write_seq_` on ENTRY, on the

@@ -1875,32 +1875,34 @@ class vertex_t {
     [[nodiscard]] value_ref_t read_stored() const { return lkv_.load(); }
 
     /**
-     * @brief Block until the write sequence moves past @p seq0 or @p timeout elapses.
-     * @param seq0    The @ref current_seq snapshot the caller waits to see surpassed.
-     * @param timeout The maximum wait.
+     * @brief Block until the write sequence moves past @p seq0, or until
+     *        `graph_t::expire_awaits` is passed a `now` that reaches @p d's deadline.
+     *
+     * A blocking await is an armed waiter with no `fire` (#2579): @ref arm_waiter links it and
+     * raises the stripe's waiter count, the waiter's half of the Dekker pair documented on
+     * `store`, so a publish ordered after the arm takes the slow path, unlinks it and notifies
+     * the stripe's condvar, and one ordered before it moved the sequence the predicate reads.
+     * No timed wait runs: the deadline is the application's, and an expiry unlinks the waiter
+     * the same way a change does.
+     * @param seq0 The @ref current_seq snapshot the caller waits to see surpassed.
+     * @param d    Whose wait it is and its deadline; it must outlive this call.
      * @return true iff a change was observed (`write_seq_ != seq0`: an equality test, so a
-     *         wrap between the snapshot and the check is still a change); false on timeout.
+     *         wrap between the snapshot and the check is still a change); false on expiry.
      */
-    [[nodiscard]] bool wait_for_change(write_seq_t seq0, std::chrono::nanoseconds timeout) {
+    [[nodiscard]] bool wait_for_change(write_seq_t seq0, await_deadline_t& d) {
         const std::size_t idx = vertex_stripe_index(this);
-        vertex_stripe_t& st = vertex_stripe_at(idx);
-        std::unique_lock lock(st.m);
-        // Register on the stripe's waiter count. Still mutated under st.m, but the count is
-        // now also read by a publish that takes NO lock (#555), so the store must be seq_cst
-        // and must land BEFORE this thread reads `write_seq_` in the predicate below. That
-        // ordering is the waiter's half of the Dekker pair documented on @ref store: a
-        // publisher that saw zero here is ordered before this store, therefore before the
-        // predicate's read, so the predicate observes its bump and `wait_for` returns without
-        // blocking. RAII so a throwing wait can never leak a phantom waiter.
-        struct waiter_scope_t {
-            std::atomic<int>& n;
-            explicit waiter_scope_t(std::atomic<int>& c) : n(c) {
-                n.fetch_add(1, std::memory_order_seq_cst);
-            }
-            ~waiter_scope_t() { n.fetch_sub(1, std::memory_order_seq_cst); }
-        } scope(st.waiters);
-        return vertex_stripe_cv(idx).wait_for(lock, timeout,
-                                              [&] { return write_seq_.load() != seq0; });
+        await_waiter_t w{.ctx = &d};
+        arm_waiter(w);
+        // Disarmed on every exit, a throwing lock included: a change that won the race, or an
+        // exception, would otherwise leave this stack waiter linked on the stripe.
+        struct disarm_on_exit_t {
+            await_waiter_t& w;
+            ~disarm_on_exit_t() { (void)disarm_waiter(w); }
+        } const disarm{w};
+        std::unique_lock lock(vertex_stripe_at(idx).m);
+        vertex_stripe_cv(idx).wait(lock, [&] { return !w.armed || write_seq_.load() != seq0; });
+        lock.unlock();  // disarm_waiter takes the same stripe mutex
+        return write_seq_.load() != seq0;
     }
 
     /** @brief The current write sequence (bumped per assign — the await predicate base).
@@ -3838,9 +3840,13 @@ class vertex_t {
                 }
                 *p = w->next;
                 w->armed = false;
+                w->next = nullptr;
+                st.waiters.fetch_sub(1, std::memory_order_seq_cst);
+                // A blocking await's waiter (no fire) only leaves the list: the notify above
+                // wakes its thread, which owns it from here and may already be returning.
+                if (w->fire == nullptr) continue;
                 w->next = fired;
                 fired = w;
-                st.waiters.fetch_sub(1, std::memory_order_seq_cst);
             }
         }
         while (fired != nullptr) {

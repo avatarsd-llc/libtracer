@@ -16,7 +16,9 @@
  * Runs under ctest as `example_graph_await`; returns non-zero on any failed check.
  */
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <span>
@@ -43,6 +45,24 @@ void check(bool& ok, bool cond, const char* what) {
     ok = ok && cond;
 }
 
+/** @brief This application's clock, in milliseconds: the `now` it hands the graph. */
+std::uint64_t now_ms() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count());
+}
+
+/**
+ * @brief The application's side of an await's deadline: pass `now` to expire_awaits until
+ *        @p done is set. libtracer reads no clock, so this loop is what ends a wait that is due.
+ */
+void drive_until(tr::graph::graph_t& g, const std::atomic<bool>& done) {
+    while (!done.load(std::memory_order_acquire)) {
+        (void)g.expire_awaits(now_ms());
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -52,22 +72,36 @@ int main() {
     const auto temp = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     const auto child = g.register_vertex(path_t("/sensor/temp/raw"), role_t::STORED_VALUE);
 
-    // A waiter parks in await(); the writer wakes it with the value it stored.
+    // A waiter parks in await(); the writer wakes it with the value it stored. Its deadline,
+    // 2 s on this app's clock, bounds a write that lands before it parks: that costs a
+    // TIMEOUT, never a hang.
     bool woke = false;
+    std::atomic<bool> answered{false};
     std::thread waiter([&] {
-        const auto r = g.await(temp, 2s);
+        const std::uint64_t now = now_ms();
+        const auto r = g.await(temp, now, now + 2000);
         woke = r && (*r)->only().bytes().size() == 5;
+        answered.store(true, std::memory_order_release);
     });
     std::this_thread::sleep_for(50ms);  // let the waiter park before the write lands
 
     (void)g.write(child, value_of("noise"));  // a DESCENDANT write — not this vertex
     (void)g.write(temp, value_of("21.5C"));
+    drive_until(g, answered);
     waiter.join();
     check(ok, woke, "await returns the value assigned at its own vertex");
 
     // await is not subtree-scoped, and the deadline is honoured: nothing writes /sensor/temp
     // again, so this one expires rather than picking up the descendant write above.
-    const auto quiet = g.await(temp, 20ms);
+    tr::graph::result_t<tr::graph::value_ref_t> quiet;
+    std::atomic<bool> done{false};
+    std::thread late([&] {
+        const std::uint64_t now = now_ms();
+        quiet = g.await(temp, now, now + 20);
+        done.store(true, std::memory_order_release);
+    });
+    drive_until(g, done);
+    late.join();
     check(ok, !quiet && quiet.error() == status_t::TIMEOUT, "an expired deadline answers TIMEOUT");
     std::printf("await woke once and timed out once, as expected\n");
     return ok ? 0 : 1;
