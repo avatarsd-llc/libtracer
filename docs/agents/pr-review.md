@@ -463,7 +463,9 @@ that breaks one of them is a finding; cite the rule.
 - **ctest runs 4 tests at a time on pushes and landings, serially nightly and on
   tags** (#2448). core-ci sets `CTEST_PARALLEL_LEVEL`; the sleep- and poll-based
   suites are `RUN_SERIAL` in `core/tests/CMakeLists.txt`, so they still run alone. A
-  new test that waits on real time joins that list.
+  new test that waits on real time joins that list. Every test has a finite
+  `TIMEOUT` (#2599): 120 s by default, x3 in a sanitizer build, set in
+  `core/CMakeLists.txt`, so a hung test fails by name instead of stalling the run.
 - **Docs-only PRs skip the C++ workflows.** A PR of `docs/` and Markdown alone
   skips core-ci and the other C++ workflows. Required checks still report: a
   skipped job, or a verdict job over skipped jobs, reads as success. doc-citations,

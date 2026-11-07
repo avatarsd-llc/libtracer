@@ -3109,3 +3109,7 @@ foreach(_serial IN ITEMS
         set_tests_properties(${_serial} PROPERTIES RUN_SERIAL TRUE)
     endif()
 endforeach()
+
+# #2599: every test above without its own TIMEOUT gets the default (core/CMakeLists.txt). Keep
+# this the last line, so a test added later picks it up.
+libtracer_default_test_timeouts()

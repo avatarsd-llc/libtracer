@@ -423,8 +423,32 @@ if(LIBTRACER_INSTALL)
         DESTINATION ${LIBTRACER_CMAKE_CONFIG_DIR})
 endif()
 
+# #2599: every test gets a finite TIMEOUT, so a hung test fails by name instead of stalling
+# its ctest run (or, in CI, being cancelled with the job). The default is 120 s, times
+# LIBTRACER_TEST_TIMEOUT_SCALE: 3 in a sanitizer build, whose slowest tests run up to ~10x
+# their plain time, 1 otherwise. A test that already sets its own TIMEOUT keeps it. Each
+# directory that declares tests calls libtracer_default_test_timeouts() as its last line,
+# so a test added anywhere above that call picks the default up.
+set(LIBTRACER_TEST_TIMEOUT_DEFAULT_SCALE 1)
+if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=")
+    set(LIBTRACER_TEST_TIMEOUT_DEFAULT_SCALE 3)
+endif()
+set(LIBTRACER_TEST_TIMEOUT_SCALE "${LIBTRACER_TEST_TIMEOUT_DEFAULT_SCALE}" CACHE STRING
+    "Multiplier on the 120 s default ctest TIMEOUT (3 when CMAKE_CXX_FLAGS has -fsanitize=)")
+math(EXPR LIBTRACER_TEST_TIMEOUT "120 * ${LIBTRACER_TEST_TIMEOUT_SCALE}")
+function(libtracer_default_test_timeouts)
+    get_property(_tests DIRECTORY PROPERTY TESTS)
+    foreach(_test IN LISTS _tests)
+        get_test_property(${_test} TIMEOUT _timeout)
+        if(NOT _timeout)
+            set_tests_properties(${_test} PROPERTIES TIMEOUT ${LIBTRACER_TEST_TIMEOUT})
+        endif()
+    endforeach()
+endfunction()
+
 if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     enable_testing()
+    message(STATUS "libtracer: default ctest TIMEOUT ${LIBTRACER_TEST_TIMEOUT} s (scale ${LIBTRACER_TEST_TIMEOUT_SCALE})")
     # The test preset (#1664, #1670): the test build binds config_t::kInstrumentCounters so the
     # ancestor-walk / canonical-fallback ablations can read their counters, and opts in to the two
     # link modules (kBusLinks, kSelfHealLinks) whose TUs the options above compile. Listed FIRST, so it
