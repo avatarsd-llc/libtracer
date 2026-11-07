@@ -109,9 +109,9 @@ class frame_ingress_t {
      * @param fd      The stream's socket.
      * @param rx      The receiving link's own source, which every body is drawn from.
      * @param framing The link's framing (see the file comment).
-     * @param flags   The `recvmsg` flags: `MSG_DONTWAIT` (the default) for a poll-driven
-     *                link, 0 for a link whose thread blocks in the read under a receive
-     *                timeout. A timeout returns true with the partial frame kept.
+     * @param flags   The `recvmsg` flags: `MSG_DONTWAIT` (the default), for a link driven by
+     *                the wait module's readiness. A read that would block returns true with
+     *                the partial frame kept.
      * @return False when the stream must close: the peer closed it, a read failed, or the
      *         framing said so.
      */

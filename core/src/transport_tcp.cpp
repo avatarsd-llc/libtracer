@@ -345,7 +345,7 @@ void tcp_transport_t::on_listen(void* ctx, wait_source_t& self, std::uint8_t rea
  *        and the threading rule that governs them) is slot_server_t's; this
  *        adds the frame-ingress state and the directed facade object.
  *
- * The ingress state is poll-thread-only, like every protocol buffer a slot carries.
+ * The ingress state is the driving thread's alone, like every protocol buffer a slot carries.
  */
 struct tcp_server_transport_t::session_t : slot_server_t::session_base_t {
     /** @brief Frame ingress (ADR-0087 §1, #2141): no stream buffer, the body lands in its
@@ -367,9 +367,9 @@ tcp_server_transport_t::tcp_server_transport_t(std::uint16_t bind_port,
 }
 
 tcp_server_transport_t::~tcp_server_transport_t() {
-    // FIRST: the run() thread dispatches this class's variance points, so it must be
-    // joined while the derived object is still whole.  ~slot_server_t closes the listen
-    // socket and sweeps the slot fds after this body.
+    // FIRST: the driving thread dispatches this class's variance points, so the link must
+    // be off the wait (and a fallback thread joined) while the derived object is still whole.
+    // ~slot_server_t closes the listen socket and sweeps the slot fds after this body.
     stop_and_join();
 }
 

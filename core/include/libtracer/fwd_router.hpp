@@ -1717,7 +1717,7 @@ class fwd_router_t {
      *
      * Fired ONLY by an accepting listener (`slot_server_t` and the ESP httpd link), never by
      * an announce-census bus, so CAN peers keep ADR-0044 §Decision 1 in full force and grow
-     * no vertices at all. Runs on the transport's poll thread with no transport lock held.
+     * no vertices at all. Runs on the transport's driving thread with no transport lock held.
      */
     void bus_peer_up(const child_rx_ctx_t& ctx, peer_handle_t handle, std::string_view peer);
     /**

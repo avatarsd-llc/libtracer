@@ -298,7 +298,7 @@ class bus_link_t {
     void set_peer_up_notifier(peer_up_fn_t fn, void* ctx) noexcept {
         if (!peer_named()) return;
         // Same ctx-before-fn publication as set_peer_down_notifier, and for the same
-        // reason: an accept can land on the poll thread while this wiring is still running.
+        // reason: an accept can land on the driving thread while this wiring is still running.
         peer_up_ctx_.store(ctx, std::memory_order_relaxed);
         peer_up_fn_.store(fn, std::memory_order_release);
     }
@@ -412,7 +412,7 @@ class bus_link_t {
     std::atomic<peer_down_fn_t> peer_down_fn_{nullptr};
     std::atomic<void*> peer_down_ctx_{nullptr}; /**< @brief Its caller-owned context. */
     /** @brief Installed peer-arrival sink. Atomic for the same reason its departure
-     *         twin is: the poll thread can accept while add_child is still wiring. */
+     *         twin is: the driving thread can accept while add_child is still wiring. */
     std::atomic<peer_up_fn_t> peer_up_fn_{nullptr};
     std::atomic<void*> peer_up_ctx_{nullptr}; /**< @brief Its caller-owned context. */
 };

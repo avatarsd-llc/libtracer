@@ -41,6 +41,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/sync.hpp"
 #include "libtracer/thread_id.hpp"
@@ -108,9 +109,9 @@ class wait_module_t {
    public:
     /**
      * @brief Opens the wait and its wake. @ref ok reports whether both opened.
-     * @param src Where the poll adapter draws its descriptor set (one entry per attached
-     *            socket, grown as sources attach) and its table of them. The epoll adapter
-     *            draws nothing. Must outlive the module.
+     * @param src Where the poll adapter draws its table of attached sources and its two
+     *            descriptor sets (one entry per source plus the wake, grown at attach). The
+     *            epoll adapter draws nothing. Must outlive the module.
      */
     explicit wait_module_t(mem::block_source_t& src) noexcept;
     /** @brief Opens with the poll adapter's set drawn from the process net sub-pool. */
@@ -127,8 +128,10 @@ class wait_module_t {
 
     /**
      * @brief Start waiting on @p s : read interest, plus write interest when `s.write` is set.
-     * @retval false The platform refused the registration, or the poll adapter's table could
-     *         not be grown to hold it; nothing was attached.
+     * @retval false The platform refused the registration, or the poll adapter's table or
+     *         spare set could not be grown to hold it; nothing was attached, and nobody already
+     *         attached was evicted. Attach is the only place the poll adapter grows, so a
+     *         dispatch pass never fails for want of memory.
      */
     [[nodiscard]] bool attach(wait_source_t& s) noexcept;
 
@@ -187,6 +190,10 @@ class wait_module_t {
     tr::mutex_t m_; /**< @brief Held while a batch is dispatched. */
     /** @brief The poll adapter's attached sources, drawn from its source; empty on epoll. */
     mem::block_array_t<wait_source_t*> sources_;
+    struct state_t;  // the adapter's own state, defined in its translation unit
+    /** @brief The poll adapter's descriptor sets, drawn from its source when it opens; none on
+     *         epoll. */
+    mem::poly_ptr_t<state_t> state_;
 };
 
 }  // namespace tr::net
