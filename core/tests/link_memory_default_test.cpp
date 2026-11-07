@@ -16,8 +16,16 @@
  *  - `io`:    the link's egress store, read back off the link (`transport_t::egress_source`).
  *
  * With no default the three counted sources see nothing, the link's egress store is the
- * vertex's own (`egress_src`, as before), and a connected peer's session raises the net pool's
- * in-use balance. A factory that names memory of its own keeps it: the default is not read.
+ * vertex's own (`egress_src`, as before), and a connected peer's session draws from the net
+ * pool. A factory that names memory of its own keeps it: the default is not read.
+ *
+ * How a net-pool draw is seen depends on the build's root, so the test picks its instrument
+ * at start (@ref net_pool_keeps_census). A slab-pool or arena root keeps a census, read through
+ * `stats().in_use`. A heap root (`kSlabPool = false`, the narrow CI leg) makes `net_source()`
+ * the platform heap, which keeps none, so there the test counts the nothrow `operator new`
+ * calls the heap source makes; it replaces those two global forms for that, which is why it
+ * is its own binary. Every counted source here draws through the THROWING forms, so the count
+ * is the net pool's alone.
  */
 
 #include <arpa/inet.h>
@@ -30,6 +38,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <new>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -39,6 +48,29 @@
 #include "libtracer/mem_source_backend.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_ws.hpp"
+
+/** @brief Global nothrow `operator new` calls: the heap source's draws (see the file note). */
+std::atomic<std::size_t> g_nothrow_news{0};
+
+/** @brief Counted, then the throwing form, so the default `operator delete` matches it. */
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
+    g_nothrow_news.fetch_add(1, std::memory_order_relaxed);
+    try {
+        return ::operator new(size);
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
+}
+
+/** @brief The aligned twin of the form above. */
+void* operator new(std::size_t size, std::align_val_t align, const std::nothrow_t&) noexcept {
+    g_nothrow_news.fetch_add(1, std::memory_order_relaxed);
+    try {
+        return ::operator new(size, align);
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
+}
 
 namespace {
 
@@ -57,12 +89,18 @@ class counting_source_t final : public tr::mem::block_source_t {
    public:
     explicit counting_source_t(const char* name) noexcept : block_source_t(name) {}
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
-        void* const p = tr::mem::heap_source().try_alloc(bytes, align);
-        if (p != nullptr) draws.fetch_add(1, std::memory_order_relaxed);
+        // The throwing form, so the nothrow count below stays the net pool's own.
+        void* p = nullptr;
+        try {
+            p = ::operator new(bytes, std::align_val_t{align});
+        } catch (const std::bad_alloc&) {
+            return nullptr;
+        }
+        draws.fetch_add(1, std::memory_order_relaxed);
         return p;
     }
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
-        tr::mem::heap_source().release(p, bytes, align);
+        ::operator delete(p, bytes, std::align_val_t{align});
     }
     std::atomic<std::size_t> draws{0}; /**< @brief Blocks served in all. */
 };
@@ -111,8 +149,25 @@ bool eventually(Pred pred) {
     return pred();
 }
 
-/** @brief The bytes the net pool has out right now. */
-std::size_t net_in_use() { return tr::mem::net_source().stats().in_use; }
+/** @brief Whether the net pool keeps a census (`stats().in_use`): probed once, in `main`. */
+bool g_net_census = false;
+
+/** @brief Probe @ref g_net_census: draw one block from the net pool and see its balance move. */
+bool net_pool_keeps_census() {
+    tr::mem::block_source_t& net = tr::mem::net_source();
+    const std::size_t before = net.stats().in_use;
+    void* const p = net.try_alloc(64, alignof(std::max_align_t));
+    const bool moved = net.stats().in_use > before;
+    if (p != nullptr) net.release(p, 64, alignof(std::max_align_t));
+    return moved;
+}
+
+/** @brief The net pool's draws so far: its census where it keeps one, else the nothrow heap
+ *         draws it is made of. Only ever compared with an earlier reading. */
+std::size_t net_draws() {
+    return g_net_census ? tr::mem::net_source().stats().in_use
+                        : g_nothrow_news.load(std::memory_order_relaxed);
+}
 
 /** @brief What @ref egress_of reads off a link. */
 struct egress_probe_t {
@@ -174,13 +229,13 @@ void run_arm(const kind_arm_t& arm, bool with_default) {
 
         if (arm.keeps_peers) {
             const std::size_t state_idle = state.draws.load();
-            const std::size_t net_idle = net_in_use();
+            const std::size_t net_idle = net_draws();
             peer = connect_peer(port);
             if (with_default) {
                 check(eventually([&] { return state.draws.load() > state_idle; }),
                       "state: the connected peer's session drew from the default's state");
             } else {
-                check(eventually([&] { return net_in_use() > net_idle; }),
+                check(eventually([&] { return net_draws() > net_idle; }),
                       "state: the connected peer's session drew from the net pool");
             }
         }
@@ -248,6 +303,9 @@ void own_memory_wins() {
 }  // namespace
 
 int main() {
+    g_net_census = net_pool_keeps_census();
+    std::printf("the net pool %s\n", g_net_census ? "keeps a census: reading stats().in_use"
+                                                  : "is the heap: counting its nothrow draws");
     for (const kind_arm_t& arm : kArms) {
         run_arm(arm, true);
         run_arm(arm, false);
