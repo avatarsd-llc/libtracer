@@ -99,6 +99,7 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [ADR-0085](adr/0085-ingress-drain-budget-waits-for-the-idle-task-not-a-clock.md) | A link's ingress drain is bounded by a compile-time budget, and a spent budget waits for the core's idle task, never for a clock | accepted |  |  |
 | [ADR-0086](adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md) | Identity is app level: the node key is the only identity the protocol knows, an optional opaque credential rides beside it, and anchored names are a verifier policy in an integration module | accepted | [RFC-0033](spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md) (part) | [ADR-0045](adr/0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md) (part) |
 | [ADR-0087](adr/0087-the-peer-path-is-one-frame-ingress-one-shared-egress-frame-one-wait-module-per-node.md) | The peer path is one frame-ingress module, one shared egress frame, one wait module per node and one peer record per peer | accepted |  | [ADR-0044](adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md) (part), [ADR-0071](adr/0071-host-transport-is-a-separate-tu-with-shared-nothing-epoll.md) (part) |
+| [ADR-0088](adr/0088-coroutines-are-not-the-core-execution-model.md) | Coroutines are not the core execution model; a single executor over the wait module is, and an app-side coroutine adapter is allowed only within fixed limits | accepted |  |  |
 
 ## RFCs
 
