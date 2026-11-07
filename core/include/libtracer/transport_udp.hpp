@@ -78,11 +78,16 @@ struct udp_config_t {
      *        cap fits `%graph::kUdpStackScratchBytes` holds none (#2142).
      */
     std::size_t max_frame = 0;
-    /** @brief Recv-thread stack size in bytes, 0 = platform default. The receive loop keeps
+    /** @brief Fallback-thread stack size in bytes, 0 = platform default. The receive loop keeps
      *         `%graph::kUdpStackScratchBytes + 1` bytes on it (#2142), so a nonzero value
      *         below `udp_transport_t::kMinRecvStack` is refused at construction
      *         (`udp_transport_t::recv_stack_refused`), never clamped. */
     std::size_t recv_stack = 0;
+    /** @brief The node's wait module (#2147): the link puts its sockets on it and owns no
+     *         thread, and the application drives it (`wait_module_t::run`). Null: a thread of
+     *         the link's own drives a private one, sized by `recv_stack`. Must outlive the
+     *         link. */
+    wait_module_t* wait = nullptr;
 };
 
 /**
@@ -157,7 +162,7 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
      * advance; until the first datagram arrives, @ref send is a no-op.
      *
      * @param config The link's knobs (@ref udp_config_t): memory (the RX seam that bounds the
-     *        datagram), receive cap, recv-thread stack.
+     *        datagram), receive cap, fallback-thread stack.
      */
     udp_transport_t(std::uint16_t bind_port, std::string_view peer_host, std::uint16_t peer_port,
                     const udp_config_t& config = {});
@@ -231,10 +236,11 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
     [[nodiscard]] std::size_t effective_max_frame() const noexcept { return max_frame_; }
 
    private:
-    void run();  // receive thread
+    /** @brief The socket's wait callback: one datagram per readiness turn. */
+    static void on_ready(void* ctx, wait_source_t& self, std::uint8_t ready);
 
     // The peer endpoint packed as (ip << 16) | port (ip network order, port host
-    // order), atomic because listener mode updates it from the recv thread while
+    // order), atomic because listener mode updates it from the driving thread while
     // send() reads it from callers' threads. 0 = no peer yet (send is a no-op).
     [[nodiscard]] std::uint64_t peer() const noexcept {
         return peer_.load(std::memory_order_relaxed);
@@ -254,6 +260,9 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
 
     // RX segment source for view delivery (ADR-0042 §2).
     mem::mem_backend_t* backend_;
+    /** @brief The ONE held receive segment of an owning link, kept across readiness turns
+     *         until a datagram is handed up in it (#2142). */
+    view::segment_ptr_t rx_seg_;
     std::size_t max_frame_ = kDefaultMaxFrame;  // accepted-datagram cap (:settings; 0 => default)
     /** @brief This link's shed-frame counters (#2482), answered by @ref drop_stats. */
     drop_tally_t<> drops_;

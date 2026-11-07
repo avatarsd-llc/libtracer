@@ -504,6 +504,25 @@ they are the reason a new binding is small.
 
 ### The POSIX scaffold
 
+Every socket wait on a node belongs to its one wait module (ADR-0087 §3, #2147): a link
+registers each socket it reads and owns no thread for it, and whatever drives the module runs
+every delivery to completion. The wait has no timeout. A link given no module falls back to a
+thread of its own that drives a private one.
+
+```{doxygenenum} tr::net::ready_t
+:project: libtracer
+```
+
+```{doxygenstruct} tr::net::wait_source_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::wait_module_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenclass} tr::net::posix_endpoint_t
 :project: libtracer
 :members:

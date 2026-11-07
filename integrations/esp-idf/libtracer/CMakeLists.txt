@@ -130,6 +130,13 @@ endif()
 if(CONFIG_LIBTRACER_TRANSPORT_UDP OR CONFIG_LIBTRACER_TRANSPORT_TCP
    OR (CONFIG_LIBTRACER_TRANSPORT_WS AND LIBTRACER_PORTABLE_WS))
     list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_POSIX_ENDPOINT})
+    # The wait module's adapter (#2147): epoll on the `linux` target, poll(2) over lwIP on a
+    # chip. A TU choice, as the WS plane's is.
+    if(IDF_TARGET STREQUAL "linux")
+        list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_WAIT_EPOLL})
+    else()
+        list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_WAIT_POLL})
+    endif()
 endif()
 
 # register_builtin_transports dispatcher, generated from core's one template
