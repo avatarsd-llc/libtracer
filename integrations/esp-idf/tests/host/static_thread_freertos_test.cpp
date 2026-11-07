@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief #2416 — `tr::static_thread_t`'s ESP-IDF branch, on a host.
+ * @brief #2416, #2352 — `tr::static_thread_t`'s ESP-IDF branch, on a host.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -17,7 +17,13 @@
  * which the library's own POSIX objects do not share. The TU needs only `mem_source.hpp`'s
  * interface, which is header-only.
  *
- * What it pins (the issue's three criteria, plus the two refusal arms):
+ * The fake FreeRTOS calls are `xTaskCreateStaticPinnedToCore`, `vTaskSuspend`, `vTaskDelete`,
+ * `eTaskGetState`, `vTaskDelay`, and the static binary semaphore (`xSemaphoreCreateBinaryStatic`,
+ * `xSemaphoreTake`, `xSemaphoreGive`). The fake also checks the two orderings the branch exists
+ * for: no task is deleted before it has suspended itself (off the CPU), and no block goes back
+ * to its source while a live task's control block still lies inside it.
+ *
+ * What it pins (#2416's three criteria, plus the two refusal arms):
  *   1. a spawn creates its task with the static creator, on a stack inside the block the
  *      source handed out, at the requested depth. Only the static creator is declared by
  *      fake_idf's task.h, so a heap-allocating creator would not compile here at all;
@@ -25,6 +31,14 @@
  *   3. a platform that refuses the task makes `start` return false and the block go back;
  *   4. `join` (and the destructor) returns the block to its source, at the size it was drawn;
  *   5. a detached thread's block is returned by the next `join` once its body has ended.
+ * and #2352's run of the join and detach paths against a task that has not finished:
+ *   6. a `join` entered while the body still runs waits for it, and only then deletes the task
+ *      and returns the block;
+ *   7. a `join` that finds the task between its done-give and its suspend waits it off the
+ *      CPU (`eTaskGetState`, then `vTaskDelay`) before it deletes it;
+ *   8. a detached thread whose body still runs stays parked through a reap, and is reaped
+ *      once it ends;
+ *   9. a reap over several parked blocks releases the finished ones and keeps the running one.
  */
 
 #include <atomic>
@@ -36,6 +50,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -64,8 +79,10 @@ struct fake_task_t {
     std::thread th;
     std::mutex m;
     std::condition_variable cv;
+    StaticTask_t* tcb = nullptr;  ///< The control block it was created on.
     bool suspended = false;
     bool deleted = false;
+    bool polled = false;  ///< Its state was queried while it was still on the CPU.
 };
 
 /** @brief What the fake was asked for; reset by each case. */
@@ -78,6 +95,10 @@ struct fake_log_t {
     StackType_t* last_stack = nullptr;
     std::uint32_t last_depth = 0;
     StaticTask_t* last_tcb = nullptr;
+    bool hold_suspend = false;     ///< A suspending task waits until its state is polled first.
+    int delays = 0;                ///< vTaskDelay calls.
+    int deleted_unsuspended = 0;   ///< vTaskDelete of a task not yet off the CPU: a bug.
+    std::set<StaticTask_t*> live;  ///< Control blocks of tasks not yet deleted.
 };
 
 fake_log_t g_log;
@@ -115,7 +136,13 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t s) {
     return pdTRUE;
 }
 
-void vTaskDelay(TickType_t /*ticks*/) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+void vTaskDelay(TickType_t /*ticks*/) {
+    {
+        const std::lock_guard lock(g_log.m);
+        ++g_log.delays;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
 
 TaskHandle_t xTaskCreateStaticPinnedToCore(TaskFunction_t fn, const char* /*name*/, uint32_t depth,
                                            void* arg, UBaseType_t /*priority*/, StackType_t* stack,
@@ -127,8 +154,10 @@ TaskHandle_t xTaskCreateStaticPinnedToCore(TaskFunction_t fn, const char* /*name
         g_log.last_stack = stack;
         g_log.last_depth = depth;
         g_log.last_tcb = tcb;
+        g_log.live.insert(tcb);
     }
     auto* const t = new fake_task_t();
+    t->tcb = tcb;
     t->th = std::thread([t, fn, arg] {
         t_self = t;
         fn(arg);
@@ -140,11 +169,16 @@ void vTaskSuspend(TaskHandle_t task) {
     // static_thread_t suspends only itself, as its body's last act; the thread then waits here
     // until it is deleted, as a suspended task would sit off the CPU.
     fake_task_t* const t = task != nullptr ? static_cast<fake_task_t*>(task) : t_self;
+    bool hold = false;
     {
         const std::lock_guard log_lock(g_log.m);
         ++g_log.suspended;
+        hold = g_log.hold_suspend;
     }
     std::unique_lock lock(t->m);
+    // Held: the task stays on the CPU, past its done-give, until a joiner has seen it there
+    // (or deletes it early, which the delete counts as the bug it is).
+    if (hold) t->cv.wait(lock, [t] { return t->polled || t->deleted; });
     t->suspended = true;
     t->cv.notify_all();
     t->cv.wait(lock, [t] { return t->deleted; });
@@ -152,21 +186,31 @@ void vTaskSuspend(TaskHandle_t task) {
 
 eTaskState eTaskGetState(TaskHandle_t task) {
     auto* const t = static_cast<fake_task_t*>(task);
-    const std::lock_guard lock(t->m);
-    return t->suspended ? eSuspended : eRunning;
+    {
+        const std::lock_guard lock(t->m);
+        if (t->suspended) return eSuspended;
+        t->polled = true;
+    }
+    t->cv.notify_all();
+    return eRunning;
 }
 
 void vTaskDelete(TaskHandle_t task) {
     auto* const t = static_cast<fake_task_t*>(task);
+    bool was_suspended = false;
     {
         const std::lock_guard lock(t->m);
+        was_suspended = t->suspended;
         t->deleted = true;
     }
     t->cv.notify_all();
     t->th.join();
+    StaticTask_t* const tcb = t->tcb;
     delete t;
     const std::lock_guard lock(g_log.m);
     ++g_log.deleted;
+    if (!was_suspended) ++g_log.deleted_unsuspended;
+    g_log.live.erase(tcb);
 }
 
 // --- The suite --------------------------------------------------------------------------------
@@ -199,6 +243,14 @@ class counting_source_t final : public tr::mem::block_source_t {
     void release(void* p, std::size_t bytes, std::size_t /*align*/) noexcept override {
         ++releases;
         released_matching = released_matching || (p == block && bytes == block_bytes);
+        {
+            const std::lock_guard lock(g_log.m);
+            auto* const lo = static_cast<std::byte*>(p);
+            for (StaticTask_t* tcb : g_log.live) {
+                auto* const at = reinterpret_cast<std::byte*>(tcb);
+                if (at >= lo && at < lo + bytes) ++released_live;
+            }
+        }
         std::free(p);
     }
 
@@ -208,6 +260,7 @@ class counting_source_t final : public tr::mem::block_source_t {
     void* block = nullptr;
     std::size_t block_bytes = 0;
     bool released_matching = false;
+    int released_live = 0;  ///< Releases of a block whose task was not yet deleted: a bug.
 };
 
 void reset_log() {
@@ -219,6 +272,9 @@ void reset_log() {
     g_log.last_stack = nullptr;
     g_log.last_depth = 0;
     g_log.last_tcb = nullptr;
+    g_log.hold_suspend = false;
+    g_log.delays = 0;
+    g_log.deleted_unsuspended = 0;
 }
 
 std::atomic<int> g_ran{0};
@@ -320,6 +376,166 @@ void detached_block_is_reaped() {
     check(g_log.deleted == 1, "the parked task was deleted");
 }
 
+/** @brief A body that holds its task on the CPU until the test opens the gate. */
+struct gate_t {
+    std::mutex m;
+    std::condition_variable cv;
+    bool entered = false;
+    bool open = false;
+};
+
+void gated_body(void* arg) {
+    auto* const g = static_cast<gate_t*>(arg);
+    std::unique_lock lock(g->m);
+    g->entered = true;
+    g->cv.notify_all();
+    g->cv.wait(lock, [g] { return g->open; });
+}
+
+void wait_entered(gate_t& g) {
+    std::unique_lock lock(g.m);
+    g.cv.wait(lock, [&g] { return g.entered; });
+}
+
+void open_gate(gate_t& g) {
+    {
+        const std::lock_guard lock(g.m);
+        g.open = true;
+    }
+    g.cv.notify_all();
+}
+
+/** @brief A snapshot of the fake's counters, taken under its lock. */
+struct counts_t {
+    int created, deleted, suspended, delays, deleted_unsuspended;
+    std::size_t live;
+};
+
+counts_t counts() {
+    const std::lock_guard lock(g_log.m);
+    return {
+        g_log.created,    g_log.deleted, g_log.suspended, g_log.delays, g_log.deleted_unsuspended,
+        g_log.live.size()};
+}
+
+void join_waits_for_a_running_body() {
+    std::printf("a join entered while the body runs waits for it, then deletes and releases\n");
+    reset_log();
+    counting_source_t src;
+    gate_t gate;
+    tr::static_thread_t t;
+    check(t.start(&gated_body, &gate, 4096, "j", src), "start succeeds");
+    wait_entered(gate);
+    std::atomic<bool> joining{false};
+    std::atomic<bool> held_while_running{false};
+    // The opener runs only while the main thread is inside join: it sees the task still
+    // alive and the block still held, and only then lets the body return.
+    std::thread opener([&] {
+        while (!joining.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const counts_t c = counts();
+        held_while_running = c.deleted == 0 && c.live == 1 && c.suspended == 0;
+        open_gate(gate);
+    });
+    joining = true;
+    t.join();
+    opener.join();
+    const counts_t c = counts();
+    check(held_while_running.load(), "join did not delete the task while its body ran");
+    check(!t.joinable(), "join ends the thread here");
+    check(c.deleted == 1 && c.live == 0, "join deleted the task once its body returned");
+    check(c.deleted_unsuspended == 0, "the task was off the CPU when it was deleted");
+    check(src.releases == 1 && src.released_matching && src.released_live == 0,
+          "the block went back only after its task was gone");
+}
+
+void join_waits_the_task_off_the_cpu() {
+    std::printf("a join that finds the task between its give and its suspend waits it off\n");
+    reset_log();
+    {
+        const std::lock_guard lock(g_log.m);
+        g_log.hold_suspend = true;
+    }
+    counting_source_t src;
+    g_ran = 0;
+    tr::static_thread_t t;
+    check(t.start(&body, &g_ran, 4096, "w", src), "start succeeds");
+    t.join();
+    const counts_t c = counts();
+    check(g_ran.load() == 1, "the body ran once");
+    check(c.delays >= 1, "join yielded (vTaskDelay) while the task was still on the CPU");
+    check(c.deleted == 1 && c.deleted_unsuspended == 0,
+          "the task was deleted only once it had suspended");
+    check(src.releases == 1 && src.released_live == 0,
+          "the block went back only after its task was gone");
+    reset_log();
+}
+
+void running_detached_thread_stays_parked() {
+    std::printf("a detached thread whose body runs survives a reap, and is reaped once done\n");
+    reset_log();
+    counting_source_t src;
+    gate_t gate;
+    tr::static_thread_t t;
+    check(t.start(&gated_body, &gate, 4096, "p", src), "start succeeds");
+    wait_entered(gate);
+    t.detach();
+    check(!t.joinable(), "detach ends the thread here");
+    {
+        tr::static_thread_t other;
+        other.join();  // a reap over a parked block whose body has not returned
+    }
+    counts_t c = counts();
+    check(src.releases == 0 && c.deleted == 0 && c.live == 1,
+          "the running task was kept parked: not deleted, its block still held");
+    open_gate(gate);
+    while (suspended_count() == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    {
+        tr::static_thread_t other;
+        other.join();
+    }
+    c = counts();
+    check(src.releases == 1 && src.released_matching && src.released_live == 0,
+          "once its body returned, the next reap returned the block after the task was gone");
+    check(c.deleted == 1 && c.deleted_unsuspended == 0, "the parked task was deleted off-CPU");
+}
+
+void reap_keeps_the_running_among_the_parked() {
+    std::printf("a reap over several parked blocks releases the finished, keeps the running\n");
+    reset_log();
+    counting_source_t src;
+    gate_t gate;
+    g_ran = 0;
+    tr::static_thread_t a;
+    tr::static_thread_t b;
+    tr::static_thread_t c;
+    check(a.start(&body, &g_ran, 4096, "a", src), "the first start succeeds");
+    check(b.start(&gated_body, &gate, 4096, "b", src), "the second start succeeds");
+    check(c.start(&body, &g_ran, 4096, "c", src), "the third start succeeds");
+    wait_entered(gate);
+    a.detach();
+    b.detach();
+    c.detach();
+    while (suspended_count() < 2) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    {
+        tr::static_thread_t other;
+        other.join();
+    }
+    counts_t n = counts();
+    check(src.releases == 2 && n.deleted == 2 && n.live == 1,
+          "the two finished blocks were reaped, the running one kept");
+    open_gate(gate);
+    while (suspended_count() < 3) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    {
+        tr::static_thread_t other;
+        other.join();
+    }
+    n = counts();
+    check(src.releases == 3 && n.deleted == 3 && n.live == 0, "the last block was reaped");
+    check(n.deleted_unsuspended == 0 && src.released_live == 0,
+          "every block went back only after its task was gone");
+}
+
 }  // namespace
 
 int main() {
@@ -331,6 +547,10 @@ int main() {
     refused_block_is_a_failed_spawn();
     refused_task_returns_the_block();
     detached_block_is_reaped();
+    join_waits_for_a_running_body();
+    join_waits_the_task_off_the_cpu();
+    running_detached_thread_stays_parked();
+    reap_keeps_the_running_among_the_parked();
     std::printf("%s: %d failure(s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
