@@ -159,8 +159,10 @@ struct budget_t {
      * Not a per-T figure, so it must cover the largest T. In NARROW this store also holds
      * every link's state (two links per lane, see `build_graph`), about 1.1 KiB per lane, so
      * NARROW at T=24 is its peak: 28,552 B before #2282 added an 8 B tenancy word to each
-     * link's mount, 29,128 B after. 32 KiB put that past the 7/8 headroom `faults()` holds
-     * every store to; 48 KiB leaves NARROW T=24 at about 60 %. The capacity is not banked:
+     * link's mount (28,936 B), 29,128 B once #2346 spilled the graph's own ropes here too, and
+     * 28,744 B since #2413 moved the word onto the bus-only token cache. 32 KiB put the peak
+     * past the 7/8 headroom `faults()` holds every store to; 48 KiB leaves NARROW T=24 at
+     * about 60 %. The capacity is not banked:
      * only `used()` is, and raising the slab moves no `used()` figure.
      */
     static constexpr std::size_t kGraph = 48U * 1024U;

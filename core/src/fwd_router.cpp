@@ -1142,7 +1142,11 @@ namespace {
 }  // namespace
 
 peer_handle_t fwd_router_t::session_tenant(const child_rx_ctx_t& ctx, std::uint32_t slot) noexcept {
-    session_tenancy_t* const t = ctx.tenancy.load(std::memory_order_acquire);
+    // The words live on the bus token cache (#2413), reached by the facet pointer: a ctx that
+    // is not a bus mount now has no slots, so it names no tenant, whatever it held before.
+    const bus_token_cache_t* const cache = ctx.peer_tokens.load(std::memory_order_acquire);
+    session_tenancy_t* const t =
+        cache != nullptr ? cache->tenancy.load(std::memory_order_acquire) : nullptr;
     return t != nullptr && slot < t->size
                ? peer_handle_from_bits(t->word(slot).load(std::memory_order_acquire))
                : peer_handle_t{};
@@ -1161,7 +1165,11 @@ peer_handle_t fwd_router_t::anchor_tenant(const child_rx_ctx_t* ctx, std::string
 
 bool fwd_router_t::set_session_tenant_locked(const child_rx_ctx_t& ctx, std::uint32_t slot,
                                              std::uint64_t bits) {
-    session_tenancy_t* t = ctx.tenancy.load(std::memory_order_relaxed);
+    // Only a bus mount's arrival seams get here, and its cache was taken before they were
+    // installed; it outlives the ctx's every re-add, so the words survive one too.
+    bus_token_cache_t* const cache = ctx.peer_tokens_own;
+    if (cache == nullptr) return false;
+    session_tenancy_t* t = cache->tenancy.load(std::memory_order_relaxed);
     if (t == nullptr || slot >= t->size) {
         // Doubled from 8 until it covers the slot; the old words are copied, the old table
         // parked for any reader still standing on it (see `session_tenancy_t`).
@@ -1180,7 +1188,7 @@ bool fwd_router_t::set_session_tenant_locked(const child_rx_ctx_t& ctx, std::uin
                 t != nullptr && i < t->size ? t->word(i).load(std::memory_order_relaxed) : 0;
             ::new (words + i * sizeof(std::uint64_t)) std::atomic<std::uint64_t>(held);
         }
-        ctx.tenancy.store(grown, std::memory_order_release);
+        cache->tenancy.store(grown, std::memory_order_release);
         t = grown;
     }
     t->word(slot).store(bits, std::memory_order_release);
@@ -2623,15 +2631,16 @@ fwd_router_t::~fwd_router_t() {
     // them any more — the transports outlive no router they are registered with.
     for (child_rx_ctx_t* c = rx_head_.load(std::memory_order_relaxed); c != nullptr;) {
         child_rx_ctx_t* const next = c->next.load(std::memory_order_relaxed);
-        if (bus_token_cache_t* const t = c->peer_tokens_own) {
-            t->~bus_token_cache_t();
-            link_src_->release(t, sizeof(bus_token_cache_t), alignof(bus_token_cache_t));
-        }
-        for (session_tenancy_t* t = c->tenancy.load(std::memory_order_relaxed); t != nullptr;) {
-            session_tenancy_t* const parked = t->parked;
-            link_src_->release(t, sizeof(session_tenancy_t) + t->size * sizeof(std::uint64_t),
-                               alignof(session_tenancy_t));
-            t = parked;
+        if (bus_token_cache_t* const cache = c->peer_tokens_own) {
+            for (session_tenancy_t* t = cache->tenancy.load(std::memory_order_relaxed);
+                 t != nullptr;) {
+                session_tenancy_t* const parked = t->parked;
+                link_src_->release(t, sizeof(session_tenancy_t) + t->size * sizeof(std::uint64_t),
+                                   alignof(session_tenancy_t));
+                t = parked;
+            }
+            cache->~bus_token_cache_t();
+            link_src_->release(cache, sizeof(bus_token_cache_t), alignof(bus_token_cache_t));
         }
         c->~child_rx_ctx_t();
         link_src_->release(c, sizeof(child_rx_ctx_t), alignof(child_rx_ctx_t));

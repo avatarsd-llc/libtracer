@@ -1078,6 +1078,31 @@ class fwd_router_t {
      * this deque never invalidates a reference either.
      */
     /**
+     * @brief A bus mount's TENANCY WORDS: per session slot, the `peer_handle_t::bits()` of the
+     *        session that holds the slot's anchor, `0` when none does (#2234).
+     *
+     * What a route to an anchor, and the reverse-direction mint, resolve the session by: one
+     * acquire load names the exact tenancy, so a delivery reaches `peer_link_of` for that
+     * handle and never a successor's. Held here rather than as the anchor's value, so an
+     * arrival or a departure touches no `value_t` and allocates nothing once the table covers
+     * the slot. 8 B per slot; the words follow this header in one block from the link plane's
+     * source.
+     *
+     * Grown, never shrunk, under `tenancy_m_`: a table too small for an arriving slot is
+     * replaced by one twice as large and the old one PARKED on `parked`, not freed, so a
+     * lock-free reader still holding it reads a live (if stale-sized) table. The whole chain
+     * goes back in the router's destructor.
+     */
+    struct alignas(std::atomic<std::uint64_t>) session_tenancy_t {
+        std::uint32_t size = 0;              /**< @brief Slots the words cover. */
+        session_tenancy_t* parked = nullptr; /**< @brief The table this one replaced. */
+        /** @brief The word for @p slot; `slot < size`. */
+        [[nodiscard]] std::atomic<std::uint64_t>& word(std::uint32_t slot) noexcept {
+            return std::launder(reinterpret_cast<std::atomic<std::uint64_t>*>(this + 1))[slot];
+        }
+    };
+
+    /**
      * @brief The BUS tier's per-peer LINK-TOKEN cache — direct-mapped, fixed, lock-free.
      *
      * The carry (#1266 / #1417) needs the arriving peer's `graph_t::intern_link` token in
@@ -1108,6 +1133,20 @@ class fwd_router_t {
          *         `(index, generation)` pair read whole — stored and loaded, never an RMW; on
          *         rv32 each access is an `__atomic_*_8` call (#1697). */
         std::atomic<std::uint64_t> val[kWays] = {};
+        /**
+         * @brief The mount's tenancy words (#2234); null until its first arrival.
+         *
+         * Held HERE, on the allocation only a bus mount makes, rather than on every child's
+         * ctx (#2413): a point-to-point child has no session slots, so an 8 B word on its ctx
+         * was pure overhead on every link. The cache lives as long as the ctx and is reused
+         * across every re-add, which is the lifetime the words need: a slot anchor outlives
+         * its mount's registration, and the word is what the next arrival in that slot finds
+         * its predecessor by. `clear` leaves it alone for that reason.
+         *
+         * OWNED with every table it replaced (`session_tenancy_t::parked`), returned by the
+         * router's destructor. Written under `tenancy_m_`, read lock-free.
+         */
+        std::atomic<session_tenancy_t*> tenancy{nullptr};
 
         /**
          * @brief @p peer's cached token, or an invalid one.
@@ -1143,34 +1182,10 @@ class fwd_router_t {
                 key[w].store(0, std::memory_order_release);
         }
 
-        /** @brief Forget every peer — a re-add rebinds the whole mount (#884). */
+        /** @brief Forget every peer — a re-add rebinds the whole mount (#884). The tenancy
+         *         words are kept: see `tenancy`. */
         void clear() noexcept {
             for (std::atomic<std::uint32_t>& k : key) k.store(0, std::memory_order_release);
-        }
-    };
-
-    /**
-     * @brief A bus mount's TENANCY WORDS: per session slot, the `peer_handle_t::bits()` of the
-     *        session that holds the slot's anchor, `0` when none does (#2234).
-     *
-     * What a route to an anchor, and the reverse-direction mint, resolve the session by: one
-     * acquire load names the exact tenancy, so a delivery reaches `peer_link_of` for that
-     * handle and never a successor's. Held here rather than as the anchor's value, so an
-     * arrival or a departure touches no `value_t` and allocates nothing once the table covers
-     * the slot. 8 B per slot; the words follow this header in one block from the link plane's
-     * source.
-     *
-     * Grown, never shrunk, under `tenancy_m_`: a table too small for an arriving slot is
-     * replaced by one twice as large and the old one PARKED on `parked`, not freed, so a
-     * lock-free reader still holding it reads a live (if stale-sized) table. The whole chain
-     * goes back in the router's destructor.
-     */
-    struct alignas(std::atomic<std::uint64_t>) session_tenancy_t {
-        std::uint32_t size = 0;              /**< @brief Slots the words cover. */
-        session_tenancy_t* parked = nullptr; /**< @brief The table this one replaced. */
-        /** @brief The word for @p slot; `slot < size`. */
-        [[nodiscard]] std::atomic<std::uint64_t>& word(std::uint32_t slot) noexcept {
-            return std::launder(reinterpret_cast<std::atomic<std::uint64_t>*>(this + 1))[slot];
         }
     };
 
@@ -1258,15 +1273,6 @@ class fwd_router_t {
         /** @brief `peer_tokens_own` as the frame path reads it; null ⇒ the FLAT tier. */
         std::atomic<bus_token_cache_t*> peer_tokens{nullptr};
         /**
-         * @brief A bus mount's tenancy words (#2234); null until its first arrival.
-         *
-         * OWNED with every table it replaced (`session_tenancy_t::parked`) and kept across a
-         * re-add: a slot anchor outlives its mount's registration, and the word is what the
-         * next arrival in that slot finds its predecessor by. `mutable` because the arrival
-         * seam hands the ctx around `const`; written under `tenancy_m_`, read lock-free.
-         */
-        mutable std::atomic<session_tenancy_t*> tenancy{nullptr};
-        /**
          * @brief The registry slot this child was registered into — resolved once, here.
          *
          * A bound hop needs the LINK an element names, and the link lives in the registry
@@ -1324,6 +1330,10 @@ class fwd_router_t {
          */
         std::atomic<child_rx_ctx_t*> next{nullptr};
     };
+    // A point-to-point child pays for no bus state beyond the two cache pointers (#2413): the
+    // tenancy words live on `bus_token_cache_t`. Pinned at its pre-#2282 size on LP64.
+    static_assert(sizeof(void*) != 8 || sizeof(child_rx_ctx_t) == 104,
+                  "child_rx_ctx_t grew: bus-only state belongs on bus_token_cache_t");
 
     /**
      * @brief Route one OWNING inbound frame from a rope-delivering link
@@ -1747,7 +1757,7 @@ class fwd_router_t {
                               std::string_view peer);
 
     /** @brief The session holding @p slot of @p ctx's mount (#2234); invalid when none does.
-     *         Lock-free: one acquire load of the table and one of the word. */
+     *         Lock-free: acquire loads of the bus cache, its table and the word (#2413). */
     [[nodiscard]] static peer_handle_t session_tenant(const child_rx_ctx_t& ctx,
                                                       std::uint32_t slot) noexcept;
     /**
