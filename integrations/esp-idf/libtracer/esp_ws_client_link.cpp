@@ -18,7 +18,6 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
-#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <expected>
@@ -95,8 +94,8 @@ constexpr int kWatchdogMs = static_cast<int>((kTaskWdtSeconds != 0 ? kTaskWdtSec
  * dial's orphaned recv thread outlives the link that started it. Half the window keeps
  * that orphan comfortably shorter than the reconnect cadence and leaves the other half
  * for the write bound (a quarter) and whatever else the destroying task holds. Nothing
- * else in the loop is unbounded — the backoff wakes on `stop_`, the poll turn is
- * @ref kPollMs.
+ * else in the loop holds a teardown up: the backoff (untimed since #2337) wakes on `stop_`,
+ * and the poll turn is @ref kPollMs.
  */
 constexpr int kDialTimeoutMs = kWatchdogMs / 2;
 
@@ -160,8 +159,9 @@ constexpr int kPollMs = 200;
 #endif
 
 /**
- * @brief Backoff before re-dialing after a failed/lost connection (ms) — an upper
- *        bound only: the wait is on a condition variable the destructor signals.
+ * @brief Backoff before re-dialing after a failed/lost connection (ms), measured on the
+ *        application's `now` (@ref esp_ws_client_link_t::sweep, #2337): the link reads no
+ *        clock and the wait has no timeout of its own.
  *
  * Kconfig (`CONFIG_LIBTRACER_WS_CLIENT_RECONNECT_BACKOFF_MS`, #1160), and the most
  * deployment-shaped of the three: it is how hard a node re-dials a peer that is down, so
@@ -888,6 +888,32 @@ esp_ws_client_link_t::timing_t esp_ws_client_link_t::timing() noexcept {
     return {kDialTimeoutMs, kWriteTimeoutMs, kReadTimeoutMs, kPollMs, kReconnectBackoffMs};
 }
 
+std::uint64_t esp_ws_client_link_t::sweep(std::uint64_t now, std::uint64_t /*deadline*/) {
+    constexpr std::uint64_t backoff = kReconnectBackoffMs;
+    std::uint64_t next = 0;
+    bool due = false;
+    {
+        const std::lock_guard<tr::mutex_t> lk(backoff_m_);
+        clocked_ = true;  // from here on the app's `now`, not a send, ends the backoff
+        // The first call that finds the recv thread backing off stamps the end; a call at or
+        // past the stamp ends it. A stamp is never `now`, so one call cannot do both.
+        if (backing_off_ && retry_at_ == 0) retry_at_ = now + backoff;
+        due = backing_off_ && now >= retry_at_;
+        if (due) {
+            backing_off_ = false;
+            retry_at_ = 0;
+        }
+        // Down and not parked (a dial in flight, or about to start): nothing is stamped yet,
+        // so ask to be called one backoff from now, when a failed dial will be waiting.
+        const bool down = armed_.load(std::memory_order_acquire) &&
+                          !stop_.load(std::memory_order_acquire) &&
+                          !connected_.load(std::memory_order_acquire);
+        next = backing_off_ ? retry_at_ : (down ? now + backoff : 0);
+    }
+    if (due) backoff_cv_.notify_all();
+    return next;
+}
+
 void esp_ws_client_link_t::drop() {
     // Close under the syscall serializer so an in-flight send() cannot touch a
     // half-closed handle, and mark down so the recv loop re-dials (which rebuilds
@@ -1009,6 +1035,16 @@ void esp_ws_client_link_t::send_on(std::span<const std::span<const std::byte>> i
         },
         [] {});
     if (r.shed != 0) tx_drops_.fetch_add(r.shed, std::memory_order_relaxed);
+    // A send on a link that is down is the event that ends a backoff no app clock drives
+    // (#2337). Inside the sender tally, so the destructor cannot have destroyed the mutex.
+    if (connected_.load(std::memory_order_acquire)) return;
+    bool woke = false;
+    {
+        const std::lock_guard<tr::mutex_t> lk(backoff_m_);
+        woke = backing_off_ && !clocked_;
+        backing_off_ = backing_off_ && !woke;
+    }
+    if (woke) backoff_cv_.notify_all();
 }
 
 std::size_t esp_ws_client_link_t::frame_into(std::byte* dst,
@@ -1197,18 +1233,18 @@ void esp_ws_client_link_t::recv_loop() {
                 }
             }
             if (backoff_now) {
-                // Interruptible backoff. `sleep_for` was not: the destructor's join
-                // inherited the whole 1.5 s on exactly the unreachable peer a re-dial
-                // exists for. The dial itself is STILL uninterruptible —
-                // esp_transport_connect takes no cancellation, and shutting its socket
-                // down from another task is not portable across IDF versions — but since
-                // #1058 a teardown does not pay for it either: it condemns the in-flight
-                // dial and detaches this thread, so what the destroying task inherits is
-                // one poll turn plus one write bound, and the orphaned dial pays its own
-                // kDialTimeoutMs out on this thread.
+                // The backoff has no timeout and reads no clock (#2337): it ends when the
+                // app's `now` passes it (sweep), on a send while no app clock drives the link,
+                // or at teardown. With none of them it stays parked, which is the "never
+                // spins" half. The dial itself is STILL uninterruptible —
+                // esp_transport_connect takes no cancellation — but since #1058 a teardown
+                // does not pay for it: it condemns the in-flight dial and detaches this
+                // thread, and the orphaned dial pays its own kDialTimeoutMs out here.
                 std::unique_lock<tr::mutex_t> lk(backoff_m_);
-                backoff_cv_.wait_for(lk, std::chrono::milliseconds(kReconnectBackoffMs),
-                                     [this] { return stop_.load(std::memory_order_acquire); });
+                backing_off_ = true;
+                backoff_cv_.wait(
+                    lk, [this] { return !backing_off_ || stop_.load(std::memory_order_acquire); });
+                backing_off_ = false;
             }
             continue;
         }

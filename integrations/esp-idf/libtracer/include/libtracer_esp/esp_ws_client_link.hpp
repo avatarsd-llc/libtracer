@@ -90,13 +90,23 @@
  *     that stages the link with `provide_link` MUST issue the creating write, or arm the
  *     link itself: a link that is never armed never dials.
  *   - A single recv thread (spawned by @ref start_receiving) owns the read side: it dials
- *     (with reconnect/backoff), then loops `esp_transport_poll_read` +
+ *     (with reconnect/backoff, see the next item), then loops `esp_transport_poll_read` +
  *     `esp_transport_read` — reading each frame's header into core's frame-ingress slot
  *     and its body DIRECTLY into a segment of its exact length (server→client frames are
  *     unmasked per RFC 6455 §5.1, so the read is the only pass), and delivers each message
  *     to the router SYNCHRONOUSLY on that thread, exactly as the raw client delivered on its
  *     recv thread. A PING is answered with a PONG and a CLOSE with a CLOSE, through the
  *     send path (#2265).
+ *   - THE RECONNECT BACKOFF RUNS ON THE APPLICATION'S CLOCK (#2337). The link reads no clock
+ *     and waits on no timeout to space its re-dials: after a failed dial, or a connection
+ *     that delivered nothing, the recv thread parks until something ends the backoff. With
+ *     @ref sweep called (by `transport_vertex_t::sweep` or by the application), the end is
+ *     the app's `now` reaching `CONFIG_LIBTRACER_WS_CLIENT_RECONNECT_BACKOFF_MS` past the
+ *     first call that found the backoff, so a node that drives this link passes `now` in
+ *     milliseconds. A link whose application never calls @ref sweep re-dials on its next
+ *     event instead: a `send()` while it is down ends the backoff. With neither, it stays
+ *     parked and never spins; a receive-only link therefore wants @ref sweep driven. A
+ *     connection that delivered and then died re-dials at once, as before.
  *   - `send()` may be called from ANY task (a subscription push on an io/timer
  *     thread, a reply on the recv thread itself). Writes are serialized by one small
  *     mutex, `write_m_`, held only for the write. The READ takes no lock (#2265): only
@@ -496,6 +506,24 @@ class esp_ws_client_link_t final : public transport_t {
     }
 
     /**
+     * @brief The application's clock: ends the reconnect backoff once @p now has passed it
+     *        (#2337).
+     *
+     * While the recv thread is backing off, the first call stamps the backoff's end at
+     * @p now plus `CONFIG_LIBTRACER_WS_CLIENT_RECONNECT_BACKOFF_MS` and answers it; a call at
+     * or past that stamp starts the next dial. While the link is down for any other reason (a
+     * dial in flight, a dead connection not yet re-dialed), it answers one backoff after
+     * @p now, so an application that sleeps until the answer comes back to stamp the next
+     * backoff. A link that is up, unarmed or shut down answers 0. The backoff is read in
+     * @p now's units, milliseconds.
+     *
+     * The first call also hands the spacing to the application for good: from then on a
+     * `send()` no longer ends a backoff. This link has no per-peer progress window, so
+     * @p deadline is unused.
+     */
+    std::uint64_t sweep(std::uint64_t now, std::uint64_t deadline) override;
+
+    /**
      * @brief One coherent snapshot of this link's passive counters plus the two
      *        dial facts only the link can know.
      *
@@ -643,7 +671,8 @@ class esp_ws_client_link_t final : public transport_t {
                                        *          twice: the poll and the `send()`). */
         int read_timeout_ms = 0;      /**< @brief Kconfig: read after a positive poll. */
         int poll_ms = 0;              /**< @brief Kconfig: one recv-loop poll turn. */
-        int reconnect_backoff_ms = 0; /**< @brief Kconfig: wait before a re-dial. */
+        int reconnect_backoff_ms = 0; /**< @brief Kconfig: spacing before a re-dial, on
+                                       *          the app's `now` (@ref sweep, #2337). */
     };
 
     /** @brief The compiled-in @ref timing_t — a build property, so `static`. */
@@ -846,11 +875,19 @@ class esp_ws_client_link_t final : public transport_t {
      *         destructor sets the top bit and waits on this word; the last sender out under
      *         that bit wakes it, so the drain reads no clock (#2338). */
     std::atomic<std::uint32_t> senders_{0};
-    /** @brief Guards the recv thread's parked wait — the reconnect backoff — which
-     *         @ref shut_down has to be able to cut short, hence a condition variable rather
-     *         than `sleep_for` (#952). Never taken with `write_m_` held. */
+    /** @brief Guards the recv thread's parked wait — the reconnect backoff — and the three
+     *         fields below, which say when it ends. A leaf: never taken with `write_m_` held,
+     *         and nothing is taken under it. */
     tr::mutex_t backoff_m_;
-    tr::condvar_t backoff_cv_; /**< @brief Signalled by @ref shut_down. */
+    /** @brief Signalled when the backoff ends: by @ref sweep, by a `send()` on an
+     *         unclocked link, and by @ref shut_down. The wait has no timeout (#2337). */
+    tr::condvar_t backoff_cv_;
+    /** @brief The recv thread is parked in the backoff; cleared by whatever ends it. */
+    bool backing_off_ = false;
+    /** @brief @ref sweep has run: the app's `now`, not a `send()`, ends the backoff. */
+    bool clocked_ = false;
+    /** @brief The app's `now` at which the backoff ends; 0 = not stamped yet. */
+    std::uint64_t retry_at_ = 0;
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     /**
      * @brief The per-message TRAFFIC half of @ref link_counters_t (#1663), kept only when

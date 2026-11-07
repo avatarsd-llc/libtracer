@@ -319,7 +319,8 @@ void test_the_drain_wakes_on_the_last_sender_out() {
  *
  * With every dial failing, the recv thread spends its life in the backoff. Pre-fix that
  * was `sleep_for(1500)`, which the destructor's join inherited whole — on exactly the
- * unreachable peer a re-dial exists to recover from.
+ * unreachable peer a re-dial exists to recover from. Since #2337 the backoff is untimed,
+ * so this case is also what shows teardown still ends one at once.
  */
 void test_teardown_does_not_wait_out_the_reconnect_backoff() {
     std::printf("teardown does not wait out the reconnect backoff:\n");
@@ -334,9 +335,10 @@ void test_teardown_does_not_wait_out_the_reconnect_backoff() {
     link.reset();
     const long long elapsed = ms_since(start);
 
-    // The backoff is 1500 ms and the recv thread enters it immediately after the failed
-    // dial, so pre-fix this reading is the whole of it.
-    check_under_ms(elapsed, 500, "the destructor cut the 1500 ms backoff short");
+    // The recv thread enters the backoff immediately after the failed dial. Since #2337 the
+    // backoff has no timeout at all (only the app's clock or a send ends it), so a
+    // destructor that did not wake it would never return.
+    check_under_ms(elapsed, 500, "the destructor ended the pending backoff at once");
     check(fake_ws::handle_misuse() == 0, "and nothing touched a destroyed handle on the way out");
 }
 
@@ -555,8 +557,9 @@ void test_send_during_a_redial_reads_no_handle() {
         });
     }
     // Run until the recv thread has rebuilt the handles at least twice MORE, so the
-    // senders straddle real rewrites rather than a single quiet window. The backoff is
-    // 1500 ms, so this is a few seconds; the ceiling only stops a wedged run.
+    // senders straddle real rewrites rather than a single quiet window. With no app clock,
+    // each send ends the backoff (#2337), so this is quick; the ceiling only stops a wedged
+    // run.
     const bool redialed =
         wait_until([&] { return fake_ws::connect_count() >= dials_before + 2; }, 12s);
     run.store(false, std::memory_order_release);
@@ -788,7 +791,8 @@ void test_an_unconnected_link_holds_no_connection_memory() {
         link->start_receiving();
         const int slot = state.live.load();  // the slot and its string copies
         check(io.live == 0, "an idle link draws nothing from memory.io");
-        check(wait_until([] { return fake_ws::connect_count() >= 2; }, 5s),
+        check(fake_ws::sweep_until(
+                  *link, [] { return fake_ws::connect_count() >= 2; }, 5s),
               "the link dialed an unreachable peer twice");
         check(wait_until([] { return fake_ws::live_handles() == 0; }, 2s),
               "and holds no transport pair across the backoff");
@@ -796,7 +800,8 @@ void test_an_unconnected_link_holds_no_connection_memory() {
         check(io.live == 0, "and from memory.io nothing at all");
 
         fake_ws::fail_connects(false);
-        check(wait_until([&] { return link->link_up(); }, 5s), "the peer came back");
+        check(
+            fake_ws::sweep_until(*link, [&] { return link->link_up(); }, 5s), "the peer came back");
         check(wait_until([&] { return state.live == slot; }, 2s),
               "a standing connection holds no read buffer and no handshake block (#2484)");
         check(io.live == 0, "and no write scratch: a send draws its own frame (#2265)");
@@ -812,7 +817,9 @@ void test_an_unconnected_link_holds_no_connection_memory() {
         // End CONNECTED, so the teardown joins the recv thread: a failing dial still in
         // flight would be orphaned and return its slot to `state` after this scope.
         fake_ws::fail_connects(false);
-        check(wait_until([&] { return link->link_up(); }, 5s), "and it came back up");
+        check(fake_ws::sweep_until(
+                  *link, [&] { return link->link_up(); }, 5s),
+              "and it came back up");
     }
     check(drained_fake(), "it drained");
     check(state.live == 0 && io.live == 0, "and its destructor returned everything else");
@@ -843,7 +850,8 @@ void test_a_refused_scratch_is_a_failed_dial() {
               "the refused connection's pair was released");
         check(!link->ok(), "and the link did not come up");
         state.refusing.store(false);
-        check(wait_until([&] { return link->link_up(); }, 5s),
+        check(fake_ws::sweep_until(
+                  *link, [&] { return link->link_up(); }, 5s),
               "the next dial came up once the store had room");
     }
     check(drained_fake(), "it drained");
@@ -1027,7 +1035,8 @@ void test_control_frames_are_answered_through_the_write_path() {
     const int dials = fake_ws::connect_count();
     fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::CLOSE, true, 2, 0x03)});
     check(wait_until([] { return fake_ws::last_write_op() == 0x8; }, 2s), "a CLOSE went out");
-    check(wait_until([&] { return fake_ws::connect_count() > dials; }, 4s),
+    check(fake_ws::sweep_until(
+              *link, [&] { return fake_ws::connect_count() > dials; }, 4s),
           "and the link dropped the connection and re-dialed");
     check(fake_ws::handle_misuse() == 0, "with no handle misuse anywhere in the case");
     link.reset();
