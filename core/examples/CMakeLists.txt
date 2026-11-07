@@ -443,3 +443,7 @@ if(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS)
         set_property(TEST example_net_multi_peer_listener PROPERTY SKIP_RETURN_CODE 77)
     endif()
 endif()
+
+# #2599: every test above without its own TIMEOUT gets the default (core/CMakeLists.txt). Keep
+# this the last line, so a test added later picks it up.
+libtracer_default_test_timeouts()

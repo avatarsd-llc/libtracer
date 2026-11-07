@@ -236,6 +236,17 @@ on:
     - cron: "0 0 * * *"
   workflow_dispatch:
 
+# ── CTEST PARALLELISM (#2448) ───────────────────────────────────────────────────────
+# Every ctest call in this file reads CTEST_PARALLEL_LEVEL, so no ctest line names `-j`.
+# A pull request push (the quick set, and the full matrix on a `batch/*` landing) and a
+# `main` push run 4 tests at a time; the suites that spend real sleeps, poll loops or
+# socket timeouts are RUN_SERIAL in core/tests/CMakeLists.txt, so ctest runs each of
+# them alone. The nightly, every release tag and a manual dispatch run the whole suite
+# serially (1), so serial ordering is still exercised before a release ships. The same
+# tests run in every leg either way; only their concurrency differs.
+env:
+  CTEST_PARALLEL_LEVEL: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && '1' || '4' }}
+
 jobs:
   # Decides whether this change can affect anything core-ci builds. It executes no build,
   # but our own runs still take the `ci-local` route like every other job (#2348): no
