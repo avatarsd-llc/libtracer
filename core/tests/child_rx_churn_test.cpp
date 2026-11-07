@@ -39,6 +39,7 @@
  *     makes "resolves to the new tenancy" mean delivery and not just a matching integer.
  */
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -57,8 +58,29 @@
 #include "pair_body.hpp"
 #include "test_support.hpp"
 
+namespace tr::net {
+/** @brief Test-only door: who holds a session slot, asked through either cache pointer. */
+struct fwd_router_test_door_t {
+    /** @brief The slot holder a route or a mint sees: through the FACET (`peer_tokens`). */
+    static peer_handle_t holder(const fwd_router_t& r, std::string_view name, std::uint32_t slot) {
+        const fwd_router_t::child_rx_ctx_t* const ctx = r.ctx_by_name(name);
+        return ctx == nullptr ? peer_handle_t{}
+                              : fwd_router_t::session_tenant(
+                                    ctx->peer_tokens.load(std::memory_order_acquire), slot);
+    }
+    /** @brief The slot holder the arrival and departure seams see: the OWNING pointer. */
+    static peer_handle_t owned_holder(const fwd_router_t& r, std::string_view name,
+                                      std::uint32_t slot) {
+        const fwd_router_t::child_rx_ctx_t* const ctx = r.ctx_by_name(name);
+        return ctx == nullptr ? peer_handle_t{}
+                              : fwd_router_t::session_tenant(ctx->peer_tokens_own, slot);
+    }
+};
+}  // namespace tr::net
+
 namespace {
 
+using door_t = tr::net::fwd_router_test_door_t;
 using tr::graph::fwd_op_t;
 using tr::graph::graph_t;
 using tr::graph::path_t;
@@ -93,6 +115,8 @@ class sink_link_t : public tr::net::transport_t {
 class bus_sink_link_t : public sink_link_t, public tr::net::bus_link_t {
    public:
     tr::net::bus_link_t* bus() override { return this; }
+    using tr::net::bus_link_t::notify_peer_down;  // the tests play the listener's seams
+    using tr::net::bus_link_t::notify_peer_up;
     void enumerate_peers(const peer_visitor_t&) const override {}
     tr::net::transport_t* peer_link(std::string_view) override { return nullptr; }
     /** @brief No peers to name — this double never delivers through the seam (#1294). */
@@ -250,6 +274,81 @@ void test_readd_as_bus_drops_the_slot() {
           "a bus mount is unbindable — it does not inherit the p2p slot");
 }
 
+/** @brief The session the bus tests seat in slot 1 of @ref kMount, and its name. */
+constexpr tr::net::peer_handle_t kSession{tr::wire::pair_t{.index = 1, .generation = 2}};
+/** @brief @ref kSession's routable name (`p<slot>~<gen>`). */
+constexpr std::string_view kSessionName = "p1~2";
+
+/** @brief Is @ref kSession's slot anchor live on @p g? */
+bool anchored(const graph_t& g) {
+    return g.find_session_anchor(fwd_router_t::session_anchor_id(kMount, kSessionName)).has_value();
+}
+
+/**
+ * @brief A bus mount re-added point-to-point names no slot holder, and re-added as a bus
+ *        mount again it has its tenancy words back (#2413).
+ *
+ * The words live on the bus token cache, which the ctx keeps across every re-add. A route
+ * asks through the facet, so the point-to-point life answers nothing; the cache itself still
+ * holds the word, so the next bus life finds the session it seated.
+ */
+void test_bus_p2p_bus_keeps_the_words() {
+    std::printf("bus -> point-to-point -> bus: no holder in between, the words come back\n");
+    graph_t g;
+    fwd_router_t router(g);
+    make_conn_vertex(g);
+    bus_sink_link_t bus;
+    sink_link_t p2p;
+
+    check(router.attach_link(std::string(kMount), bus), "registered the bus mount");
+    bus.notify_peer_up(kSession, kSessionName);
+    check(door_t::holder(router, kMount, 1) == kSession, "the arrival seated the session");
+    check(anchored(g), "and anchored it");
+
+    check(router.remove_child(kMount), "removed the bus mount");
+    check(router.attach_link(std::string(kMount), p2p), "re-added the NAME point-to-point");
+    check(!door_t::holder(router, kMount, 1).valid(),
+          "a point-to-point child names no slot holder");
+    check(door_t::owned_holder(router, kMount, 1) == kSession,
+          "the cache still holds the word underneath");
+
+    check(router.remove_child(kMount), "removed the point-to-point child");
+    check(router.attach_link(std::string(kMount), bus), "re-added the NAME as a bus mount");
+    check(door_t::holder(router, kMount, 1) == kSession, "the bus mount has its words back");
+}
+
+/**
+ * @brief A departure that lands while the name is point-to-point still retires the anchor and
+ *        clears the word, so no stale word comes back on a later bus re-add (#2413).
+ *
+ * The departing bus still holds the ctx as its notifier context. The departure seam reads the
+ * holder through the OWNING pointer: through the facet it would see no holder, skip the
+ * retire, and hand the next bus life a word for a session that is gone.
+ */
+void test_late_departure_while_p2p() {
+    std::printf("a late departure while point-to-point clears the word\n");
+    graph_t g;
+    fwd_router_t router(g);
+    make_conn_vertex(g);
+    bus_sink_link_t bus;
+    sink_link_t p2p;
+
+    check(router.attach_link(std::string(kMount), bus), "registered the bus mount");
+    bus.notify_peer_up(kSession, kSessionName);
+    check(router.remove_child(kMount), "removed the bus mount");
+    check(router.attach_link(std::string(kMount), p2p), "re-added the NAME point-to-point");
+    check(anchored(g), "control: the anchor outlived the registration");
+    check(door_t::owned_holder(router, kMount, 1) == kSession, "control: the word is held");
+
+    bus.notify_peer_down(kSession, kSessionName);
+    check(!anchored(g), "the late departure retired the anchor");
+    check(!door_t::owned_holder(router, kMount, 1).valid(), "and cleared the word");
+
+    check(router.remove_child(kMount), "removed the point-to-point child");
+    check(router.attach_link(std::string(kMount), bus), "re-added the NAME as a bus mount");
+    check(!door_t::holder(router, kMount, 1).valid(), "no stale word came back");
+}
+
 /** @brief Churn on a stable name set occupies ONE receiver ctx — the #884 growth half. */
 void test_churn_does_not_grow_the_chain() {
     std::printf("create/remove churn does not grow the receiver chain\n");
@@ -343,6 +442,8 @@ int main() {
     test_removed_child_stops_referencing();
     test_readd_resolves_the_new_tenancy();
     test_readd_as_bus_drops_the_slot();
+    test_bus_p2p_bus_keeps_the_words();
+    test_late_departure_while_p2p();
     test_churn_does_not_grow_the_chain();
     test_duplicate_add_rebinds();
     test_forward_reaches_the_new_link();

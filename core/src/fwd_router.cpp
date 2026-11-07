@@ -1141,10 +1141,11 @@ namespace {
 
 }  // namespace
 
-peer_handle_t fwd_router_t::session_tenant(const child_rx_ctx_t& ctx, std::uint32_t slot) noexcept {
-    // The words live on the bus token cache (#2413), reached by the facet pointer: a ctx that
-    // is not a bus mount now has no slots, so it names no tenant, whatever it held before.
-    const bus_token_cache_t* const cache = ctx.peer_tokens.load(std::memory_order_acquire);
+peer_handle_t fwd_router_t::session_tenant(const bus_token_cache_t* cache,
+                                           std::uint32_t slot) noexcept {
+    // The words live on the bus token cache (#2413). Which pointer the caller hands in is the
+    // policy: the frame path asks through the facet, the arrival and departure seams through
+    // the owning pointer (see the declaration).
     session_tenancy_t* const t =
         cache != nullptr ? cache->tenancy.load(std::memory_order_acquire) : nullptr;
     return t != nullptr && slot < t->size
@@ -1158,7 +1159,9 @@ peer_handle_t fwd_router_t::anchor_tenant(const child_rx_ctx_t* ctx, std::string
     // The word FIRST, the generation after: see `bus_peer_up` for the publication order.
     const std::optional<std::uint32_t> slot = session_slot_index(name);
     const peer_handle_t tenant =
-        ctx != nullptr && slot ? session_tenant(*ctx, *slot) : peer_handle_t{};
+        ctx != nullptr && slot
+            ? session_tenant(ctx->peer_tokens.load(std::memory_order_acquire), *slot)
+            : peer_handle_t{};
     const std::optional<graph::vertex_slot_t> now = graph_.vertex_slot(anchor);
     return now && now->generation == generation ? tenant : peer_handle_t{};
 }
@@ -1228,7 +1231,8 @@ void fwd_router_t::bus_peer_up(const child_rx_ctx_t& ctx, peer_handle_t handle,
     // evicts the edges and awaits filed under the predecessor's name, clears the
     // word and drops the slot's cached token. An empty word (the departure already ran, or
     // the slot was never anchored) has nothing to reclaim.
-    if (const peer_handle_t prev = session_tenant(ctx, handle.index); prev.valid()) {
+    if (const peer_handle_t prev = session_tenant(ctx.peer_tokens_own, handle.index);
+        prev.valid()) {
         std::array<char, kPeerNameChars> scratch{};
         bus_peer_down(ctx, prev, resolve_peer_name(*ctx.entry, prev, scratch));
     }
@@ -1250,7 +1254,7 @@ std::size_t fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t
     bool holds_slot = true;
     {
         const std::lock_guard lock(tenancy_m_);
-        const peer_handle_t tenant = session_tenant(ctx, handle.index);
+        const peer_handle_t tenant = session_tenant(ctx.peer_tokens_own, handle.index);
         holds_slot = !tenant.valid() || tenant == handle;
         // Retire BEFORE the eviction, and before the word clears. Retirement is what bumps
         // the saturating generation (RFC-0024 §4.4 rule 3), and the slot this session sat in

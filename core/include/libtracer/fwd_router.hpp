@@ -1007,7 +1007,7 @@ class fwd_router_t {
     }
 
    private:
-    friend struct fwd_router_test_door_t;  // test-only: calls hop_mint for a removed child.
+    friend struct fwd_router_test_door_t;  // test-only: hop_mint, session_tenant (#2413).
 
     /**
      * @brief Brackets one inbound frame, or one origination, on this thread.
@@ -1756,9 +1756,19 @@ class fwd_router_t {
     std::size_t bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle,
                               std::string_view peer);
 
-    /** @brief The session holding @p slot of @p ctx's mount (#2234); invalid when none does.
-     *         Lock-free: acquire loads of the bus cache, its table and the word (#2413). */
-    [[nodiscard]] static peer_handle_t session_tenant(const child_rx_ctx_t& ctx,
+    /**
+     * @brief The session holding @p slot in @p cache's tenancy words (#2234); invalid when
+     *        none does, or when @p cache is null. Lock-free: acquire loads of the table and
+     *        the word.
+     *
+     * The words sit on a bus mount's token cache (#2413), and the caller picks the pointer.
+     * A route or a mint asks through the FACET (`peer_tokens`), so a name re-added as a
+     * point-to-point child names no session. The arrival and departure seams ask through the
+     * OWNING pointer (`peer_tokens_own`), so a departure that lands while the name is
+     * point-to-point still retires its anchor and clears its word, and a later bus re-add
+     * finds no stale word.
+     */
+    [[nodiscard]] static peer_handle_t session_tenant(const bus_token_cache_t* cache,
                                                       std::uint32_t slot) noexcept;
     /**
      * @brief The session holding @p anchor, the anchor of the slot session name @p name
