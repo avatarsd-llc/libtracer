@@ -131,6 +131,9 @@ class fwd_router_t {
                      link_kind_t kind = {});
     bool remove_child(std::string_view name);   // removal, not departure
     void link_down(std::string_view link_name); // departure: evict edges
+    // One bus peer's departure by handle (#2237): the count of edges it reclaimed (#2591);
+    // 0 for an unknown mount, a foreign handle, or a peer with nothing left to reclaim.
+    std::size_t link_down(std::string_view link_name, peer_handle_t peer);
 
     // Bind a LOCAL producer's subscription toward a MOUNT-PATH target (#739): resolves
     // `target` through the SAME strip-K cached descent the forward path uses (ADR-0061),

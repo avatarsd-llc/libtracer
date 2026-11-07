@@ -543,12 +543,12 @@ void test_peer_door_takes_only_minted_handles() {
     std::array<char, tr::net::kPeerNameChars> scratch{};
     check(tcan.peer_name(tr::net::peer_handle_t{9, kGen + 1}, scratch).empty(),
           "peer_name refuses a generation this bus never mints");
-    check(!router.link_down("can0", tr::net::peer_handle_t{9, kGen + 1}),
+    check(router.link_down("can0", tr::net::peer_handle_t{9, kGen + 1}) == 0,
           "so the door refuses that handle and evicts nothing");
-    check(!router.link_down("can0", tr::net::peer_handle_t{can::kNodeMax + 1u, kGen}),
+    check(router.link_down("can0", tr::net::peer_handle_t{can::kNodeMax + 1u, kGen}) == 0,
           "and a node id past the bus's id space");
-    check(router.link_down("can0", tr::net::peer_handle_t{9, kGen}),
-          "a minted handle is accepted, heard or not");
+    check(router.link_down("can0", tr::net::peer_handle_t{9, kGen}) == 0,
+          "a minted handle is accepted, heard or not, and reclaims 0 edges it never held");
 }
 
 // ---------------------------------------------------------------------------

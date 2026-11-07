@@ -822,6 +822,10 @@ void test_departure_notifier_seam() {
  * bus fires no peer-down at all) needs the application to say so: `link_down(mount, handle)`
  * runs the same departure the bus's own peer-down seam runs. The door refuses an unknown
  * mount, a flat link and an invalid handle, and evicts nothing for any of them.
+ *
+ * #2591 pins what it returns: the count of edges the call reclaimed. n7 holds two edges (one
+ * on `/s`, one on `/t`), so its departure returns 2, a second one returns 0, and every
+ * refusal returns 0.
  */
 void test_public_peer_door() {
     std::printf("#2237 public by-handle peer door:\n");
@@ -833,10 +837,13 @@ void test_public_peer_door() {
     (void)router.attach_link("bus", bus);
 
     (void)g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/t"), role_t::STORED_VALUE);
     p2p.inject(b_fwd(fwd_op_t::WRITE, b_path({"s"}), b_path({"p2p"}), b_field_subscribers_append(),
                      b_subscriber("p")));
     bus.inject_peer("n7", b_fwd(fwd_op_t::WRITE, b_path({"s"}), b_path({"n7"}),
                                 b_field_subscribers_append(), b_subscriber("q")));
+    bus.inject_peer("n7", b_fwd(fwd_op_t::WRITE, b_path({"t"}), b_path({"n7"}),
+                                b_field_subscribers_append(), b_subscriber("q2")));
     bus.inject_peer("n8", b_fwd(fwd_op_t::WRITE, b_path({"s"}), b_path({"n8"}),
                                 b_field_subscribers_append(), b_subscriber("r")));
     p2p.drain();
@@ -855,16 +862,16 @@ void test_public_peer_door() {
           "all three sessions deliver before any departure");
 
     const peer_handle_t n7 = bus.mint("n7");
-    check(!router.link_down("nope", n7), "an unknown mount is refused");
-    check(!router.link_down("bus", peer_handle_t{}), "an invalid handle is refused");
-    check(!router.link_down("p2p", n7), "a flat link has no peers to evict by handle");
+    check(router.link_down("nope", n7) == 0, "an unknown mount is refused: 0 reclaimed");
+    check(router.link_down("bus", peer_handle_t{}) == 0, "an invalid handle is refused: 0");
+    check(router.link_down("p2p", n7) == 0, "a flat link has no peers to evict by handle: 0");
     check(deliveries(0x42) == std::array<std::size_t, 3>{1, 1, 1},
           "and none of those refusals evicted anything");
 
-    check(router.link_down("bus", n7), "the bus mount accepts its peer's handle");
+    check(router.link_down("bus", n7) == 2, "n7's departure reclaims exactly its two edges");
     check(deliveries(0x43) == std::array<std::size_t, 3>{1, 0, 1},
           "only n7's edge left; the other peer and the flat child still deliver");
-    check(router.link_down("bus", n7), "a second departure of the same peer is a no-op");
+    check(router.link_down("bus", n7) == 0, "a second departure of the same peer reclaims 0");
     check(deliveries(0x44) == std::array<std::size_t, 3>{1, 0, 1}, "and changes nothing");
 }
 
