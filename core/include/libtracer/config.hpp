@@ -44,6 +44,12 @@ struct std_sync_t;           // sync.hpp — the host blocking primitives: std::
 
 }  // namespace tr
 
+namespace tr::net {
+
+struct no_frame_observer_t;  // fwd_router.hpp — observes nothing; the call compiles away
+
+}  // namespace tr::net
+
 namespace tr::graph {
 
 /**
@@ -619,6 +625,28 @@ struct default_config_t {
      * `using sync_t = my_rtos_sync_t;`.
      */
     using sync_t = ::tr::std_sync_t;
+
+    /**
+     * @brief What the router tells about each inbound frame before it routes it (#2580): the
+     *        name of the link the frame arrived on, and nothing else.
+     *
+     * `fwd_router_t` calls `frame_observer_t::on_frame(inbound_link_name)` once per inbound
+     * frame, on every link, before dispatch, on the receiving task, including a frame that
+     * dispatch then refuses or drops. A frame on a bus whose peer the link cannot name has no
+     * name to give, and is dropped unobserved; a frame the node originates itself arrived on
+     * no link and is not observed either. The call gets no frame bytes, and the name view is
+     * valid only for the duration of the call. It is observe-only: it returns nothing, so it cannot
+     * refuse or alter the frame, and it must be `noexcept`. It runs on the receiving task, so it
+     * must not block. Its use is per-link
+     * liveness and traffic accounting kept in the application. The router holds no state for
+     * it, so whatever the policy keeps lives in the policy itself.
+     *
+     * The default, `%tr::net::no_frame_observer_t`, does nothing and compiles away: a build
+     * that does not name a policy pays nothing. Override fragment:
+     * `using frame_observer_t = my_link_tally_t;`, where `my_link_tally_t` has
+     * `static void on_frame(std::string_view link) noexcept`.
+     */
+    using frame_observer_t = ::tr::net::no_frame_observer_t;
 
     /**
      * @brief Locks in the host guard's process-wide stripe table (#1716); a power of two.

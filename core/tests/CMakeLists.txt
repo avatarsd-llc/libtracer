@@ -1999,6 +1999,13 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(fwd_terminus_reply_link_test PRIVATE libtracer)
     libtracer_test_warnings(fwd_terminus_reply_link_test)
     add_test(NAME fwd_terminus_reply_link COMMAND fwd_terminus_reply_link_test)
+    # #2580 — the compile-time frame observer: once per inbound frame per link, with its name,
+    # before dispatch. A leg with its own fragment binds no counting observer and exits 77.
+    add_executable(fwd_frame_observer_test fwd_frame_observer_test.cpp)
+    target_link_libraries(fwd_frame_observer_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_frame_observer_test)
+    add_test(NAME fwd_frame_observer COMMAND fwd_frame_observer_test)
+    set_property(TEST fwd_frame_observer PROPERTY SKIP_RETURN_CODE 77)
 
     # ADR-0084 — a remote AWAIT is answered from a one-shot receiver-side waiter charged to
     # the receiving link's rx source, and never holds that link's receive context.

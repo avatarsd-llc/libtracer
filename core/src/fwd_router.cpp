@@ -990,6 +990,7 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
             [](void* c, std::span<const std::byte> frame) {
                 auto* const cc = static_cast<child_rx_ctx_t*>(c);
                 const frame_scope_t scope;
+                graph::config_t::frame_observer_t::on_frame(cc->name);  // #2580
                 cc->self->on_frame_impl(cc->name, frame, nullptr, cc, false);
             },
             &ctx);
@@ -1568,6 +1569,7 @@ fwd_router_t::head_dst_t fwd_router_t::route_pair_forward(std::string_view inbou
 
 void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::byte> frame) {
     const frame_scope_t scope;
+    graph::config_t::frame_observer_t::on_frame(inbound_name);  // #2580
     on_frame_impl(inbound_name, frame, nullptr);
 }
 
@@ -1705,6 +1707,7 @@ void fwd_router_t::on_frame_bus(const child_rx_ctx_t& ctx, peer_handle_t peer,
     std::array<char, kPeerNameChars> scratch{};
     const std::string_view name = resolve_peer_name(*ctx.entry, peer, scratch);
     if (name.empty()) return;  // no bus facet, or a handle this kind does not name
+    graph::config_t::frame_observer_t::on_frame(name);  // #2580
     on_frame_impl(name, frame, nullptr, &ctx, true, peer);
 }
 
@@ -1856,6 +1859,13 @@ template <class Cursor, class Reject, class Terminus, class Reply>
 void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,
                                       const child_rx_ctx_t* inbound_ctx, bool from_peer,
                                       peer_handle_t peer) {
+    // The build's frame observer (#2580), for every rope-tier ingress: once per frame, before
+    // anything below can route, refuse or drop it. The span tier calls it in its three entries
+    // (the link thunk, `on_frame`, `on_frame_bus`) rather than in `on_frame_impl`, which this
+    // function and `originate` also enter: a one-link rope is not counted twice, and a frame
+    // the node originates itself, on no link, is not counted at all. The default does nothing
+    // and compiles away.
+    graph::config_t::frame_observer_t::on_frame(inbound_name);
     // Single-link (every current producer): the link's bytes span feeds the SAME
     // routing as the borrowed path — the forward hop below never touches the
     // refcount (zero-heap, ADR-0038); only the terminus sees the owner, for the

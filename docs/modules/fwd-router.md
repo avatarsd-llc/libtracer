@@ -203,6 +203,20 @@ flowchart TB
     class SG,SINK zc
 ```
 
+**The frame observer (#2580).** Before any of this, the router calls the build's
+`config_t::frame_observer_t::on_frame(inbound_link_name)` once for each inbound frame, on every
+link and on both receive tiers, on the receiving task. A frame that is then dropped as a runt,
+refused as an unserved type or answered with an error is still observed; on a bus the name is
+the peer's. The observer gets the link name and nothing else, valid only for the call: no frame
+bytes, no copy, and no way to refuse or alter the frame, since `on_frame` is `void` and
+`noexcept`. It runs on the receiving task, so it must not block. A frame the node originates
+itself (`originate`) arrived on no link and is not observed. It is a compile-time policy, not a registration: the router holds no function
+pointer or state for it, and the default `no_frame_observer_t` does nothing and compiles away.
+An application that keeps per-link liveness or traffic counts binds its own type in its
+`libtracer/config_override.hpp` (`using frame_observer_t = my_link_tally_t;`, a fragment as
+[ADR-0068](../adr/0068-build-configuration-is-plain-cpp-config-header.md) describes) and keeps
+the counts in that type.
+
 ## Originating an operation
 
 A node that wants a remote value asks for it with `originate`, not by building `FWD` bytes and
