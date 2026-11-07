@@ -150,6 +150,56 @@ void test_write_interest() {
     d.module.detach(c.src);
 }
 
+/**
+ * @brief A crossing arm and disarm never strand a held frame: write interest ends registered
+ *        as the flag last says.
+ *
+ * The link's shape, hammered: a sender arms after holding a frame while the driver disarms in
+ * its write turn, and an arm lands while the source is being attached (a send held between a
+ * link's start and its attach). After each arm the driver must take a write turn (here, one
+ * that disarms), or the frame would sit held with the socket writable and no turn to come.
+ */
+void test_write_interest_converges() {
+    std::printf("-- a crossing arm and disarm leave write interest as last armed\n");
+    driven_t d;
+    struct disarming_t {
+        tr::net::wait_module_t* module;
+        counted_t c;
+    } x{&d.module, {}};
+    x.c.src.ctx = &x;
+    x.c.src.fire = [](void* ctx, tr::net::wait_source_t& self, std::uint8_t ready) {
+        auto& y = *static_cast<disarming_t*>(ctx);
+        if (!tr::net::writable(ready)) return;
+        y.c.writes.fetch_add(1);
+        y.module->want_write(self, false);  // the driver's disarm once the frame is out
+    };
+    check(d.module.attach(x.c.src), "attached");
+    // The sender spins on the flag and arms the instant the driver's disarm clears it, so
+    // the arm lands between the driver's flip and its registration. A stranded arm leaves
+    // the flag set with no write turn to come: the spin's bound catches it.
+    const auto disarmed = [&] {
+        const auto until = std::chrono::steady_clock::now() + 2s;
+        while (x.c.src.write.load())
+            if (std::chrono::steady_clock::now() > until) return false;
+        return true;
+    };
+    bool converged = true;
+    for (int i = 0; i < 20000 && converged; ++i) {
+        d.module.want_write(x.c.src, true);  // the sender's arm, crossing the last disarm
+        converged = disarmed();
+    }
+    check(converged, "every arm crossing a disarm got its write turn");
+    for (int i = 0; i < 2000 && converged; ++i) {
+        d.module.detach(x.c.src);
+        std::thread arm([&] { d.module.want_write(x.c.src, true); });
+        converged = d.module.attach(x.c.src);
+        arm.join();
+        converged = converged && disarmed();
+    }
+    check(converged, "every arm crossing an attach got its write turn");
+    d.module.detach(x.c.src);
+}
+
 void test_detach_waits_out_a_callback() {
     std::printf("-- a foreign detach waits out the callback in flight\n");
     driven_t d;
@@ -315,6 +365,7 @@ int main() {
     std::printf("== #2147: one wait module per node ==\n");
     test_ready_and_stop();
     test_write_interest();
+    test_write_interest_converges();
     test_detach_waits_out_a_callback();
     test_detach_inside_callback();
     test_idle_sources_wake_nobody();

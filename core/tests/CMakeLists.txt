@@ -2145,6 +2145,11 @@ if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP)
     target_link_libraries(wait_module_poll_test PRIVATE libtracer)
     libtracer_test_warnings(wait_module_poll_test)
     add_test(NAME wait_module_poll COMMAND wait_module_poll_test)
+    # The poll adapter's refusal at attach: a refused newcomer is closed, nobody is evicted.
+    add_executable(wait_poll_refusal_test wait_poll_refusal_test.cpp ${LIBTRACER_SOURCES_WAIT_POLL})
+    target_link_libraries(wait_poll_refusal_test PRIVATE libtracer)
+    libtracer_test_warnings(wait_poll_refusal_test)
+    add_test(NAME wait_poll_refusal COMMAND wait_poll_refusal_test)
 endif()
 
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)

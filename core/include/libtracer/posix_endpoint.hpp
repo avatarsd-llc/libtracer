@@ -617,6 +617,10 @@ class stream_endpoint_t : protected posix_endpoint_t {
      */
     void flush_one(int fd);
 
+    /** @brief After a flush, disarm write interest on @p s once @p peer holds nothing, then
+     *         re-arm it if a sender held a frame meanwhile (driving thread). */
+    void disarm_flushed(wait_source_t& s, const egress_peer_t& peer);
+
     /**
      * @brief The ONE peer departed (driving thread): stop waiting on its connection, then
      *        @ref teardown_peer it.
@@ -628,9 +632,11 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *        (driving thread).
      *
      * Runs @p on_accept (per-peer setup; false rejects: the socket is closed and the listener
-     * keeps waiting), publishes the fd to @ref conn_fd_ and reopens the peer's egress, then
-     * moves @ref src_ from the listening socket to the connection, served by @p fire. A
-     * listener accepts nobody else while a peer is connected: the kernel's backlog holds them.
+     * keeps waiting), publishes the fd to @ref conn_fd_, moves @ref src_ from the listening
+     * socket to the connection, served by @p fire, and only then reopens the peer's egress.
+     * A refused registration closes the peer and puts @ref src_ back on the listening socket.
+     * A listener accepts nobody else while a peer is connected: the kernel's backlog holds
+     * them.
      * @ref relisten puts @ref src_ back on the listening socket after the peer departs.
      */
     void accept_one(int listen_fd, function_ref_t<bool(int)> on_accept, wait_source_t::fire_t fire);
@@ -729,7 +735,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
  * closed one. @ref session_base_t::name and the slot table's growth are guarded by
  * @ref peers_m_, which no write is ever made under (#2263): a broadcast walks the slots by
  * @ref session_base_t::next with no lock, and the driving thread, the table's only mutator,
- * reads it with none. Every protocol buffer a slot carries is poll-thread-only. The
+ * reads it with none. Every protocol buffer a slot carries is the driving thread's alone. The
  * destructor's closing sweep runs after the driving thread is joined. There is no shared write
  * lock: a stalled peer holds only its own role.
  *
@@ -883,9 +889,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *
      * Shuts the socket down (`SHUT_RDWR`) under @ref peers_m_ (teardown un-names a slot
      * under the same lock before it closes the fd); the driving thread's next pass observes the
-     * close and
-     * runs the IDENTICAL remote-FIN teardown, so the recycle is asynchronous (within one
-     * poll bound) and no poll-thread-only buffer is ever touched off-thread.
+     * close and runs the IDENTICAL remote-FIN teardown, so the recycle is asynchronous (the
+     * shut-down socket reports a hangup at once) and no buffer the driving thread alone
+     * owns is ever touched off-thread.
      * @retval true  @p peer named an open connection and its socket was shut down.
      * @retval false @p peer names no currently-open connection.
      */
