@@ -8,12 +8,14 @@
  *        ESP-IDF chip, ADR-0071): one `poll(2)` over the attached sockets with no timeout,
  *        woken by a loopback datagram doorbell (#2147).
  *
- * The table of attached sources and the descriptor set rebuilt from it on every pass are both
- * drawn from the module's own source and grown, never shrunk. A table that cannot grow refuses
- * the newcomer at attach; a set that cannot grow sheds the newest source with a HANGUP, so its
- * link drops it as it would any departed peer. Nobody attached is evicted for a newcomer.
- * Every change to the table or to a write interest rings the doorbell, so a pass in flight is
- * rebuilt before it can wait on a stale set.
+ * The table of attached sources and the descriptor sets rebuilt from it are all drawn from the
+ * module's own source and grown, never shrunk. Every growth happens at attach, so attach is the
+ * one place a refusal lands: a newcomer the table or a set cannot hold is refused there, and
+ * nobody attached is ever evicted for it. There are two sets: the driver polls the live one
+ * with the lock released, so an attach grows the spare, and the driver swaps the spare in
+ * when the live one is too small. A pass therefore never fails to rebuild. Every change to the
+ * table or to a write interest rings the doorbell, so a pass in flight is rebuilt before it
+ * can wait on a stale set.
  *
  * lwIP has no `eventfd` and no pipe, so the doorbell is a UDP socket bound to the loopback
  * address and connected to itself (lwIP's loopback interface, `LWIP_NETIF_LOOPBACK`): it costs
@@ -26,8 +28,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstdint>
 #include <mutex>
+#include <thread>
 
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/wait.hpp"
@@ -65,7 +69,21 @@ std::uint8_t ready_of(short e) noexcept {
 }
 }  // namespace
 
+/** @brief The poll adapter's two descriptor sets: the live one the driver polls, and the spare
+ *         an attach grows while that poll is in flight. */
+struct wait_module_t::state_t {
+    /** @brief Both sets draw from @p src . */
+    explicit state_t(mem::block_source_t& src) noexcept
+        : set{mem::block_array_t<pollfd>(src), mem::block_array_t<pollfd>(src)} {}
+    mem::block_array_t<pollfd> set[2]; /**< @brief The two sets. */
+    unsigned live = 0; /**< @brief The one the driver polls. Driver, under the lock. */
+};
+
 wait_module_t::wait_module_t(mem::block_source_t& src) noexcept : sources_(src) {
+    // The live set holds the doorbell from the start, so a module with no source still waits
+    // on its wake.
+    state_ = mem::make_poly<state_t>(src, src);
+    if (!state_ || !state_->set[0].reserve(1)) return;
     fd_[0] = fd_[1] = open_doorbell();
 }
 
@@ -78,8 +96,10 @@ wait_module_t::~wait_module_t() {
 bool wait_module_t::attach(wait_source_t& s) noexcept {
     bool done = false;
     locked([&] {
-        // A table that cannot grow refuses the newcomer; nobody attached is evicted.
-        done = !s.attached && sources_.push_back(&s);
+        // Grow the spare set to the table plus the newcomer and the doorbell, then the table: a
+        // refusal of either refuses the newcomer, and nobody attached is evicted.
+        done = !s.attached && state_->set[state_->live ^ 1U].reserve(sources_.size() + 2) &&
+               sources_.push_back(&s);
         s.attached = s.attached || done;
         gen_.fetch_add(1, std::memory_order_acq_rel);
     });
@@ -105,21 +125,15 @@ void wait_module_t::want_write(wait_source_t& s, bool on) noexcept {
 
 void wait_module_t::run() noexcept {
     driver_.store(detail::this_thread_id(), std::memory_order_release);
-    mem::block_array_t<pollfd> set(sources_.source());
-    pollfd bell{fd_[0], POLLIN, 0};  // the doorbell alone, when the set cannot be grown
     std::unique_lock lock(m_);
     while (!stopping_.load(std::memory_order_acquire)) {
-        // Rebuild under the lock: the doorbell, then every source in table order. A set that
-        // cannot be grown to the table sheds the newest source: it is detached and told it
-        // hung up, so its link sheds it, and the pass starts again.
+        // Rebuild under the lock: the doorbell, then every source in table order. The spare
+        // was grown by the last attach to hold the whole table, so when the live set is too
+        // small the spare is swapped in, and every push below fits.
+        if (state_->set[state_->live].capacity() < sources_.size() + 1) state_->live ^= 1U;
+        mem::block_array_t<pollfd>& set = state_->set[state_->live];
         set.clear();
-        if (!set.reserve(sources_.size() + 1) && !sources_.empty()) {
-            wait_source_t& shed = *sources_.back();
-            detach(shed);
-            shed.fire(shed.ctx, shed, static_cast<std::uint8_t>(ready_t::HANGUP));
-            continue;
-        }
-        (void)set.push_back(bell);
+        (void)set.push_back(pollfd{fd_[0], POLLIN, 0});
         for (wait_source_t* const s : sources_) {
             const short ev = static_cast<short>(
                 POLLIN | (s->write.load(std::memory_order_acquire) ? POLLOUT : 0));
@@ -127,11 +141,10 @@ void wait_module_t::run() noexcept {
         }
         const std::uint32_t seen = gen_.load(std::memory_order_acquire);
         lock.unlock();
-        pollfd* const fds = set.empty() ? &bell : set.data();
-        const int n = ::poll(fds, static_cast<nfds_t>(set.empty() ? 1 : set.size()), -1);
+        const int n = ::poll(set.data(), static_cast<nfds_t>(set.size()), -1);
         lock.lock();
         if (n <= 0 || gen_.load(std::memory_order_acquire) != seen) continue;
-        if ((fds[0].revents & POLLIN) != 0) {
+        if ((set[0].revents & POLLIN) != 0) {
             char drain[16];
             while (::recv(fd_[0], drain, sizeof(drain), MSG_DONTWAIT) > 0) {
             }
@@ -152,8 +165,13 @@ void wait_module_t::stop() noexcept {
 }
 
 void wait_module_t::ring() noexcept {
+    // No wake may be lost: a stop or a set change that never reaches a blocked pass would
+    // leave it blocked. A full doorbell is already readable; a send lwIP refuses for want of a
+    // buffer is retried until it goes.
     const char one = 1;
-    (void)::send(fd_[1], &one, sizeof(one), MSG_DONTWAIT | MSG_NOSIGNAL);
+    while (::send(fd_[1], &one, sizeof(one), MSG_DONTWAIT | MSG_NOSIGNAL) < 0 &&
+           (errno == ENOMEM || errno == ENOBUFS || errno == EINTR))
+        std::this_thread::yield();
 }
 
 }  // namespace tr::net

@@ -85,8 +85,9 @@ class counting_source_t final : public tr::mem::block_source_t {
     std::atomic<std::size_t> draws{0}; /**< @brief Blocks drawn in all. */
 };
 
-/** @brief Pinned idle draw of a stream server on a 64-bit target: the poll set's first block
- *         (8 `pollfd`s for the listen socket). Was 1992 B before #2156. */
+/** @brief Pinned idle draw of a stream server on a 64-bit target: nothing, since its listen
+ *         socket's wait is the wait module's (#2147). Was 64 B (the poll set's first block, 8
+ *         `pollfd`s) before #2147, and 1992 B before #2156. */
 constexpr std::size_t kServerBaseBytes64 = 0;
 
 /**

@@ -397,7 +397,7 @@ class tcp_server_transport_t final : public stream_server_base_t {
      *
      * @param bind_port  TCP port to listen on (host byte order; 0 → ephemeral).
      * @param config     The server's knobs (@ref tcp_server_config_t): memory, receive cap,
-     *                   peer cap, bus facet, poll-thread stack, liveness window.
+     *                   peer cap, bus facet, fallback-thread stack, liveness window.
      */
     explicit tcp_server_transport_t(std::uint16_t bind_port,
                                     const tcp_server_config_t& config = {});

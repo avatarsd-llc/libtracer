@@ -1,7 +1,7 @@
 /**
  * @file
- * @brief The WebSocket server transport: many inbound connections multiplexed on one poll
- *        thread.
+ * @brief The WebSocket server transport: many inbound connections multiplexed on one wait
+ *        module, with no thread per peer.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -274,7 +274,7 @@ class ws_server_transport_t final : public stream_server_base_t {
      *
      * @param bind_port TCP port to listen on (host byte order; 0 → ephemeral).
      * @param config    The server's knobs (@ref ws_server_config_t): memory, receive cap,
-     *                  peer cap, bus facet, poll-thread stack, liveness window, handshake
+     *                  peer cap, bus facet, fallback-thread stack, liveness window, handshake
      *                  budget.
      */
     explicit ws_server_transport_t(std::uint16_t bind_port, const ws_server_config_t& config = {});

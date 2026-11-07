@@ -426,11 +426,15 @@ void stream_endpoint_t::flush_one(int fd) {
             return note_moved(tx_moved_, write_frame(fd, f, off, 0, true));
         },
         [fd] { condemn_fd(fd); }));
+    disarm_flushed(src_, peer_);
+}
+
+void stream_endpoint_t::disarm_flushed(wait_source_t& s, const egress_peer_t& peer) {
     // Disarm once nothing is held, then look again: a sender that held a frame after the
     // first look armed it, and this disarm may have landed after that arm.
-    if (peer_.wants_write()) return;
-    waiter().want_write(src_, false);
-    if (peer_.wants_write()) waiter().want_write(src_, true);
+    if (peer.wants_write()) return;
+    waiter().want_write(s, false);
+    if (peer.wants_write()) waiter().want_write(s, true);
 }
 
 void stream_endpoint_t::depart() {
@@ -466,11 +470,19 @@ void stream_endpoint_t::accept_one(int listen_fd, function_ref_t<bool(int)> on_a
     }
     conn_fd_.store(fd, std::memory_order_relaxed);
     tx_moved_.store(true, std::memory_order_relaxed);  // a new peer starts alive (#2198)
-    egress_.open(peer_);  // release: a sender that claims the role then sees the fd
     // The listener's source carries the connection now: nobody else is accepted until the
-    // peer departs and `relisten` puts it back.
+    // peer departs and `relisten` puts it back. The egress opens only once the source is on
+    // the connection, so no sender can arm write interest on the listening socket.
+    // A refused registration refuses the peer and puts the listener back, so the link keeps
+    // accepting rather than going deaf.
+    const wait_source_t::fire_t on_listen = src_.fire;
     waiter().detach(src_);
-    if (!attach(src_, fd, fire)) teardown_peer(fd);
+    if (!attach(src_, fd, fire)) {
+        teardown_peer(fd);
+        relisten(listen_fd, on_listen);
+        return;
+    }
+    egress_.open(peer_);  // release: a sender that claims the role then sees the fd
 }
 
 void stream_endpoint_t::relisten(int listen_fd, wait_source_t::fire_t fire) {
@@ -484,7 +496,7 @@ void stream_endpoint_t::relisten(int listen_fd, wait_source_t::fire_t fire) {
 // ---------------------------------------------------------------------------
 
 slot_server_t::~slot_server_t() {
-    // The derived destructor's first act was stop_and_join, so the poll thread is gone
+    // The derived destructor's first act was stop_and_join, so the link is off the wait
     // and nothing races either close below.
     if (listen_fd_ >= 0) ::close(listen_fd_);
     for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
@@ -594,9 +606,9 @@ transport_t* slot_server_t::peer_link_of(peer_handle_t peer) {
 }
 
 bool slot_server_t::close_peer(std::string_view peer) {
-    // Shutdown-only under peers_m_; the poll thread's next pass observes the close and runs
+    // Shutdown-only under peers_m_; the driving thread's next pass observes the close and runs
     // the IDENTICAL remote-FIN teardown — no duplicate logic, and no off-thread touch of the
-    // poll-thread-only buffers teardown_slot's on_slot_reset hook clears. The fd cannot be
+    // driving-thread-only buffers teardown_slot's on_slot_reset hook clears. The fd cannot be
     // closed under us: teardown un-names the slot under this same lock before it closes it.
     const std::lock_guard plock(peers_m_);
     for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
@@ -624,7 +636,7 @@ std::uint64_t slot_server_t::sweep(std::uint64_t now, std::uint64_t deadline) {
         const bool rx_owed = s->rx_owed.load(std::memory_order_relaxed);
         if (!sw.frozen(tx_owed || rx_owed, (!tx && tx_owed) || (!rx && rx_owed), s->live_since))
             continue;
-        condemn_fd(fd);  // the poll thread's next pass runs the remote-FIN teardown
+        condemn_fd(fd);  // the driving thread's next pass runs the remote-FIN teardown
         s->live_since = now;
         ++closed;
     }
@@ -677,10 +689,7 @@ void slot_server_t::flush_peer(session_base_t& s) {
     };
     const auto condemn = [&] { condemn_fd(fd()); };
     note_egress(egress_.flush(s.egress, write, condemn));
-    // Disarm once nothing is held, then look again (the one-peer `flush_one` race).
-    if (s.egress.wants_write()) return;
-    waiter().want_write(s, false);
-    if (s.egress.wants_write()) waiter().want_write(s, true);
+    disarm_flushed(s, s.egress);
 }
 
 void slot_server_t::accept_peer() {
@@ -855,7 +864,7 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     // FLAT link has ONE routing identity for every peer it carries — the registered child
     // NAME — so its only seam is the whole link. Firing that on a mid-life close evicts the
     // SURVIVING peers' edges too, which is why it waits for the last open session to go.
-    // The check runs on the poll thread with both transport locks released: `open` is
+    // The check runs on the driving thread with both transport locks released: `open` is
     // mutated only here and in accept_peer, both on this thread, so no session can appear
     // or vanish between the answer and the notification.
     if (was_open && departed[0] != '\0') {
@@ -886,8 +895,8 @@ void slot_server_t::stop_and_join() {
 }
 
 bool slot_server_t::any_open_session() const {
-    // No lock: this runs on the poll thread (or after it is joined), the only thread that
-    // grows the slot vector or stores `open`, so its own reads need no ordering (#2263).
+    // No lock: this runs on the driving thread (or once the link is off the wait), the only thread
+    // that grows the slot vector or stores `open`, so its own reads need no ordering (#2263).
     for (const mem::poly_ptr_t<session_base_t>& s : slots_)
         if (s->open.load(std::memory_order_relaxed)) return true;
     return false;

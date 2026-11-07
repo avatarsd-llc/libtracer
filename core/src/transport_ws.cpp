@@ -167,7 +167,7 @@ struct ws_server_transport_t::framing_t {
         std::array<std::byte, ws::kMaxServerControlFrame> pong{};
         const std::size_t plen = ws::encode_server_control(pong, ws::opcode_t::PONG, payload);
         // Through the session's egress like any other frame (#2144): never a wait on the
-        // poll thread, and never interleaved with a frame in flight.
+        // driving thread, and never interleaved with a frame in flight.
         const ::iovec pv{pong.data(), plen};
         link.send_to(s, std::span<const ::iovec>(&pv, 1));
     }
@@ -188,7 +188,7 @@ struct ws_server_transport_t::framing_t {
      *
      * The FLAT tier carries no per-frame tag by construction, so the WHO the subject seam
      * needs is stamped here instead (#375 Part 2, ADR-0082): the session's handle, on the
-     * poll thread, immediately before the delivery that consumes it, and cleared once it is
+     * driving thread, immediately before the delivery that consumes it, and cleared once it is
      * handed up, so the field names a session only while that session's frame is being
      * delivered (#1915). A message no sink took (a refused materialize, #2504) is a
      * `dropped_rx`.
@@ -218,9 +218,9 @@ ws_server_transport_t::ws_server_transport_t(std::uint16_t bind_port,
 }
 
 ws_server_transport_t::~ws_server_transport_t() {
-    // FIRST: the run() thread dispatches this class's variance points, so it must be
-    // joined while the derived object is still whole. ~slot_server_t closes the listen
-    // socket and sweeps the slot fds after this body.
+    // FIRST: the driving thread dispatches this class's variance points, so the link must
+    // be off the wait (and a fallback thread joined) while the derived object is still whole.
+    // ~slot_server_t closes the listen socket and sweeps the slot fds after this body.
     stop_and_join();
 }
 
@@ -496,7 +496,7 @@ ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_
 
     conn_fd_.store(fd, std::memory_order_relaxed);
     // The two facts diverge from here (#1059): came_up_ is the ok() answer, written once
-    // and never reverting; connected_ is the link_up() liveness the recv thread's
+    // and never reverting; connected_ is the link_up() liveness the driving thread's
     // teardown clears.
     came_up_ = true;
     connected_.store(true, std::memory_order_relaxed);
