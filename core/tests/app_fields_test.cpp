@@ -33,6 +33,7 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_await.hpp"
 #include "test_history.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
@@ -412,7 +413,8 @@ void test_announce_flow() {
     check(deliveries == 0, "the field write delivered NOTHING (no propagation)");
     if constexpr (tr::graph::kInstrumentCounters)
         check(g.ancestor_walks() == walks0, "the field write never walked ancestors");
-    check(fails_with(g.await(temp, std::chrono::milliseconds(30)), status_t::TIMEOUT),
+    check(fails_with(tr::testing::await_within(g, temp, std::chrono::milliseconds(30)),
+                     status_t::TIMEOUT),
           "await did not wake on the field write (write seq untouched)");
 
     // The owner applies the change and announces with an ordinary data write (§C).

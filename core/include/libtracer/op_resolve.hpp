@@ -72,9 +72,6 @@ enum class reply_kind_t : std::uint8_t {
     ERROR = 1,  /**< @brief Failure — payload is `STATUS{ ERROR u8 }` (RFC-0002 model). */
 };
 
-/** @brief Default AWAIT deadline when a FWD carries no `await_timeout` child. */
-inline constexpr std::chrono::nanoseconds kDefaultAwaitTimeout = std::chrono::seconds(1);
-
 /**
  * @brief The inbound identity of a resolved operation: WHERE it arrived and WHO sent it
  *        (#375 Part 2 / #1266, fused — the 2026-08-16 ruling on #375).
@@ -220,10 +217,7 @@ struct link_token_seam_t {
  * stack, so a sink that keeps the wait copies them before it returns.
  */
 struct deferred_await_t {
-    vertex_handle_t vertex; /**< @brief The awaited vertex. */
-    /** @brief The request's `await_timeout` (or the default): the requester's own deadline,
-     *         which a sink MAY ignore (RFC-0004 Amendment 3). */
-    std::chrono::nanoseconds timeout;
+    vertex_handle_t vertex;         /**< @brief The awaited vertex. */
     std::string_view subject;       /**< @brief The ACL subject the gate passed. */
     const inbound_ref_t* inbound;   /**< @brief Where it arrived and who sent it. */
     std::span<const std::byte> dst; /**< @brief Reply `dst` (the request's `src`). */

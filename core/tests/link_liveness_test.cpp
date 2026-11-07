@@ -39,6 +39,7 @@
 #include "libtracer/self_heal_link.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_tcp.hpp"
+#include "test_await.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 #include "transport_vertex_test_access.hpp"
@@ -175,7 +176,7 @@ std::uint8_t state_byte(graph_t& g, std::string_view path) {
     const auto deadline = std::chrono::steady_clock::now() + 10s;
     while (state_byte(g, path) != static_cast<std::uint8_t>(want)) {
         if (std::chrono::steady_clock::now() > deadline) return false;
-        (void)g.await(*parsed, 100ms);
+        (void)tr::testing::await_within(g, *parsed, 100ms);
     }
     return true;
 }

@@ -20,6 +20,7 @@
  * refcount path links and runs on single-core FreeRTOS.
  */
 
+#include <atomic>
 #include <chrono>
 #include <cinttypes>
 #include <cstdint>
@@ -59,15 +60,20 @@ std::uint32_t as_u32(const tr::view::view_t& view) {
     return v;
 }
 
+/** @brief Set by the await task once its wait has answered. */
+std::atomic<bool> g_await_done{false};
+
 /** @brief A FreeRTOS task that parks in await() and reports the next value written. */
 void await_task(void*) {
-    ESP_LOGI(kTag, "await: parking on /sensor/temp (2s timeout)");
-    auto r = g_graph.await(*g_temp, std::chrono::seconds(2));
+    // libtracer reads no clock: the wait ends on the write, or when app_main ends it below.
+    ESP_LOGI(kTag, "await: parking on /sensor/temp (no deadline)");
+    auto r = g_graph.await(*g_temp, 0, tr::graph::kNoDeadline);
     if (r) {
         ESP_LOGI(kTag, "await: woke with value = %" PRIu32, as_u32((*r)->only()));
     } else {
-        ESP_LOGW(kTag, "await: timed out with no write");
+        ESP_LOGW(kTag, "await: ended with no write");
     }
+    g_await_done.store(true, std::memory_order_release);
     vTaskDelete(nullptr);
 }
 
@@ -97,7 +103,13 @@ extern "C" void app_main(void) {
         ESP_LOGE(kTag, "read failed");
     }
 
-    // Let the await task drain its log line before app_main returns.
+    // End the wait if the write did not, then let the await task drain its log line before
+    // app_main returns. Repeated until the task answers: one call made before the task armed
+    // would end nothing.
+    while (!g_await_done.load(std::memory_order_acquire)) {
+        (void)g_graph.expire_awaits(tr::graph::kNoDeadline);
+        vTaskDelay(1);
+    }
     vTaskDelay(pdMS_TO_TICKS(200));
     ESP_LOGI(kTag, "in-process mirror smoke complete");
 }

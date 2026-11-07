@@ -20,6 +20,7 @@
  * behavior (each subscriber sees the write) rather than merely exiting cleanly.
  */
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -57,6 +58,24 @@ void check(bool& ok, bool cond, const char* what) {
     if (!cond) {
         std::printf("  [FAIL] %s\n", what);
         ok = false;
+    }
+}
+
+/** @brief This application's clock, in milliseconds: the `now` it hands the graph. */
+std::uint64_t now_ms() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count());
+}
+
+/**
+ * @brief The application's side of an await's deadline: pass `now` to expire_awaits until
+ *        @p done is set. libtracer reads no clock, so this loop is what ends a wait that is due.
+ */
+void drive_until(tr::graph::graph_t& g, const std::atomic<bool>& done) {
+    while (!done.load(std::memory_order_acquire)) {
+        (void)g.expire_awaits(now_ms());
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
@@ -99,17 +118,23 @@ int main() {
     (void)g.subscribe(path_t("/sensor/temp"), path_t("/log/temp"));
 
     // subscriber_t 3 — a thread blocking in await().
+    // Its deadline is 2 s on this app's clock (libtracer reads none), so a write that lands
+    // before it parks costs a TIMEOUT, never a hang.
+    std::atomic<bool> answered{false};
     std::thread waiter([&] {
-        auto r = g.await(temp, 2s);
+        const std::uint64_t now = now_ms();
+        auto r = g.await(temp, now, now + 2000);
         if (r) {
             await_got = as_u32((*r)->only());
             std::printf("  [await sub] received %u\n", await_got);
         }
+        answered.store(true, std::memory_order_release);
     });
     std::this_thread::sleep_for(50ms);  // let the waiter park in await()
 
     std::printf("publisher: write /sensor/temp = %u\n", kSent);
     (void)g.write(temp, value_u32(kSent));
+    drive_until(g, answered);
     waiter.join();  // joins-after-write: every delivery is complete + visible here
 
     // Read back the last-known-value (a clone — keeps the segment alive for us).

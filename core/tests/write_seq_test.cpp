@@ -38,6 +38,7 @@
 #include "libtracer/guard_mutex.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/vertex.hpp"
+#include "test_await.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -162,31 +163,37 @@ void test_wrap_arithmetic() {
 void test_wait_across_wrap() {
     std::printf("write sequence: wait_for_change while the atomic wraps through 0:\n");
     tr::graph::vertex_t v{role_t::STORED_VALUE, {}, {}};
+    graph_t g;  // owns the waits' deadlines; its expire_awaits ends them
     tr::graph::vertex_seq_test_door_t::preset(v, 0xFFFFFFFEu);
     const write_seq_t s0 = v.current_seq();
     check(s0 == 0xFFFFFFFEu, "the door presets the sequence two bumps before the wrap");
-    check(!v.wait_for_change(s0, 5ms), "no bump yet: the preset snapshot times out");
+    check(!tr::testing::wait_for_change_within(g, v, s0, 5ms),
+          "no bump yet: the preset snapshot times out");
 
     v.note_write();
     const write_seq_t s1 = v.current_seq();
     check(s1 == 0xFFFFFFFFu, "first bump: 0xFFFFFFFE -> 0xFFFFFFFF");
-    check(v.wait_for_change(s0, 0ms), "the first bump wakes the preset snapshot");
-    check(!v.wait_for_change(s1, 5ms), "and 0xFFFFFFFF itself is not a change yet");
+    check(tr::testing::wait_for_change_within(g, v, s0, 0ms),
+          "the first bump wakes the preset snapshot");
+    check(!tr::testing::wait_for_change_within(g, v, s1, 5ms),
+          "and 0xFFFFFFFF itself is not a change yet");
 
     // A BLOCKED waiter across the wrap: the snapshot is 0xFFFFFFFF, taken on this thread before
     // the waiter starts (level-triggered, as in vertex_test), and the bump lands it on 0.
     std::atomic<bool> woke{false};
     std::thread waiter([&] {
-        if (v.wait_for_change(s1, 5s)) woke.store(true);
+        if (tr::testing::wait_for_change_within(g, v, s1, 5s)) woke.store(true);
     });
     std::this_thread::sleep_for(10ms);  // widens the blocked case; not load-bearing
     v.note_write();
     waiter.join();
     check(v.current_seq() == 0u, "second bump: 0xFFFFFFFF -> 0, the atomic really wrapped");
     check(woke.load(), "the bump across the wrap wakes a blocked waiter");
-    check(v.wait_for_change(s1, 0ms) && v.wait_for_change(s0, 0ms),
+    check(tr::testing::wait_for_change_within(g, v, s1, 0ms) &&
+              tr::testing::wait_for_change_within(g, v, s0, 0ms),
           "both pre-wrap snapshots see the change after the wrap");
-    check(!v.wait_for_change(0u, 5ms), "the post-wrap value is not a change to itself");
+    check(!tr::testing::wait_for_change_within(g, v, 0u, 5ms),
+          "the post-wrap value is not a change to itself");
 }
 
 /**
@@ -213,7 +220,7 @@ void test_graph_await_across_wrap() {
             std::this_thread::sleep_for(2ms);
         }
     });
-    const auto r = g.await(h, 5s);
+    const auto r = tr::testing::await_within(g, h, 5s);
     awaited.store(true, std::memory_order_release);
     writer.join();
     check(r.has_value() && std::to_integer<int>((*r)->only().bytes()[0]) == 0x77,
@@ -238,7 +245,7 @@ void test_graph_await_across_wrap() {
             std::this_thread::sleep_for(2ms);
         }
     });
-    auto r = g.await(v, 5s);
+    auto r = tr::testing::await_within(g, v, 5s);
     awaited.store(true, std::memory_order_release);
     writer.join();
     return r;

@@ -64,6 +64,7 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "pair_body.hpp"
+#include "test_await.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -223,7 +224,7 @@ void bracketed_terminus_ops() {
     {
         bracket_node_t n;
         tr::graph::result_t<tr::graph::value_ref_t> r{};  // a value: it must become the refusal
-        bracket(n.g, n.park, [&] { r = n.g.await(*n.h, 1ms, "p0"); });
+        bracket(n.g, n.park, [&] { r = tr::testing::await_within(n.g, *n.h, 1ms, "p0"); });
         check(!r && r.error() == status_t::PERMISSION_DENIED, "an AWAIT is refused");
     }
     {
