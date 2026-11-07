@@ -470,6 +470,16 @@ that breaks one of them is a finding; cite the rule.
   skips core-ci and the other C++ workflows. Required checks still report: a
   skipped job, or a verdict job over skipped jobs, reads as success. doc-citations,
   docs and mermaid-lint still run.
+- **A landing runs combined legs; the nightly adds every single setting.** On a
+  `batch/*` landing, core-ci's non-default build-test settings run as two legs,
+  WIDE (`acl_full=ON` with `hazard_slot_t`) and NARROW (`root=heap` with
+  `reclaim=strict`); the ASan and TSan hazard legs run as WIDE; the bus and
+  self-heal modules are closed out together in `build-test-closed-modules`; and
+  esp-idf builds esp32c6 and esp32s3 only. The nightly, every release tag and a
+  manual dispatch run all of that plus each setting alone (the four single-setting
+  legs, the plain hazard sanitizer legs, bus-closed, self-heal-closed, and esp32 and
+  esp32c3). The `build-test` verdict requires a nightly-only job to be skipped on a
+  landing, so a landing that ran one, or a nightly that skipped one, is red.
 - **Benches run only in quiet windows,** judged best-of-rounds, with an A/A row
   beside every A/B so the noise floor is on the page.
 

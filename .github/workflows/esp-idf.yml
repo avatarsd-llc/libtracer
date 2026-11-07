@@ -24,6 +24,14 @@
 # target here without adding it there supports nothing, and adding it there
 # without adding it here claims something untested.
 #
+# LANDING VERSUS NIGHTLY (#2451; CI time audit tier B, ruled 2026-11-01). A landing (a
+# `batch/*` pull request, the only pull request these jobs run on) builds esp-build and
+# full-node for one chip per architecture: esp32s3 (Xtensa) and esp32c6 (RISC-V, the
+# required target). The nightly, every release tag and a manual dispatch build all four
+# targets, so esp32c3 and esp32 (the one dual-core, `CONFIG_FREERTOS_UNICORE=n` build) are
+# still built at least nightly and before every release. The target list is the one
+# expression in each job's `matrix.target`.
+#
 # WHAT THIS WORKFLOW STILL CANNOT DO, and where that lives now (#1557): every job
 # below cross-compiles, links, reads objects or censuses flash. None of them
 # EXECUTES a libtracer instruction on a chip, because no hosted runner has one
@@ -227,7 +235,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [esp32c6, esp32c3, esp32, esp32s3]
+        # A landing: esp32c6 + esp32s3; nightly, tag, dispatch: all four (header, #2451).
+        target: ${{ fromJSON(github.event_name == 'pull_request' && '["esp32c6", "esp32s3"]' || '["esp32c6", "esp32c3", "esp32", "esp32s3"]') }}
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
@@ -301,7 +310,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [esp32c6, esp32c3, esp32, esp32s3]
+        # A landing: esp32c6 + esp32s3; nightly, tag, dispatch: all four (header, #2451).
+        target: ${{ fromJSON(github.event_name == 'pull_request' && '["esp32c6", "esp32s3"]' || '["esp32c6", "esp32c3", "esp32", "esp32s3"]') }}
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an

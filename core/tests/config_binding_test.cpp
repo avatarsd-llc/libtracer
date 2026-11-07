@@ -1,8 +1,8 @@
 /**
  * @file
  * @brief #1810 — a CI leg runs the configuration its name says: the bound LKV slot,
- *        reclamation policy and ACL policy are printed, and checked against the leg's
- *        expectation.
+ *        reclamation policy, ACL policy and default root are printed, and checked against the
+ *        leg's expectation.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -16,7 +16,9 @@
  *
  *  - `LT_EXPECT_LKV_SLOT`       — `single_writer_slot_t` or `hazard_slot_t`;
  *  - `LT_EXPECT_RECLAIM_POLICY` — `reclaim_qsbr_t` or `reclaim_strict_t`;
- *  - `LT_EXPECT_ACL_POLICY`     — `allow_only_policy_t` or `full_acl_policy_t`.
+ *  - `LT_EXPECT_ACL_POLICY`     — `allow_only_policy_t` or `full_acl_policy_t`;
+ *  - `LT_EXPECT_DEFAULT_ROOT`   — `slab_pool`, `arena` or `heap` (#2449: a combined leg binds
+ *    several settings in one fragment, so each one it names is checked, the root included).
  *
  * A variable left unset is not checked, so a local build runs the test and only prints its
  * binding.
@@ -85,6 +87,16 @@ constexpr std::string_view acl_policy_name() {
     return "unknown";
 }
 
+/** @brief The default root this build's fragment selects (`kSlabPool`, `kArenaBytes`). */
+constexpr std::string_view default_root_name() {
+    if constexpr (tr::mem::kHeapRoot) {
+        return "heap";
+    } else if constexpr (tr::mem::kSlabPool) {
+        return "slab_pool";
+    }
+    return "arena";
+}
+
 /** @brief Checks one binding against the leg's expectation, when the leg states one. */
 void expect(const char* variable, std::string_view bound) {
     const char* expected = std::getenv(variable);
@@ -104,12 +116,14 @@ void expect(const char* variable, std::string_view bound) {
 int main() {
     std::printf(
         "this build binds: lkv_slot_t = %.*s, reclaim_policy_t = %.*s, "
-        "acl_policy_t = %.*s\n",
+        "acl_policy_t = %.*s, default root = %.*s\n",
         static_cast<int>(lkv_slot_name().size()), lkv_slot_name().data(),
         static_cast<int>(reclaim_policy_name().size()), reclaim_policy_name().data(),
-        static_cast<int>(acl_policy_name().size()), acl_policy_name().data());
+        static_cast<int>(acl_policy_name().size()), acl_policy_name().data(),
+        static_cast<int>(default_root_name().size()), default_root_name().data());
     expect("LT_EXPECT_LKV_SLOT", lkv_slot_name());
     expect("LT_EXPECT_RECLAIM_POLICY", reclaim_policy_name());
     expect("LT_EXPECT_ACL_POLICY", acl_policy_name());
+    expect("LT_EXPECT_DEFAULT_ROOT", default_root_name());
     return tr::testing::summary("config_binding");
 }
