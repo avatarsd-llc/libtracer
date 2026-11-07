@@ -157,6 +157,28 @@ The component exposes libtracer's build-time knobs through **Kconfig** (`idf.py 
 
 The value is delivered as the ordinary constexpr `tr::graph::kVertexLockStripes` (ADR-0068). The component writes a generated `<libtracer/config_override.hpp>` — a fragment that inherits `tr::graph::default_config_t` and states only this knob and the other ESP-specific ones — into a directory listed before `core/include` in the component's public include dirs, where the checked-in `config.hpp` finds it with `__has_include`. One shared header per build, so the `inline constinit` stripe table's size can never diverge across TUs. (A bare `-D` no longer does anything; the Kconfig option is the knob.)
 
+### The router's frame observer (application type, not Kconfig)
+
+`config_t::frame_observer_t` (#2580) is a type the application writes, so Kconfig cannot carry it. Two CMake variables, set in the project's top-level `CMakeLists.txt` **before** `project()` (or passed as `idf.py -D…`), bind it (#2595):
+
+| Variable | Value |
+| --- | --- |
+| `LIBTRACER_FRAME_OBSERVER_HEADER` | the header that defines the observer; a relative path is taken from the project directory |
+| `LIBTRACER_FRAME_OBSERVER_TYPE` | the observer's fully qualified type name |
+
+```cmake
+set(LIBTRACER_FRAME_OBSERVER_HEADER "${CMAKE_CURRENT_LIST_DIR}/main/link_tally.hpp")
+set(LIBTRACER_FRAME_OBSERVER_TYPE "::my_app::link_tally_t")
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(my_app)
+```
+
+The generated `libtracer/config_override.hpp` then includes the header and binds `using frame_observer_t = <type>;` inside `esp_config_t`. Set both or neither; one alone is a configure error. Unset, the generated config is unchanged: no include, and the no-op `tr::net::no_frame_observer_t`.
+
+**How the header reaches the router's compile.** The fragment includes the header by its absolute path, so no include directory is added for it: every TU that includes `config.hpp` (the component's own `fwd_router.cpp`, every other component TU, and your app's TUs) reaches the header through the fragment, and the header's own quoted includes resolve from its own directory. Two consequences follow. The header must include only the standard library and its own neighbours, never a libtracer header, because `config.hpp` is what includes it. And `on_frame` should be defined in the header (inline): the component's archive calls it, and a definition kept in the app's own component is a link dependency the component does not declare.
+
+The type must be `static void on_frame(std::string_view) noexcept`; `fwd_router.hpp` checks it against the `tr::net::frame_observer` concept, so a wrong shape is a compile error. [`examples/full_node/`](examples/full_node/) binds a counting observer this way, `static_assert`s that `tr::graph::config_t::frame_observer_t` is that type, and its self-proof checks that the observer saw frames.
+
 ## FreeRTOS / threading notes
 
 - **The transports spawn one recv thread each (a FreeRTOS task via `pthread_create`).** Every socket transport owns one recv thread; `transport_can`'s TWAI link owns one dispatch thread. **Right-size each one directly**: pass `recv_stack` (bytes) to the transport constructor, or set `twai_link_config_t::stack_size`, and it sizes just that thread — no need to inflate the **global** `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`, which is paid by *every* pthread in the system (#486). A `0` (the default) keeps the global default. Size to the measured high-water mark (`uxTaskGetStackHighWaterMark`, surfaced in the `/system/tasks` census) plus margin — the ws/tcp serve loops carry ~4 KiB chunk buffers + TLV decode frames, so the ESP-IDF default 3 KiB is NOT enough for an un-sized global default (the example raises the global to **12 KiB** as the blunt fallback). Priorities follow `CONFIG_PTHREAD_TASK_PRIO_DEFAULT` (5) — below Wi-Fi/lwIP tasks, which is the right default: recv loops are throughput, not latency-critical ISR work.

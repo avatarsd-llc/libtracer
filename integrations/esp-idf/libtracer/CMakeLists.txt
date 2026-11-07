@@ -475,6 +475,29 @@ if(CONFIG_LIBTRACER_WS_SERVER AND NOT CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
                     "task; if a low-priority task never blocks, httpd_ws_link_t stops reading for "
                     "good after one budget. Set both to 0 unless the idle task is known to run.")
 endif()
+# The router's per-frame observer (#2595, completing #2580). It is an APPLICATION type, so it
+# is not a Kconfig option: the application names the header that defines it and the type,
+# as two plain CMake variables set in its project CMakeLists.txt before project() (or with
+# `idf.py -D`). The fragment includes the header by its ABSOLUTE path (a relative one is taken
+# from the project directory), so no include directory has to be added for it: every TU that
+# includes config.hpp, the component's fwd_router.cpp among them, reaches the header through
+# the fragment, and the header's own quoted includes resolve from its own directory. Unset,
+# both strings stay empty and the fragment is byte-for-byte what it was before the knob:
+# no include and the no-op default. fwd_router.hpp still checks the bound type against the
+# `tr::net::frame_observer` concept.
+set(LIBTRACER_FRAME_OBSERVER_INCLUDE "")
+set(LIBTRACER_FRAME_OBSERVER_BINDING "")
+if(LIBTRACER_FRAME_OBSERVER_HEADER OR LIBTRACER_FRAME_OBSERVER_TYPE)
+    if(NOT LIBTRACER_FRAME_OBSERVER_HEADER OR NOT LIBTRACER_FRAME_OBSERVER_TYPE)
+        message(FATAL_ERROR "libtracer: set both LIBTRACER_FRAME_OBSERVER_HEADER and "
+                            "LIBTRACER_FRAME_OBSERVER_TYPE, or neither (#2595).")
+    endif()
+    get_filename_component(LIBTRACER_FRAME_OBSERVER_PATH "${LIBTRACER_FRAME_OBSERVER_HEADER}"
+                           ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+    set(LIBTRACER_FRAME_OBSERVER_INCLUDE "#include \"${LIBTRACER_FRAME_OBSERVER_PATH}\"\n")
+    set(LIBTRACER_FRAME_OBSERVER_BINDING
+        "    using frame_observer_t = ${LIBTRACER_FRAME_OBSERVER_TYPE};\n")
+endif()
 set(LIBTRACER_CONFIG_OVERRIDE_PATH
     "${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config_override.hpp")
 set(LIBTRACER_CONFIG_OVERRIDE_TEXT
@@ -489,7 +512,7 @@ set(LIBTRACER_CONFIG_OVERRIDE_TEXT
 #pragma once
 
 #include <cstddef>
-${LIBTRACER_SLOT_INCLUDE}${LIBTRACER_SYNC_INCLUDE}
+${LIBTRACER_SLOT_INCLUDE}${LIBTRACER_SYNC_INCLUDE}${LIBTRACER_FRAME_OBSERVER_INCLUDE}
 namespace tr::graph {
 
 /** @brief Core's defaults with this component's Kconfig and chip-derived knobs applied. */
@@ -512,7 +535,7 @@ struct esp_config_t : default_config_t {
     static constexpr std::size_t kArenaBytes = ${LIBTRACER_ARENA_BYTES};
     static constexpr std::size_t kThreadStackArenaBytes = ${LIBTRACER_THREAD_STACK_ARENA_BYTES};
     static constexpr share_hint_t kDefaultShareHint = share_hint_t::${LIBTRACER_DEFAULT_SHARE_HINT};
-${LIBTRACER_SLOT_BINDING}${LIBTRACER_SYNC_BINDING}};
+${LIBTRACER_SLOT_BINDING}${LIBTRACER_SYNC_BINDING}${LIBTRACER_FRAME_OBSERVER_BINDING}};
 
 using config_t = esp_config_t;
 

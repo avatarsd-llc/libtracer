@@ -20,5 +20,11 @@ cmake_minimum_required(VERSION 3.16)
 # component resolvable as `libtracer` (what main/ does `REQUIRES libtracer` on).
 set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../libtracer")
 
+# Bind the router's per-frame observer (#2595): the component's generated config includes
+# this header and binds the type as `config_t::frame_observer_t`. app_main.cpp asserts the
+# binding and the self-proof checks that the observer saw frames.
+set(LIBTRACER_FRAME_OBSERVER_HEADER "${CMAKE_CURRENT_LIST_DIR}/main/link_tally.hpp")
+set(LIBTRACER_FRAME_OBSERVER_TYPE "::full_node::link_tally_t")
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(full_node)

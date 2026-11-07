@@ -53,6 +53,7 @@
 #include <span>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -65,6 +66,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_vertex.hpp"
+#include "link_tally.hpp"
 #include "platform.hpp"
 
 namespace {
@@ -83,6 +85,10 @@ using tr::wire::type_t;
 
 /** @brief The device's UDP listener port (the host peer dials it over loopback). */
 constexpr std::uint16_t kNodePort = 47301;
+
+// The project CMakeLists.txt binds the router's frame observer through the component (#2595).
+static_assert(std::is_same_v<tr::graph::config_t::frame_observer_t, full_node::link_tally_t>,
+              "LIBTRACER_FRAME_OBSERVER_TYPE did not reach the generated config");
 
 int g_failures = 0;
 
@@ -445,6 +451,11 @@ int run_host_probe(device_node_t& dev) {
     awaiter.join();
     check(delivered.has_value() && *delivered == 22,
           "remote fan-out delivered 22 to the host peer (await fired)");
+
+    // 4) The bound frame observer (#2595): both routers in this image called it for the frames
+    //    above, so a binding that never reached the component's router reads zero here.
+    check(full_node::link_tally_t::frames.load(std::memory_order_relaxed) != 0,
+          "the bound config_t::frame_observer_t observed inbound frames");
 
     return g_failures;
 }
