@@ -1,5 +1,7 @@
 # Prerequisites
 *.d
+# ...but not the changelog fragment directories (core/changelog.d/, CONTRIBUTING.md item 6)
+!changelog.d
 
 # Object files
 *.o

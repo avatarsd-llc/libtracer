@@ -99,6 +99,15 @@ set(LIBTRACER_SOURCES_POSIX_ENDPOINT
     "${_libtracer_src}/posix_endpoint.cpp"
 )
 
+# The wait module's two adapters (ADR-0087 §3, #2147), one per target, picked by which TU
+# compiles: one epoll set on a Linux host, poll(2) over lwIP sockets everywhere else.
+set(LIBTRACER_SOURCES_WAIT_EPOLL
+    "${_libtracer_src}/wait_epoll.cpp"
+)
+set(LIBTRACER_SOURCES_WAIT_POLL
+    "${_libtracer_src}/wait_poll.cpp"
+)
+
 # The CAN transport (portable framing/reassembly), plus its two can_link_t platform
 # bindings: the real SocketCAN link (Linux only) and the always-off stub for elsewhere.
 set(LIBTRACER_SOURCES_TRANSPORT_CAN

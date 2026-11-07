@@ -107,3 +107,5 @@ Related: `p999` is not a reportable statistic on this project's harness at any s
 - `io_uring` stays reachable, as the WIDE adapter's later form.
 - **The `SO_REUSEPORT` shared-nothing split stays the deferred scale-out above about 4 000 concurrent peers**, as this ADR's erratum bounded it. Read under ADR-0087, that split is one wait-module instance per thread over its share of sockets. Whether a node may run more than one instance is not ruled here.
 - The asio rejection stands unchanged.
+
+**Implementation note (2026-11-07, [#2147](https://github.com/avatarsd-llc/libtracer/issues/2147)).** The wait module ships as `tr::net::wait_module_t` with two adapter TUs, `wait_epoll.cpp` (one level-triggered `epoll` set and an `eventfd` wake, the WIDE host) and `wait_poll.cpp` (`poll(2)` over lwIP sockets and a loopback doorbell, until #2148's callback adapter replaces it on MID), held to one conformance suite. **Thread per link stays as a fallback adapter:** a link whose config names no module drives a private one on a thread of its own, with the same untimed wait, so an application that drives nothing keeps working and still wakes 0 times while idle.

@@ -151,7 +151,7 @@ prefix_framing_t<Deliver> prefix_framing(std::size_t max_frame, drop_tally_t<>& 
 
 tcp_transport_t::tcp_transport_t(std::string_view peer_host, std::uint16_t peer_port,
                                  const tcp_config_t& config)
-    : stream_endpoint_t(config.memory.io_or_default()),
+    : stream_endpoint_t(config.memory.io_or_default(), true, config.wait),
       backend_(config.memory.rx),
       recv_stack_(config.recv_stack),
       stack_src_(&config.memory.stack_or_default()) {
@@ -170,25 +170,19 @@ tcp_transport_t::tcp_transport_t(std::string_view peer_host, std::uint16_t peer_
         ::close(fd);
         return;
     }
-    // A receive timeout lets every blocking read poll stop_ for a clean
-    // shutdown (the posix_endpoint_t SO_RCVTIMEO idiom, applied per connection).
-    set_rcv_timeout(fd);
-    // Its egress twin (#838): without it a send into a peer that has stopped reading blocks
+    // The bounded send (#838): without it a send into a peer that has stopped reading blocks
     // forever in the writer's turn, and every record behind it waits in the ring.
     set_snd_timeout(fd);
     set_nodelay(fd);
     conn_fd_.store(fd, std::memory_order_relaxed);
     came_up_ = true;  // the ok() fact (#1059): the dial succeeded; liveness is link_up()
-    // Two-phase bring-up (#1045): the recv thread is spawned by `start_receiving()`, never
-    // here. A thread started here could decode a frame the peer pushed on connect before the
+    // Two-phase bring-up (#1045): the socket goes on the wait in `start_receiving()`, never
+    // here. A wait begun here could decode a frame the peer pushed on connect before the
     // owner installs a sink, and the empty slot would drop it with no counter moving.
 }
 
 bool tcp_transport_t::start_receiving() {
-    // A LISTEN link's accept loop IS its one `start`, spawned in its constructor. Without
-    // this arm an owner arming every link it wires would spawn a SECOND thread onto an
-    // already-accepted peer's fd — two `serve` loops splitting one stream, over a `body_`
-    // the second `start` reassigns while the first is running it.
+    // A LISTEN link began waiting in its constructor: its one `start` is spent.
     if (listen_) return true;
     const int fd = conn_fd_.load(std::memory_order_relaxed);
     if (fd < 0) return true;  // the dial failed: there is no socket to serve, and ok() says so
@@ -196,17 +190,12 @@ bool tcp_transport_t::start_receiving() {
     // is reachable both from the one-phase constructor and from an owner that calls it
     // unconditionally on every link it wires.
     if (recv_started_.exchange(true, std::memory_order_relaxed)) return true;
-    if (start(
-            [this, fd] {
-                serve(fd);
-                teardown_peer(fd);  // close the egress, then reset and close (stream_endpoint_t)
-                // Departure seam (RFC-0009 §D extended): the one connection died under us —
-                // not a local stop — so report the link down (no locks held here).
-                if (!stop_.load(std::memory_order_relaxed)) notify_down();
-            },
-            recv_stack_, *stack_src_))
+    // Write interest is armed for the first turn only when a send held a frame before now, so
+    // the driving thread resumes it; otherwise the driver never writes until a send holds.
+    if (start(recv_stack_, *stack_src_) &&
+        attach(src_, fd, &tcp_transport_t::on_conn, peer_.wants_write()))
         return true;
-    // A refused spawn (#2288) is the connection dying before its first byte: closed, and
+    // A refused wait (#2288) is the connection dying before its first byte: closed, and
     // ok() false. The owner hears it from the return, not from a link-down fired under
     // whatever lock it holds while it wires the link.
     teardown_peer(fd);
@@ -215,7 +204,9 @@ bool tcp_transport_t::start_receiving() {
 }
 
 tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, const tcp_config_t& config)
-    : stream_endpoint_t(config.memory.io_or_default()), listen_(true), backend_(config.memory.rx) {
+    : stream_endpoint_t(config.memory.io_or_default(), true, config.wait),
+      listen_(true),
+      backend_(config.memory.rx) {
     const std::size_t max_frame = config.max_frame;
     const std::size_t recv_stack = config.recv_stack;
     const std::uint32_t liveness_window_ms = config.liveness_window_ms;
@@ -242,16 +233,17 @@ tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, const tcp_config_t& co
     if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
         bound_port_ = ntohs(bound.sin_port);
 
-    // A refused accept-loop spawn (#2288) leaves the listener inert: ok() false.
-    if (!start([this] { run_listen(); }, recv_stack, config.memory.stack_or_default())) {
+    // A refused wait (#2288) leaves the listener inert: ok() false.
+    if (!start(recv_stack, config.memory.stack_or_default()) ||
+        !attach(src_, listen_fd_, &tcp_transport_t::on_listen)) {
         ::close(listen_fd_);
         listen_fd_ = -1;
     }
 }
 
 tcp_transport_t::~tcp_transport_t() {
-    stop_and_join();  // FIRST: the thread touches the fds released below
-    // A leftover peer fd (never-spawned thread — dial failed) is closed by
+    stop_and_join();  // FIRST: a callback touches the fds released below
+    // A leftover peer fd (one never put on the wait) is closed by
     // ~stream_endpoint_t after this body; the listen socket is ours.
     if (listen_fd_ >= 0) ::close(listen_fd_);
 }
@@ -309,49 +301,37 @@ void tcp_transport_t::send_record(std::span<const std::span<const std::byte>> pa
         lane);
 }
 
-void tcp_transport_t::serve(int fd) {
-    // Frame ingress with no read-ahead (ADR-0087 §1): the prefix is read alone, then the body
-    // straight into a segment drawn at its exact length, and the NEXT frame's prefix rides the
-    // same read (#2133), so a frame of any size is received with no copy. The read blocks
-    // under the receive timeout, which is how the loop gets back to `stop_`.
-    frame_ingress_t<kPrefixBytes, 0> ingress;
-    // Tier select lives in the slot (receiver_slot.hpp): the rope sink gets the frame OWNING,
-    // the span sink borrows it.
-    auto framing = prefix_framing(max_frame_, drops_,
-                                  [this](view::view_t frame) { rx_.deliver(std::move(frame)); });
-    while (!stop_.load(std::memory_order_relaxed)) {
-        // A frame the socket cut short waits for writability, so this thread waits for both
-        // and resumes it (#2144), then reads without blocking; otherwise the read is the wait.
-        int flags = 0;
-        if (peer_.wants_write()) {
-            const int pr = poll_io(fd);
-            if (pr < 0) return;
-            if (pr == 0) continue;
-            flags = MSG_DONTWAIT;
-        }
-        if (!ingress.read(fd, *backend_, framing, flags)) return;
-    }
+void tcp_transport_t::on_conn(void* ctx, wait_source_t& self, std::uint8_t ready) {
+    (void)self;
+    auto& link = *static_cast<tcp_transport_t*>(static_cast<posix_endpoint_t*>(ctx));
+    auto framing = prefix_framing(link.max_frame_, link.drops_, [&link](view::view_t frame) {
+        link.rx_.deliver(std::move(frame));
+    });
+    if (link.peer_turn(ready,
+                       [&](int fd) { return link.ingress_.read(fd, *link.backend_, framing); }))
+        return;
+    // Departure seam (RFC-0009 §D extended): the one connection died under us, so report the
+    // link down, after the teardown and with no lock held. A listener waits for the next peer.
+    link.depart();
+    link.notify_down();
+    if (link.listen_) link.relisten(link.listen_fd_, &tcp_transport_t::on_listen);
 }
 
-void tcp_transport_t::run_listen() {
-    // The one-peer accept/serve/teardown shape is stream_endpoint_t's; only
-    // the per-peer socket options are TCP's.
-    run_accept_loop(
-        listen_fd_,
-        [this](int fd) {
-            set_rcv_timeout(fd);
+void tcp_transport_t::on_listen(void* ctx, wait_source_t& self, std::uint8_t ready) {
+    (void)self;
+    (void)ready;
+    auto& link = *static_cast<tcp_transport_t*>(static_cast<posix_endpoint_t*>(ctx));
+    // The one-peer accept/serve/teardown shape is stream_endpoint_t's; only the socket
+    // options and the fresh ingress are this link's.
+    link.accept_one(
+        link.listen_fd_,
+        [&link](int fd) {
             set_snd_timeout(fd);  // the #838 egress bound, same as the DIAL socket's
             set_nodelay(fd);
+            link.ingress_.reset();
             return true;
         },
-        [this](int fd) {
-            serve(fd);
-            // Departure seam (RFC-0009 §D extended): serve only returns once the
-            // peer's connection is dead (or we are stopping); teardown_peer follows
-            // in the accept loop before the next peer can connect, so eviction
-            // never races a successor session on this single-peer link.
-            if (!stop_.load(std::memory_order_relaxed)) notify_down();
-        });
+        &tcp_transport_t::on_conn);
 }
 
 // ---------------------------------------------------------------------------
@@ -377,13 +357,13 @@ struct tcp_server_transport_t::session_t : slot_server_t::session_base_t {
 tcp_server_transport_t::tcp_server_transport_t(std::uint16_t bind_port,
                                                const tcp_server_config_t& config)
     : stream_server_base_t(config.max_peers, config.peer_named, config.liveness_window_ms,
-                           config.memory.io_or_default(), config.memory.state_or_default()),
+                           config.memory.io_or_default(), config.memory.state_or_default(),
+                           config.wait),
       backend_(config.memory.rx) {
     max_frame_ = length_prefix_framer_t::configured_cap(config.max_frame);  // tighten-only (#1035)
     if (!bind_listen(bind_port)) return;
     // A refused poll-loop spawn (#2288) leaves the listener inert: ok() false.
-    if (!start([this] { run(); }, config.recv_stack, config.memory.stack_or_default()))
-        close_listen();
+    if (!serve(config.recv_stack, config.memory.stack_or_default())) close_listen();
 }
 
 tcp_server_transport_t::~tcp_server_transport_t() {
