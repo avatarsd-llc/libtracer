@@ -34,11 +34,24 @@ on:
   schedule:
     - cron: "0 0 * * *"
   workflow_dispatch:
+  # EVERY PULL REQUEST PUSH, NOT ONLY A LANDING (#2601). The job was gated to `batch/*`
+  # heads, so a pinned symbol that grew reached the train first and cost a full
+  # re-landing (#2562). It is one cheap job: the scope step below is its path filter
+  # (core/ and bench/, Markdown excluded; nothing else can move a pinned size), and when it
+  # builds, the two bench targets come from the shared compiler cache (17-52 s per job on
+  # the ci-local runners across the 2026-11-06/07 landings). A push runs the same steps,
+  # script and pins as the landing.
   pull_request:
+
+# One cancelling group per pull request (a newer push supersedes its own older run, the
+# standing per-PR rule); nightly, tag and dispatch runs key on the sha and never cancel.
+concurrency:
+  group: symbol-ratchet-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   symbol-ratchet:
-    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'batch/'))
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
