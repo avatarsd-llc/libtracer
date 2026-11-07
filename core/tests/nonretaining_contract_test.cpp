@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "libtracer/tracer.hpp"
+#include "test_await.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -78,7 +79,7 @@ using tr::testing::make_value;
             std::this_thread::sleep_for(2ms);
         }
     });
-    auto got = g.await(v, 5s);
+    auto got = tr::testing::await_within(g, v, 5s);
     done.store(true, std::memory_order_release);
     writer.join();
     return got;

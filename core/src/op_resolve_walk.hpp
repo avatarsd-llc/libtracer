@@ -304,8 +304,6 @@ struct parsed_fwd_t {
      * reference before storing it (the remote-subscribe arm below).
      */
     std::optional<N> reverse{};
-    /** AWAIT only: the request's `await_timeout`, or @ref kDefaultAwaitTimeout when absent. */
-    std::uint64_t await_timeout = static_cast<std::uint64_t>(kDefaultAwaitTimeout.count());
     /**
      * @brief The `src` PATH is present but ZERO-LENGTH — *no reply requested*
      *        (RFC-0004 Amendment 2, #1502/#1491).
@@ -375,11 +373,10 @@ template <class N>
             p.payload = *tail;
             tail = ch.next();
         }
-    } else if (p.op == fwd_op_t::AWAIT) {
-        if (tail && tail->type() == type_t::VALUE) {
-            p.await_timeout = detail::load_le<std::uint64_t>(tail->body());
-            tail = ch.next();
-        }
+    } else if (p.op == fwd_op_t::AWAIT && tail && tail->type() == type_t::VALUE) {
+        // The `await_timeout` hint: the deadline is the requester's (RFC-0004 Amendment 3),
+        // and a terminus reads no clock to run it (#2579), so it is skipped unread.
+        tail = ch.next();
     }
     if (tail && tail->type() == type_t::PATH_REF_REVERSE) p.reverse = *tail;
     return p;
@@ -915,16 +912,14 @@ template <class N, class ReplyError>
     // decodes to an empty path, and answering that as a plain await would be a change
     // of behaviour this refactor does not make.
     if (req.selector.has_value()) return error_reply(route, status_t::SCHEMA_NOT_FOUND, egress);
-    const std::chrono::nanoseconds timeout(req.await_timeout);
     // ADR-0084: with a deferral sink and a caller that can send a later reply, the
-    // wait leaves this thread. Blocking here for `timeout` held the receive context of
-    // the link the request arrived on, and every frame queued behind it. The READ gate
-    // answers first, as on the synchronous arm below.
+    // wait leaves this thread. Blocking here held the receive context of the link the
+    // request arrived on, and every frame queued behind it. The READ gate answers first,
+    // as on the synchronous arm below.
     if (await_defer.fn != nullptr && await_defer.deferred != nullptr) {
         if (!graph.allows(v, subject, acl_right_t::READ))
             return error_reply(route, status_t::PERMISSION_DENIED, egress);
         const deferred_await_t d{.vertex = v,
-                                 .timeout = timeout,
                                  .subject = subject,
                                  .inbound = link_token.inbound,
                                  .dst = route.dst_wire,
@@ -935,7 +930,9 @@ template <class N, class ReplyError>
         *await_defer.deferred = true;
         return rope_t{};
     }
-    result_t<value_ref_t> r = graph.await(v, timeout, subject);
+    // The synchronous arm runs no deadline either (#2579): the wait ends on the next change,
+    // or with `TIMEOUT` when the application's `graph_t::expire_awaits` ends it.
+    result_t<value_ref_t> r = graph.await(v, 0, kNoDeadline, subject);
     if (!r) return error_reply(route, r.error(),
                                egress);  // TIMEOUT => tr::flow::timeout
     return or_backpressure(assemble_result_rope(ok, **r, egress), route, egress);

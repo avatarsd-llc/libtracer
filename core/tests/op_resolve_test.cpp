@@ -44,6 +44,7 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_await.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
@@ -264,12 +265,15 @@ void test_await() {
               value_u8(r.children[4]) == 0x7B,
           "AWAIT reply payload == the next write (VALUE u8=123)");
 
-    // Timeout path: 1ms deadline, no writer.
+    // Timeout path, no writer. The `await_timeout` hint (1ms) is the requester's and is not run
+    // here (RFC-0004 Amendment 3, #2579): the wait ends when the application's clock door,
+    // `graph_t::expire_awaits`, ends it. `kNoDeadline` ends every wait, deadline or not.
     std::vector<std::byte> tbuf(8);
     tr::detail::store_le<std::uint64_t>(tbuf, 1'000'000ull);  // 1ms
     const auto fwd_to =
         b_fwd(fwd_op_t::AWAIT, b_path({"sensor", "temp"}), b_path({"reply-ep"}), {}, b_value(tbuf));
-    auto reply_to = resolve_bytes(resolver, fwd_to);
+    auto reply_to = tr::testing::with_expiry(
+        g, 0, [&] { return resolve_bytes(resolver, fwd_to); }, &tr::testing::end_every_await);
     const auto drto = decode_reply(*reply_to);
     const tlv_t& rto = drto.tlv;
     check(value_u8(rto.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
@@ -306,7 +310,9 @@ void test_await_field_selector_is_enotty() {
     const auto await_with = [&](const std::vector<std::byte>& sel) {
         const auto f = b_fwd(fwd_op_t::AWAIT, b_path({"sensor", "temp"}), b_path({"reply-ep"}), sel,
                              b_value(tbuf));
-        auto reply = resolve_bytes(resolver, f);
+        // The synchronous arm runs no deadline (#2579): the suite's clock door ends the wait.
+        auto reply = tr::testing::with_expiry(
+            g, 0, [&] { return resolve_bytes(resolver, f); }, &tr::testing::end_every_await);
         check(reply.has_value(), "resolve AWAIT returned");
         return decode_reply(*reply);
     };
@@ -404,7 +410,7 @@ void test_local_subscribe_await_field_path_matches_remote() {
         const auto edge = g.subscribe(p, *path_t::parse("/sink"));
         check(!edge.has_value() && edge.error() == status_t::SCHEMA_NOT_FOUND,
               (std::string("subscribe(edge) ") + text + " -> SCHEMA_NOT_FOUND"));
-        const auto w = g.await(p, std::chrono::milliseconds(1));
+        const auto w = tr::testing::await_within(g, p, std::chrono::milliseconds(1));
         check(!w.has_value() && w.error() == status_t::SCHEMA_NOT_FOUND,
               (std::string("await ") + text + " -> SCHEMA_NOT_FOUND, not flow::timeout"));
     }
@@ -444,17 +450,19 @@ void test_await_at_a_handler_replies_with_the_composed_value() {
     std::printf("AWAIT at a HANDLER terminus -> RESULT(on_read value), not ERROR:\n");
     graph_t g;
     op_resolver_t resolver(g);
-    auto last = std::make_shared<std::uint8_t>(0);
+    // Written on the writer thread's on_write, read in the awaiter's on_read: atomic.
+    auto last = std::make_shared<std::atomic<std::uint8_t>>(0);
     tr::graph::handlers_t h;
     auto h_on_write = [last](const tr::graph::value_t& value,
                              const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         const auto dec = tr::wire::decode(value.only());
-        if (dec) *last = value_u8(*dec);
+        if (dec) last->store(value_u8(*dec), std::memory_order_relaxed);
         return {};
     };
     h.on_write = tr::graph::thunk(h_on_write);
     auto h_on_read = [last]() -> tr::graph::result_t<tr::graph::value_ref_t> {
-        return tr::graph::value_ref_t::composed(make_value(b_value({*last})));
+        return tr::graph::value_ref_t::composed(
+            make_value(b_value({last->load(std::memory_order_relaxed)})));
     };
     h.on_read = tr::graph::thunk(h_on_read);
     const auto path = path_t::parse("/dev/seam");

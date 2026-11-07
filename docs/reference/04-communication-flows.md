@@ -13,7 +13,7 @@ The entire control and data surface is three operations. Every flow below decomp
 | ---- | ---- | ---- | ---- |
 | `read(path)` | Fetch the last-known-value at `path` | No (configurable: blocks under `reliable`) | TLV view (ownership transferred to caller) or NOT_FOUND |
 | `write(path, tlv)` | Push `tlv` to `path`, fan out to subscribers | No (back-pressure may queue) | OK or error code |
-| `await(path, timeout)` | Block until next write at `path` or timeout | Yes | TLV view or TIMEOUT |
+| `await(path, now, deadline)` | Block until next write at `path`, or until the deadline passes on the application's clock | Yes | TLV view or TIMEOUT |
 
 Subscriptions, QoS, ACL and liveness — every control surface — are encoded as **writes to fields under the `:` separator**. There is no separate `subscribe()`, `connect()` or `set_qos()` verb.
 
@@ -115,7 +115,8 @@ Each edge carries exactly one `target`, and the target is **subscription-unaware
 ```
 Subscriber                     Vertex
    |                              |
-   | await("/sensor/temp", 1s)    |
+   | await("/sensor/temp", now,   |
+   |       deadline)              |
    |─────────────────────────────>|
    |                              |── enqueue caller in waiter list
    |                              |
@@ -128,7 +129,10 @@ Subscriber                     Vertex
    |                              |
 ```
 
-Or on timeout:
+Or on timeout. A local `await` reads no clock: its deadline is on the application's clock, and
+it ends when the application passes a `now` at or past it to `graph_t::expire_awaits`
+([#2579](https://github.com/avatarsd-llc/libtracer/issues/2579)). Without that call it ends only
+on the next write.
 
 ```
    | <── STATUS=ERROR(TIMEOUT) ───|

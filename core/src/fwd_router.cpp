@@ -2690,8 +2690,9 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     p->source = &source;
     p->block_bytes = bytes;
     // No deadline is stored: the requester owns the timeout (RFC-0004 Amendment 3, ADR-0084),
-    // so `req.timeout` is ignored here. A waiter whose vertex never changes ends on link_down /
-    // remove_child or at teardown, and it costs only this block of its own link's source.
+    // and the resolver skips the `await_timeout` hint. A waiter whose vertex never changes ends on
+    // link_down / remove_child or at teardown, and it costs only this block of its own link's
+    // source.
     p->echo_ts = req.echo_ts;
     p->name_len = name.size();
     p->dst_len = req.dst.size();

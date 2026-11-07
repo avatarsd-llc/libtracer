@@ -441,13 +441,21 @@ int run_host_probe(device_node_t& dev) {
     // 3) Producer fan-out: a plain device-side graph.write fans a FWD{WRITE}
     //    out to us; observed with graph.await on the host side (await is the
     //    consumer's poll — armed BEFORE the write, so no race).
+    // libtracer reads no clock: this app gives the wait 3 s on its own clock, then ends it
+    // through the graph's clock door.
     std::optional<std::uint32_t> delivered;
-    std::thread awaiter([&graph, &probe_path, &delivered] {
-        const auto d = graph.await(probe_path, 3s);
+    std::atomic<bool> answered{false};
+    std::thread awaiter([&graph, &probe_path, &delivered, &answered] {
+        const auto d = graph.await(probe_path, 0, tr::graph::kNoDeadline);
         if (d.has_value()) delivered = value_u32_of((*d)->only());
+        answered.store(true, std::memory_order_release);
     });
     std::this_thread::sleep_for(100ms);  // let await arm
     check(dev.write_sensor(22), "device: write /sensor/temp = 22");
+    for (int i = 0; i < 60 && !answered.load(std::memory_order_acquire); ++i)
+        std::this_thread::sleep_for(50ms);
+    while (!answered.load(std::memory_order_acquire))
+        (void)graph.expire_awaits(tr::graph::kNoDeadline);
     awaiter.join();
     check(delivered.has_value() && *delivered == 22,
           "remote fan-out delivered 22 to the host peer (await fired)");

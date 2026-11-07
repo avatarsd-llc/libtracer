@@ -148,7 +148,7 @@ place that turns a byte span into an owned `view_t`. A hand-rolled
 loses the allocation-failure signal that `std::optional` carries.
 
 **`read` returns a reference, not a copy.** `graph_t::read` and `graph_t::await` return
-`result_t<value_ref_t>` (`core/include/libtracer/graph.hpp:graph_t::read(vertex_handle_t v, std::string_view caller`, `core/include/libtracer/graph.hpp:graph_t::await(vertex_handle_t v, std::chrono::nanoseconds`), so `(*got)` is a
+`result_t<value_ref_t>` (`core/include/libtracer/graph.hpp:graph_t::read(vertex_handle_t v, std::string_view caller`, `core/include/libtracer/graph.hpp:graph_t::await(vertex_handle_t v, std::uint64_t now`), so `(*got)` is a
 `value_ref_t` and `(*got)->…` reaches the referenced `value_t`. The rule: *a read of a
 published value returns a reference to it; a read that composes a new value returns a
 reference to a fresh block* — so `read_children_folded`, its siblings and a handler's
@@ -179,8 +179,12 @@ auto on_temp = [](const tr::view::rope_t& v) { /* … use v.only().bytes() … *
 // (2) a spec-faithful target vertex (a write re-dispatches the value to /log/temp)
 (void)g.subscribe(path_t("/sensor/temp"), path_t("/log/temp"));
 
-// (3) a thread blocking on the next write (the single-shot primitive)
-auto r = g.await(temp, std::chrono::seconds{2});
+// (3) a thread blocking on the next write (the single-shot primitive). The deadline is on
+//     the application's clock, which libtracer never reads: the wait ends on the write, or
+//     when the app passes a `now` at or past `deadline` to g.expire_awaits(now).
+const std::uint64_t now = app_now_ms();  // the application's own monotonic clock
+const std::uint64_t deadline = now + 2000;
+auto r = g.await(temp, now, deadline);
 
 (void)g.write(temp, *value);           // → (1) and (2) fire; (3) wakes
 ```
