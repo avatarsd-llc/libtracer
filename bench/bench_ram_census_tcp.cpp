@@ -72,10 +72,10 @@
  *   - the router's four planes and the transport vertex's receive backend and egress store,
  *     over `net_source()`. Nothing tests those sources' identity, so each draw lands exactly
  *     where it would by default;
- *   - every plane of the SPEC-created listener (`link_memory_t` rx, io, state and stack),
- *     through the census's own `tcp` factory (@ref register_counted_tcp). The built-in
- *     factory leaves state and stack on `net_source()` with no seam to inject them, which is
- *     where a connected peer's session lives.
+ *   - every plane of the SPEC-created listener (`link_memory_t` rx, io, state and stack):
+ *     the receive backend above, and the node-wide link memory default (#2574,
+ *     @ref kCountedLink) the transport vertex hands the built-in `tcp` factory, which is
+ *     where a connected peer's session and the receive thread's boot record live.
  *
  * Values the census writes itself are drawn from the graph's own segment seam
  * (`graph_t::value_backend()`), as a peer's are.
@@ -248,6 +248,9 @@ counting_source_t g_net{tr::mem::net_source()};
 /** @brief The segment backend over @ref g_net: what `net_backend()` is, counted. The router's
  *         flatten and egress backend and every link's receive seam. */
 tr::mem::source_backend_t g_net_rx{g_net};
+/** @brief The node-wide link memory default (#2574) of the census's transport vertex: every
+ *         SPEC-created link's io, connection state and receive-thread stack, counted. */
+const tr::net::link_memory_t kCountedLink{.io = &g_net, .state = &g_net, .stack = &g_net};
 
 }  // namespace
 
@@ -619,38 +622,6 @@ int peer_main(int cmd_fd, int rsp_fd) {
 // --- the census arm ----------------------------------------------------------
 
 /**
- * @brief Register the census's `tcp` factory on the slim transport vertex @p net: the
- *        built-in factory's LISTEN arm (`builtin_transport_tcp.cpp`), with every
- *        `link_memory_t` plane on the counted net source.
- *
- * The built-in factory sets only `rx`, so a connected peer's session (`state`) and the
- * receive thread's boot record (`stack`) land on `net_source()`, uncounted. This one sets all
- * four; the SPEC write and `register_module` are unchanged, so the listener is still created
- * the way the wire creates one and only the factory's memory planes differ.
- *
- * @warning Drift risk: the census LISTEN never sets the kind-private keys, so this factory
- *          does not parse them and leaves `max_peers`, `peer_named` and `liveness_window` at
- *          their defaults. If the built-in LISTEN arm gains a construction step, mirror it
- *          here. A DIAL is refused: the census never dials.
- */
-void register_counted_tcp(tr::net::transport_vertex_t& net) {
-    net.register_transport_type(
-        "tcp",
-        [](const tr::net::conn_settings_t& s, const tr::wire::tlv_node_t*,
-           tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
-            if (s.role != tr::net::conn_role_t::LISTEN || !s.port_set)
-                return std::unexpected(tr::graph::status_t::TYPE_MISMATCH);
-            return tr::net::with_egress_source(
-                tr::net::make_checked<tr::net::tcp_server_transport_t>(
-                    src, s.port,
-                    tr::net::tcp_server_config_t{
-                        .memory = {.rx = &g_net_rx, .io = &g_net, .state = &g_net, .stack = &g_net},
-                        .max_frame = s.max_frame}),
-                &g_net);
-        });
-}
-
-/**
  * @brief A plain default `graph_t`, as the operator-new counter sees it: the default graph's
  *        floor, its own 4 KiB-slab table pool included, which the injected-root census graph
  *        does not build. Trend-only.
@@ -717,8 +688,11 @@ sample_t run_census(mix_t mix, std::size_t ops, int cmd_fd, int rsp_fd) {
     tr::net::fwd_router_t router(
         g, tr::net::router_planes_t{
                .link_src = &g_net, .rx = &g_net, .flat = &g_net_rx, .egress = &g_net_rx});
-    tr::net::transport_vertex_t net(g, router, "/net", &g_net_rx, tr::net::slim_net, &g_net);
-    register_counted_tcp(net);
+    // Slim, so only the `tcp` factory is in the catalog, and it reads `kCountedLink` off the
+    // vertex: the listener is built by the built-in factory, as a stock node builds it.
+    tr::net::transport_vertex_t net(g, router, "/net", &g_net_rx, tr::net::slim_net, &g_net,
+                                    &kCountedLink);
+    tr::net::register_tcp_transport(net, &g_net_rx, &g_net);
     (void)net.register_module(std::string(tr::net::kTcpServerSuggestedModule), "tcp",
                               tr::net::conn_role_t::LISTEN);
     const auto wl = g.write(path_t("/net/tcp-server/conn"), tcp_conn_spec("peer", port));

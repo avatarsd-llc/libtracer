@@ -153,6 +153,35 @@ template <class Dial, class Listen>
     return link;
 }
 
+/**
+ * @brief The EGRESS store a built-in factory wires into the links it builds: the node-wide
+ *        default's `io` (#2574) when @p node names one, else @p egress_src.
+ * @param egress_src The ADR-0079 egress store the factory was registered with.
+ * @param node       The vertex's node-wide link memory default (`link_memory()`), or null.
+ */
+[[nodiscard]] inline mem::block_source_t* builtin_egress(mem::block_source_t* egress_src,
+                                                         const link_memory_t* node) noexcept {
+    return node != nullptr && node->io != nullptr ? node->io : egress_src;
+}
+
+/**
+ * @brief The `link_memory_t` a built-in udp, tcp or ws factory builds a link with (#2574).
+ *
+ * With no node-wide default (@p node null) it is today's: the receive plane on
+ * @p rx_backend and every other plane at its process default. With one, the link's `io`
+ * is @p egress (see @ref builtin_egress) and its `state` and `stack` are the default's, so
+ * a connected peer's session, the receive thread and the per-frame io all land on the
+ * sources the node owner supplied (receiver pays, ADR-0083). `rx` stays @p rx_backend
+ * either way: that is the vertex's own receive plane.
+ */
+[[nodiscard]] inline link_memory_t builtin_link_memory(mem::mem_backend_t* rx_backend,
+                                                       mem::block_source_t* egress,
+                                                       const link_memory_t* node) noexcept {
+    if (node == nullptr) return link_memory_t{.rx = rx_backend};
+    return link_memory_t{
+        .rx = rx_backend, .io = egress, .state = node->state, .stack = node->stack};
+}
+
 /** @brief Register the built-in `udp` transport factory on @p vertex (needs transport_udp).
  *         @p egress_src is the ADR-0079 egress store — see `with_egress_source`. */
 void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend,
@@ -180,6 +209,10 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
  * @param egress_src The ADR-0079 net-plane EGRESS store threaded to every socket these
  *                   factories construct — see `with_egress_source`. Default: the
  *                   process net sub-pool (#1777).
+ *
+ * Each register_*_transport also reads the vertex's node-wide link memory default
+ * (`transport_vertex_t::link_memory`, #2574) and builds every link from it — see
+ * `builtin_link_memory`.
  */
 void register_builtin_transports(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend,
                                  mem::block_source_t* egress_src = &mem::net_source());

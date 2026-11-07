@@ -300,11 +300,24 @@ class transport_vertex_t {
      *                   `graph_t::collect()` after a removal (or the graph). A kind's own factory
      *                   registered later via @ref register_transport_type reaches the same
      *                   store through @ref egress_source.
+     * @param link_memory The node-wide LINK MEMORY default (#2574): the `io`, `state` and
+     *                   `stack` sources every link the built-in udp, tcp and ws factories
+     *                   build draws from, so a deployer bounds or accounts the per-peer
+     *                   session state, receive-thread stacks and io memory of SPEC-created
+     *                   links without writing a factory of its own. Its `rx` is not read:
+     *                   @p rx_backend is the receive plane. A null `io` means @p egress_src,
+     *                   a null `state` or `stack` that plane's process default. `nullptr`
+     *                   (the default) changes nothing: those links draw from the net pool, as
+     *                   before. A link built by a factory that names its own memory keeps
+     *                   it. Read through @ref link_memory. The object and every source it
+     *                   names must outlive this vertex and the `graph_t::collect()` that
+     *                   frees a removed link, as @p egress_src must.
      */
     transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
                        std::string_view net_root = "/net",
                        mem::mem_backend_t* rx_backend = &mem::net_backend(),
-                       mem::block_source_t* egress_src = &mem::net_source());
+                       mem::block_source_t* egress_src = &mem::net_source(),
+                       const link_memory_t* link_memory = nullptr);
 
     /**
      * @brief SLIM ctor (@ref slim_net_t): bind to @p graph / @p router and register
@@ -332,10 +345,15 @@ class transport_vertex_t {
      *                   `nullptr` (and the default) means the process net sub-pool
      *                   (#1777). Must outlive this object and, like the default ctor's,
      *                   the `graph_t::collect()` that frees a removed link (or the graph).
+     * @param link_memory The node-wide link memory default, as on the default ctor. A slim
+     *                   node registers its factories itself, and each built-in
+     *                   `register_*_transport` it calls reads this default off the vertex
+     *                   through @ref link_memory.
      */
     transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string_view net_root,
                        mem::mem_backend_t* rx_backend, slim_net_t,
-                       mem::block_source_t* egress_src = &mem::net_source());
+                       mem::block_source_t* egress_src = &mem::net_source(),
+                       const link_memory_t* link_memory = nullptr);
 
     /**
      * @brief Retire the connection handlers and drain in-flight calls, then detach every
@@ -433,6 +451,16 @@ class transport_vertex_t {
      * ADR-0079 NARROW shape ignores this and captures its own per-thread source instead.
      */
     [[nodiscard]] mem::block_source_t& egress_source() const noexcept { return *egress_src_; }
+
+    /**
+     * @brief This net plane's node-wide link memory default (the ctor's `link_memory`,
+     *        #2574), or `nullptr` when none was given.
+     *
+     * The built-in udp, tcp and ws registrations read it here, off the vertex they are
+     * handed, and build every link with its `io`, `state` and `stack`; a factory registered
+     * through @ref register_transport_type may do the same, or name memory of its own.
+     */
+    [[nodiscard]] const link_memory_t* link_memory() const noexcept { return link_memory_; }
 
     /**
      * @brief Declare the MODULE that connections of @p kind and @p role mount under.
@@ -1089,6 +1117,7 @@ class transport_vertex_t {
     // table below and every factory-built link object is drawn from: this net plane's one
     // injected source (the net sub-pool when nothing is injected, ADR-0083 Q21).
     mem::block_source_t* egress_src_;
+    const link_memory_t* link_memory_;  // the node-wide link memory default, or null (#2574)
     mem::string_t net_root_;
     // One factory-catalog row: the constructor and the kind's capability declarations
     // (RFC-0014 S5). Traits ride WITH the factory so one lookup answers both.
