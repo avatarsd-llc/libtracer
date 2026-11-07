@@ -29,12 +29,36 @@ namespace {
 /** @brief Events taken per pass: a larger burst is served over several passes. */
 constexpr int kBatch = 16;
 
-/** @brief The `epoll` interest of @p s . */
-epoll_event interest_of(wait_source_t& s) noexcept {
+/** @brief The `epoll` interest of @p s with write interest @p write . */
+epoll_event interest_of(wait_source_t& s, bool write) noexcept {
     epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLRDHUP | (s.write.load(std::memory_order_acquire) ? EPOLLOUT : 0U);
+    ev.events = EPOLLIN | EPOLLRDHUP | (write ? EPOLLOUT : 0U);
     ev.data.ptr = &s;
     return ev;
+}
+
+/**
+ * @brief Register @p s in @p ep with operation @p op and its write flag as it reads now, then
+ *        again for as long as the flag moved meanwhile.
+ *
+ * An arm (a sender) and a disarm (the driver) can cross: each flips the flag, then registers
+ * it, with no lock between. Whichever registers last re-reads the flag after and registers it
+ * once more if it moved, so the kernel always ends with the flag's last value, never a held
+ * frame stranded with write interest unregistered. The loop runs again only while another
+ * thread is flipping the flag: it is no wait.
+ * @return The first registration's result.
+ */
+int register_interest(int ep, int op, wait_source_t& s) noexcept {
+    bool write = s.write.load(std::memory_order_acquire);
+    epoll_event ev = interest_of(s, write);
+    const int rc = ::epoll_ctl(ep, op, s.fd.load(std::memory_order_relaxed), &ev);
+    for (bool now = s.write.load(std::memory_order_acquire); rc == 0 && now != write;
+         now = s.write.load(std::memory_order_acquire)) {
+        write = now;
+        ev = interest_of(s, write);
+        ::epoll_ctl(ep, EPOLL_CTL_MOD, s.fd.load(std::memory_order_relaxed), &ev);
+    }
+    return rc;
 }
 
 /** @brief The @ref ready_t bits of the `epoll` events @p e . */
@@ -71,9 +95,7 @@ wait_module_t::~wait_module_t() {
 bool wait_module_t::attach(wait_source_t& s) noexcept {
     bool done = false;
     locked([&] {
-        epoll_event ev = interest_of(s);
-        done = !s.attached &&
-               ::epoll_ctl(fd_[0], EPOLL_CTL_ADD, s.fd.load(std::memory_order_relaxed), &ev) == 0;
+        done = !s.attached && register_interest(fd_[0], EPOLL_CTL_ADD, s) == 0;
         s.attached = s.attached || done;
     });
     return done;
@@ -90,10 +112,10 @@ void wait_module_t::detach(wait_source_t& s) noexcept {
 
 void wait_module_t::want_write(wait_source_t& s, bool on) noexcept {
     if (s.write.exchange(on, std::memory_order_acq_rel) == on) return;
-    // No lock: `epoll_ctl` is safe against a concurrent wait. A source that is not attached
-    // answers ENOENT and keeps the bit for its next attach.
-    epoll_event ev = interest_of(s);
-    ::epoll_ctl(fd_[0], EPOLL_CTL_MOD, s.fd.load(std::memory_order_relaxed), &ev);
+    // No lock: `epoll_ctl` is safe against a concurrent wait, and the registration converges
+    // with a crossing flip. A source that is not attached answers ENOENT and keeps the bit:
+    // its attach registers the flag as it then reads, and converges the same way.
+    (void)register_interest(fd_[0], EPOLL_CTL_MOD, s);
 }
 
 void wait_module_t::run() noexcept {
