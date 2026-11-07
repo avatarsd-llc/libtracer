@@ -457,7 +457,15 @@ that breaks one of them is a finding; cite the rule.
   `build-test` default leg (the other legs are the `build-test-variants` job),
   `ci-paths` and `format`, plus the lint and docs checks whose paths the diff
   touches (`no-binaries`, `doc-citations`, docs, mermaid-lint, complexity,
-  version-consistency, capability-matrix, internet-draft, changelog-fragment). Every other job is
+  version-consistency, capability-matrix, internet-draft, changelog-fragment). A pull request push
+  also runs `symbol-ratchet` (#2601), which builds only when the diff touches
+  `core/` or `bench/` outside Markdown. Each of these runs the same script in the
+  same mode as the landing: the docs build (Doxygen, then `sphinx-build -n -W
+  --keep-going`; a PR build skips only the page-data steps that render another
+  workflow's verdict), the CCN and public-std ratchets with their stale-pin rule,
+  the doc citations, the config-key checker, the record index and the file map,
+  and the symbol ratchet. So a red push check is a landing failure seen early:
+  fix it before the PR goes to the train. Every other job is
   gated by `if:` and reports as skipped, never as missing. The full matrix runs on
   a pull request whose head branch starts with `batch/`, nightly at 00:00 UTC, on
   every release tag, and on a serial landing, which the train runs as a batch of
