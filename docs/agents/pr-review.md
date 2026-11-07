@@ -148,8 +148,12 @@ before assuming it still holds.
   regardless of how correct the new text is.
 - **Backwards-incompatible changes require a major spec version bump.** If the
   diff changes what a conforming peer must do and does not bump, say so.
-- **A public API change requires a note in the relevant `CHANGELOG.md`.** Its
-  absence is a finding. `core/`, and each binding, keep their own.
+- **A public API change requires a changelog note: add a fragment.** The note is a
+  file, `<package>/changelog.d/<issue>.<kind>.md`, holding the bullet text, and never
+  an edit to `CHANGELOG.md` itself ([CONTRIBUTING](../../.github/CONTRIBUTING.md) item
+  6). Its absence is a finding. `core/`, and each binding, keep their own. The
+  `changelog-fragment` job enforces it for public headers; a binding's API surface
+  is checked here.
 - **A change that contradicts an ADR must say so and argue it**, not slip past.
   If your own finding contradicts an ADR or a load-bearing reference doc,
   **surface the contradiction** rather than silently overriding it — that
@@ -372,7 +376,7 @@ severity, disposition — and a new error identity is an amendment, not a
 refactor); the **conformance profiles** P0–P3 (strict supersets — a required
 module added to P0 changes what "conforming" means for a 16 KB node); and the
 **public headers** of `core/` plus each binding's API surface, which carry a
-CHANGELOG obligation.
+changelog-fragment obligation.
 
 ## The runbook to hand the contributor
 
@@ -389,6 +393,7 @@ yourself**; CI already did.
 | Formatting | `clang-format-18 --dry-run --Werror` over the paths `core-ci.yml`'s format step lists — **version 18** (CI runs 18.1.3); another major version reformats untouched files | no |
 | Public-header docs gate | Doxygen with `core/Doxyfile` (`WARN_AS_ERROR=YES`) | no |
 | Doc citations (`doc-citations`) | `python3 tools/check_doc_citations.py` — fails on a symbol citation that is gone or ambiguous, and on any line-number citation in a living doc | no |
+| Changelog fragment (`changelog-fragment`) | `python3 tools/check_changelog_fragment.py` — fails when a public header changed (`core/include/**`, `backends/*/include/**`, `integrations/esp-idf/libtracer/include/**`) with no `changelog.d/<issue>.<kind>.md` in that package; `python3 tools/changelog_assemble.py --check` prints the assembled sections and refuses a misnamed fragment | no |
 | Symbol-size ratchet (`symbol-ratchet`) | `cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release && cmake --build bench/build --target bench_libtracer bench_chain_delivery -j && python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json` — toolchain-bound, so a local number is not CI's | no |
 | Perf gate (`perf`, path-filtered to `core/`, `bench/`, `docs/methodology.md`) | `gate-pr` in `.github/workflows/perf.yml`: a same-runner interleaved A/B against `main` via `bench/perf_gate.py`; a contributor does not reproduce it locally | no |
 | QSBR model check (`genmc`, path-filtered to the reclaim headers, not required) | `GENMC=<path to genmc> tools/genmc_qsbr.sh` — GenMC v0.19.0, built as `.github/workflows/genmc.yml` does; a VIOLATION prints the trace | no |
@@ -452,7 +457,7 @@ that breaks one of them is a finding; cite the rule.
   `build-test` default leg (the other legs are the `build-test-variants` job),
   `ci-paths` and `format`, plus the lint and docs checks whose paths the diff
   touches (`no-binaries`, `doc-citations`, docs, mermaid-lint, complexity,
-  version-consistency, capability-matrix, internet-draft). Every other job is
+  version-consistency, capability-matrix, internet-draft, changelog-fragment). Every other job is
   gated by `if:` and reports as skipped, never as missing. The full matrix runs on
   a pull request whose head branch starts with `batch/`, nightly at 00:00 UTC, on
   every release tag, and on a serial landing, which the train runs as a batch of
@@ -490,7 +495,7 @@ that breaks one of them is a finding; cite the rule.
 3. Build and `ctest` the core if you touched `core/`.
 4. The conformance suite if you touched the wire codec or `tests/conformance/`.
 5. `cargo test` / the TypeScript tests if you touched a binding.
-6. A `CHANGELOG.md` entry if you changed a public API.
+6. A changelog fragment (`changelog.d/<issue>.<kind>.md`) if you changed a public API; `tools/check_changelog_fragment.py` checks the header rule.
 7. An erratum or RFC if you touched `docs/spec/` or an annex (Step 0).
 8. `git commit -s`, and no `Co-Authored-By` trailer.
 

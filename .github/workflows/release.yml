@@ -107,6 +107,11 @@ jobs:
         with:
           node-version: "22"
       - uses: dtolnay/rust-toolchain@stable
+      # The changelog-cut PR folds every `changelog.d/` fragment into `[Unreleased]`
+      # (.github/RELEASING.md, step 1). A fragment still in the tagged tree is an entry the
+      # release body would silently leave out, so it stops the release here (#2600).
+      - name: Every changelog fragment was assembled before the tag
+        run: python3 tools/changelog_assemble.py --check --fail-on-pending
       - name: Build the C++ conformance harness
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo

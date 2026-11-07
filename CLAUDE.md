@@ -10,7 +10,7 @@ libtracer is a spec-first protocol project. See [GOVERNANCE.md](.github/GOVERNAN
 - **C/C++ changes** must pass `clang-format-18` (config at `.clang-format`). CI runs 18.1.3; a bare `clang-format` of another major version reports unrelated files as dirty. Every CI gate and a before-you-push list are in [the runbook](docs/agents/pr-review.md#the-runbook-to-hand-the-contributor).
 - **C++ naming, namespaces and comments:** follow [core/STYLE.md](core/STYLE.md), the one statement of those rules. Read it before writing C++; public headers are CI-gated by `core/Doxyfile` (`WARN_AS_ERROR`).
 - **Spec changes** — anything under [docs/spec/](docs/spec/), **plus every reference page that [docs/spec/v1.md §3](docs/spec/v1.md) incorporates as a normative annex** (that list is the only source; it is restated at [docs/spec/index.md §What is normative](docs/spec/index.md)) — require an RFC under [docs/spec/rfcs/](docs/spec/rfcs/) per [GOVERNANCE.md](.github/GOVERNANCE.md). Pick the right instrument: an **erratum** (the text contradicts shipped, already-agreed behaviour — ordinary PR, no window, must not change the wire surface) or an **amendment** (the normative surface itself changes — RFC + maintainer approval, 14-day window **waived by default** while solo-maintained, invoked explicitly when outside input is wanted). Do not defer a correction for a window that is waived.
-- **Public API changes** require a note in the relevant `CHANGELOG.md`.
+- **Public API changes** require a changelog note: add a fragment, `<package>/changelog.d/<issue>.<kind>.md`, and never edit `CHANGELOG.md` itself ([CONTRIBUTING.md](.github/CONTRIBUTING.md) item 6).
 
 ## Design rules (standing)
 
