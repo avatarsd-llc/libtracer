@@ -58,13 +58,6 @@ namespace {
 constexpr std::size_t kWaiters[] = {1, 2, 4, 8, 16, 32, 64, 128};
 
 constexpr auto kWindow = std::chrono::milliseconds(300);
-/**
- * @brief Waiter await timeout: bounds how long a waiter lingers after `stop` before it exits.
- *
- * Short enough to keep teardown snappy; long enough that, in steady state,
- * waiters wake on writes far more often than they time out.
- */
-constexpr auto kAwaitTimeout = std::chrono::milliseconds(20);
 
 }  // namespace
 
@@ -86,12 +79,15 @@ int main() {
         std::atomic<std::uint64_t> wakeups{0};
         std::atomic<std::uint64_t> writes{0};
 
+        std::atomic<std::size_t> exited{0};
         auto waiter = [&]() {
             ready.fetch_add(1, std::memory_order_release);
             while (!stop.load(std::memory_order_relaxed)) {
-                if (g.await(v, kAwaitTimeout).has_value())
+                // No deadline: the wait ends on a write, or on the teardown expiry below.
+                if (g.await(v, 0, tr::graph::kNoDeadline).has_value())
                     wakeups.fetch_add(1, std::memory_order_relaxed);
             }
+            exited.fetch_add(1, std::memory_order_release);
         };
         auto writer = [&]() {
             ready.fetch_add(1, std::memory_order_release);
@@ -113,6 +109,9 @@ int main() {
         const std::uint64_t t0 = bench::now_ns();
         std::this_thread::sleep_for(kWindow);
         stop.store(true, std::memory_order_relaxed);
+        // The bench is the application: it ends the waits a stopped writer will never wake.
+        while (exited.load(std::memory_order_acquire) < W)
+            (void)g.expire_awaits(tr::graph::kNoDeadline);
         for (auto& t : threads) t.join();
         const std::uint64_t t1 = bench::now_ns();
 

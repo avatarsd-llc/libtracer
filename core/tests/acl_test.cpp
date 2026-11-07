@@ -48,6 +48,7 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_await.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
@@ -576,7 +577,7 @@ void test_gated_ops() {
     check(denied(write_u8(g, v, 2, "peer-r")), "WRITE denied without the WRITE bit");
     // AWAIT rides the READ right (checked up front)
     {
-        const auto r = g.await(v, std::chrono::nanoseconds(1), "peer-w");
+        const auto r = tr::testing::await_within(g, v, std::chrono::nanoseconds(1), "peer-w");
         check(!r.has_value() && r.error() == status_t::PERMISSION_DENIED,
               "AWAIT denied without the READ bit");
     }
@@ -1209,9 +1210,9 @@ void test_resolver_deny_arm_is_denied_at_every_gate() {
 
     // AWAIT rides the READ right, checked before the condvar (graph.cpp:1353).
     {
-        const auto ok = g.await(v, std::chrono::nanoseconds(1), "peer-ok");
+        const auto ok = tr::testing::await_within(g, v, std::chrono::nanoseconds(1), "peer-ok");
         check(!denied(ok), "AWAIT: the nameable caller is not denied (it times out instead)");
-        check(denied(g.await(v, std::chrono::nanoseconds(1), kUnnameable)),
+        check(denied(tr::testing::await_within(g, v, std::chrono::nanoseconds(1), kUnnameable)),
               "AWAIT: the UNNAMEABLE caller is DENIED before it can camp on the condvar");
     }
 

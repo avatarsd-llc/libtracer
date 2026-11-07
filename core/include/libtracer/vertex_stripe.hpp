@@ -18,6 +18,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 
 #include "libtracer/config.hpp"
@@ -73,11 +74,32 @@ using await_fire_fn_t = void (*)(void* ctx, await_waiter_t& waiter) noexcept;
  * Every field but @ref fire / @ref ctx is the graph's, written under the stripe mutex.
  */
 struct await_waiter_t {
-    await_fire_fn_t fire = nullptr; /**< @brief Called once on change; never on disarm. */
-    void* ctx = nullptr;            /**< @brief Opaque to the graph; handed back to @ref fire. */
+    /** @brief Called once on change; never on disarm. Null marks a BLOCKING await's waiter,
+     *         which a change only unlinks (its thread wakes on the stripe's condvar). */
+    await_fire_fn_t fire = nullptr;
+    /** @brief Opaque to the graph; handed back to @ref fire. A blocking waiter's (no
+     *         @ref fire) points at its @ref await_deadline_t instead. */
+    void* ctx = nullptr;
     const void* vertex = nullptr;   /**< @brief The watched vertex (its pinned address). */
     await_waiter_t* next = nullptr; /**< @brief Stripe list link (graph-owned). */
     bool armed = false;             /**< @brief Linked into a stripe list (graph-owned). */
+};
+
+/** @brief A deadline no `now` reaches short of the teardown value: the await ends only on a
+ *         change, or on `graph_t::expire_awaits(kNoDeadline)`. */
+inline constexpr std::uint64_t kNoDeadline = std::numeric_limits<std::uint64_t>::max();
+
+/**
+ * @brief What a blocking await's waiter (an `%await_waiter_t` with no `fire`) points its
+ *        `ctx` at: whose wait it is, and when the application's clock ends it (#2579).
+ *
+ * Lives on the waiting thread's stack. libtracer reads no clock: @ref deadline is compared
+ * only against a `now` the application passes to `graph_t::expire_awaits`, in the unit it
+ * picks.
+ */
+struct await_deadline_t {
+    const void* owner = nullptr;          /**< @brief The graph the await runs on. */
+    std::uint64_t deadline = kNoDeadline; /**< @brief Ends the wait once `now` reaches it. */
 };
 
 /**
@@ -104,8 +126,9 @@ struct alignas(kStripeAlign) vertex_stripe_t {  // one cache line per stripe whe
      *         that #370 skipped. See `%vertex_t::store` for the ordering argument that
      *         makes the lock-free read safe against a lost wakeup. */
     std::atomic<int> waiters{0};
-    /** @brief The armed one-shot waiters of this stripe's vertices (ADR-0084), guarded by
-     *         @ref m. Each one is also counted in @ref waiters. */
+    /** @brief The armed waiters of this stripe's vertices, guarded by @ref m. Two kinds:
+     *         the one-shot ones (ADR-0084) and the blocking awaits' (no `fire`, #2579). Each
+     *         one is also counted in @ref waiters. */
     await_waiter_t* armed{nullptr};
 };
 
@@ -153,7 +176,8 @@ inline vertex_stripe_t& vertex_stripe_of(const void* v) noexcept {
 
 /**
  * @brief The stripe's condvar — a SEPARATE guarded-static table, reached only from
- *        `vertex_t::wait_for_change` and from a publish that saw `waiters != 0`:
+ *        `vertex_t::wait_for_change`, `graph_t::expire_awaits` and a publish that saw
+ *        `waiters != 0`:
  *        the waiterless publish (the hot path) never pays this table's init guard.
  */
 inline tr::condvar_t& vertex_stripe_cv(std::size_t idx) {

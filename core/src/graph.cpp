@@ -3154,16 +3154,50 @@ result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, vie
             .subject = caller, .link = link, .session = session, .session_link = session_link});
 }
 
-result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::chrono::nanoseconds timeout,
+result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::uint64_t now, std::uint64_t deadline,
                                      std::string_view caller) {
     vertex_t* v = vh.get();
     // await is the readiness form of a data READ — same gate, checked up front so a
     // denied caller cannot camp on the condvar.
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
+    if (deadline <= now) return std::unexpected(status_t::TIMEOUT);
     const write_seq_t seq0 = v->current_seq();
-    if (!v->wait_for_change(seq0, timeout)) return std::unexpected(status_t::TIMEOUT);
+    await_deadline_t d{.owner = this, .deadline = deadline};
+    if (!v->wait_for_change(seq0, d)) return std::unexpected(status_t::TIMEOUT);
     return await_value(vh);
+}
+
+std::uint64_t graph_t::expire_awaits(std::uint64_t now) noexcept {
+    // The stripes are process-wide, so a blocking waiter names its graph; one that is this
+    // graph's and due leaves the list exactly as a change takes it, and its thread wakes on
+    // the notify. A stripe with no waiter of either kind costs one load.
+    std::uint64_t next = kNoDeadline;
+    for (std::size_t idx = 0; idx < kVertexLockStripes; ++idx) {
+        vertex_stripe_t& st = vertex_stripe_at(idx);
+        if (st.waiters.load(std::memory_order_seq_cst) == 0) continue;
+        const std::lock_guard lock(st.m);
+        bool expired = false;  // notify only a stripe whose waiter this call ended
+        for (await_waiter_t** p = &st.armed; *p != nullptr;) {
+            await_waiter_t* const w = *p;
+            // Only a blocking waiter (no fire) carries a deadline; an armed one's ctx is its own.
+            const auto* const d =
+                w->fire == nullptr ? static_cast<const await_deadline_t*>(w->ctx) : nullptr;
+            const bool mine = d != nullptr && d->owner == this;
+            if (!mine || d->deadline > now) {
+                if (mine) next = std::min(next, d->deadline);
+                p = &w->next;
+                continue;
+            }
+            *p = w->next;
+            w->armed = false;
+            w->next = nullptr;
+            st.waiters.fetch_sub(1, std::memory_order_seq_cst);
+            expired = true;
+        }
+        if (expired) vertex_stripe_cv(idx).notify_all();
+    }
+    return next == kNoDeadline ? 0 : next;
 }
 
 result_t<value_ref_t> graph_t::await_value(vertex_handle_t vh) const {
@@ -3190,6 +3224,9 @@ result_t<void> graph_t::arm_await(vertex_handle_t vh, await_waiter_t& w, std::st
     // The same up-front gate `await` runs: a denied caller cannot park a waiter either.
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
+    // A waiter with no fire is a blocking await's (#2579): armed here it would be read as one,
+    // its ctx taken for an await_deadline_t, and never fired.
+    if (w.fire == nullptr) return std::unexpected(status_t::TYPE_MISMATCH);
     v->arm_waiter(w);
     return {};
 }
@@ -4370,13 +4407,14 @@ result_t<void> graph_t::write(const path_t& path, view::rope_t value) {
     return write(vertex_handle_t{v}, path.field(), std::move(value));
 }
 
-result_t<value_ref_t> graph_t::await(const path_t& path, std::chrono::nanoseconds timeout) {
+result_t<value_ref_t> graph_t::await(const path_t& path, std::uint64_t now,
+                                     std::uint64_t deadline) {
     vertex_t* v = find_ptr(path.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
     // Nothing can ever wake a wait on a field (RFC-0010 §C), so answer it as the wire AWAIT
     // does instead of waiting on the whole vertex until the timeout (#2113).
     if (!path.field().empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-    return await(vertex_handle_t{v}, timeout);
+    return await(vertex_handle_t{v}, now, deadline);
 }
 
 }  // namespace tr::graph

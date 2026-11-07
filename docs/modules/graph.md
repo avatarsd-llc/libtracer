@@ -155,8 +155,9 @@ class graph_t {
     result_t<value_ref_t> read (vertex_handle_t, std::string_view caller = {}) const;
     result_t<void>        write(vertex_handle_t, rope_t, std::string_view caller = {},
                                 const net::link_kind_t* link = nullptr);  // #1650
-    result_t<value_ref_t> await(vertex_handle_t, std::chrono::nanoseconds,
-                                std::string_view caller = {});
+    result_t<value_ref_t> await(vertex_handle_t, std::uint64_t now, std::uint64_t deadline,
+                                std::string_view caller = {});      // the app's clock (#2579)
+    std::uint64_t         expire_awaits(std::uint64_t now) noexcept;  // ends due awaits
     result_t<void>        assign(vertex_handle_t, rope_t, std::string_view caller = {});
     result_t<void>        propagate(vertex_handle_t);
     result_t<std::size_t> history(vertex_handle_t, std::span<value_ref_t> out) const;  // 0 allocs
@@ -191,7 +192,7 @@ class graph_t {
                            std::string_view caller = {});
     result_t<value_ref_t> read (const path_t&) const;               // field tail → :schema, …
     result_t<void>        write(const path_t&, rope_t);             // → :subscribers[], :settings.*
-    result_t<value_ref_t> await(const path_t&, std::chrono::nanoseconds);
+    result_t<value_ref_t> await(const path_t&, std::uint64_t now, std::uint64_t deadline);
 
     // subscriptions
     result_t<void>           subscribe(const path_t& src, const path_t& target,
@@ -1062,6 +1063,17 @@ it binds to a temporary lambda.
 
 ```{doxygenfunction} tr::graph::vertex_stripe_at
 :project: libtracer
+```
+
+A blocking `await` is a stripe waiter with no `fire`; its deadline is the application's (#2579):
+
+```{doxygenvariable} tr::graph::kNoDeadline
+:project: libtracer
+```
+
+```{doxygenstruct} tr::graph::await_deadline_t
+:project: libtracer
+:members:
 ```
 
 See: [path](path.md), [views](views.md), [status & errors](status.md),

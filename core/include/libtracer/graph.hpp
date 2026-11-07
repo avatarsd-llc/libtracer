@@ -2173,7 +2173,15 @@ class graph_t {
      *         non-conforming). `SCHEMA_NOT_FOUND` on a non-STREAM role. */
     [[nodiscard]] result_t<std::uint64_t> stream_gaps(vertex_handle_t v) const;
     /**
-     * @brief Block until the vertex's value changes or @p timeout elapses; return the value.
+     * @brief Block until the vertex's value changes or the application's clock passes
+     *        @p deadline; return the value.
+     *
+     * libtracer reads no clock and runs no timer for this (#2579): @p now and @p deadline are
+     * the application's, in whatever monotonic unit it picks. A @p deadline at or before
+     * @p now answers `TIMEOUT` at once (the gate still answers first). Otherwise the wait
+     * ends on the next change, or when the application calls @ref expire_awaits with a `now`
+     * that reaches @p deadline; an application that never calls it gets the change only.
+     * @ref kNoDeadline asks for exactly that.
      *
      * The READINESS FORM OF A DATA READ (RFC-0008 §A: `await` observes `assign`s at its own
      * vertex, in the state plane, independent of propagation) — so after a wake the value is
@@ -2190,8 +2198,21 @@ class graph_t {
      *
      * @return The value, or a `status_t` (`TIMEOUT`, `PERMISSION_DENIED`, `NOT_FOUND`).
      */
-    [[nodiscard]] result_t<value_ref_t> await(vertex_handle_t v, std::chrono::nanoseconds timeout,
-                                              std::string_view caller = {});
+    [[nodiscard]] result_t<value_ref_t> await(vertex_handle_t v, std::uint64_t now,
+                                              std::uint64_t deadline, std::string_view caller = {});
+    /**
+     * @brief The clock door of @ref await (#2579): end every blocking await on this graph
+     *        whose deadline @p now has reached, so each answers `TIMEOUT`.
+     *
+     * @p now is the application's, in the unit its @ref await deadlines use. The return value
+     * tells it when to call next, so it sleeps until then with no idle wakeup; an await
+     * that starts later can be due earlier, so an application that wants that bounded calls
+     * after starting one too. Passing @ref kNoDeadline ends every blocking await, deadline or
+     * not: the call to make before tearing the graph down. The armed form
+     * (@ref arm_await) carries no deadline and is never ended here.
+     * @return The earliest deadline still pending, or 0 when no blocking await has one.
+     */
+    std::uint64_t expire_awaits(std::uint64_t now) noexcept;
     /**
      * @brief The non-blocking form of @ref await (ADR-0084): gate @p caller for READ, then arm
      *        the one-shot waiter @p w on @p v and return at once.
@@ -2201,7 +2222,8 @@ class graph_t {
      * nothing: @p w is the caller's, and must stay alive until it fires or @ref disarm_await
      * returns true for it. There is no deadline here — a timeout is the caller's to run, by
      * calling @ref disarm_await.
-     * @return `PERMISSION_DENIED` when the READ gate refuses (nothing is armed).
+     * @return `PERMISSION_DENIED` when the READ gate refuses, `TYPE_MISMATCH` when @p w has
+     *         no `fire` (the blocking form's shape, #2579); nothing is armed either way.
      */
     [[nodiscard]] result_t<void> arm_await(vertex_handle_t v, await_waiter_t& w,
                                            std::string_view caller = {});
@@ -2823,10 +2845,11 @@ class graph_t {
      * std::string_view, const net::link_kind_t*). */
     [[nodiscard]] result_t<void> write(const path_t& path, view::rope_t value);
     /** @brief Await by path — resolve the key once, then @ref await(vertex_handle_t,
-     * std::chrono::nanoseconds, std::string_view). A path with a `:field` tail answers
+     * std::uint64_t, std::uint64_t, std::string_view). A path with a `:field` tail answers
      * `SCHEMA_NOT_FOUND`, as a wire AWAIT with a FIELD selector does: nothing wakes a wait
      * on a field (docs/reference/02 §#585). */
-    [[nodiscard]] result_t<value_ref_t> await(const path_t& path, std::chrono::nanoseconds timeout);
+    [[nodiscard]] result_t<value_ref_t> await(const path_t& path, std::uint64_t now,
+                                              std::uint64_t deadline);
 
     /** @brief Resolve a canonical PATH-payload @p key to its vertex handle (`nullopt` if
      *         unknown). */
