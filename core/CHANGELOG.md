@@ -16,6 +16,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed (breaking)
 
+- **`fwd_router_t::link_down(link_name, peer)` returns `std::size_t`, was `bool` (#2591).** It
+  returns the number of subscriber edges the call reclaimed, the count the eviction itself
+  reports, so a ghost-session sweep (a downstream ESP32-C6 consumer retires bus peers that went
+  quiet) learns what each departure freed without walking the edges again. It returns 0 for an
+  unknown mount, a flat link, a handle the bus does not mint, or a peer with nothing left to
+  reclaim; the old `true` for a recognised peer with no edges is now 0 as well. A caller that
+  tested the `bool` tests the count instead. `link_down(link_name)` is unchanged.
 - **`path_t` drops its learned-chain slot: 40 → 24 B on a 64-bit host, 24 → 16 B on rv32
   (#2436).** Removed: `path_binding_t`, `path_t::binding`, `path_t::bind`,
   `path_t::clear_binding`, and the router calls that only tests reached through it,
