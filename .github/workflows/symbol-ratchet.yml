@@ -43,12 +43,6 @@ on:
   # script and pins as the landing.
   pull_request:
 
-# One cancelling group per pull request (a newer push supersedes its own older run, the
-# standing per-PR rule); nightly, tag and dispatch runs key on the sha and never cancel.
-concurrency:
-  group: symbol-ratchet-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   symbol-ratchet:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
