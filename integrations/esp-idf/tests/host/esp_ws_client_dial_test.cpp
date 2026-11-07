@@ -262,8 +262,10 @@ void test_every_dial_carries_the_headers() {
         check(wait_until([&] { return link.link_up(); }, 2s), "the first dial landed");
         fake_ws::push_frames(
             {fake_ws::make_frame(tr::net::ws::opcode_t::CLOSE, /*fin=*/true, /*len=*/2, 0x11)});
-        // One reconnect backoff (kReconnectBackoffMs, 1.5 s) separates the two dials.
-        check(wait_until([] { return fake_ws::handshakes() >= 2; }, 10s), "the link re-dialed");
+        // One reconnect backoff, on the app's clock (#2337), separates the two dials.
+        check(fake_ws::sweep_until(
+                  link, [] { return fake_ws::handshakes() >= 2; }, 10s),
+              "the link re-dialed");
         const auto dials = fake_ws::dial_headers();
         check(dials.size() >= 2, "both dials were recorded");
         bool all_carried = !dials.empty();
@@ -314,8 +316,10 @@ void test_a_wrong_accept_fails_the_dial() {
               "and released the transport of the refused dial");
         check(!link.ok() && !link.link_up(), "the link never came up");
         fake_ws::reject_upgrades(false);
-        // One reconnect backoff separates the refused dial from the next.
-        check(wait_until([&] { return link.link_up(); }, 5s),
+        // One reconnect backoff, on the app's clock (#2337), separates the refused dial
+        // from the next.
+        check(fake_ws::sweep_until(
+                  link, [&] { return link.link_up(); }, 5s),
               "a server that answers correctly brings it up");
     }
     check_drained();
@@ -590,7 +594,7 @@ void test_failed_dials_are_released_and_observed_only_on_request() {
             failed = wait_until(
                 [&] { return fake_ws::connect_count() >= 1 && fake_ws::live_handles() == 0; }, 2s);
             // The count and the log come just AFTER the release, so hold the window open a
-            // little longer. The next dial is a whole reconnect backoff (1.5 s) away.
+            // little longer. The next dial waits for a sweep past the backoff (#2337).
             std::this_thread::sleep_for(100ms);
         });
         check(failed, "a dial was attempted and failed");
@@ -608,7 +612,9 @@ void test_failed_dials_are_released_and_observed_only_on_request() {
         check(!logged_dial, "the library logs NOTHING about the failed dial (#1662)");
 #endif
         fake_ws::fail_connects(false);
-        check(wait_until([&] { return link->link_up(); }, 10s), "the next dial lands");
+        check(fake_ws::sweep_until(
+                  *link, [&] { return link->link_up(); }, 10s),
+              "the next dial lands");
         const auto landed = link->stats();
         check(landed.reconnects == 1 && landed.c.connected_at_us >= 0,
               "the handshake is counted and dated in every image (#1663)");

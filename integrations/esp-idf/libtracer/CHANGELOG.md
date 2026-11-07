@@ -100,6 +100,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed (breaking)
 
+- **The WS client's reconnect backoff runs on the application's clock (#2337).**
+  `esp_ws_client_link_t` no longer waits out `CONFIG_LIBTRACER_WS_CLIENT_RECONNECT_BACKOFF_MS`
+  on a timed condition wait; it reads no clock to space its re-dials. It now overrides
+  `transport_t::sweep(now, deadline)`: while the link backs off, the first call stamps the end
+  at `now` plus the backoff and answers it, and a call at or past that time starts the next
+  dial. A link that is down for another reason answers one backoff after `now`, and an up link
+  answers 0. The backoff is read in `now`'s units, so a node passes `now` in milliseconds.
+  `transport_vertex_t::sweep` already calls it on every connection's link. A link whose
+  application never calls `sweep` re-dials after a backoff on its next `send()` instead, and
+  otherwise stays parked; a receive-only client link therefore needs `sweep` driven to recover
+  from a refused or failed dial. The first `sweep` call hands the spacing to the clock for good,
+  so sends no longer end a backoff. A connection that delivered a message and then died still
+  re-dials at once, and teardown still ends a pending backoff at once.
+
 - **`esp_ws_client_link_t` frames its stream with core's WebSocket rules (#2484).** The link
   now runs its own RFC 6455 client handshake over `tcp_transport` and frames the byte stream
   with core's `ws_framing_t` and `ws_assembler_t`; it no longer depends on `esp_transport_ws`.

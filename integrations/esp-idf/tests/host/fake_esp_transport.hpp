@@ -52,6 +52,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -296,5 +297,29 @@ void park_get_socket(bool on);
 /** @} */
 
 /** @} */
+
+/**
+ * @brief Drive @p link's `sweep` from a fake application clock until @p pred holds or
+ *        @p limit of wall time passes (#2337). @return whether @p pred held.
+ *
+ * The link's reconnect backoff runs on the application's `now`, so a case that waits for a
+ * re-dial after a backoff has to move a clock. Each turn moves this suite's clock one
+ * backoff forward and sweeps: the first turn that finds the link backing off stamps the
+ * backoff's end, and the next turn passes it. The clock only ever moves forward, across
+ * every case in the process.
+ */
+template <class link_t, class pred_t>
+bool sweep_until(link_t& link, pred_t pred, std::chrono::milliseconds limit) {
+    static std::uint64_t now = 1;
+    const std::uint64_t step = static_cast<std::uint64_t>(link_t::timing().reconnect_backoff_ms);
+    const auto give_up = std::chrono::steady_clock::now() + limit;
+    while (!pred()) {
+        if (std::chrono::steady_clock::now() >= give_up) return pred();
+        now += step;
+        (void)link.sweep(now, now);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+}
 
 }  // namespace fake_ws
