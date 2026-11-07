@@ -89,7 +89,8 @@ CI-published registries, not unnecessary. CMake `FetchContent` is already covere
    DRAFT with the "pin to a commit" note.
 3. **CHANGELOG — all four of them.** Every package changelog's `[Unreleased]`
    section is complete (every public-API change has a note, per
-   [CONTRIBUTING](CONTRIBUTING.md)): [`core/CHANGELOG.md`](../core/CHANGELOG.md),
+   [CONTRIBUTING](CONTRIBUTING.md); mid-cycle a note is a `changelog.d/` fragment, folded
+   in at step 1): [`core/CHANGELOG.md`](../core/CHANGELOG.md),
    [`bindings/rust/CHANGELOG.md`](../bindings/rust/CHANGELOG.md),
    [`bindings/typescript/CHANGELOG.md`](../bindings/typescript/CHANGELOG.md) and
    [`integrations/esp-idf/libtracer/CHANGELOG.md`](../integrations/esp-idf/libtracer/CHANGELOG.md).
@@ -128,14 +129,22 @@ entries, the release is a minor bump, never a patch. Re-publishing one registry 
    commit.** Consolidation is done *at tag time*, never speculatively: a
    long-lived `[Unreleased]` accumulates one `### Category` heading per landing PR
    (18 against 3 distinct names, at the time of writing), and merging them early
-   only creates conflicts for every PR still in flight. Do it mechanically:
+   only creates conflicts for every PR still in flight. Do it mechanically. First
+   fold in the changelog fragments the PRs added (`<package>/changelog.d/<issue>.<kind>.md`,
+   [CONTRIBUTING](CONTRIBUTING.md) item 6), then consolidate:
    ```sh
+   python3 tools/changelog_assemble.py --check   # preview; exit 1 on a bad fragment
+   python3 tools/changelog_assemble.py --write
    python3 tools/consolidate_changelog.py \
      core/CHANGELOG.md bindings/ros2/CHANGELOG.md bindings/rust/CHANGELOG.md \
      bindings/typescript/CHANGELOG.md integrations/esp-idf/libtracer/CHANGELOG.md \
      --release X.Y.Z --write
    ```
-   That merges each file's repeated `### Category` subsections into one per
+   The assembler appends each fragment, in issue order, to the first `### <Heading>`
+   subsection of its package's `[Unreleased]` (opening the heading at the end of the
+   section if it has none), exactly as a hand edit would, and deletes the fragment;
+   commit the deletions with the CHANGELOGs. `release.yml`'s preflight refuses a tag
+   that still holds a fragment. The consolidator then merges each file's repeated `### Category` subsections into one per
    category in Keep-a-Changelog order (entry order preserved, text moved verbatim),
    renames the section to `## [X.Y.Z] — YYYY-MM-DD`, and opens a fresh empty
    `[Unreleased]`. `--check` is the read-only form; omit `--write` to preview on
