@@ -266,11 +266,12 @@ tr::mem::poly_ptr_t<tr::net::esp_ws_client_link_t> dialed_link(sink_t& sink) {
  * @brief Wait for the link to re-dial past @p dials and come back up, then send @p probe and
  *        check it is the next delivery — the recovery half of every over-cap case.
  */
-void check_recovers(const tr::net::esp_ws_client_link_t& link, sink_t& sink, int dials,
+void check_recovers(tr::net::esp_ws_client_link_t& link, sink_t& sink, int dials,
                     std::size_t delivered, const fake_ws::frame_t& probe) {
     // An over-cap close delivered nothing, so the connection counts as unproductive and the
-    // re-dial waits one reconnect backoff (#1128).
-    check(wait_until([&] { return fake_ws::connect_count() > dials && link.link_up(); }, 5s),
+    // re-dial waits one reconnect backoff (#1128), on the app's clock (#2337).
+    check(fake_ws::sweep_until(
+              link, [&] { return fake_ws::connect_count() > dials && link.link_up(); }, 5s),
           "the link re-dialed");
     fake_ws::push_frames({probe});
     check(wait_until([&] { return sink.count() > delivered; }, 5s), "a message was delivered");
@@ -490,7 +491,8 @@ void test_unarmed_link_holds_the_dial() {
         // a future latch that wrongly re-closed per connection reddens here.
         fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::CLOSE, /*fin=*/true,
                                                   /*len=*/2, /*seed=*/0x11)});
-        check(wait_until([] { return fake_ws::connect_count() >= 2; }, 5s),
+        check(fake_ws::sweep_until(
+                  link, [] { return fake_ws::connect_count() >= 2; }, 5s),
               "the link re-dialed after the peer CLOSE with no re-arm");
         const fake_ws::frame_t after = fake_ws::make_frame(tr::net::ws::opcode_t::BINARY,
                                                            /*fin=*/true, /*len=*/8, /*seed=*/0xB0);

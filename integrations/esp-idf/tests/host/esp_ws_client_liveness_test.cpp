@@ -55,10 +55,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -230,7 +232,8 @@ void test_peer_close_reports_down() {
         fake_ws::push_frames({close_frame()});
         check(wait_until([&] { return down.count() > before; }, 5s),
               "the departure was reported (it used to be reported from nowhere)");
-        check(wait_until([&] { return fake_ws::connect_count() > dials_before; }, 5s),
+        check(fake_ws::sweep_until(
+                  *link, [&] { return fake_ws::connect_count() > dials_before; }, 5s),
               "and the link still re-dialed afterwards");
     }
     check_drained();
@@ -252,7 +255,8 @@ void test_second_death_reports_again() {
         fake_ws::push_frames({close_frame()});
         check(wait_until([&] { return down.count() >= 1; }, 5s), "the first departure reported");
         const int after_first = down.count();
-        check(wait_until([&] { return fake_ws::connect_count() > dials_before; }, 5s),
+        check(fake_ws::sweep_until(
+                  *link, [&] { return fake_ws::connect_count() > dials_before; }, 5s),
               "the link re-dialed");
         fake_ws::push_frames({close_frame()});
         check(wait_until([&] { return down.count() > after_first; }, 5s),
@@ -293,7 +297,8 @@ void test_failed_dials_report_nothing() {
             tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
         link->set_down_notifier(&down_counter_t::fire, &down);
         link->start_receiving();
-        check(wait_until([] { return fake_ws::connect_count() >= 2; }, 6s),
+        check(fake_ws::sweep_until(
+                  *link, [] { return fake_ws::connect_count() >= 2; }, 6s),
               "the link retried its dial at least twice");
         check(!link->ok(), "and never came up");
         check(!link->link_up(), "so neither answer is true — not even the liveness one (#1203)");
@@ -307,7 +312,8 @@ void test_failed_dials_report_nothing() {
 // 6 — BACKOFF: a connection that produced nothing is a failed attempt (#1128).
 // ---------------------------------------------------------------------------
 /**
- * @brief A post-101 refusal must spend the reconnect backoff, not spin.
+ * @brief A post-101 refusal must spend the reconnect backoff, not spin, and the backoff
+ *        runs on the application's clock (#1128, #2337).
  *
  * The shipped failure: a server that accepts the upgrade and then closes — an admission
  * refusal, which can only be expressed after `101 Switching Protocols` — looked like a
@@ -315,27 +321,62 @@ void test_failed_dials_report_nothing() {
  * that is a dial every few milliseconds; on a single-core target it starved the idle task
  * and the board panic-rebooted, resuming the dial on the next boot.
  *
- * Measured as the GAP between the close and the next dial, because that is the quantity
- * the defect is about. The threshold is a lower bound well inside the 1500 ms interval and
- * far outside the microseconds the spin took, so it cannot pass for either reason by
- * accident.
+ * Since #2337 the link reads no clock: the backoff ends when the `now` passed to `sweep`
+ * reaches one backoff past the first call that found it. So this case drives a fake clock
+ * and pins the three edges: no re-dial before the deadline, however much wall time passes;
+ * one re-dial at it; and `sweep` answering the deadline while it waits.
  */
 void test_refused_connection_backs_off() {
-    std::printf("#1128 a connection that delivered nothing backs off before re-dialing:\n");
+    std::printf("#1128/#2337 a connection that delivered nothing backs off on the app's now:\n");
+    fake_ws::reset();
+    {
+        auto link = dialed_link();
+        const std::uint64_t backoff = static_cast<std::uint64_t>(
+            tr::net::esp_ws_client_link_t::timing().reconnect_backoff_ms);
+        const int dials_before = fake_ws::connect_count();
+        // The refusal: the peer closes without ever having sent a message.
+        fake_ws::push_frames({close_frame()});
+        check(wait_until([&] { return !link->link_up() && fake_ws::live_handles() == 0; }, 5s),
+              "the peer's close took the link down");
+        // Let the recv thread reach the backoff; sweeping before it does stamps nothing.
+        std::this_thread::sleep_for(100ms);
+        constexpr std::uint64_t t0 = 1000;
+        check(link->sweep(t0, t0) == t0 + backoff,
+              "the first sweep stamps the backoff's end and answers it");
+        check(link->sweep(t0 + backoff - 1, t0) == t0 + backoff,
+              "a sweep short of it answers the same end");
+        std::this_thread::sleep_for(300ms);
+        check(fake_ws::connect_count() == dials_before,
+              "no re-dial before the app's clock passes the backoff, whatever the wall clock");
+        (void)link->sweep(t0 + backoff, t0);
+        check(wait_until([&] { return fake_ws::connect_count() > dials_before; }, 5s),
+              "a sweep at the backoff's end starts the re-dial");
+        check(wait_until([&] { return link->link_up(); }, 5s), "and the link came back up");
+        check(link->sweep(t0 + backoff + 1, t0) == 0, "an up link answers 0");
+    }
+    check_drained();
+}
+
+/**
+ * @brief With no app clock, a backed-off link re-dials on its next send, and on nothing
+ *        else: it never spins (#2337).
+ */
+void test_unclocked_backoff_ends_on_a_send() {
+    std::printf("#2337 without sweep, a send ends the backoff, and nothing else does:\n");
     fake_ws::reset();
     {
         auto link = dialed_link();
         const int dials_before = fake_ws::connect_count();
-        const auto closed_at = std::chrono::steady_clock::now();
-        // The refusal: the peer closes without ever having sent a message.
         fake_ws::push_frames({close_frame()});
+        check(wait_until([&] { return !link->link_up() && fake_ws::live_handles() == 0; }, 5s),
+              "the peer's close took the link down");
+        std::this_thread::sleep_for(500ms);
+        check(fake_ws::connect_count() == dials_before,
+              "with no sweep and no send it stays parked: no re-dial, no spin");
+        const std::byte frame[1] = {std::byte{1}};
+        link->send(std::span<const std::byte>(frame));
         check(wait_until([&] { return fake_ws::connect_count() > dials_before; }, 5s),
-              "the link re-dialed eventually");
-        const auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::steady_clock::now() - closed_at)
-                             .count();
-        std::printf("       re-dial gap: %lld ms\n", static_cast<long long>(gap));
-        check(gap >= 1000, "and it waited the backoff first, instead of spinning");
+              "a send on the down link starts one re-dial");
     }
     check_drained();
 }
@@ -406,7 +447,9 @@ void test_ok_latches_while_link_up_flips() {
         check(!link->stats().up, "and the stats snapshot is liveness, so it went down too");
         // The latch survives the recovery too: coming back up cannot make a latched fact
         // any truer, and the two must not re-converge into one answer.
-        check(wait_until([&] { return link->link_up(); }, 5s), "the link re-dialed and came back");
+        check(fake_ws::sweep_until(
+                  *link, [&] { return link->link_up(); }, 5s),
+              "the link re-dialed on the app's clock and came back");
         check(link->ok(), "and ok() is still true across the whole cycle");
     }
     check_drained();
@@ -443,6 +486,7 @@ int main() {
     test_destructor_reports_nothing();
     test_failed_dials_report_nothing();
     test_refused_connection_backs_off();
+    test_unclocked_backoff_ends_on_a_send();
     test_productive_connection_redials_at_once();
     test_ok_latches_while_link_up_flips();
     // Defensive: `main` must never return under a detached orphan still inside the fake,

@@ -194,10 +194,14 @@ menu "libtracer"
         range 1 600000
         default 1500
         help
-            Upper bound on the wait after a failed or lost connection before the
-            recv thread dials again. An UPPER bound only: the wait is on a
-            condition variable the destructor signals, so a teardown never pays
-            it. Raise it for a fleet that must not hammer a peer that is down;
+            The wait after a failed connection, or one that delivered nothing,
+            before the recv thread dials again. It is measured on the
+            application's clock: the link reads none, and the wait ends when the
+            `now` passed to the link's sweep has moved this far past the first
+            sweep that found it, so a node that drives the link passes `now` in
+            milliseconds. A link whose sweep is never called re-dials on its next
+            send instead. A teardown never pays it. Raise it for a fleet that must
+            not hammer a peer that is down;
             lower it on a bench node chasing a peer reboot. It is also what a
             refused admission costs before the next dial, so a node whose peer
             gates admission pays this per rejected attempt.
