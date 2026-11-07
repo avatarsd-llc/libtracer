@@ -176,6 +176,12 @@ endif()
 # scaffold), compiled when ANY of them is on.
 if(LIBTRACER_TRANSPORT_TCP OR LIBTRACER_TRANSPORT_UDP OR LIBTRACER_TRANSPORT_WS)
     target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_POSIX_ENDPOINT})
+    # The wait module's adapter (#2147): a TU choice by platform, as socketcan_link's is.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_WAIT_EPOLL})
+    else()
+        target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_WAIT_POLL})
+    endif()
 endif()
 if(LIBTRACER_TRANSPORT_TCP)
     target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_TRANSPORT_TCP})

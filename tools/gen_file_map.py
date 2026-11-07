@@ -68,7 +68,7 @@ PAGES = {
         "transport.hpp", "peer_handle.hpp", "link_kind.hpp", "loopback.hpp",
         "transport_udp.hpp", "transport_tcp.hpp", "transport_ws.hpp", "ws.hpp", "ws_assembler.hpp", "ws_framing.hpp",
         "frame_ingress.hpp", "transport_quic.hpp",
-        "transport_webtransport.hpp", "posix_endpoint.hpp", "iov_table.hpp", "egress.hpp",
+        "transport_webtransport.hpp", "posix_endpoint.hpp", "wait.hpp", "iov_table.hpp", "egress.hpp",
         "park.hpp",
         "receiver_slot.hpp", "self_heal_link.hpp", "builtin_transports.hpp",
         "transport_factory.hpp", "static_thread.hpp",

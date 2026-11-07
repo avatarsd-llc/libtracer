@@ -23,7 +23,7 @@ byte source is the wrong shape:
 
 | Structural copy | Site | Why it cannot go |
 |---|---|---|
-| Ingress ownership | `rope_t::flatten` (`core/src/rope.cpp:rope_t::flatten_core`), frame ingress into the accepted segment (`core/src/transport_tcp.cpp:tcp_transport_t::serve`) | A transient recv buffer cannot be borrowed by a rope that outlives the receive call |
+| Ingress ownership | `rope_t::flatten` (`core/src/rope.cpp:rope_t::flatten_core`), frame ingress into the accepted segment (`core/src/transport_tcp.cpp:tcp_transport_t::on_conn`) | A transient recv buffer cannot be borrowed by a rope that outlives the receive call |
 | Mutation ownership | `own_wire` (`core/src/op_resolve_view.cpp:view_node::own_wire`) | A mutated multi-link value must own a contiguous, patchable, trailer-cleared segment |
 | WS TX gather | `httpd_ws_link_t::queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`; destination is a pre-allocated tx work slot — no slot free means a counted drop, not a heap item) | `httpd_ws_send_frame_async` takes one contiguous buffer and `httpd_queue_work` runs later, after the rope links are gone |
 
@@ -83,7 +83,7 @@ identifiers for the rest of this page.
 
 | # | Site | Single-link? | Multi-link? | Kind | Removed by the rope cursor? |
 |---|------|:--:|:--:|---------|---------|
-| ① | Ingress ownership — `flatten` (`core/src/rope.cpp:rope_t::flatten_core`), pull-path frame ingress into the accepted segment (`core/src/transport_tcp.cpp:tcp_transport_t::serve`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
+| ① | Ingress ownership — `flatten` (`core/src/rope.cpp:rope_t::flatten_core`), pull-path frame ingress into the accepted segment (`core/src/transport_tcp.cpp:tcp_transport_t::on_conn`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
 | ② | Branch write — `value.try_materialize(*value_backend_)` (`core/src/graph.cpp:graph_t::write_branch`) | no — refcount bump | yes (one flatten to feed the span cursor) | Fallback | Multi-link leg: yes, via a rope-native branch decode |
 | ③ | Field write — the twin of ② (`core/src/graph.cpp:graph_t::write(vertex_handle_t vh,`) | no — refcount bump | yes | Fallback | Same as ② |
 | ④ | 4096-byte decode arena (`core/src/graph.cpp:graph_t::write_branch`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
@@ -313,7 +313,7 @@ asynchronously, awaited. A borrowed view of that buffer would dangle. Ingress mu
 bytes in an owned segment.
 
 **Why the pull path pays nothing extra.** The TCP `serve` loop runs frame ingress with no
-read-ahead (`core/src/transport_tcp.cpp:tcp_transport_t::serve`): the prefix is read alone, then
+read-ahead (`core/src/transport_tcp.cpp:tcp_transport_t::on_conn`): the prefix is read alone, then
 the body straight into a segment drawn at its exact length from the injected backend
 (`core/include/libtracer/frame_ingress.hpp:frame_ingress_t::read`), and the next frame's prefix
 rides that same read. The pooled receive target *is* the owned segment — one kernel copy and zero

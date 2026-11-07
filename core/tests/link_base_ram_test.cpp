@@ -87,7 +87,7 @@ class counting_source_t final : public tr::mem::block_source_t {
 
 /** @brief Pinned idle draw of a stream server on a 64-bit target: the poll set's first block
  *         (8 `pollfd`s for the listen socket). Was 1992 B before #2156. */
-constexpr std::size_t kServerBaseBytes64 = 64;
+constexpr std::size_t kServerBaseBytes64 = 0;
 
 /**
  * @brief Construct one idle server on a counting seam and compare its draw to the pin.
@@ -105,11 +105,8 @@ void run_arm(const char* name) {
         cfg.memory.state = &src;
         Server server(0, cfg);
         check(server.ok(), "server bound");
-        // The poll thread draws its set on its first pass: wait for that draw (the pin on a
-        // 64-bit target, any draw elsewhere) rather than for a fixed time.
-        const std::size_t want = sizeof(void*) == 8 ? kServerBaseBytes64 : 1;
-        for (int i = 0; i < 1000 && src.live.load(std::memory_order_relaxed) < want; ++i)
-            std::this_thread::sleep_for(2ms);
+        // The listening socket's wait is registered with the wait module (#2147), whose state
+        // is the module's, not the link's: an idle server draws nothing from its own seam.
         base = src.live.load(std::memory_order_relaxed);
     }
     std::printf("%s: idle draw %zu B (sizeof %zu B)\n", name, base, sizeof(Server));
@@ -122,19 +119,20 @@ void run_arm(const char* name) {
 /**
  * @brief Pinned draw of one connected, idle WS peer on a 64-bit target (#2140): its session
  *        (with frame ingress's 14-byte next-header slot and the shared egress slot, #2144),
- *        its slot entries and its poll entry. Frame ingress put the session 16 B over the
+ *        its slot entry and its wait registration. Frame ingress put the session 16 B over the
  *        stream-buffer design it replaced; the egress slot, net of the per-session write
  *        state it retired, adds 16 B more; the liveness record (#2198) 8 B more (its three
  *        progress flags sit in padding); the broadcast's lock-free slot chain (#2263) 8 B more.
  *        The fragment assembler holding its links in a chain drawn from the rx source, not an
- *        idle `rope_t`, takes 48 B off.
+ *        idle `rope_t`, takes 48 B off. The wait module (#2147) took the server's poll entry
+ *        and slot table entry off, net of the session's wait registration: 56 B off.
  *
  * The session's `peer_endpoint_t` is a `transport_t`, whose receiver slot holds a
- * `std::mutex`: 40 B on x86_64 glibc, 48 B on aarch64 glibc. So the pin is 688 B plus that
- * mutex, exact on each target: 728 B on x86_64, 736 B on aarch64. Every other byte is
+ * `std::mutex`: 40 B on x86_64 glibc, 48 B on aarch64 glibc. So the pin is 632 B plus that
+ * mutex, exact on each target: 672 B on x86_64, 680 B on aarch64. Every other byte is
  * pointers, sizes and block counts, the same on any 64-bit target.
  */
-constexpr std::size_t kWsPeerBytes64 = 688 + sizeof(std::mutex);
+constexpr std::size_t kWsPeerBytes64 = 632 + sizeof(std::mutex);
 
 /** @brief A receive backend over the platform heap that adds to @p src's live balance. */
 class counting_rx_t final : public tr::mem::mem_backend_t {
