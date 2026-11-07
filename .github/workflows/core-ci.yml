@@ -222,6 +222,19 @@ name: core-ci
 # startsWith(github.head_ref, 'batch/')`; their lint and docs checks run on every PR
 # whose paths they match.
 #
+# LANDING VERSUS NIGHTLY (#2449, #2450, #2451; CI time audit tier B, ruled 2026-11-01). The
+# full matrix has two tiers. A LANDING (a `batch/*` pull request) runs the combined legs: the
+# non-default build-test settings as two legs, WIDE (`acl_full=ON` with `hazard_slot_t`,
+# core/tests/presets/wide) and NARROW (`root=heap` with `reclaim=strict`, presets/narrow); the
+# ASan and TSan hazard legs as WIDE; and the bus and self-heal modules closed out together in
+# `build-test-closed-modules`. The NIGHTLY, every release tag and a manual dispatch run all of
+# that and, in addition, every single-setting leg alone (`build-test-variants`' four, the plain
+# hazard ASan and TSan legs, `build-test-bus-closed`, `build-test-self-heal-closed`). So no
+# configuration tested before is dropped: each runs at least nightly and on every tag, and the
+# nightly is a superset of a landing. `changes` exports the tier as `nightly` and the legs as
+# `variant_legs` and `sanitizer_legs`; the verdict requires a nightly-only job to be skipped on a
+# landing and to succeed on the nightly.
+#
 # DOCS-ONLY PULL REQUESTS (#2348). A changed `*.md` file never makes core-ci relevant
 # (nothing core-ci builds reads one), so a PR of docs/ and Markdown alone skips every
 # job here and the required `build-test` verdict reports success on the skips. The
@@ -278,6 +291,11 @@ jobs:
       # false on a branch push (main) and on a pull request whose head is not `batch/*`:
       # run the quick set only (header, QUICK SET).
       full: ${{ ((github.event_name == 'push' && github.ref_type == 'branch') || (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'batch/'))) && 'false' || 'true' }}
+      # true on the nightly schedule, a release tag and a manual dispatch: the full matrix
+      # plus every single-setting leg (header, LANDING VERSUS NIGHTLY). false on a landing.
+      nightly: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'tag')) && 'true' || 'false' }}
+      variant_legs: ${{ steps.legs.outputs.variant_legs }}
+      sanitizer_legs: ${{ steps.legs.outputs.sanitizer_legs }}
     defaults:
       run:
         # Bash as on the hosted image (`bash -e {0}`): a container job otherwise falls back
@@ -341,6 +359,35 @@ jobs:
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
           echo "relevant=$relevant"
+      - name: Choose the matrix legs for this tier
+        id: legs
+        env:
+          NIGHTLY: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'tag')) && 'true' || 'false' }}
+        # header, LANDING VERSUS NIGHTLY. `preset` names the directory under
+        # core/tests/presets/ that the leg puts on the include path; the other keys name the
+        # leg and state the bindings config_binding_test checks (LT_EXPECT_*). WIDE and NARROW
+        # run on every full run; the single-setting legs are added on the nightly tier.
+        run: |
+          set -euo pipefail
+          wide='{"acl_full":"ON","lkv_slot":"hazard_slot_t","preset":"wide"}'
+          narrow='{"acl_full":"OFF","lkv_slot":"single_writer_slot_t","root":"heap","reclaim":"strict","preset":"narrow"}'
+          acl='{"acl_full":"ON","lkv_slot":"single_writer_slot_t","preset":"acl-full"}'
+          hazard='{"acl_full":"OFF","lkv_slot":"hazard_slot_t","preset":"hazard-slot"}'
+          heap='{"acl_full":"OFF","lkv_slot":"single_writer_slot_t","root":"heap","preset":"heap-root"}'
+          strict='{"acl_full":"OFF","lkv_slot":"single_writer_slot_t","reclaim":"strict","preset":"reclaim-strict"}'
+          san_single='{"acl_full":"OFF","lkv_slot":"single_writer_slot_t","preset":""}'
+          if [ "$NIGHTLY" = true ]; then
+            variant_legs="[$wide,$narrow,$acl,$hazard,$heap,$strict]"
+            sanitizer_legs="[$san_single,$wide,$hazard]"
+          else
+            variant_legs="[$wide,$narrow]"
+            sanitizer_legs="[$san_single,$wide]"
+          fi
+          echo "variant_legs=$variant_legs" >> "$GITHUB_OUTPUT"
+          echo "sanitizer_legs=$sanitizer_legs" >> "$GITHUB_OUTPUT"
+          echo "nightly=$NIGHTLY"
+          echo "variant_legs=$variant_legs"
+          echo "sanitizer_legs=$sanitizer_legs"
       - name: Clean this job's workspace off the host runner
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
@@ -461,10 +508,12 @@ jobs:
         if: always()
         run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
-  # THE NON-DEFAULT build-test LEGS. The same steps as build-test above, for the four other
+  # THE NON-DEFAULT build-test LEGS. The same steps as build-test above, for the other
   # configurations its comment names. A separate job only so that the quick set (a branch
   # push or a non-batch PR, header QUICK SET) runs the default leg alone and the build-test
-  # verdict can require these skipped there; on a batch PR, nightly or tag run they run.
+  # verdict can require these skipped there. A landing runs the two combined legs, WIDE and
+  # NARROW; the nightly, a tag and a dispatch run those and the four single-setting legs
+  # (header, LANDING VERSUS NIGHTLY). `changes` lists the legs (`variant_legs`).
   build-test-variants:
     needs: changes
     if: >-
@@ -498,24 +547,14 @@ jobs:
     # break in graph_pmr_test.
     strategy:
       matrix:
-        include:
-          - acl_full: ON
-            lkv_slot: single_writer_slot_t
-          - acl_full: OFF
-            lkv_slot: hazard_slot_t
-          # The heap-rooted MCU default (#2090): no slab pool, no arena, the heap as the root.
-          - acl_full: OFF
-            lkv_slot: single_writer_slot_t
-            root: heap
-          # THE OTHER RECLAMATION POLICY (#894, ADR-0080). `reclaim_qsbr_t` is the default on
-          # every target (Amendment 1, #2127) and every other leg compiles it;
-          # `reclaim_strict_t` is the one opt-out (NARROW bare metal, no preemption and no
-          # second core), and a seam whose other member nothing builds has already rotted. This
-          # leg binds it with core/tests/presets/reclaim-strict and runs the whole suite —
-          # `reclaim_test` follows the binding by `if constexpr`. It was its own job until #2300.
-          - acl_full: OFF
-            lkv_slot: single_writer_slot_t
-            reclaim: strict
+        # WIDE = acl_full=ON + hazard_slot_t (presets/wide); NARROW = root=heap + reclaim=strict
+        # (presets/narrow); nightly adds acl-full, hazard-slot and heap-root (the heap-rooted MCU
+        # default, #2090) alone, and reclaim-strict alone: THE OTHER RECLAMATION POLICY (#894,
+        # ADR-0080). `reclaim_qsbr_t` is the default on every target (Amendment 1, #2127) and
+        # every other leg compiles it; `reclaim_strict_t` is the one opt-out (NARROW bare metal,
+        # no preemption and no second core), and a seam whose other member nothing builds has
+        # already rotted. `reclaim_test` follows the binding by `if constexpr`.
+        include: ${{ fromJSON(needs.changes.outputs.variant_legs) }}
     name: build-test (acl_full=${{ matrix.acl_full }}, slot=${{ matrix.lkv_slot }})${{ matrix.root && format(' root={0}', matrix.root) || '' }}${{ matrix.reclaim && format(' reclaim={0}', matrix.reclaim) || '' }}
     steps:
       - name: Check the runner workspace has room
@@ -566,15 +605,19 @@ jobs:
           LT_EXPECT_LKV_SLOT: ${{ matrix.lkv_slot }}
           LT_EXPECT_RECLAIM_POLICY: ${{ matrix.reclaim == 'strict' && 'reclaim_strict_t' || 'reclaim_qsbr_t' }}
           LT_EXPECT_ACL_POLICY: ${{ matrix.acl_full == 'ON' && 'full_acl_policy_t' || 'allow_only_policy_t' }}
+          LT_EXPECT_DEFAULT_ROOT: ${{ matrix.root == 'heap' && 'heap' || 'slab_pool' }}
+        # One fragment per leg: a combined leg's preset binds every setting its name carries,
+        # and config_binding_test (the `this build binds:` line in the ctest output) checks
+        # each against the LT_EXPECT_* above.
         run: |
-          preset=""
-          if [ "${{ matrix.acl_full }}" = "ON" ]; then preset="-I$PWD/core/tests/presets/acl-full"; fi
-          if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/hazard-slot"; fi
-          if [ "${{ matrix.root }}" = "heap" ]; then preset="-I$PWD/core/tests/presets/heap-root"; fi
-          if [ "${{ matrix.reclaim }}" = "strict" ]; then preset="-I$PWD/core/tests/presets/reclaim-strict"; fi
+          preset="-I$PWD/core/tests/presets/${{ matrix.preset }}"
+          echo "preset: $preset"
+          cat "core/tests/presets/${{ matrix.preset }}/libtracer/config_override.hpp"
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="$preset"
           cmake --build core/build --parallel "$BUILD_JOBS"
           ctest --test-dir core/build --output-on-failure
+          # The binding this whole suite ran under, printed (the full run hides passing output).
+          ctest --test-dir core/build -R '^config_binding$' -V
       - name: Compiler cache statistics (this job)
         # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
         # are shared by every runner. Absent on the hosted route (no `/ccache`).
@@ -709,9 +752,11 @@ jobs:
   # is absent AND that every door which could ask for it refuses rather than degrading.
   build-test-bus-closed:
     needs: changes
+    # Nightly, tag and dispatch only; a landing runs build-test-closed-modules, which closes
+    # out both modules at once (header, LANDING VERSUS NIGHTLY; #2450).
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.nightly == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
@@ -830,9 +875,11 @@ jobs:
   # path is never compiled under the test suite and the knob rots.
   build-test-self-heal-closed:
     needs: changes
+    # Nightly, tag and dispatch only; a landing runs build-test-closed-modules, which closes
+    # out both modules at once (header, LANDING VERSUS NIGHTLY; #2450).
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.nightly == 'true')
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
@@ -928,6 +975,139 @@ jobs:
       - name: The liveness engine is absent from the archive
         run: |
           if nm -C core/build-self-heal-closed/libtracer.a \
+               | grep -E '^[0-9a-f]+ [TtWw] tr::net::self_heal_link_t::'; then
+            echo "ERROR: self_heal_link_t code is still in the archive on a closed-out build" >&2
+            exit 1
+          fi
+          echo "ok: no self_heal_link_t code in libtracer.a"
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job; a host job first takes root-owned leftovers back through a throwaway
+        # container (no sudo), so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+
+  # GCC-15 host gate: build the core + ctest with GCC 15 (the same major the
+  # ESP-IDF v6.0 RISC-V toolchain ships), so the core is gated on the compiler
+  # the MCU actually uses — catches toolchain-version-specific issues (e.g. the
+  # FNV-1a 64-bit-constant overflow on 32-bit size_t GCC 15 newly -Werror's).
+  # GCC 15 is not in ubuntu-24.04's default repos; the toolchain test PPA carries it.
+  # BOTH OPT-IN LINK MODULES CLOSED OUT IN ONE BUILD (#2450). The landing's stand-in for
+  # build-test-bus-closed and build-test-closed-modules, which run alone nightly and on tags:
+  # kBusLinks = false AND kSelfHealLinks = false in one fragment, the union of both jobs' CMake
+  # options, ctest without either label, both jobs' deselected-suite checks and the archive
+  # check. It runs on the nightly too, so a nightly is a superset of a landing.
+  build-test-closed-modules:
+    needs: changes
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.changes.outputs.relevant == 'true' && needs.changes.outputs.full == 'true')
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container:
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
+      # CPU is bounded host-side: the trusted route's `--cgroup-parent` puts every container in
+      # runners-ci.slice, under runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
+      # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
+      # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+    # Same container + apt step as the group above; held at its 20-minute wedge bound.
+    timeout-minutes: 20
+    steps:
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
+      # Build parallelism (#1637, #1691, #2348): on the self-hosted runners, 4 while at most 3
+      # CI containers share the 11-core slice and 2 above that or when the count is
+      # unreadable (see BUILD_JOBS in core-ci.yml's header); `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice (this one included): $n"
+            if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
+          else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
+      - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
+      - name: Bind kBusLinks = false and kSelfHealLinks = false, build + ctest
+        env:
+          LT_EXPECT_LKV_SLOT: single_writer_slot_t
+          LT_EXPECT_RECLAIM_POLICY: reclaim_qsbr_t
+          LT_EXPECT_ACL_POLICY: allow_only_policy_t
+        run: |
+          mkdir -p "$PWD/closed-modules/libtracer"
+          cat > "$PWD/closed-modules/libtracer/config_override.hpp" <<'FRAGMENT'
+          /**
+           * @file
+           * @brief GENERATED CI fixture — the ADR-0044 bus module and the RFC-0014 S5 liveness
+           *        engine both closed out (#375, #1470, #2450).
+           */
+          #pragma once
+
+          namespace tr::graph {
+
+          /** @brief No peer-named links and no link-liveness engine. */
+          struct closed_modules_config_t : default_config_t {
+              static constexpr bool kBusLinks = false;
+              static constexpr bool kSelfHealLinks = false;
+              // The fault-injection tests run here too, so the hooks are compiled in (#1719).
+              static constexpr bool kFaultInjection = true;
+          };
+
+          using config_t = closed_modules_config_t;
+
+          }  // namespace tr::graph
+          FRAGMENT
+          cat "$PWD/closed-modules/libtracer/config_override.hpp"
+          cmake -S core -B core/build-closed-modules -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_TRANSPORT_CAN=OFF \
+            -DLIBTRACER_TEST_ESP_WS_SERVER=OFF -DLIBTRACER_SELF_HEAL_LINKS=OFF \
+            -DCMAKE_CXX_FLAGS="-I$PWD/closed-modules"
+          cmake --build core/build-closed-modules --parallel "$BUILD_JOBS"
+          ctest --test-dir core/build-closed-modules -LE 'bus|selfheal' --output-on-failure
+      # Both jobs' deselected suites, run on purpose — the claim each of them makes. Each
+      # states a skip from its own `main` and exits 77, which ctest reads as Skipped; this step
+      # fails the moment one of them crashes or fails instead.
+      - name: The deselected suites SKIP cleanly rather than crash
+        run: |
+          ctest --test-dir core/build-closed-modules --output-on-failure \
+            -R '^(edge_eviction|send_stall|session_anchor|tcp|ws_transport|link_liveness|net_lock_order)$'
+      # The engine's symbols are actually GONE — the point of the knob, not a side effect. A
+      # build that merely stopped calling it would keep the archive member and the flash.
+      - name: The liveness engine is absent from the archive
+        run: |
+          if nm -C core/build-closed-modules/libtracer.a \
                | grep -E '^[0-9a-f]+ [TtWw] tr::net::self_heal_link_t::'; then
             echo "ERROR: self_heal_link_t code is still in the archive on a closed-out build" >&2
             exit 1
@@ -1187,10 +1367,13 @@ jobs:
     # margin for a COLD cache: a new per-leg ccache dir, or one evicted, rebuilds the whole
     # sanitized Debug tree on a shared ci-local runner before ctest starts.
     timeout-minutes: 60
+    # A landing runs the default slot and WIDE (hazard_slot_t with acl_full=ON,
+    # presets/wide); the nightly, a tag and a dispatch add the plain hazard_slot_t leg
+    # (header, LANDING VERSUS NIGHTLY; #2449). `changes` lists the legs (`sanitizer_legs`).
     strategy:
       matrix:
-        lkv_slot: [single_writer_slot_t, hazard_slot_t]
-    name: sanitizers (slot=${{ matrix.lkv_slot }})
+        include: ${{ fromJSON(needs.changes.outputs.sanitizer_legs) }}
+    name: sanitizers (slot=${{ matrix.lkv_slot }})${{ matrix.acl_full == 'ON' && ' acl_full=ON' || '' }}
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
@@ -1222,14 +1405,14 @@ jobs:
             {
               echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
               echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
-              echo "CCACHE_DIR=$HOME/ccache-host-san/asan-${{ matrix.lkv_slot }}"
+              echo "CCACHE_DIR=$HOME/ccache-host-san/asan-${{ matrix.acl_full == 'ON' && 'wide' || matrix.lkv_slot }}"
               echo "CCACHE_MAXSIZE=4G"
               echo "CCACHE_COMPILERCHECK=content"
               echo "CCACHE_BASEDIR=$(realpath "$GITHUB_WORKSPACE")"
               echo "CCACHE_NOHASHDIR=1"
               echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
             } >> "$GITHUB_ENV"
-            echo "ccache: ON ($HOME/ccache-host-san/asan-${{ matrix.lkv_slot }})"
+            echo "ccache: ON ($HOME/ccache-host-san/asan-${{ matrix.acl_full == 'ON' && 'wide' || matrix.lkv_slot }})"
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
@@ -1247,16 +1430,19 @@ jobs:
         env:
           LT_EXPECT_LKV_SLOT: ${{ matrix.lkv_slot }}
           LT_EXPECT_RECLAIM_POLICY: reclaim_qsbr_t
-          LT_EXPECT_ACL_POLICY: allow_only_policy_t
+          LT_EXPECT_ACL_POLICY: ${{ matrix.acl_full == 'ON' && 'full_acl_policy_t' || 'allow_only_policy_t' }}
           LIBTRACER_VCAN_NS: ${{ runner.environment == 'self-hosted' && 'required' || 'fallback' }}
         run: |
           preset=""
-          if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/hazard-slot"; fi
+          if [ -n "${{ matrix.preset }}" ]; then preset="-I$PWD/core/tests/presets/${{ matrix.preset }}"; fi
+          echo "preset: ${preset:-none (default config)}"
           cmake -S core -B core/build-asan -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g $preset"
           cmake --build core/build-asan --parallel "$BUILD_JOBS"
           # ASLR can make ASan/TSan abort in this runner; pin it off.
           setarch "$(uname -m)" -R ctest --test-dir core/build-asan --output-on-failure
+          # The binding this whole suite ran under, printed (the full run hides passing output).
+          setarch "$(uname -m)" -R ctest --test-dir core/build-asan -R '^config_binding$' -V
 
   # A host job on ci-local (header, HOST JOBS), for the same `setarch -R` reason.
       - name: Compiler cache statistics (this job)
@@ -1289,10 +1475,13 @@ jobs:
     # new or evicted per-leg ccache dir rebuilds the whole TSan tree before ctest starts.
     # Deliberately loose, because a false red on a sanitizer leg is read as flakiness.
     timeout-minutes: 75
+    # A landing runs the default slot and WIDE (hazard_slot_t with acl_full=ON,
+    # presets/wide); the nightly, a tag and a dispatch add the plain hazard_slot_t leg
+    # (header, LANDING VERSUS NIGHTLY; #2449). `changes` lists the legs (`sanitizer_legs`).
     strategy:
       matrix:
-        lkv_slot: [single_writer_slot_t, hazard_slot_t]
-    name: tsan (slot=${{ matrix.lkv_slot }})
+        include: ${{ fromJSON(needs.changes.outputs.sanitizer_legs) }}
+    name: tsan (slot=${{ matrix.lkv_slot }})${{ matrix.acl_full == 'ON' && ' acl_full=ON' || '' }}
     steps:
       - name: Check the runner workspace has room
         # FIRST, before checkout: a full runner disk fails here, named, instead of as an
@@ -1324,14 +1513,14 @@ jobs:
             {
               echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
               echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
-              echo "CCACHE_DIR=$HOME/ccache-host-san/tsan-${{ matrix.lkv_slot }}"
+              echo "CCACHE_DIR=$HOME/ccache-host-san/tsan-${{ matrix.acl_full == 'ON' && 'wide' || matrix.lkv_slot }}"
               echo "CCACHE_MAXSIZE=4G"
               echo "CCACHE_COMPILERCHECK=content"
               echo "CCACHE_BASEDIR=$(realpath "$GITHUB_WORKSPACE")"
               echo "CCACHE_NOHASHDIR=1"
               echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
             } >> "$GITHUB_ENV"
-            echo "ccache: ON ($HOME/ccache-host-san/tsan-${{ matrix.lkv_slot }})"
+            echo "ccache: ON ($HOME/ccache-host-san/tsan-${{ matrix.acl_full == 'ON' && 'wide' || matrix.lkv_slot }})"
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
@@ -1349,15 +1538,18 @@ jobs:
         env:
           LT_EXPECT_LKV_SLOT: ${{ matrix.lkv_slot }}
           LT_EXPECT_RECLAIM_POLICY: reclaim_qsbr_t
-          LT_EXPECT_ACL_POLICY: allow_only_policy_t
+          LT_EXPECT_ACL_POLICY: ${{ matrix.acl_full == 'ON' && 'full_acl_policy_t' || 'allow_only_policy_t' }}
           LIBTRACER_VCAN_NS: ${{ runner.environment == 'self-hosted' && 'required' || 'fallback' }}
         run: |
           preset=""
-          if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/hazard-slot"; fi
+          if [ -n "${{ matrix.preset }}" ]; then preset="-I$PWD/core/tests/presets/${{ matrix.preset }}"; fi
+          echo "preset: ${preset:-none (default config)}"
           cmake -S core -B core/build-tsan -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1 $preset"
           cmake --build core/build-tsan --parallel "$BUILD_JOBS"
           setarch "$(uname -m)" -R ctest --test-dir core/build-tsan --output-on-failure
+          # The binding this whole suite ran under, printed (the full run hides passing output).
+          setarch "$(uname -m)" -R ctest --test-dir core/build-tsan -R '^config_binding$' -V
 
   # The TSan suite with the `kQsbrAsymmetricFence` opt-in bound (#2100): the default fenced
   # entry is what the `tsan` matrix above runs, since `reclaim_qsbr_t` is the default on every
@@ -1968,7 +2160,7 @@ jobs:
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
       (always())
-    needs: [changes, build-test, build-test-variants, build-test-minimal-set, build-test-bus-closed, build-test-self-heal-closed, build-test-gcc15, build-test-noise, sanitizers, tsan, tsan-membarrier, install-consume, bench-compile, census-gate, ci-paths, format, doxygen-gate]
+    needs: [changes, build-test, build-test-variants, build-test-minimal-set, build-test-closed-modules, build-test-bus-closed, build-test-self-heal-closed, build-test-gcc15, build-test-noise, sanitizers, tsan, tsan-membarrier, install-consume, bench-compile, census-gate, ci-paths, format, doxygen-gate]
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-d3cc1cb0835e
@@ -1992,6 +2184,7 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
           RELEVANT: ${{ needs.changes.outputs.relevant }}
           FULL: ${{ needs.changes.outputs.full }}
+          NIGHTLY: ${{ needs.changes.outputs.nightly }}
         # Python, not jq: the CI image carries python3 and no jq (#2348).
         run: |
           python3 - <<'PY'
@@ -2005,12 +2198,20 @@ jobs:
           # On a branch push or a non-batch PR only the quick set runs (header, QUICK SET); the rest
           # must be skipped, so a smoke run can never pass on a job it silently ran.
           rest = want if os.environ["FULL"] == "true" else "skipped"
-          print(f"relevant={os.environ['RELEVANT']} full={os.environ['FULL']}: "
-                f"smoke jobs must be '{want}', the rest '{rest}'")
+          # A landing runs the combined legs; the single-setting jobs below run only on the
+          # nightly, a tag and a dispatch (header, LANDING VERSUS NIGHTLY), so on a landing
+          # they must be skipped, and on the nightly they must succeed.
+          late = rest if os.environ["NIGHTLY"] == "true" else "skipped"
+          print(f"relevant={os.environ['RELEVANT']} full={os.environ['FULL']} "
+                f"nightly={os.environ['NIGHTLY']}: smoke jobs must be '{want}', "
+                f"nightly-only jobs '{late}', the rest '{rest}'")
           smoke = {"build-test", "ci-paths", "format"}
-          bad = [f"{k}={v['result']} (want {want if k in smoke else rest})"
+          nightly_only = {"build-test-bus-closed", "build-test-self-heal-closed"}
+          def required(k):
+              return want if k in smoke else late if k in nightly_only else rest
+          bad = [f"{k}={v['result']} (want {required(k)})"
                  for k, v in needs.items()
-                 if k != "changes" and v["result"] != (want if k in smoke else rest)]
+                 if k != "changes" and v["result"] != required(k)]
           if bad:
               print("::error::core-ci jobs not as required: " + " ".join(bad))
               sys.exit(1)
