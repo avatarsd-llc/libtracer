@@ -96,16 +96,18 @@ using tr::testing::make_value;
 void test_await_at_a_handler_serves_the_read_contract() {
     std::printf("vector 1 — AWAIT at a HANDLER composes from on_read:\n");
     graph_t g;
-    auto last = std::make_shared<std::uint8_t>(0);
+    // Written by on_write on await_while_writing's writer thread, read by on_read on this one.
+    auto last = std::make_shared<std::atomic<std::uint8_t>>(0);
     handlers_t h;
     auto h_on_write = [last](const tr::graph::value_t& value,
                              const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
-        *last = only_byte(value);
+        last->store(only_byte(value), std::memory_order_relaxed);
         return {};
     };
     h.on_write = tr::graph::thunk(h_on_write);
     auto h_on_read = [last]() -> tr::graph::result_t<tr::graph::value_ref_t> {
-        return tr::graph::value_ref_t::composed(make_value({*last}));
+        return tr::graph::value_ref_t::composed(
+            make_value({last->load(std::memory_order_relaxed)}));
     };
     h.on_read = tr::graph::thunk(h_on_read);
     vertex_handle_t v = g.register_vertex(path_t("/h/seam"), role_t::HANDLER, std::move(h));
