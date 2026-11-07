@@ -37,31 +37,37 @@ void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // RFC-0014 §4 S5 (#1548): `udp` is a POINT-TO-POINT kind, so its DIAL connections are
     // engine-managed — see `kBuiltinPointToPointTraits` for the whole reasoning, including
     // why `self_heal_dial` is build-conditioned. RE-RUNNABILITY (the engine runs this
-    // factory once per dial attempt): the thunk captures only two raw pointers whose
+    // factory once per dial attempt): the thunk captures only three raw pointers whose
     // lifetime outlives the vertex, and the DIAL arm constructs a FRESH `udp_transport_t`
     // binding a fresh ephemeral local port each run — nothing here is consumed, moved from,
     // or memoized between runs, so the second dial builds exactly what the first did (a new
     // ephemeral source port, which no peer depends on: a udp DIAL socket is peer-addressed,
     // never peer-known). The LISTEN arm never reaches the engine at all.
+    // #2574: `node` is the vertex's node-wide link memory default, or null; every link this
+    // thunk builds draws its io, state and stack from it (`builtin_link_memory`).
     vertex.register_transport_type(
         "udp",
-        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* /*raw_config*/,
-                                 mem::block_source_t& src) {
+        [rx_backend, egress = builtin_egress(egress_src, vertex.link_memory()),
+         node = vertex.link_memory()](const conn_settings_t& s,
+                                      const wire::tlv_node_t* /*raw_config*/,
+                                      mem::block_source_t& src) {
             auto link = dial_or_listen(
                 s,
                 [&] {
                     return make_checked<udp_transport_t>(
                         src, 0, s.addr, s.port,
-                        udp_config_t{.memory = {.rx = rx_backend}, .max_frame = s.max_frame});
+                        udp_config_t{.memory = builtin_link_memory(rx_backend, egress, node),
+                                     .max_frame = s.max_frame});
                 },
                 [&] {
                     return make_checked<udp_transport_t>(
                         src, s.port, s.addr, 0,
-                        udp_config_t{.memory = {.rx = rx_backend}, .max_frame = s.max_frame});
+                        udp_config_t{.memory = builtin_link_memory(rx_backend, egress, node),
+                                     .max_frame = s.max_frame});
                 });
             // The ADR-0079 egress store, wired before the link is handed to the router
             // (#873).
-            return with_egress_source(std::move(link), egress_src);
+            return with_egress_source(std::move(link), egress);
         },
         kBuiltinPointToPointTraits);
 }
