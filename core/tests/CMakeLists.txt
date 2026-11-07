@@ -322,6 +322,15 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
     add_test(NAME link_base_ram COMMAND link_base_ram_test)
 endif()
 
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
+    # #2574 — the node-wide link memory default: a SPEC-created udp, tcp or ws link draws its
+    # io, state and stack from the default the transport vertex was given, else the net pool.
+    add_executable(link_memory_default_test link_memory_default_test.cpp)
+    target_link_libraries(link_memory_default_test PRIVATE libtracer)
+    libtracer_test_warnings(link_memory_default_test)
+    add_test(NAME link_memory_default COMMAND link_memory_default_test)
+endif()
+
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_CAN)
     # ADR-0044 — stateless transport-peer enumeration + transparent per-peer FWD over
     # the CAN bus binding: join hellos -> synthesized /net/can0:children[], directed
