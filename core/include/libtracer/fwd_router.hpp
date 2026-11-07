@@ -786,12 +786,13 @@ class fwd_router_t {
      * Calling it for a peer that already left, or never subscribed, evicts nothing and is
      * safe. The calling discipline is @ref link_down's: callers hold no transport-internal
      * locks.
-     * @retval true  @p link_name is a live bus mount and @p peer is a handle that bus mints
-     *               (its `peer_name` names it), whether or not that peer is still heard.
-     * @retval false no live child is named @p link_name, it has no bus facet, or @p peer is
-     *               not a handle that bus mints. Nothing was evicted.
+     * @return The number of subscriber edges this call reclaimed (#2591), summed over the
+     *         graph: the count the eviction itself reports, so a ghost-session sweep learns what
+     *         each departure freed without walking the edges again. 0 when no live child is
+     *         named @p link_name, it has no bus facet, @p peer is not a handle that bus mints,
+     *         or the peer had no edges left to reclaim (a second call for the same peer).
      */
-    bool link_down(std::string_view link_name, peer_handle_t peer);
+    std::size_t link_down(std::string_view link_name, peer_handle_t peer);
 
     /**
      * @brief This node's NAME for the link @p link names (#1941): its registry slot's name,
@@ -1454,8 +1455,8 @@ class fwd_router_t {
                                : graph::link_pair_t{};
     }
     /** @brief @ref link_down with the departed link's pair in hand — the body every
-     *         departure seam runs. */
-    void link_gone(std::string_view link_name, graph::link_pair_t link);
+     *         departure seam runs. Returns the number of edges the eviction reclaimed. */
+    std::size_t link_gone(std::string_view link_name, graph::link_pair_t link);
     /** @brief The `graph::stats_sampler_fn_t` trampoline: `ctx` is the router
      *         (RFC-0010 Amendment 2). */
     static bool stats_sampler_thunk(void* ctx, std::string_view seam_class,
@@ -1738,8 +1739,12 @@ class fwd_router_t {
      * can never validate again and pay a name lookup for its whole life. Dropping it is
      * self-healing rather than merely tidy — correctness is already covered by `graph_t`
      * refusing the stale stamp.
+     *
+     * Returns the number of edges the eviction reclaimed, which the by-handle
+     * @ref link_down hands back (#2591).
      */
-    void bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle, std::string_view peer);
+    std::size_t bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle,
+                              std::string_view peer);
 
     /** @brief The session holding @p slot of @p ctx's mount (#2234); invalid when none does.
      *         Lock-free: one acquire load of the table and one of the word. */

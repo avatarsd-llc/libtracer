@@ -1101,7 +1101,7 @@ void fwd_router_t::link_down(std::string_view link_name) {
     link_gone(link_name, inbound_pair(nullptr, link_name, {}));
 }
 
-bool fwd_router_t::link_down(std::string_view link_name, peer_handle_t peer) {
+std::size_t fwd_router_t::link_down(std::string_view link_name, peer_handle_t peer) {
     // Opened before the mount is looked up: a `remove_child` racing this
     // door cannot have its ctx, link or bus collected under the lookup and the eviction.
     const frame_scope_t scope;
@@ -1112,18 +1112,18 @@ bool fwd_router_t::link_down(std::string_view link_name, peer_handle_t peer) {
     std::array<char, kPeerNameChars> scratch{};
     const std::string_view name =
         bus != nullptr ? bus->peer_name(peer, scratch) : std::string_view{};
-    if (name.empty()) return false;
-    bus_peer_down(*ctx, peer, name);
-    return true;
+    if (name.empty()) return 0;
+    return bus_peer_down(*ctx, peer, name);
 }
 
-void fwd_router_t::link_gone(std::string_view link_name, graph::link_pair_t link) {
+std::size_t fwd_router_t::link_gone(std::string_view link_name, graph::link_pair_t link) {
     const frame_scope_t scope;
-    graph_.evict_link_edges(link_name, link);
+    const std::size_t evicted = graph_.evict_link_edges(link_name, link);
     // A deferred AWAIT's reply has nowhere to go once its link is down: release its waiter
     // (ADR-0084). The receiver holds no deadline, so this is how an unanswered one ends.
     const std::lock_guard lock(awaits_.m);
     cancel_awaits_locked(link_name, false);
+    return evicted;
 }
 
 namespace {
@@ -1233,8 +1233,8 @@ void fwd_router_t::bus_peer_up(const child_rx_ctx_t& ctx, peer_handle_t handle,
         (void)graph_.register_session_anchor(id);
 }
 
-void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle,
-                                 std::string_view peer) {
+std::size_t fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle,
+                                        std::string_view peer) {
     // A departure leaves the slot's anchor, word and cached token alone when the word holds
     // ANOTHER session (#2234): a late departure that lands after a successor took the slot,
     // including one still pending authentication, finds the successor's handle there. An
@@ -1256,7 +1256,7 @@ void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle
             (void)set_session_tenant_locked(ctx, handle.index, 0);
         }
     }
-    link_gone(peer, {.conn = ctx.entry->conn_slot, .peer = handle});
+    const std::size_t evicted = link_gone(peer, {.conn = ctx.entry->conn_slot, .peer = handle});
     // The eviction inside `link_down` RELEASED this peer's index slot, so the token cached
     // for it names a stamp that can never validate again (#1417). Dropping it is what lets
     // the next session in this slot mint a fresh one on its first subscribe instead of
@@ -1265,6 +1265,7 @@ void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle
     bus_token_cache_t* const cache =
         holds_slot ? ctx.peer_tokens.load(std::memory_order_acquire) : nullptr;
     if (cache != nullptr) cache->drop(handle);
+    return evicted;
 }
 
 // --- bound paths (RFC-0024) -------------------------------------------------
