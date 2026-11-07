@@ -284,9 +284,9 @@ no byte is counted on a hand-wired path.
 
 The counted seams are the graph's source, the router's four planes, the transport vertex's
 receive backend and egress store, and all four `link_memory_t` planes of the listener. The
-last come from the census's own `tcp` factory, the built-in LISTEN arm with every plane
-counted, registered on a slim transport vertex: the built-in factory leaves the per-peer
-session (`state`) and the thread boot record (`stack`) on `net_source()`. Injecting the graph's
+listener is built by the built-in `tcp` factory, registered on a slim transport vertex whose
+node-wide link memory default (#2574) is counted, so the per-peer session (`state`), the
+thread boot record (`stack`) and the link's `io` land on the counted source. Injecting the graph's
 source makes the census graph an **injected-root** graph: it builds no table pool of its own
 (#1882) and draws values from the injected root. S_A..S_E therefore price an injected-root
 node, and `S_A_default_bytes` keeps the default graph's floor visible — a plain `graph_t`,

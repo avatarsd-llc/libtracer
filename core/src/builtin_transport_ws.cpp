@@ -77,19 +77,22 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     // vertex DORMANT and this thunk runs on the engine's worker, once per dial attempt —
     // which is also what makes a ws client survive a server restart without the connection
     // vertex being torn down and re-created.
-    // RE-RUNNABILITY: the thunk captures two raw pointers that outlive the vertex, re-parses
+    // RE-RUNNABILITY: the thunk captures three raw pointers that outlive the vertex, re-parses
     // its kind-private keys from the raw config bytes the engine kept a copy of, and
     // constructs a FRESH `ws_client_transport_t` per run — including a fresh masked-frame
-    // buffer bound to `egress_src` at construction, so every healed socket is as bounded as
+    // buffer bound to `egress` at construction, so every healed socket is as bounded as
     // the first. As on `tcp`, the engine calls `start_receiving()` once it has wired the
     // socket's sinks.
     // The LISTEN arm never reaches the engine (a LISTEN link binds eagerly, RFC-0014 §4),
     // which is also why the `peer_named` bus facet is unaffected by this flip — it exists
     // only on the listener.
+    // #2574: `node` is the vertex's node-wide link memory default, or null; every link this
+    // thunk builds draws its io, state and stack from it (`builtin_link_memory`).
     vertex.register_transport_type(
         "ws",
-        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* raw_config,
-                                 mem::block_source_t& src) {
+        [rx_backend, egress = builtin_egress(egress_src, vertex.link_memory()),
+         node = vertex.link_memory()](const conn_settings_t& s, const wire::tlv_node_t* raw_config,
+                                      mem::block_source_t& src) {
             const wire::config_reader_t cfg(raw_config);
             const bool peer_named = cfg.flag("peer_named").value_or(false);
             // The bus-module refusal (#375 deliverable 3). TYPE_MISMATCH, the status this
@@ -121,9 +124,11 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                     // leave that one buffer on the process heap. `with_egress_source` still
                     // runs — it is what wires the LISTEN arm and the base gather — and this
                     // argument is what makes the DIAL arm's own buffer agree with it.
+                    link_memory_t memory = builtin_link_memory(rx_backend, egress, node);
+                    memory.io = egress;
                     return make_checked<ws_client_transport_t>(
                         src, s.addr, s.port,
-                        ws_client_config_t{.memory = {.rx = rx_backend, .io = egress_src},
+                        ws_client_config_t{.memory = memory,
                                            .max_frame = s.max_frame,
                                            .liveness_window_ms = liveness_window,
                                            .max_handshake = max_handshake});
@@ -131,7 +136,7 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                 [&] {
                     return make_checked<ws_server_transport_t>(
                         src, s.port,
-                        ws_server_config_t{.memory = {.rx = rx_backend},
+                        ws_server_config_t{.memory = builtin_link_memory(rx_backend, egress, node),
                                            .max_frame = s.max_frame,
                                            .max_peers = max_peers,
                                            .peer_named = peer_named,
@@ -140,7 +145,7 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                 });
             // The ADR-0079 egress store, wired before the link is handed to the router
             // (#873).
-            return with_egress_source(std::move(link), egress_src);
+            return with_egress_source(std::move(link), egress);
         },
         kBuiltinPointToPointTraits);
 }
