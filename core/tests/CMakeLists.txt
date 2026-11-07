@@ -3104,6 +3104,10 @@ foreach(_serial IN ITEMS
         esp_ws_client_dial          # 1.5 s reconnect backoff
         esp_ws_client_dial_stats    # the dial suite, dial stats on
         esp_ws_client_traffic_stats # the dial suite, traffic stats on
+        egress                      # wall-clock bound: two sends past a stuck writer < 50 ms
+        frozen_peer                 # 200 ms sleeps, then asserts the poll thread kept up
+        server_broadcast_unlocked   # client reads under a 300 ms SO_RCVTIMEO
+        playout                     # wall-clock bound: a batch returns in < 200 ms
 )
     if(TEST ${_serial})
         set_tests_properties(${_serial} PROPERTIES RUN_SERIAL TRUE)
