@@ -51,10 +51,11 @@ Import("env", "pio_lib_builder")  # noqa: F821  (injected by PlatformIO/SCons at
 # name exactly the files of the source groups it stands for, so a core source added,
 # removed or regrouped there without the matching edit here fails CI. Keep them literal
 # lists of file names; the check reads them without running this script.
-DENY_BASELINE = [  # LIBTRACER_SOURCES_QUIC + LIBTRACER_SOURCES_SOCKETCAN_LINUX
+DENY_BASELINE = [  # LIBTRACER_SOURCES_QUIC + SOCKETCAN_LINUX + WAIT_EPOLL (Linux epoll, #2147)
     "transport_quic.cpp",
     "transport_webtransport.cpp",
     "socketcan_link.cpp",
+    "wait_epoll.cpp",
 ]
 DENY_WITHOUT_BUS_LINKS = [  # LIBTRACER_SOURCES_TRANSPORT_CAN + LIBTRACER_SOURCES_SOCKETCAN_STUB
     "transport_can.cpp",

@@ -374,8 +374,9 @@ void test_refused_receive_spawn_is_reported() {
 
 /**
  * @brief #2288 — the socket set a full node brings up (udp listener and dial, tcp listener
- *        and dial, ws server and dial) spawns every receive thread from `memory.stack`, and
- *        none draws from the link's frame or state planes for it.
+ *        and dial, ws server and dial) spawns every receive thread, and the private wait
+ *        module it drives (#2147), from `memory.stack`, and none draws from the link's frame
+ *        or state planes for it.
  */
 void test_full_socket_set_spawns_every_receive() {
     std::printf("socket links: the full set spawns every receive thread from memory.stack:\n");
@@ -394,11 +395,14 @@ void test_full_socket_set_spawns_every_receive() {
     check(udp_listen.ok() && udp_dial.ok() && tcp_listen.ok() && tcp_dial.ok() && ws_server.ok() &&
               ws_dial.ok(),
           "every link is up");
-    check(stacks.served() == 6 && stacks.refused() == 0,
-          "six receive threads, each drawn from memory.stack, none refused");
+    // Each link given no node wait module drives a private one on its own thread (#2147):
+    // the module and the thread's stack are its two draws from memory.stack.
+    check(stacks.served() == 12 && stacks.refused() == 0,
+          "six receive threads and their wait modules, each drawn from memory.stack, none "
+          "refused");
     check(tcp_dial.start_receiving() && ws_dial.start_receiving(),
           "a repeat start is a no-op that answers true");
-    check(stacks.served() == 6, "and spawns nothing more");
+    check(stacks.served() == 12, "and spawns nothing more");
 }
 
 int main() {

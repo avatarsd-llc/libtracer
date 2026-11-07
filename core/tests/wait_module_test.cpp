@@ -1,0 +1,324 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ */
+/**
+ * @file
+ * @brief #2147: the wait module's conformance suite, and the links on it.
+ *
+ * Built twice: `wait_module_test` runs it against the build's adapter (epoll on a Linux host),
+ * `wait_module_poll_test` against the poll adapter (`wait_poll.cpp`, the lwIP sockets one),
+ * linked ahead of the library so the archive's adapter is never pulled in. Both must pass the
+ * same assertions (ADR-0071's two-implementations rule).
+ *
+ * The idle checks count the driving thread's voluntary context switches from
+ * `/proc/self/task/<tid>/status`: a wait with no timeout makes none while nothing is ready.
+ */
+
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <span>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "libtracer/transport_tcp.hpp"
+#include "libtracer/transport_udp.hpp"
+#include "libtracer/wait.hpp"
+#include "test_support.hpp"
+
+namespace {
+
+using tr::testing::check;
+using namespace std::chrono_literals;
+
+/** @brief Voluntary context switches of thread @p tid so far. */
+long voluntary_switches(pid_t tid) {
+    std::ifstream in("/proc/self/task/" + std::to_string(tid) + "/status");
+    std::string line;
+    while (std::getline(in, line))
+        if (line.rfind("voluntary_ctxt_switches:", 0) == 0) return std::stol(line.substr(24));
+    return -1;
+}
+
+/** @brief Threads in this process. */
+std::size_t thread_count() {
+    std::ifstream in("/proc/self/status");
+    std::string line;
+    while (std::getline(in, line))
+        if (line.rfind("Threads:", 0) == 0) return std::stoul(line.substr(8));
+    return 0;
+}
+
+/** @brief Poll @p done for up to 2 s. */
+template <class Pred>
+bool eventually(Pred done) {
+    for (int i = 0; i < 200; ++i) {
+        if (done()) return true;
+        std::this_thread::sleep_for(10ms);
+    }
+    return done();
+}
+
+/** @brief A module driven by a thread of the test's own, which records its tid. */
+struct driven_t {
+    tr::net::wait_module_t module;
+    std::atomic<pid_t> tid{0};
+    std::thread driver;
+    driven_t() {
+        driver = std::thread([this] {
+            tid.store(static_cast<pid_t>(::syscall(SYS_gettid)));
+            module.run();
+        });
+        (void)eventually([this] { return tid.load() != 0; });
+    }
+    ~driven_t() {
+        module.stop();
+        driver.join();
+    }
+};
+
+/** @brief One socketpair end on a source that counts its turns. */
+struct counted_t {
+    tr::net::wait_source_t src;
+    int pair[2] = {-1, -1};
+    std::atomic<int> reads{0};
+    std::atomic<int> writes{0};
+    counted_t() {
+        (void)::socketpair(AF_UNIX, SOCK_STREAM, 0, pair);
+        src.fd.store(pair[0]);
+        src.ctx = this;
+        src.fire = [](void* ctx, tr::net::wait_source_t&, std::uint8_t ready) {
+            auto& c = *static_cast<counted_t*>(ctx);
+            if (tr::net::readable(ready)) {
+                char b[64];
+                (void)::recv(c.pair[0], b, sizeof(b), MSG_DONTWAIT);
+                c.reads.fetch_add(1);
+            }
+            if (tr::net::writable(ready)) c.writes.fetch_add(1);
+        };
+    }
+    ~counted_t() {
+        ::close(pair[0]);
+        ::close(pair[1]);
+    }
+};
+
+void test_ready_and_stop() {
+    std::printf("-- a ready source fires on the driver; stop wakes a blocked run\n");
+    auto d = std::make_unique<driven_t>();
+    check(d->module.ok(), "the module opens");
+    counted_t c;
+    check(d->module.attach(c.src), "a source attaches");
+    (void)::send(c.pair[1], "x", 1, 0);
+    check(eventually([&] { return c.reads.load() == 1; }), "readable fires once per arrival");
+    d->module.detach(c.src);
+    (void)::send(c.pair[1], "x", 1, 0);
+    std::this_thread::sleep_for(50ms);
+    check(c.reads.load() == 1, "a detached source never fires again");
+    const auto t0 = std::chrono::steady_clock::now();
+    d.reset();  // stop + join
+    check(std::chrono::steady_clock::now() - t0 < 1s, "stop wakes the blocked wait at once");
+}
+
+void test_write_interest() {
+    std::printf("-- write interest is armed and disarmed\n");
+    driven_t d;
+    counted_t c;
+    check(d.module.attach(c.src), "attached");
+    std::this_thread::sleep_for(30ms);
+    check(c.writes.load() == 0, "no write turn while it is not armed");
+    d.module.want_write(c.src, true);
+    check(eventually([&] { return c.writes.load() > 0; }), "an armed, writable socket fires");
+    d.module.want_write(c.src, false);
+    std::this_thread::sleep_for(30ms);
+    const int seen = c.writes.load();
+    std::this_thread::sleep_for(50ms);
+    check(c.writes.load() == seen, "disarmed, it stops");
+    d.module.detach(c.src);
+}
+
+void test_detach_waits_out_a_callback() {
+    std::printf("-- a foreign detach waits out the callback in flight\n");
+    driven_t d;
+    struct slow_t {
+        tr::net::wait_source_t src;
+        int pair[2] = {-1, -1};
+        std::atomic<bool> inside{false};
+        std::atomic<bool> done{false};
+    } s;
+    (void)::socketpair(AF_UNIX, SOCK_STREAM, 0, s.pair);
+    s.src.fd.store(s.pair[0]);
+    s.src.ctx = &s;
+    s.src.fire = [](void* ctx, tr::net::wait_source_t&, std::uint8_t) {
+        auto& me = *static_cast<slow_t*>(ctx);
+        char b[8];
+        (void)::recv(me.pair[0], b, sizeof(b), MSG_DONTWAIT);
+        me.inside.store(true);
+        std::this_thread::sleep_for(100ms);
+        me.done.store(true);
+    };
+    check(d.module.attach(s.src), "attached");
+    (void)::send(s.pair[1], "x", 1, 0);
+    check(eventually([&] { return s.inside.load(); }), "the callback is running");
+    d.module.detach(s.src);
+    check(s.done.load(), "detach returned only after the callback finished");
+    ::close(s.pair[0]);
+    ::close(s.pair[1]);
+}
+
+void test_detach_inside_callback() {
+    std::printf("-- a source may detach itself and its neighbour from its callback\n");
+    driven_t d;
+    counted_t a;
+    counted_t b;
+    struct self_t {
+        tr::net::wait_source_t src;
+        int pair[2] = {-1, -1};
+        tr::net::wait_module_t* module = nullptr;
+        counted_t* other = nullptr;
+        std::atomic<int> fired{0};
+    } s;
+    (void)::socketpair(AF_UNIX, SOCK_STREAM, 0, s.pair);
+    s.src.fd.store(s.pair[0]);
+    s.src.ctx = &s;
+    s.module = &d.module;
+    s.other = &b;
+    s.src.fire = [](void* ctx, tr::net::wait_source_t& self, std::uint8_t) {
+        auto& me = *static_cast<self_t*>(ctx);
+        me.fired.fetch_add(1);
+        me.module->detach(self);
+        me.module->detach(me.other->src);
+    };
+    check(d.module.attach(a.src) && d.module.attach(b.src) && d.module.attach(s.src), "attached");
+    (void)::send(s.pair[1], "x", 1, 0);
+    (void)::send(b.pair[1], "x", 1, 0);
+    (void)::send(a.pair[1], "x", 1, 0);
+    check(eventually([&] { return a.reads.load() == 1; }), "the survivor is still served");
+    std::this_thread::sleep_for(50ms);
+    check(s.fired.load() == 1, "the self-detached source fired once and never again");
+    (void)::send(b.pair[1], "y", 1, 0);
+    std::this_thread::sleep_for(50ms);
+    check(b.reads.load() <= 1, "the neighbour it detached is not served after the detach");
+    d.module.detach(a.src);
+    ::close(s.pair[0]);
+    ::close(s.pair[1]);
+}
+
+void test_idle_sources_wake_nobody() {
+    std::printf("-- 32 idle sources: the driver wakes 0 times\n");
+    driven_t d;
+    std::vector<std::unique_ptr<counted_t>> idle;
+    for (int i = 0; i < 32; ++i) {
+        idle.push_back(std::make_unique<counted_t>());
+        check(d.module.attach(idle.back()->src), "attached");
+    }
+    std::this_thread::sleep_for(50ms);
+    const long before = voluntary_switches(d.tid.load());
+    std::this_thread::sleep_for(500ms);
+    const long after = voluntary_switches(d.tid.load());
+    std::printf("   driver voluntary switches over 500 ms idle: %ld\n", after - before);
+    check(before >= 0 && after == before, "no idle wakeup");
+    for (auto& c : idle) d.module.detach(c->src);
+}
+
+void test_links_share_one_module() {
+    std::printf("-- 32 TCP dialers and 32 UDP peers on one module: no thread, no idle wakeup\n");
+    driven_t d;
+    std::atomic<int> delivered{0};
+    auto rx = [&](std::span<const std::byte>) { delivered.fetch_add(1); };
+    const std::size_t threads_before = thread_count();
+    tr::net::tcp_server_transport_t server(0, {.wait = &d.module});
+    check(server.ok(), "the server listens on the module");
+    server.set_receiver(rx);
+    std::vector<std::unique_ptr<tr::net::tcp_transport_t>> dialers;
+    std::vector<std::unique_ptr<tr::net::udp_transport_t>> udps;
+    for (int i = 0; i < 32; ++i) {
+        dialers.push_back(std::make_unique<tr::net::tcp_transport_t>(
+            "127.0.0.1", server.local_port(), tr::net::tcp_config_t{.wait = &d.module}));
+        dialers.back()->set_receiver(rx);
+        check(dialers.back()->ok() && dialers.back()->start_receiving(), "a dialer is up");
+        udps.push_back(std::make_unique<tr::net::udp_transport_t>(
+            0, "127.0.0.1", 9, tr::net::udp_config_t{.wait = &d.module}));
+        check(udps.back()->ok(), "a UDP link is up");
+    }
+    check(thread_count() == threads_before, "65 links spawned no thread");
+    const std::array<std::byte, 4> frame{};
+    for (auto& t : dialers) t->send(std::span<const std::byte>(frame));
+    check(eventually([&] { return delivered.load() == 32; }), "every dialer's frame is delivered");
+    server.send(std::span<const std::byte>(frame));
+    check(eventually([&] { return delivered.load() == 64; }), "the broadcast reaches every dialer");
+    std::this_thread::sleep_for(50ms);
+    const long before = voluntary_switches(d.tid.load());
+    std::this_thread::sleep_for(500ms);
+    const long after = voluntary_switches(d.tid.load());
+    std::printf("   driver voluntary switches over 500 ms idle: %ld\n", after - before);
+    check(before >= 0 && after == before, "no idle wakeup at 32 dialers and 32 UDP peers");
+    // A peer that departs is seen on the module: the dialer's link goes down.
+    server.shut_down();
+    check(eventually([&] { return !dialers[0]->link_up(); }),
+          "a departed peer brings its dialer down");
+    for (auto& t : dialers) t->shut_down();
+    for (auto& u : udps) u->shut_down();
+}
+
+/** @brief The ids of the process's threads. */
+std::vector<pid_t> thread_ids() {
+    std::vector<pid_t> ids;
+    for (const auto& e : std::filesystem::directory_iterator("/proc/self/task"))
+        ids.push_back(static_cast<pid_t>(std::stol(e.path().filename().string())));
+    return ids;
+}
+
+void test_fallback_thread_is_idle() {
+    std::printf("-- the thread-per-link fallback: quiet links' threads wake 0 times\n");
+    // Only the threads the links add are counted, so a runtime's helper thread (a
+    // sanitizer's, say) is not taken for a link waking.
+    const std::vector<pid_t> old = thread_ids();
+    tr::net::tcp_server_transport_t server(0, {});
+    tr::net::tcp_transport_t dialer("127.0.0.1", server.local_port(), {});
+    tr::net::udp_transport_t udp(0, "127.0.0.1", 9, {});
+    check(server.ok() && dialer.ok() && dialer.start_receiving() && udp.ok(),
+          "the fallback links are up, each on a thread of its own");
+    std::vector<pid_t> links;
+    for (const pid_t id : thread_ids())
+        if (std::find(old.begin(), old.end(), id) == old.end()) links.push_back(id);
+    check(links.size() == 3, "three link threads, one per fallback link");
+    const auto switches = [&links] {
+        long sum = 0;
+        for (const pid_t id : links) sum += voluntary_switches(id);
+        return sum;
+    };
+    std::this_thread::sleep_for(100ms);
+    const long before = switches();
+    std::this_thread::sleep_for(500ms);
+    const long after = switches();
+    std::printf("   link threads' voluntary switches over 500 ms idle: %ld\n", after - before);
+    check(after == before, "no idle wakeup on any link thread (the 100 ms quanta are gone)");
+}
+
+}  // namespace
+
+int main() {
+    std::printf("== #2147: one wait module per node ==\n");
+    test_ready_and_stop();
+    test_write_interest();
+    test_detach_waits_out_a_callback();
+    test_detach_inside_callback();
+    test_idle_sources_wake_nobody();
+    test_links_share_one_module();
+    test_fallback_thread_is_idle();
+    return tr::testing::summary("wait_module_test");
+}

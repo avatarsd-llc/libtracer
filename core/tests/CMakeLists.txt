@@ -2139,6 +2139,20 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP)
     endif()
 endif()
 
+if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP)
+    # #2147 — the wait module's conformance suite and the links on it, run against BOTH
+    # adapters (ADR-0071's two-implementations rule): the build's own, and the poll adapter
+    # linked ahead of the archive, so the archive's adapter is never pulled in.
+    add_executable(wait_module_test wait_module_test.cpp)
+    target_link_libraries(wait_module_test PRIVATE libtracer)
+    libtracer_test_warnings(wait_module_test)
+    add_test(NAME wait_module COMMAND wait_module_test)
+    add_executable(wait_module_poll_test wait_module_test.cpp ${LIBTRACER_SOURCES_WAIT_POLL})
+    target_link_libraries(wait_module_poll_test PRIVATE libtracer)
+    libtracer_test_warnings(wait_module_poll_test)
+    add_test(NAME wait_module_poll COMMAND wait_module_poll_test)
+endif()
+
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
     # M6 — TCP stream transport harness (length-prefix framing: split/coalesced writes,
     # oversize-prefix rejection, ADR-0042 owning delivery + backpressure drain, two-node
