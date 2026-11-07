@@ -7,7 +7,6 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/uio.h>
@@ -205,39 +204,40 @@ write_fault_stats_t write_fault_stats() noexcept {
 
 posix_endpoint_t::~posix_endpoint_t() { stop_and_join(); }
 
-void posix_endpoint_t::thread_entry(void* self) { static_cast<posix_endpoint_t*>(self)->body_(); }
+void posix_endpoint_t::thread_entry(void* self) {
+    static_cast<posix_endpoint_t*>(self)->own_->run();
+}
 
-bool posix_endpoint_t::start(thread_body_t body, std::size_t stack_size, mem::block_source_t& src) {
-    body_ = body;
-    return thread_.start(&posix_endpoint_t::thread_entry, this, stack_size, "tr_recv", src);
+bool posix_endpoint_t::start(std::size_t stack_size, mem::block_source_t& src) {
+    if (node_ != nullptr) {
+        wait_.store(node_, std::memory_order_release);
+        return true;
+    }
+    // The fallback adapter: a private module, whose poll-adapter tables come from the same
+    // stack plane, and one thread of the link's own to drive it.
+    own_ = mem::make_poly<wait_module_t>(src, src);
+    if (!own_ || !own_->ok()) return false;
+    wait_.store(own_.get(), std::memory_order_release);
+    if (thread_.start(&posix_endpoint_t::thread_entry, this, stack_size, "tr_wait", src))
+        return true;
+    wait_.store(nullptr, std::memory_order_release);
+    return false;
 }
 
 void posix_endpoint_t::stop_and_join() {
-    stop_.store(true, std::memory_order_relaxed);
+    wait_module_t* const w = wait_.load(std::memory_order_acquire);
+    if (w == nullptr) return;
+    w->detach(src_);
+    if (!own_) return;
+    own_->stop();
     thread_.join();
 }
 
-void posix_endpoint_t::set_rcv_timeout(int fd) {
-    timeval tv{.tv_sec = 0, .tv_usec = 100000};  // 100 ms
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-}
-
 void posix_endpoint_t::set_snd_timeout(int fd) {
-    // The same 100 ms quantum as the receive side, and for the same reason: it is what
-    // makes a blocked syscall return so the loop above it can re-check the world — here
-    // the record deadline (#838), there stop_.
+    // The 100 ms quantum that makes a blocked send return so the record deadline (#838) can
+    // be observed.
     timeval tv{.tv_sec = 0, .tv_usec = static_cast<suseconds_t>(kBoundedWaitMs) * 1000};
     ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-}
-
-int posix_endpoint_t::poll_readable(int fd) {
-    pollfd pfd{.fd = fd, .events = POLLIN, .revents = 0};
-    return ::poll(&pfd, 1, 100);
-}
-
-int posix_endpoint_t::poll_accept(int listen_fd) {
-    if (poll_readable(listen_fd) <= 0) return -1;  // timeout / error → caller re-checks stop_
-    return ::accept(listen_fd, nullptr, nullptr);
 }
 
 stream_endpoint_t::~stream_endpoint_t() {
@@ -417,22 +417,30 @@ void stream_endpoint_t::condemn_fd(int fd) noexcept {
     if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
 }
 
-int stream_endpoint_t::poll_io(int fd) {
-    pollfd pfd{
-        .fd = fd,
-        .events = static_cast<short>(POLLIN | (POLLOUT * static_cast<int>(peer_.wants_write()))),
-        .revents = 0};
-    const int pr = ::poll(&pfd, 1, 100);
-    if (pr <= 0) return pr;
-    // The recv thread owns the fd, so the turn names it directly; it never waits.
-    if ((pfd.revents & POLLOUT) != 0)
-        note_egress(egress_.flush(
-            peer_,
-            [&](const egress_frame_t& f, std::size_t off) {
-                return note_moved(tx_moved_, write_frame(fd, f, off, 0, true));
-            },
-            [fd] { condemn_fd(fd); }));
-    return (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0 ? 1 : 0;
+void stream_endpoint_t::flush_one(int fd) {
+    // The driving thread owns the fd's lifecycle, so the turn names it directly; it never
+    // waits.
+    note_egress(egress_.flush(
+        peer_,
+        [&](const egress_frame_t& f, std::size_t off) {
+            return note_moved(tx_moved_, write_frame(fd, f, off, 0, true));
+        },
+        [fd] { condemn_fd(fd); }));
+    disarm_flushed(src_, peer_);
+}
+
+void stream_endpoint_t::disarm_flushed(wait_source_t& s, const egress_peer_t& peer) {
+    // Disarm once nothing is held, then look again: a sender that held a frame after the
+    // first look armed it, and this disarm may have landed after that arm.
+    if (peer.wants_write()) return;
+    waiter().want_write(s, false);
+    if (peer.wants_write()) waiter().want_write(s, true);
+}
+
+void stream_endpoint_t::depart() {
+    waiter().detach(src_);
+    src_.write.store(false, std::memory_order_relaxed);  // a next peer starts unarmed
+    teardown_peer(src_.fd.load(std::memory_order_relaxed));
 }
 
 void stream_endpoint_t::teardown_peer(int fd) {
@@ -446,31 +454,39 @@ void stream_endpoint_t::teardown_peer(int fd) {
 }
 
 void stream_endpoint_t::shut_down_stream() {
+    // Detached first, so no callback can tear the peer down under this one.
     stop_and_join();
-    // Only the joined thread ever closed this fd, so nothing else can close it under us.
     const int fd = conn_fd_.load(std::memory_order_relaxed);
     if (fd >= 0) teardown_peer(fd);
 }
 
-void stream_endpoint_t::run_accept_loop(int listen_fd, function_ref_t<bool(int)> on_accept,
-                                        function_ref_t<void(int)> serve_peer) {
-    while (!stop_.load(std::memory_order_relaxed)) {
-        // One poll-100ms-recheck accept pass: timeout / error / no connection
-        // → re-check stop_ and try again.
-        const int fd = poll_accept(listen_fd);
-        if (fd < 0) continue;
-        if (!on_accept(fd)) {  // per-peer setup / handshake failed → reject
-            ::close(fd);
-            continue;
-        }
-        conn_fd_.store(fd, std::memory_order_relaxed);
-        tx_moved_.store(true, std::memory_order_relaxed);  // a new peer starts alive (#2198)
-        egress_.open(peer_);  // release: a sender that claims the role then sees the fd
-
-        serve_peer(fd);
-
-        teardown_peer(fd);  // then re-accept the next peer
+void stream_endpoint_t::accept_one(int listen_fd, function_ref_t<bool(int)> on_accept,
+                                   wait_source_t::fire_t fire) {
+    const int fd = ::accept(listen_fd, nullptr, nullptr);
+    if (fd < 0) return;
+    if (!on_accept(fd)) {  // per-peer setup / handshake failed → reject
+        ::close(fd);
+        return;
     }
+    conn_fd_.store(fd, std::memory_order_relaxed);
+    tx_moved_.store(true, std::memory_order_relaxed);  // a new peer starts alive (#2198)
+    // The listener's source carries the connection now: nobody else is accepted until the
+    // peer departs and `relisten` puts it back. The egress opens only once the source is on
+    // the connection, so no sender can arm write interest on the listening socket.
+    // A refused registration refuses the peer and puts the listener back, so the link keeps
+    // accepting rather than going deaf.
+    const wait_source_t::fire_t on_listen = src_.fire;
+    waiter().detach(src_);
+    if (!attach(src_, fd, fire)) {
+        teardown_peer(fd);
+        relisten(listen_fd, on_listen);
+        return;
+    }
+    egress_.open(peer_);  // release: a sender that claims the role then sees the fd
+}
+
+void stream_endpoint_t::relisten(int listen_fd, wait_source_t::fire_t fire) {
+    (void)attach(src_, listen_fd, fire);
 }
 
 // ---------------------------------------------------------------------------
@@ -480,7 +496,7 @@ void stream_endpoint_t::run_accept_loop(int listen_fd, function_ref_t<bool(int)>
 // ---------------------------------------------------------------------------
 
 slot_server_t::~slot_server_t() {
-    // The derived destructor's first act was stop_and_join, so the poll thread is gone
+    // The derived destructor's first act was stop_and_join, so the link is off the wait
     // and nothing races either close below.
     if (listen_fd_ >= 0) ::close(listen_fd_);
     for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
@@ -590,9 +606,9 @@ transport_t* slot_server_t::peer_link_of(peer_handle_t peer) {
 }
 
 bool slot_server_t::close_peer(std::string_view peer) {
-    // Shutdown-only under peers_m_; the poll thread's next pass observes the close and runs
+    // Shutdown-only under peers_m_; the driving thread's next pass observes the close and runs
     // the IDENTICAL remote-FIN teardown — no duplicate logic, and no off-thread touch of the
-    // poll-thread-only buffers teardown_slot's on_slot_reset hook clears. The fd cannot be
+    // driving-thread-only buffers teardown_slot's on_slot_reset hook clears. The fd cannot be
     // closed under us: teardown un-names the slot under this same lock before it closes it.
     const std::lock_guard plock(peers_m_);
     for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
@@ -620,7 +636,7 @@ std::uint64_t slot_server_t::sweep(std::uint64_t now, std::uint64_t deadline) {
         const bool rx_owed = s->rx_owed.load(std::memory_order_relaxed);
         if (!sw.frozen(tx_owed || rx_owed, (!tx && tx_owed) || (!rx && rx_owed), s->live_since))
             continue;
-        condemn_fd(fd);  // the poll thread's next pass runs the remote-FIN teardown
+        condemn_fd(fd);  // the driving thread's next pass runs the remote-FIN teardown
         s->live_since = now;
         ++closed;
     }
@@ -634,13 +650,18 @@ void slot_server_t::send_one(session_base_t& s, function_ref_t<egress_frame_t*()
     // it, and teardown closes the egress (waiting the role out) before resetting it.
     const auto fd = [&s] { return s.fd.load(std::memory_order_relaxed); };
     const egress_result_t r = egress_.send(
-        s.egress, lane, frame,
-        [&] { return note_moved(s.tx_moved, write_gather(fd(), rec, 0, true)); },
+        s.egress, lane, frame, [&] { return session_turn(s, write_gather(fd(), rec, 0, true)); },
         [&](const egress_frame_t& f, std::size_t off) {
-            return note_moved(s.tx_moved, write_frame(fd(), f, off, 0, true));
+            return session_turn(s, write_frame(fd(), f, off, 0, true));
         },
         [&] { condemn_fd(fd()); });
     note_egress(r);
+}
+
+egress_step_t slot_server_t::session_turn(session_base_t& s, egress_step_t step) noexcept {
+    // Inside the session's writer role, so its fd cannot be closed under the arm.
+    if (step.held) arm_write(s);
+    return note_moved(s.tx_moved, step);
 }
 
 void slot_server_t::broadcast(std::span<const ::iovec> rec, const graph::value_t* value,
@@ -668,10 +689,10 @@ void slot_server_t::flush_peer(session_base_t& s) {
     };
     const auto condemn = [&] { condemn_fd(fd()); };
     note_egress(egress_.flush(s.egress, write, condemn));
+    disarm_flushed(s, s.egress);
 }
 
-void slot_server_t::accept_peer(mem::block_array_t<pollfd>& pfds,
-                                mem::block_array_t<session_base_t*>& pslots) {
+void slot_server_t::accept_peer() {
     sockaddr_in remote{};
     socklen_t rlen = sizeof(remote);
     const int fd = ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&remote), &rlen);
@@ -690,14 +711,11 @@ void slot_server_t::accept_peer(mem::block_array_t<pollfd>& pfds,
         if (slot == nullptr) {
             // max_peers_ is the RESOLVED cap, never 0, so there is no "0 means uncapped" arm
             // left to test: a newcomer past it is refused and no admitted peer is evicted.
-            // A refused session, or a refused place for it in the poll set (the listen socket
-            // plus every slot, #2156), refuses the peer exactly as the cap does: a clean close,
-            // nothing half-built in the table, and no admitted peer the poll loop cannot see.
-            // The set is grown here, before the slot exists, so a refusal never evicts anyone.
-            // The fd was never published, so its close never waits.
+            // A refused session refuses the peer exactly as the cap does: a clean close and
+            // nothing half-built in the table. The fd was never published, so its close never
+            // waits.
             mem::poly_ptr_t<session_base_t> fresh;
-            if (slots_.size() >= max_peers_ || !pfds.reserve(slots_.size() + 2) ||
-                !pslots.reserve(slots_.size() + 1) || !(fresh = make_session()) ||
+            if (slots_.size() >= max_peers_ || !(fresh = make_session()) ||
                 !slots_.push_back(std::move(fresh))) {
                 ::close(fd);  // a clean refusal, not a hung SYN
                 return;
@@ -741,7 +759,16 @@ void slot_server_t::accept_peer(mem::block_array_t<pollfd>& pfds,
     // claimed until the egress opens — a release a claim's acquire pairs with — so no sender
     // can see the slot half-published, and none waits on the accept to finish.
     // Release: the liveness check's acquire of the fd then sees the flags stored above (#2198).
+    slot->fire = &slot_server_t::on_session;
+    slot->ctx = static_cast<posix_endpoint_t*>(this);  // the context every callback casts back
+    slot->write.store(false, std::memory_order_relaxed);
     slot->fd.store(fd, std::memory_order_release);
+    // On the wait before it opens, so a first frame the socket holds can arm writability. A
+    // refused registration refuses the peer, as the cap does.
+    if (!waiter().attach(*slot)) {
+        teardown_slot(*slot);
+        return;
+    }
     // The seam that makes the order testable: the fd is published, the slot not yet open. A
     // broadcast that lands here must skip the slot rather than write to fd -1 (`tcp_test`,
     // the accept-publish race).
@@ -821,6 +848,7 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     // to a closed or reused descriptor. A stalled peer's frames and strikes die with its
     // session and are never inherited by whoever next claims this slot (#838).
     const bool was_open = s.open.exchange(false, std::memory_order_acq_rel);
+    if (wait_module_t* const w = waiting()) w->detach(s);  // no callback for it runs after
     const int fd = s.fd.load(std::memory_order_relaxed);
     if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
     egress_.close(s.egress);
@@ -836,7 +864,7 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     // FLAT link has ONE routing identity for every peer it carries — the registered child
     // NAME — so its only seam is the whole link. Firing that on a mid-life close evicts the
     // SURVIVING peers' edges too, which is why it waits for the last open session to go.
-    // The check runs on the poll thread with both transport locks released: `open` is
+    // The check runs on the driving thread with both transport locks released: `open` is
     // mutated only here and in accept_peer, both on this thread, so no session can appear
     // or vanish between the answer and the notification.
     if (was_open && departed[0] != '\0') {
@@ -848,69 +876,50 @@ void slot_server_t::teardown_slot(session_base_t& s) {
 }
 
 void slot_server_t::shut_down_slots() {
-    // The poll thread first: it is the only other thread that tears a slot down or reads the
-    // listen socket, so after the join both are this call's alone.
+    // Off the wait first: once it returns no callback tears a slot down or reads the listen
+    // socket, so both are this call's alone.
     stop_and_join();
     for (const mem::poly_ptr_t<session_base_t>& s : slots_) teardown_slot(*s);
     if (listen_fd_ >= 0) ::close(listen_fd_);
     listen_fd_ = -1;
 }
 
+void slot_server_t::stop_and_join() {
+    // The listener first: `slots_` grows only in its callback, so once its detach has waited
+    // that out the table is still, and the sessions can be walked off. Then a fallback thread.
+    if (wait_module_t* const w = waiting()) {
+        w->detach(src_);
+        for (const mem::poly_ptr_t<session_base_t>& s : slots_) w->detach(*s);
+    }
+    stream_endpoint_t::stop_and_join();
+}
+
 bool slot_server_t::any_open_session() const {
-    // No lock: this runs on the poll thread (or after it is joined), the only thread that
-    // grows the slot vector or stores `open`, so its own reads need no ordering (#2263).
+    // No lock: this runs on the driving thread (or once the link is off the wait), the only thread
+    // that grows the slot vector or stores `open`, so its own reads need no ordering (#2263).
     for (const mem::poly_ptr_t<session_base_t>& s : slots_)
         if (s->open.load(std::memory_order_relaxed)) return true;
     return false;
 }
 
-void slot_server_t::run() {
-    // ONE poll pass multiplexes the listen socket and every live peer — no per-peer thread
-    // (the MCU-shaped choice, #362), bounded to 100 ms so the loop stays
-    // shutdown-responsive (the posix_endpoint_t idiom).
-    //
-    // The poll set grows to exactly fit the slot table, never ahead of it (#2156): sizing it
-    // to the admission cap up front charged every idle listener the whole cap (two 100-entry
-    // tables).
-    // accept_peer grows it BEFORE a new slot is admitted and refuses the newcomer when that
-    // growth is refused, so every slot always has a place here and no admitted peer goes
-    // unpolled. Slots are recycled, never freed, and a cleared set keeps its block.
-    mem::block_array_t<pollfd> pfds(slots_.source());
-    mem::block_array_t<session_base_t*> pslots(slots_.source());
-    pollfd listen_only{listen_fd_, POLLIN, 0};
-    while (!stop_.load(std::memory_order_relaxed)) {
-        pfds.clear();
-        pslots.clear();
-        // No lock (#2263): this thread is the slot vector's only mutator and the only writer
-        // of every fd, so it reads both as they are; peers_m_ orders the OTHER threads' reads.
-        if (pfds.push_back(listen_only)) {
-            for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
-                const int fd = s->fd.load(std::memory_order_relaxed);
-                if (fd < 0) continue;
-                // A peer with a held frame also waits for writability (#2144).
-                const auto ev = static_cast<short>(
-                    POLLIN | (POLLOUT * static_cast<int>(s->egress.wants_write())));
-                if (!pfds.push_back(pollfd{fd, ev, 0})) break;
-                if (!pslots.push_back(s.get())) {
-                    pfds.pop_back();
-                    break;
-                }
-            }
-        }
-        pollfd* const set = pfds.empty() ? &listen_only : pfds.data();
-        const std::size_t set_n = pfds.empty() ? 1 : pfds.size();
-        const int pr = ::poll(set, static_cast<nfds_t>(set_n), 100);
-        if (pr < 0) continue;  // transient error → re-check stop_
-        if (stop_.load(std::memory_order_relaxed)) break;
-        // Peers first (their events are bound to this pass's fd list), then the accept
-        // (which may add a slot). Writability resumes a held frame; a pass that ran out its
-        // quantum is no event, so it strikes nobody (#2144).
-        for (std::size_t i = 1; i < set_n; ++i) {
-            if ((set[i].revents & POLLOUT) != 0) flush_peer(*pslots[i - 1]);
-            if ((set[i].revents & (POLLIN | POLLHUP | POLLERR)) != 0) service_peer(*pslots[i - 1]);
-        }
-        if ((set[0].revents & POLLIN) != 0) accept_peer(pfds, pslots);
-    }
+bool slot_server_t::serve(std::size_t stack_size, mem::block_source_t& stack_src) {
+    // ONE wait multiplexes the listen socket and every live peer, with no per-peer thread
+    // (#362) and no timeout (#2147).
+    return start(stack_size, stack_src) && attach(src_, listen_fd_, &slot_server_t::on_listen);
+}
+
+void slot_server_t::on_listen(void* ctx, wait_source_t& self, std::uint8_t ready) {
+    (void)self;
+    (void)ready;
+    static_cast<slot_server_t*>(static_cast<posix_endpoint_t*>(ctx))->accept_peer();
+}
+
+void slot_server_t::on_session(void* ctx, wait_source_t& self, std::uint8_t ready) {
+    auto* const server = static_cast<slot_server_t*>(static_cast<posix_endpoint_t*>(ctx));
+    auto& s = static_cast<session_base_t&>(self);
+    // Writability resumes a held frame (#2144); then the read, which may tear the slot down.
+    if (writable(ready)) server->flush_peer(s);
+    if (readable(ready)) server->service_peer(s);
 }
 
 }  // namespace tr::net

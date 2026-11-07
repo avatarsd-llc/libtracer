@@ -1,14 +1,14 @@
 /**
  * @file
- * @brief The receive-thread and endpoint scaffold every POSIX socket transport shares.
+ * @brief The wait and endpoint scaffold every POSIX socket transport shares.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * posix_endpoint — the recv-thread/endpoint scaffold every POSIX socket
- * transport shares (udp / tcp / ws server / ws client). One home for the
- * stop-flag + receive-thread lifecycle and the 100 ms poll/timeout idioms that
- * let a blocking socket loop notice a clean shutdown; the transports keep what
+ * posix_endpoint — the wait/endpoint scaffold every POSIX socket
+ * transport shares (udp / tcp / ws server / ws client). One home for putting a
+ * link's sockets on a wait module with no timeout (`%wait.hpp`, #2147), on the
+ * node's module or a thread-per-link fallback; the transports keep what
  * is genuinely theirs (fds, receivers, counters, framing). The STREAM
  * transports additionally share the one-peer fd/teardown discipline —
  * stream_endpoint_t below owns that layer (the peer-fd atomic, the write
@@ -41,14 +41,13 @@
 #include "libtracer/static_thread.hpp"
 #include "libtracer/sync.hpp"
 #include "libtracer/transport.hpp"
+#include "libtracer/wait.hpp"
 
 /** @brief The POSIX scatter-gather descriptor (`<sys/uio.h>`), forward-declared
  *         so this header need not pull the system socket headers in. */
 struct iovec;
 /** @brief The POSIX IPv4 address (`<netinet/in.h>`), forward-declared for the same reason. */
 struct in_addr;
-/** @brief The POSIX poll descriptor (`<poll.h>`), forward-declared for the same reason. */
-struct pollfd;
 
 namespace tr::detail {
 
@@ -143,11 +142,9 @@ inline constexpr std::uint32_t kDefaultLivenessWindowMs = 10000;
  * Two jobs, neither of them a policy knob. (1) A derived bound is a DIVISION
  * (window ÷ peers in the round) and a division has no natural floor — the #956 lesson from
  * #837's MCU twin, where `SO_SNDTIMEO = 0` means *block forever*, so a bound that rounds
- * to zero would restore the very defect being fixed. (2) It is the same 100 ms quantum
- * @ref posix_endpoint_t::set_rcv_timeout and @ref posix_endpoint_t::poll_readable already
- * use for "one bounded wait before re-checking the world" — a write that cannot move one
- * byte inside the interval the read side already treats as a whole pass is not making
- * progress. Not a new number: the one this file already lives by.
+ * to zero would restore the very defect being fixed. (2) It is the `SO_SNDTIMEO` quantum
+ * @ref posix_endpoint_t::set_snd_timeout arms, so a blocked send returns to observe the
+ * record's deadline. A send-side quantum only: no receive wait is timed (#2147).
  */
 inline constexpr std::uint32_t kBoundedWaitMs = 100;
 
@@ -243,154 +240,120 @@ struct write_result_t {
 }
 
 /**
- * @brief The shared recv-thread scaffold of the POSIX socket transports.
+ * @brief The shared wait scaffold of the POSIX socket transports (#2147).
  *
- * A protected base (inherited privately by the concrete transports) owning the
- * `stop_` flag and the receive thread, plus the socket-timeout/poll idioms that
- * make a blocking loop shutdown-responsive: every blocking wait is bounded to
- * 100 ms (SO_RCVTIMEO or `poll(2)`), after which the loop re-checks `stop_`.
+ * A protected base (inherited privately by the concrete transports) that puts the link's
+ * sockets on a @ref wait_module_t : the node's, when the link's config names one, and the link
+ * then owns no thread; otherwise a private module driven by one thread of the link's own (the
+ * thread-per-link fallback adapter). Either way the wait has no timeout and every callback
+ * runs on the module's driving thread.
  *
- * **Teardown invariant (derived destructors):** call @ref stop_and_join
- * FIRST, before releasing ANY resource the thread body touches (sockets,
- * receivers, buffers) — the thread may be mid-loop until the join returns.
+ * **Teardown invariant (derived destructors):** call @ref stop_and_join FIRST, before
+ * releasing ANY resource a callback touches (sockets, receivers, buffers). It detaches the
+ * link's sources, which waits out a callback in flight, so none runs once it returns.
  *
- * Stream transports (tcp / ws) layer the shared one-peer fd/teardown
- * discipline on top via @ref stream_endpoint_t — the write-serialization and
- * teardown-under-write-lock invariants live there, with the code.
+ * Stream transports (tcp / ws) layer the shared one-peer fd/teardown discipline on top via
+ * @ref stream_endpoint_t — the write-serialization and teardown-under-role invariants live
+ * there, with the code.
  */
 class posix_endpoint_t {
    protected:
-    /** @brief The receive thread's body: a stored callable with inline storage (ADR-0083
-     *         Q10) — every transport's body captures `this` and at most a descriptor. */
-    using thread_body_t = inline_fn_t<void()>;
+    /** @brief Constructs not yet waiting.
+     *  @param node The node's wait module, or null for the thread-per-link fallback. It must
+     *              outlive the link. */
+    explicit posix_endpoint_t(wait_module_t* node = nullptr) noexcept : node_(node) {}
 
-    /** @brief Constructs with no thread running and @ref stop_ clear. */
-    posix_endpoint_t() = default;
-
-    /**
-     * @brief Joins a still-running thread as a last resort.
-     *
-     * Derived destructors must have called @ref stop_and_join already (see the
-     * teardown invariant above) — by the time this runs, derived members the
-     * thread touches are gone. The defensive join only covers a derived class
-     * that never spawned a thread or already joined it (both no-ops).
-     */
+    /** @brief Stops a fallback thread as a last resort; derived destructors have already
+     *         called @ref stop_and_join (see the teardown invariant above). */
     ~posix_endpoint_t();
 
     posix_endpoint_t(const posix_endpoint_t&) = delete;
     posix_endpoint_t& operator=(const posix_endpoint_t&) = delete;
 
     /**
-     * @brief Spawn the receive thread running @p body.
+     * @brief Begin waiting: on the node's module, or on a private one driven by a thread of
+     *        the link's own. Call at most once, before the first @ref attach.
      *
-     * Call at most once, after the socket is up and every resource @p body
-     * touches is initialized. @p body must poll @ref stop_ (directly or via the
-     * bounded waits below) and return promptly once it is set. Usually that is
-     * the derived constructor; a transport offering the two-phase bring-up
-     * (`%transport_t::start_receiving` — the owner installs its sinks BEFORE any
-     * frame can be decoded) calls it from there instead, and owns the one-shot
-     * latch that keeps "at most once" true.
+     * The fallback's thread spawns through @ref static_thread_t (#2288), never `std::thread`,
+     * whose constructor throws on failure (an `abort` under `-fno-exceptions`). Its private
+     * module and, on ESP-IDF, its task block and stack are drawn from @p src.
      *
-     * Spawns through @ref static_thread_t (#2288), never `std::thread`: the constructor of the
-     * latter THROWS on failure, which under `-fno-exceptions` (the MCU build) `std::abort`s.
-     * On ESP-IDF the thread is a static FreeRTOS task whose control block and stack are ONE
-     * block drawn from @p src; on a POSIX host it is a `pthread_create` and @p src pays only
-     * a small boot record.
-     *
-     * @param body       The thread body (the transport's accept/recv loop).
-     * @param stack_size Recv-thread stack size in bytes, or 0 for the platform
-     *        default (`CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT` on ESP-IDF). A non-zero hint
-     *        right-sizes this thread instead of inflating that default for every pthread in
-     *        the system. On POSIX a hint below the platform floor is ignored (the default
-     *        stack is used) rather than failing the spawn.
-     * @param src        Where the thread's memory comes from: the link's
-     *        `link_memory_t::stack`. It MUST outlive @ref stop_and_join.
-     * @retval false The spawn was refused (by @p src or the platform): nothing runs. The
-     *         caller MUST report it, by leaving the link inert (`ok()` false) or bringing it
-     *         down; a link that comes up and never receives is the failure this forbids.
+     * @param stack_size The fallback thread's stack in bytes, 0 for the platform default
+     *                   (ignored on the node's module, whose driver is the application's).
+     * @param src        The link's `link_memory_t::stack`. It MUST outlive @ref stop_and_join.
+     * @retval false The private module or its thread was refused: nothing waits. The caller
+     *         MUST report it, by leaving the link inert (`ok()` false) or bringing it down.
      */
-    [[nodiscard]] bool start(thread_body_t body, std::size_t stack_size, mem::block_source_t& src);
+    [[nodiscard]] bool start(std::size_t stack_size, mem::block_source_t& src);
 
     /**
-     * @brief Request shutdown and join the receive thread (idempotent).
+     * @brief Put @p s (socket @p fd , callback @p fire with this link as context) on the wait.
      *
-     * Sets `stop_` and joins the thread if one is running. MUST be the
-     * FIRST act of every derived destructor — only after it returns may the
-     * destructor release the resources the thread body touches.
+     * @p write arms write interest for the first turn. A write interest armed on @p s since
+     * @ref start (a send held between the two) is kept, never cleared here.
+     * @retval false The module refused it: the caller treats the socket as gone.
+     */
+    [[nodiscard]] bool attach(wait_source_t& s, int fd, wait_source_t::fire_t fire,
+                              bool write = false) noexcept {
+        s.fd.store(fd, std::memory_order_relaxed);
+        s.fire = fire;
+        s.ctx = this;
+        if (write) s.write.store(true, std::memory_order_relaxed);
+        return waiter().attach(s);
+    }
+
+    /** @brief The module this link waits on, or null before @ref start. */
+    [[nodiscard]] wait_module_t* waiting() const noexcept {
+        return wait_.load(std::memory_order_acquire);
+    }
+
+    /** @brief The module this link waits on (valid after @ref start). */
+    [[nodiscard]] wait_module_t& waiter() noexcept {
+        return *wait_.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Arm write interest on @p s, from inside the egress writer role, once a write
+     *        left a frame held. Before @ref start it does nothing: the first attach arms it.
+     */
+    void arm_write(wait_source_t& s) noexcept {
+        if (wait_module_t* const w = wait_.load(std::memory_order_acquire)) w->want_write(s, true);
+    }
+
+    /**
+     * @brief Stop waiting (idempotent): detach @ref src_, and stop and join the fallback
+     *        thread. MUST be the FIRST act of every derived destructor.
      */
     void stop_and_join();
 
     /**
-     * @brief Arm the 100 ms receive timeout (SO_RCVTIMEO) on @p fd.
-     *
-     * The idiom that keeps a blocking `recv`/`recvfrom` loop shutdown-
-     * responsive: each blocked read wakes within 100 ms so the loop can
-     * re-check `stop_` and resume (or exit) — one home for the constant.
-     *
-     * @param fd The socket to arm.
-     */
-    static void set_rcv_timeout(int fd);
-
-    /**
      * @brief Arm the bounded SEND timeout (`SO_SNDTIMEO`, `kBoundedWaitMs`) on @p fd (#838).
      *
-     * The egress twin of @ref set_rcv_timeout, and the syscall-level half of the #838 fix:
-     * without it a `send`/`sendmsg` into a peer whose TCP receive window is full blocks
-     * INDEFINITELY — with the write mutex held — so one stalled-but-not-dead peer freezes
-     * the sending application thread and everything queued behind it.
-     *
-     * The option is deliberately the short 100 ms quantum rather than the policy bound: it
-     * is what makes each blocked syscall RETURN so the software deadline
-     * (@ref stream_endpoint_t::write_all_iov's @p bound_ms, derived from the liveness
-     * window) can be observed. Putting the policy bound on the socket instead would bound
-     * each syscall but not the record, since a stream write may need several.
+     * Without it a `send`/`sendmsg` into a peer whose TCP receive window is full blocks
+     * INDEFINITELY inside the writer's turn. The option is the short quantum rather than the
+     * policy bound: it makes each blocked syscall RETURN so the record's deadline
+     * (@ref stream_endpoint_t::write_all_iov's @p bound_ms, derived from the liveness window)
+     * can be observed, since a stream write may need several syscalls.
      *
      * @param fd The socket to arm.
      */
     static void set_snd_timeout(int fd);
 
     /**
-     * @brief One bounded readability wait: `poll(2)` for POLLIN with a 100 ms timeout on @p fd.
-     *
-     * The poll-flavored twin of @ref set_rcv_timeout for loops that wait
-     * before reading. Returns the raw `poll(2)` result — `> 0` readable,
-     * `0` timeout (re-check `stop_` and continue), `< 0` error.
-     *
-     * @param fd The socket to wait on.
-     * @return The `poll(2)` return value.
+     * @brief The link's own socket's registration: a datagram socket, a dialled connection,
+     *        or a listening socket. Its context is the link.
      */
-    static int poll_readable(int fd);
-
-    /**
-     * @brief One iteration of the poll-100ms-recheck accept loop.
-     *
-     * Waits up to 100 ms for @p listen_fd to become readable, then accepts.
-     * Returns the accepted fd, or -1 on timeout / poll error / accept failure
-     * — the caller's loop simply continues, re-checking @ref stop_ each pass.
-     *
-     * @param listen_fd The bound+listening socket.
-     * @return The accepted connection fd, or -1 when there is none this pass.
-     */
-    static int poll_accept(int listen_fd);
+    wait_source_t src_;
 
    private:
-    /** @brief The thread entry trampoline: runs `body_` of the @ref posix_endpoint_t @p self. */
+    /** @brief The fallback thread's body: drive the private module. */
     static void thread_entry(void* self);
 
-    thread_body_t body_;     /**< @brief The thread body `thread_entry` runs. */
-    static_thread_t thread_; /**< @brief The receive thread (joined by stop_and_join). */
-
-   protected:
-    /**
-     * @brief The shutdown flag every blocking loop polls (set by
-     *        @ref stop_and_join; read with relaxed order — it is a flag, not
-     *        a synchronizer; the join provides the ordering).
-     *
-     * Declared LAST on purpose (#2512): it leaves this class's tail padding open, so a derived
-     * link's first 4 B members pack into it. `static_thread_t` is a member, whose own padding
-     * no derived class may reuse; declared after it, every stream link object would pay 8 B.
-     */
-    std::atomic<bool> stop_{false};
+    wait_module_t* node_; /**< @brief The node's module, or null. */
+    /** @brief The module waited on, published by @ref start. */
+    std::atomic<wait_module_t*> wait_{nullptr};
+    mem::poly_ptr_t<wait_module_t> own_; /**< @brief The fallback's private module. */
+    static_thread_t thread_;             /**< @brief The fallback's thread. */
 };
 
 /**
@@ -398,7 +361,7 @@ class posix_endpoint_t {
  *        shares (tcp dial+listen, ws server, ws client).
  *
  * Owns the live peer fd (@ref conn_fd_) and the link's egress (@ref egress_, ADR-0087 §2),
- * and is the ONE home of the invariants that keep a concurrent `send()` and the recv thread's
+ * and is the ONE home of the invariants that keep a concurrent `send()` and the driving thread's
  * connection teardown safe against each other:
  *
  * **Write-serialization invariant:** every write to a peer fd is made by the sender holding
@@ -408,15 +371,15 @@ class posix_endpoint_t {
  * on another publisher's write. A record the socket cuts short keeps its frame and offset,
  * and the rest goes on the peer's next turn, so a part write never desyncs the framing.
  *
- * **Teardown-under-role invariant:** a recv thread that closes the peer fd first
+ * **Teardown-under-role invariant:** a driving thread that closes the peer fd first
  * `shutdown(2)`s it (an in-flight write returns), then closes the peer's egress — which waits
  * for the writer role to be let go — and only then resets @ref conn_fd_ to -1 and
  * `close(2)`s it (@ref teardown_peer). So a sender never writes to (or reads) a closed or
  * reused fd, and the shared write mutex is gone.
  *
- * The one-peer accept loop shape (poll-100ms-recheck accept → per-peer setup
- * → serve → teardown → re-accept) shared by tcp's LISTEN mode and the ws
- * server lives here too (@ref run_accept_loop). A protected base, inherited
+ * The one-peer listener shape (accept → per-peer setup → serve → teardown →
+ * listen again), on the wait module, lives here too (@ref accept_one,
+ * @ref relisten). A protected base, inherited
  * privately by the concrete stream transports; udp stays on plain
  * posix_endpoint_t — a datagram socket has no per-peer fd to tear down and
  * its single-syscall sends need no serialization.
@@ -437,15 +400,17 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *                 A multi-peer server passes false and keeps one peer per session; its
      *                 writes never wait, so its cap is `kEgressStallStrikes`.
      */
-    explicit stream_endpoint_t(mem::block_source_t& tx_src, bool one_peer = true)
-        : io_src_(&tx_src),
+    explicit stream_endpoint_t(mem::block_source_t& tx_src, bool one_peer = true,
+                               wait_module_t* node = nullptr)
+        : posix_endpoint_t(node),
+          io_src_(&tx_src),
           egress_(tx_src, one_peer ? kMaxConsecutiveStalls : kEgressStallStrikes) {
         // Open from the start: a send before a peer connects finds no fd and sheds, counted.
         if (one_peer) egress_.open(peer_);
     }
 
     /**
-     * @brief Closes a leftover peer fd (one the recv thread never tore down).
+     * @brief Closes a leftover peer fd (one the driving thread never tore down).
      *
      * Runs AFTER the derived destructor, whose first act was stop_and_join
      * (the posix_endpoint_t teardown invariant) — so no thread can race this.
@@ -561,7 +526,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *
      * Shutdown, never close: it takes effect on this line, needs no cooperation from the
      * stalled socket, makes every later write fail at once and raises the readable-at-EOF the
-     * recv/poll thread turns into the ordinary remote-departure teardown (the same path
+     * driving thread turns into the ordinary remote-departure teardown (the same path
      * @ref slot_server_t::close_peer uses). A negative fd is a no-op.
      */
     static void condemn_fd(int fd) noexcept;
@@ -570,11 +535,19 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * @brief The one-peer @ref transport_t::sweep (#2198, #2481): a dialer's, or a one-peer
      *        listener's. Only the TX direction is owed here: a frame held on the wire that
      *        moved no byte since the last check. A frozen peer is shut down inside its writer
-     *        role, so the recv thread runs the ordinary teardown, and counted in
+     *        role, so the driving thread runs the ordinary teardown, and counted in
      *        @ref frozen_closed_.
      * @return When the peer is next due, 0 when it owes nothing or was closed.
      */
     std::uint64_t sweep_one(std::uint64_t now, std::uint64_t deadline);
+
+    /** @brief A write turn of the ONE peer, inside its writer role: its bytes are recorded in
+     *         @ref tx_moved_ and a held frame arms write interest on @ref src_, so the driving
+     *         thread resumes it on writability. Returns @p s. */
+    egress_step_t held_turn(egress_step_t s) noexcept {
+        if (s.held) arm_write(src_);
+        return note_moved(tx_moved_, s);
+    }
 
     /** @brief Record @p s 's bytes in @p moved, a peer's TX progress flag (#2198); returns
      *         @p s. */
@@ -610,30 +583,70 @@ class stream_endpoint_t : protected posix_endpoint_t {
                 fd = conn_fd_.load(std::memory_order_acquire);
                 // No live peer (still dialing, or torn down) => a counted drop.
                 if (fd < 0) return egress_step_t{0, false, true};
-                return note_moved(tx_moved_, std::forward<Direct>(direct)(fd, bound));
+                return held_turn(std::forward<Direct>(direct)(fd, bound));
             },
             [&](const egress_frame_t& f, std::size_t off) {
                 fd = conn_fd_.load(std::memory_order_acquire);
                 if (fd < 0) return egress_step_t{0, false, true};
-                return note_moved(tx_moved_, write_frame(fd, f, off, bound, false));
+                return held_turn(write_frame(fd, f, off, bound, false));
             },
             [&] { condemn_fd(fd); });
         note_egress(r);
     }
 
     /**
-     * @brief One bounded 100 ms wait on the ONE peer's socket (recv-thread side): readable,
-     *        and writable too while a frame is held (@ref egress_peer_t::wants_write).
+     * @brief One readiness turn of the ONE peer's connection (@ref src_), on the driving
+     *        thread: writability resumes a held frame, nonblocking (`egress_t::flush`), so a
+     *        record the socket cut short finishes without waiting for a later send (#2144);
+     *        readability (or a hangup) runs @p read on the socket.
      *
-     * Writability resumes the held frame here, nonblocking (`egress_t::flush`), so a record
-     * the socket cut short finishes without waiting for a later send (#2144).
-     *
-     * @return `> 0` readable (or hung up), `0` nothing to read, `< 0` a poll error.
+     * @tparam Read Callable `bool(int fd)`: read what the socket has; false when the
+     *              connection must close.
+     * @return False when the peer is gone: the caller runs @ref depart.
      */
-    int poll_io(int fd);
+    template <class Read>
+    [[nodiscard]] bool peer_turn(std::uint8_t ready, Read&& read) {
+        const int fd = src_.fd.load(std::memory_order_relaxed);
+        if (writable(ready)) flush_one(fd);
+        return !readable(ready) || std::forward<Read>(read)(fd);
+    }
 
     /**
-     * @brief Tear the peer connection down (recv-thread side).
+     * @brief Resume the ONE peer's held frame on @p fd without waiting, then disarm write
+     *        interest once nothing is held (driving thread).
+     */
+    void flush_one(int fd);
+
+    /** @brief After a flush, disarm write interest on @p s once @p peer holds nothing, then
+     *         re-arm it if a sender held a frame meanwhile (driving thread). */
+    void disarm_flushed(wait_source_t& s, const egress_peer_t& peer);
+
+    /**
+     * @brief The ONE peer departed (driving thread): stop waiting on its connection, then
+     *        @ref teardown_peer it.
+     */
+    void depart();
+
+    /**
+     * @brief One accept on the one-peer listener, whose listening socket is @ref src_
+     *        (driving thread).
+     *
+     * Runs @p on_accept (per-peer setup; false rejects: the socket is closed and the listener
+     * keeps waiting), publishes the fd to @ref conn_fd_, moves @ref src_ from the listening
+     * socket to the connection, served by @p fire, and only then reopens the peer's egress.
+     * A refused registration closes the peer and puts @ref src_ back on the listening socket.
+     * A listener accepts nobody else while a peer is connected: the kernel's backlog holds
+     * them.
+     * @ref relisten puts @ref src_ back on the listening socket after the peer departs.
+     */
+    void accept_one(int listen_fd, function_ref_t<bool(int)> on_accept, wait_source_t::fire_t fire);
+
+    /** @brief After a one-peer listener's @ref depart, wait on @p listen_fd again, served by
+     *         @p fire. */
+    void relisten(int listen_fd, wait_source_t::fire_t fire);
+
+    /**
+     * @brief Tear the peer connection down (driving thread).
      *
      * The teardown-under-role invariant as code: `shutdown(2)` the fd so a write in flight
      * returns, close the peer's egress (waiting out its writer, releasing its frames), THEN
@@ -650,23 +663,6 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *        the peer closed and sheds. Idempotent.
      */
     void shut_down_stream();
-
-    /**
-     * @brief The one-peer accept loop (tcp LISTEN / ws server shape).
-     *
-     * Until `stop_`: one poll-100ms-recheck accept pass (@ref poll_accept);
-     * on a new connection run @p on_accept (per-peer setup — socket options,
-     * handshake; return false to reject: the fd is closed and the loop
-     * re-accepts), publish the fd to @ref conn_fd_ and reopen the peer's egress, run
-     * @p serve_peer, then @ref teardown_peer and re-accept the next peer.
-     *
-     * @param listen_fd  The bound+listening socket.
-     * @param on_accept  Per-peer setup; false rejects the connection.
-     * @param serve_peer The per-connection recv loop; returns on peer
-     *                   departure or `stop_`.
-     */
-    void run_accept_loop(int listen_fd, function_ref_t<bool(int)> on_accept,
-                         function_ref_t<void(int)> serve_peer);
 
     std::atomic<int> conn_fd_{-1}; /**< @brief The live peer connection (-1 = none). */
     /** @brief The injected peer liveness window, ms (0 = `kDefaultLivenessWindowMs`) —
@@ -706,7 +702,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
 /**
  * @brief The MULTI-peer slot/poll machinery every stream SERVER shares
  *        (tcp_server_transport_t, ws_server_transport_t) — one listener, N
- *        recycled peer slots, one poll thread (#871).
+ *        recycled peer slots, all on one wait module (#871, #2147).
  *
  * The tier above @ref stream_endpoint_t — that one owns a single peer fd, this
  * one owns a VECTOR of them. Everything the two servers used to restate
@@ -730,7 +726,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
  * @ref flat_slot_server_t according to @ref tr::net::kBusLinks.
  *
  * **Slot threading rule, ONE rule for both halves of a slot's lifecycle:**
- * @ref session_base_t::fd / @ref session_base_t::open are MUTATED only on the poll
+ * `session_base_t::fd` / @ref session_base_t::open are MUTATED only on the poll
  * thread — accept publishes the fd, then opens the session's egress, then `open`
  * (#891: "open ⇒ fd valid"); teardown clears `open`, shuts the fd down, closes the
  * session's egress (which waits out its writer), and only then resets and closes the fd.
@@ -738,13 +734,13 @@ class stream_endpoint_t : protected posix_endpoint_t {
  * the egress hands over with acquire/release, so it never sees a half-published slot or a
  * closed one. @ref session_base_t::name and the slot table's growth are guarded by
  * @ref peers_m_, which no write is ever made under (#2263): a broadcast walks the slots by
- * @ref session_base_t::next with no lock, and the poll thread, the table's only mutator,
- * reads it with none. Every protocol buffer a slot carries is poll-thread-only. The
- * destructor's closing sweep runs after the poll thread is joined. There is no shared write
+ * @ref session_base_t::next with no lock, and the driving thread, the table's only mutator,
+ * reads it with none. Every protocol buffer a slot carries is the driving thread's alone. The
+ * destructor's closing sweep runs after the driving thread is joined. There is no shared write
  * lock: a stalled peer holds only its own role.
  *
  * @warning A derived destructor MUST call `stop_and_join()` as its FIRST act:
- *          the poll thread dispatches the variance points below into the
+ *          the driving thread dispatches the variance points below into the
  *          derived object, which must still be alive when it does.
  */
 class slot_server_t : public transport_t, protected stream_endpoint_t {
@@ -849,12 +845,12 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * A peer-named server tags every frame through the bus seam and never needs this. A FLAT
      * one cannot: it has exactly one routing identity for every peer it carries, and the
      * `p<slot>~<gen>` tag it computes is thrown away at the delivery fork. This is where that tag
-     * survives — stamped on the poll thread immediately before the flat delivery, read
+     * survives — stamped on the driving thread immediately before the flat delivery, read
      * back, on that same thread, by the router's terminus, and cleared once the frame has
      * been handed up. Outside a delivery it answers the default (invalid) handle (#1915).
      *
      * @warning Poll-thread state, meaningful ONLY inside a receive callback. It is a plain
-     *          member and not an atomic on purpose: one server owns one poll thread
+     *          member and not an atomic on purpose: one server owns one driving thread
      *          (ADR-0071's shared-nothing epoll), the store and every legitimate load happen
      *          on it, and paying for an atomic on the per-frame delivery path to make an
      *          off-thread read merely *defined* rather than *correct* buys nothing.
@@ -892,10 +888,10 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * @brief Close the open peer named @p peer, freeing its slot for reuse.
      *
      * Shuts the socket down (`SHUT_RDWR`) under @ref peers_m_ (teardown un-names a slot
-     * under the same lock before it closes the fd); the poll thread's next pass observes the
-     * close and
-     * runs the IDENTICAL remote-FIN teardown, so the recycle is asynchronous (within one
-     * poll bound) and no poll-thread-only buffer is ever touched off-thread.
+     * under the same lock before it closes the fd); the driving thread's next pass observes the
+     * close and runs the IDENTICAL remote-FIN teardown, so the recycle is asynchronous (the
+     * shut-down socket reports a hangup at once) and no buffer the driving thread alone
+     * owns is ever touched off-thread.
      * @retval true  @p peer named an open connection and its socket was shut down.
      * @retval false @p peer names no currently-open connection.
      */
@@ -935,22 +931,23 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * @ref peer_endpoint facade object. See the class-level threading rule for who may
      * touch what.
      */
-    struct session_base_t {
-        /** @brief Constructs a free slot (no fd, not open, unnamed). */
+    struct session_base_t : wait_source_t {
+        /** @brief Constructs a free slot (no fd, not open, unnamed). Its inherited
+         *         @ref wait_source_t is the session's registration with the wait module, and
+         *         its `fd` is the peer socket: -1 ⇒ free slot. */
         session_base_t() = default;
         session_base_t(const session_base_t&) = delete;
         session_base_t& operator=(const session_base_t&) = delete;
 
-        std::atomic<int> fd{-1};       /**< @brief The peer socket; -1 ⇒ free slot. */
         std::atomic<bool> open{false}; /**< @brief True while the session may carry frames. */
         /** @brief A byte of ours went out since the last liveness check (#2198). Set by the
          *         writer, taken by @ref sweep; an accept sets it. */
         std::atomic<bool> tx_moved{false};
         /** @brief The peer's socket was readable since the last liveness check (#2198). Set
-         *         by the poll thread, taken by @ref sweep; an accept sets it. */
+         *         by the driving thread, taken by @ref sweep; an accept sets it. */
         std::atomic<bool> rx_moved{false};
         /** @brief The peer has begun a frame or a handshake and not finished it (#2198):
-         *         @ref mid_frame as of the poll thread's last pass over it. */
+         *         @ref mid_frame as of the driving thread's last pass over it. */
         std::atomic<bool> rx_owed{false};
         /** @brief The peer's routable NAME, `p<slot>~<gen>` — the slot index and this
          *         tenancy's generation (ADR-0073 §2, #426): stamped at accept, moved out by
@@ -968,7 +965,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
          * Minted at accept and RETIRED at teardown (`generation = 0`, i.e. not
          * @ref peer_handle_t::valid), so a handle minted against the session that used to
          * hold this slot never matches its successor — the same validate-on-use stamp the
-         * ESP link's session ref carries. Written on the poll thread under @ref peers_m_
+         * ESP link's session ref carries. Written on the driving thread under @ref peers_m_
          * beside @ref name, and read on that thread by the delivery path.
          */
         peer_handle_t handle;
@@ -1018,11 +1015,13 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *                   server.
      * @param liveness_window_ms The app-provided peer liveness window, ms (0 =
      *                   `kDefaultLivenessWindowMs`) — see @ref directed_send_bound_ms (#1295).
+     * @param node       The node's wait module, or null for a thread of the server's own
+     *                   (@ref posix_endpoint_t).
      */
     slot_server_t(std::size_t max_peers, bool peer_named, std::uint32_t liveness_window_ms = 0,
                   mem::block_source_t& src = mem::net_source(),
-                  mem::block_source_t& state_src = mem::net_source())
-        : stream_endpoint_t(src, false),
+                  mem::block_source_t& state_src = mem::net_source(), wait_module_t* node = nullptr)
+        : stream_endpoint_t(src, false, node),
           slots_(state_src),
           max_peers_(max_peers != 0 ? max_peers : kDefaultMaxPeers),
           peer_named_(peer_named) {
@@ -1047,7 +1046,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * @param bind_port TCP port to listen on (host byte order; 0 → ephemeral, resolved
      *                  into @ref local_port).
      * @retval false The socket could not be bound/listened; the caller must NOT spawn the
-     *               poll thread (`ok()` stays false).
+     *               driving thread (`ok()` stays false).
      */
     bool bind_listen(std::uint16_t bind_port);
 
@@ -1056,17 +1055,24 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     void close_listen() noexcept;
 
     /**
-     * @brief The ONE poll thread body: one `poll(2)` pass multiplexes the listen socket
-     *        and every live peer — no per-peer thread (the MCU-shaped choice, #362),
-     *        bounded to 100 ms so the loop stays shutdown-responsive.
+     * @brief Begin serving: wait on the listening socket (#2147). Call it from the DERIVED
+     *        constructor, last, once every member the variance points touch is initialized.
      *
-     * Spawn it from the DERIVED constructor (`start([this] { run(); }, recv_stack)`),
-     * last, once every member the variance points touch is initialized.
+     * The listener and every session are sources of one wait module, so no per-peer thread
+     * exists (#362) and the wait has no timeout.
+     *
+     * @param stack_size The fallback thread's stack (see @ref posix_endpoint_t::start).
+     * @param stack_src  The link's `memory.stack`.
+     * @retval false The wait could not begin: the caller leaves the listener inert.
      */
-    void run();
+    [[nodiscard]] bool serve(std::size_t stack_size, mem::block_source_t& stack_src);
+
+    /** @brief Stop waiting on the listener and on every session (idempotent): the FIRST act
+     *         of a derived destructor, which hides @ref posix_endpoint_t::stop_and_join. */
+    void stop_and_join();
 
     /**
-     * @brief Tear one slot down and free it for reuse (poll thread only).
+     * @brief Tear one slot down and free it for reuse (driving thread only).
      *
      * Two phases: stop name resolution under @ref peers_m_ (so no new sender targets the
      * dying slot), then clear `open`, shut the fd down and close the session's egress —
@@ -1082,7 +1088,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     void teardown_slot(session_base_t& s);
 
     /**
-     * @brief The @ref transport_t::shut_down of a stream server: join the poll thread, tear
+     * @brief The @ref transport_t::shut_down of a stream server: join the driving thread, tear
      *        every session down exactly as a remote close does (@ref teardown_slot), and close
      *        the listen socket. Idempotent.
      */
@@ -1152,7 +1158,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *
      * The read is the derived server's, so each kind receives straight into the buffer
      * its framing draws (ADR-0087 §1) rather than through a chunk of this tier's. Runs on
-     * the poll thread with no transport lock held. The hook owns the decision to
+     * the driving thread with no transport lock held. The hook owns the decision to
      * @ref teardown_slot, for a peer that closed as for a framing violation.
      *
      * @param s  The slot whose socket polled readable.
@@ -1204,7 +1210,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     void publish_peer_up(const session_base_t& s);
 
     /** @brief Open @p s to senders: its egress, then @p first as its first frame (a WS
-     *         server's 101; empty: none), then `open` (poll thread; the fd is already
+     *         server's 101; empty: none), then `open` (driving thread; the fd is already
      *         published). */
     void open_session(session_base_t& s, std::span<const std::byte> first = {});
 
@@ -1237,7 +1243,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
 
     /**
      * @brief Guards the slot vector's growth and every slot's NAME — the cross-thread reads
-     *        (@ref enumerate_peers / @ref peer_link) against the poll thread's
+     *        (@ref enumerate_peers / @ref peer_link) against the driving thread's
      *        accept/teardown. See the class-level threading rule. Never held across a write
      *        (#2263): a broadcast walks @ref first_ instead.
      */
@@ -1245,7 +1251,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     /** @brief The peer slots: insert-only, recycled in place, never freed early. */
     mem::block_array_t<mem::poly_ptr_t<session_base_t>> slots_;
     /** @brief The slot admitted last, or null: the head of the @ref session_base_t::next
-     *         chain, newest first (#2263). Stored only by the poll thread, release. */
+     *         chain, newest first (#2263). Stored only by the driving thread, release. */
     std::atomic<session_base_t*> first_{nullptr};
     int listen_fd_ = -1;           /**< @brief The bound+listening socket (-1 = not bound). */
     std::uint16_t bound_port_ = 0; /**< @brief The resolved bound port (see local_port()). */
@@ -1271,26 +1277,32 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * refuses such a server outright; the folding is what makes the refusal FREE rather than
      * merely safe.
      *
-     * Non-virtual and inline on purpose: it is read once per inbound frame on the poll thread,
+     * Non-virtual and inline on purpose: it is read once per inbound frame on the driving thread,
      * where `peer_named()`'s virtual would be a per-frame dispatch. At the default binding it
      * IS `peer_named_` — one member load, the instruction sequence that was there before.
      */
     [[nodiscard]] bool bus_mode() const noexcept { return kBusLinks && peer_named_; }
     /** @brief The peer whose frame is being delivered RIGHT NOW — @ref inbound_peer's
      *         storage. Stamped by the derived server's receive loop immediately before it
-     *         hands a frame up the FLAT tier, on the poll thread, and never read off it;
+     *         hands a frame up the FLAT tier, on the driving thread, and never read off it;
      *         reset to the default handle after each frame, delivered or not (#1915). */
     peer_handle_t delivering_{};
 
    private:
-    /**
-     * @brief Admit one inbound connection into a free (or newly grown) slot.
-     *
-     * @param pfds   The poll thread's fd set; grown here to hold a new slot before it is
-     *               admitted, and a refused growth refuses the newcomer (#2156).
-     * @param pslots The session list parallel to @p pfds, grown the same way.
-     */
-    void accept_peer(mem::block_array_t<pollfd>& pfds, mem::block_array_t<session_base_t*>& pslots);
+    /** @brief Admit one inbound connection into a free (or newly grown) slot, refused when
+     *         the cap, the slot table or the wait module refuses it. */
+    void accept_peer();
+
+    /** @brief A write turn of @p s inside its writer role: its bytes recorded in its TX
+     *         progress flag (#2198), and a held frame arms its write interest. */
+    egress_step_t session_turn(session_base_t& s, egress_step_t step) noexcept;
+
+    /** @brief The listening socket's wait callback: one accept. */
+    static void on_listen(void* ctx, wait_source_t& self, std::uint8_t ready);
+
+    /** @brief A session's wait callback: writability resumes its held frame, readability
+     *         serves it. */
+    static void on_session(void* ctx, wait_source_t& self, std::uint8_t ready);
 
     /** @brief One readable pass on @p s: `recv` a chunk, or tear the slot down. */
     void service_peer(session_base_t& s);

@@ -167,7 +167,7 @@ struct ws_server_transport_t::framing_t {
         std::array<std::byte, ws::kMaxServerControlFrame> pong{};
         const std::size_t plen = ws::encode_server_control(pong, ws::opcode_t::PONG, payload);
         // Through the session's egress like any other frame (#2144): never a wait on the
-        // poll thread, and never interleaved with a frame in flight.
+        // driving thread, and never interleaved with a frame in flight.
         const ::iovec pv{pong.data(), plen};
         link.send_to(s, std::span<const ::iovec>(&pv, 1));
     }
@@ -188,7 +188,7 @@ struct ws_server_transport_t::framing_t {
      *
      * The FLAT tier carries no per-frame tag by construction, so the WHO the subject seam
      * needs is stamped here instead (#375 Part 2, ADR-0082): the session's handle, on the
-     * poll thread, immediately before the delivery that consumes it, and cleared once it is
+     * driving thread, immediately before the delivery that consumes it, and cleared once it is
      * handed up, so the field names a session only while that session's frame is being
      * delivered (#1915). A message no sink took (a refused materialize, #2504) is a
      * `dropped_rx`.
@@ -207,20 +207,20 @@ struct ws_server_transport_t::framing_t {
 ws_server_transport_t::ws_server_transport_t(std::uint16_t bind_port,
                                              const ws_server_config_t& config)
     : stream_server_base_t(config.max_peers, config.peer_named, config.liveness_window_ms,
-                           config.memory.io_or_default(), config.memory.state_or_default()),
+                           config.memory.io_or_default(), config.memory.state_or_default(),
+                           config.wait),
       backend_(config.memory.rx) {
     max_frame_ = length_prefix_framer_t::configured_cap(config.max_frame);  // tighten-only (#1035)
     max_handshake_ = handshake_cap(config.max_handshake);                   // tighten-only (#934)
     if (!bind_listen(bind_port)) return;
     // A refused poll-loop spawn (#2288) leaves the listener inert: ok() false.
-    if (!start([this] { run(); }, config.recv_stack, config.memory.stack_or_default()))
-        close_listen();
+    if (!serve(config.recv_stack, config.memory.stack_or_default())) close_listen();
 }
 
 ws_server_transport_t::~ws_server_transport_t() {
-    // FIRST: the run() thread dispatches this class's variance points, so it must be
-    // joined while the derived object is still whole. ~slot_server_t closes the listen
-    // socket and sweeps the slot fds after this body.
+    // FIRST: the driving thread dispatches this class's variance points, so the link must
+    // be off the wait (and a fallback thread joined) while the derived object is still whole.
+    // ~slot_server_t closes the listen socket and sweeps the slot fds after this body.
     stop_and_join();
 }
 
@@ -439,7 +439,8 @@ ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_
                                              const ws_client_config_t& config)
     // Every masked frame this link sends is egress store (#1661, #2267): drawn from
     // `memory.io` per send, not from the process heap, and never kept past its write.
-    : stream_endpoint_t(config.memory.io != nullptr ? *config.memory.io : mem::net_source()),
+    : stream_endpoint_t(config.memory.io != nullptr ? *config.memory.io : mem::net_source(), true,
+                        config.wait),
       backend_(config.memory.rx),
       pipelined_(config.memory.state_or_default()),
       recv_stack_(config.recv_stack),
@@ -450,8 +451,7 @@ ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_
     const std::size_t max_handshake = config.max_handshake;
     // Wire the BASE's egress store to the same one, before anything can send: the gather
     // temporary of `transport_t::send(iov)` and this class's masked frames are then one
-    // store, not two. First statement on purpose — `start_receiving()` at the end of this body
-    // spawns the recv thread.
+    // store, not two. First statement on purpose, before anything can send.
     if (egress_src != nullptr) set_egress_source(*egress_src);
     liveness_window_ms_ = liveness_window_ms;                        // the #838 send bound's source
     max_frame_ = length_prefix_framer_t::configured_cap(max_frame);  // tighten-only (#1035)
@@ -496,15 +496,15 @@ ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_
 
     conn_fd_.store(fd, std::memory_order_relaxed);
     // The two facts diverge from here (#1059): came_up_ is the ok() answer, written once
-    // and never reverting; connected_ is the link_up() liveness the recv thread's
+    // and never reverting; connected_ is the link_up() liveness the driving thread's
     // teardown clears.
     came_up_ = true;
     connected_.store(true, std::memory_order_relaxed);
     pipelined_ = std::move(pipelined);
-    // Two-phase bring-up (#1025): the recv thread is spawned by `start_receiving()`, never
-    // here. A thread started here could decode a message the server pushed on connect before
-    // the owner installs a sink, and the empty slot would drop it silently. The pipelined
-    // bytes stay parked until then.
+    // Two-phase bring-up (#1025): the socket goes on the wait in `start_receiving()`, never
+    // here. A wait begun here could decode a message the server pushed on connect before the
+    // owner installs a sink, and the empty slot would drop it silently. The pipelined bytes
+    // stay parked until then.
 }
 
 bool ws_client_transport_t::start_receiving() {
@@ -514,10 +514,16 @@ bool ws_client_transport_t::start_receiving() {
     // unconditionally on every link it wires.
     if (recv_started_.exchange(true, std::memory_order_relaxed)) return true;
     const int fd = conn_fd_.load(std::memory_order_relaxed);
-    // `pipelined_` is the recv thread's from here on: `serve` takes it over.
-    if (start([this, fd] { serve(fd); }, recv_stack_, *stack_src_)) return true;
-    // A refused spawn (#2288) is the connection dying before its first message: closed, and
-    // ok() false. The owner hears it from the return, not from a link-down fired under
+    rx_state_ = mem::make_poly<rx_t>(pipelined_.source(), *backend_);
+    // `pipelined_` is the driving thread's from here on: the first turn feeds it. Write
+    // interest is armed so that turn comes at once, on a socket that may stay quiet, when
+    // there are pipelined bytes to feed or a frame a send held before now.
+    if (rx_state_ && start(recv_stack_, *stack_src_) &&
+        attach(src_, fd, &ws_client_transport_t::on_conn,
+               pipelined_.size() != 0 || peer_.wants_write()))
+        return true;
+    // A refused receive state or wait (#2288) is the connection dying before its first message:
+    // closed, and ok() false. The owner hears it from the return, not from a link-down fired under
     // whatever lock it holds while it wires the link.
     teardown_peer(fd);
     connected_.store(false, std::memory_order_relaxed);
@@ -526,9 +532,9 @@ bool ws_client_transport_t::start_receiving() {
 }
 
 ws_client_transport_t::~ws_client_transport_t() {
-    stop_and_join();  // FIRST: serve() touches conn_fd_
-    // A leftover fd (never-spawned thread — handshake failed — leaves conn_fd_
-    // at -1 anyway) is closed by ~stream_endpoint_t after this body.
+    stop_and_join();  // FIRST: a callback touches conn_fd_
+    // A leftover fd (one never put on the wait) is closed by ~stream_endpoint_t after this
+    // body.
 }
 
 void ws_client_transport_t::shut_down() { shut_down_stream(); }
@@ -630,13 +636,12 @@ bool ws_client_transport_t::handshake(int fd, std::string_view host, std::uint16
     // published to conn_fd_ until the handshake has succeeded.
     write_all(fd, req.bytes(), derive_send_bound_ms(liveness_window_ms_, 1));
 
-    // Read the response header block (CRLFCRLF), bounded so a stuck peer cannot
-    // hang construction forever.
+    // Read the response header block (CRLFCRLF) with plain blocking reads: no receive
+    // timeout (#2147). A server that never answers holds the dial, as the connect does.
     mem::bytes_t resp(pipelined.source());  // connection state: the link's `memory.state`
     std::array<std::byte, 1024> chunk;
     std::size_t hdr_end = std::string_view::npos;
     while (hdr_end == std::string_view::npos) {
-        if (stop_.load(std::memory_order_relaxed)) return false;
         // The PRE-AUTH budget, applied to the READ rather than to the buffer afterwards
         // (#934): ask the socket for only what is left of it, so the accumulation can never
         // pass the budget by even one byte and nothing has to be discarded after the fact.
@@ -647,9 +652,6 @@ bool ws_client_transport_t::handshake(int fd, std::string_view host, std::uint16
             drops_.count_malformed_rx();
             return false;
         }
-        const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
-        if (pr < 0) return false;
-        if (pr == 0) continue;  // timeout → re-check stop_
         const ssize_t n = ::recv(fd, chunk.data(), std::min(chunk.size(), room), 0);
         if (n <= 0) return false;  // peer closed / error
         if (!resp.append(chunk.data(), static_cast<std::size_t>(n))) return false;  // store refused
@@ -671,14 +673,27 @@ bool ws_client_transport_t::handshake(int fd, std::string_view host, std::uint16
 }
 
 /**
+ * @brief The client's receive state across readiness turns. Its frame ingress is sized for a
+ *        masked header too: RFC 6455 forbids a masked server frame, but the shared rules
+ *        unmask one rather than stall on a header the slot could not hold.
+ */
+struct ws_client_transport_t::rx_t {
+    /** @brief Reassembly draws from @p rx , the link's receive seam. */
+    explicit rx_t(mem::block_source_t& rx) noexcept : assembler(rx) {}
+    ws_rx_frame_t frame{};    /**< @brief The header of the frame being received. */
+    ws_assembler_t assembler; /**< @brief RFC 6455 fragment reassembly. */
+    frame_ingress_t<ws::kMaxClientFrameHeader> ingress; /**< @brief Frame ingress. */
+};
+
+/**
  * @brief The dial-out client's end of the shared receive rules (@ref ws_framing_t): the one
  *        connection's stream state, this link's cap and counters, a masked PONG, and
  *        delivery to its one slot.
  */
 struct ws_client_transport_t::framing_t {
     ws_client_transport_t& link; /**< @brief The client (its counters, sink and egress). */
-    ws_rx_frame_t frame;         /**< @brief The header of the frame being received. */
-    ws_assembler_t assembler;    /**< @brief Fragment reassembly. */
+    ws_rx_frame_t& frame;        /**< @brief The header of the frame being received. */
+    ws_assembler_t& assembler;   /**< @brief Fragment reassembly. */
 
     /** @brief The receive cap, resolved from the injected backend and `max_frame` exactly as
      *         the server resolves it: a dialled peer gets no more credit than an accepted
@@ -719,44 +734,35 @@ struct ws_client_transport_t::framing_t {
     }
 };
 
-void ws_client_transport_t::serve(int fd) {
-    framing_t end{*this, {}, ws_assembler_t{*backend_}};
+void ws_client_transport_t::on_conn(void* ctx, wait_source_t& self, std::uint8_t ready) {
+    (void)self;
+    auto& link = *static_cast<ws_client_transport_t*>(static_cast<posix_endpoint_t*>(ctx));
+    framing_t end{link, link.rx_state_->frame, link.rx_state_->assembler};
     ws_framing_t<framing_t> framing{end};
-    // Stack state, not a member: the header being read and the body's segment while it fills
-    // live on this receive thread for the life of the connection (ADR-0087 §1).
-    // Sized for a masked header too: RFC 6455 forbids a masked server frame, but the shared
-    // rules unmask one rather than stall on a header the slot could not hold.
-    frame_ingress_t<ws::kMaxClientFrameHeader> ingress;
     // The bytes the server pipelined behind its 101 are the start of the frame stream: a peer
     // that pushes its state on connect and then goes quiet must still get that message
-    // delivered, so they are fed before the first wait, then released.
-    bool alive = ingress.feed(std::span<const std::byte>(pipelined_.data(), pipelined_.size()),
-                              *backend_, framing) >= 0;
-    pipelined_ = mem::bytes_t(pipelined_.source());
-
-    // The local stop is checked once per pass, here: a `continue` on a poll timeout comes
-    // straight back to it.
-    while (alive && !stop_.load(std::memory_order_relaxed)) {
-        // One bounded 100 ms wait: readable, and writable too while a frame the socket cut
-        // short is held, which resumes it here (#2144).
-        const int pr = poll_io(fd);
-        if (pr < 0) break;
-        if (pr == 0) continue;  // timeout → re-check stop_
-        // False for a peer that closed, a read error, a CLOSE, or an RFC 6455 breach
-        // (§7.1.7), which is what stops the server we dialled from naming our memory
-        // budget (#872).
-        alive = ingress.read(fd, *backend_, framing);
-    }
-
-    teardown_peer(fd);  // close the egress, then reset and close (stream_endpoint_t)
+    // delivered, so the first turn feeds them, then releases them.
+    bool alive = link.pipelined_.size() == 0 ||
+                 link.rx_state_->ingress.feed(
+                     std::span<const std::byte>(link.pipelined_.data(), link.pipelined_.size()),
+                     *link.backend_, framing) >= 0;
+    link.pipelined_ = mem::bytes_t(link.pipelined_.source());
+    // False for a peer that closed, a read error, a CLOSE, or an RFC 6455 breach (§7.1.7),
+    // which is what stops the server we dialled from naming our memory budget (#872).
+    alive = alive && link.peer_turn(ready, [&](int fd) {
+        return link.rx_state_->ingress.read(fd, *link.backend_, framing);
+    });
+    if (alive) return;
+    link.depart();  // off the wait, then close the egress, reset and close
     // Liveness (#1059): every death of the one connection lands here — peer CLOSE, remote
-    // hangup, receive error, RFC 6455 breach, and the local stop — so this is the ONE
-    // place link_up() flips false. Cleared BEFORE the departure seam fires, so a notifier
-    // that turns around and polls the link reads the state it was just told about.
-    connected_.store(false, std::memory_order_relaxed);
-    // Departure seam (RFC-0009 §D extended): the one connection died under us — not a
-    // local stop — so report the link down (after teardown, no locks held).
-    if (!stop_.load(std::memory_order_relaxed)) notify_down();
+    // hangup, receive error, RFC 6455 breach — so this is the ONE place link_up() flips
+    // false. Cleared BEFORE the departure seam fires, so a notifier that turns around and
+    // polls the link reads the state it was just told about.
+    link.connected_.store(false, std::memory_order_relaxed);
+    // Departure seam (RFC-0009 §D extended): the one connection died under us, so report the
+    // link down (after teardown, no locks held). A local shut_down detaches first and never
+    // gets here.
+    link.notify_down();
 }
 
 }  // namespace tr::net

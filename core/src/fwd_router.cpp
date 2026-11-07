@@ -1246,7 +1246,7 @@ void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle
         holds_slot = !tenant.valid() || tenant == handle;
         // Retire BEFORE the eviction, and before the word clears. Retirement is what bumps
         // the saturating generation (RFC-0024 §4.4 rule 3), and the slot this session sat in
-        // can be handed to the next dialer the moment the poll thread returns from here — so
+        // can be handed to the next dialer the moment the driving thread returns from here — so
         // the stamp has to have moved by then, or the successor revives at a generation an
         // element minted against the DEAD session still matches.
         if (tenant.valid() && tenant == handle) {
