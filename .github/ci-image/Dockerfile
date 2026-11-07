@@ -25,8 +25,13 @@
 # the install is
 # --no-install-recommends and the toolchain only Recommends them (transitively), yet
 # nano.specs / nosys.specs and the target's C++ headers come from them.
-# g++-15 is NOT here: build-test-gcc15 adds the ubuntu-toolchain-r PPA on top, because a
-# PPA compiler baked into an image would silently stop tracking the PPA.
+#   g++-15 gcc-15 (ppa:ubuntu-toolchain-r/test)        build-test-gcc15
+# g++-15 and gh are baked in because their run-time installs were the flake surface (#2627):
+# a PPA add died on `IncompleteRead`, an `apt-get install gh` hit its timeout, each one
+# failing a landing before any project code ran. The PPA is added only for that install
+# and then removed again, together with software-properties-common, so a job's own
+# `apt-get update` never reaches launchpad. The compiler is a snapshot of the PPA at build
+# time: to pick up a newer g++-15, edit this file (a new tag) and rebuild.
 #
 # HOW IT IS VERSIONED. The image tag is `noble-` + the first 12 hex chars of this file's
 # sha256 (`sha256sum .github/ci-image/Dockerfile | cut -c1-12`). Editing this file
@@ -46,3 +51,13 @@ RUN apt-get update -qq \
       unzip curl \
       gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib gh \
  && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update -qq \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      software-properties-common \
+ && add-apt-repository -y ppa:ubuntu-toolchain-r/test \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      g++-15 gcc-15 \
+ && add-apt-repository -y --remove ppa:ubuntu-toolchain-r/test \
+ && DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq --auto-remove software-properties-common \
+ && rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/ubuntu-toolchain-r-*
