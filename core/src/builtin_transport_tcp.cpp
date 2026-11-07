@@ -55,16 +55,19 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // why `self_heal_dial` is build-conditioned. The DIAL arm's synchronous connect
     // described above therefore no longer happens at CREATION: creation mints the vertex
     // DORMANT and this thunk runs on the engine's worker, once per dial attempt.
-    // RE-RUNNABILITY: the thunk captures two raw pointers that outlive the vertex, re-parses
+    // RE-RUNNABILITY: the thunk captures three raw pointers that outlive the vertex, re-parses
     // its kind-private keys from the raw config bytes the engine kept a copy of, and
     // constructs a FRESH `tcp_transport_t` per run — no state survives a run. The engine
     // wires the socket's sinks and then calls `start_receiving()` itself
     // (`self_heal_link_t::wire_socket`), exactly as `make_connection` does. The LISTEN arm never
     // reaches the engine.
+    // #2574: `node` is the vertex's node-wide link memory default, or null; every link this
+    // thunk builds draws its io, state and stack from it (`builtin_link_memory`).
     vertex.register_transport_type(
         "tcp",
-        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* raw_config,
-                                 mem::block_source_t& src) {
+        [rx_backend, egress = builtin_egress(egress_src, vertex.link_memory()),
+         node = vertex.link_memory()](const conn_settings_t& s, const wire::tlv_node_t* raw_config,
+                                      mem::block_source_t& src) {
             const wire::config_reader_t cfg(raw_config);
             const bool peer_named = cfg.flag("peer_named").value_or(false);
             // The bus-module refusal — the ws factory's twin; see its comment for why
@@ -88,21 +91,21 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                     // is fully wired.
                     return make_checked<tcp_transport_t>(
                         src, s.addr, s.port,
-                        tcp_config_t{.memory = {.rx = rx_backend},
+                        tcp_config_t{.memory = builtin_link_memory(rx_backend, egress, node),
                                      .max_frame = s.max_frame,
                                      .liveness_window_ms = liveness_window});
                 },
                 [&] {
                     return make_checked<tcp_server_transport_t>(
                         src, s.port,
-                        tcp_server_config_t{.memory = {.rx = rx_backend},
+                        tcp_server_config_t{.memory = builtin_link_memory(rx_backend, egress, node),
                                             .max_frame = s.max_frame,
                                             .max_peers = max_peers,
                                             .peer_named = peer_named,
                                             .liveness_window_ms = liveness_window});
                 });
             // The ADR-0079 egress store, wired before the link is handed to the router (#873).
-            return with_egress_source(std::move(link), egress_src);
+            return with_egress_source(std::move(link), egress);
         },
         kBuiltinPointToPointTraits);
 }
