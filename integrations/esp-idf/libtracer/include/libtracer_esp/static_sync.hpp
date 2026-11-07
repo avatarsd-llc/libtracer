@@ -58,8 +58,16 @@ class static_mutex_t {
     static_mutex_t(const static_mutex_t&) = delete;
     static_mutex_t& operator=(const static_mutex_t&) = delete;
 
-    /** @brief Block until the mutex is taken. */
-    void lock() noexcept { (void)xSemaphoreTake(handle(), portMAX_DELAY); }
+    /**
+     * @brief Block until the mutex is taken.
+     *
+     * Retried: IDF enables `xTaskAbortDelay`, which can end even a `portMAX_DELAY` take early,
+     * and a `lock()` that returned then would leave its caller's critical section unguarded.
+     */
+    void lock() noexcept {
+        while (xSemaphoreTake(handle(), portMAX_DELAY) != pdTRUE) {
+        }
+    }
     /** @brief Take the mutex only if it is free. */
     [[nodiscard]] bool try_lock() noexcept { return xSemaphoreTake(handle(), 0) == pdTRUE; }
     /** @brief Give the mutex back. */
