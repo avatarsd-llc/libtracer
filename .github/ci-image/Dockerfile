@@ -32,6 +32,14 @@
 # and then removed again, together with software-properties-common, so a job's own
 # `apt-get update` never reaches launchpad. The compiler is a snapshot of the PPA at build
 # time: to pick up a newer g++-15, edit this file (a new tag) and rebuild.
+# CLANG STAYS ON GCC 13. Clang picks the newest GCC installation it finds, so with g++-15
+# baked in, a clang a job installs would compile against libstdc++ 15. GenMC's LLVM 19 cannot
+# parse those headers (`RAND_MAX` undeclared in stl_algo.h: the #2631 landing). Clang reads a
+# default config file named after its driver (clang.cfg, clang++.cfg) from the directory its
+# binary lives in, so the last layer writes one per LLVM major noble ships (18-20) that pins
+# `--gcc-install-dir` to noble's own GCC 13: the base the image had before g++-15 joined it.
+# A job's `apt-get install clang-NN` later fills those directories and leaves the files alone.
+# An explicit `--gcc-install-dir` or `--config` on a clang command line still wins.
 #
 # HOW IT IS VERSIONED. The image tag is `noble-` + the first 12 hex chars of this file's
 # sha256 (`sha256sum .github/ci-image/Dockerfile | cut -c1-12`). Editing this file
@@ -61,3 +69,10 @@ RUN apt-get update -qq \
  && add-apt-repository -y --remove ppa:ubuntu-toolchain-r/test \
  && DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq --auto-remove software-properties-common \
  && rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/ubuntu-toolchain-r-*
+
+RUN for v in 18 19 20; do \
+      mkdir -p "/usr/lib/llvm-$v/bin"; \
+      for d in clang clang++; do \
+        echo '--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13' > "/usr/lib/llvm-$v/bin/$d.cfg"; \
+      done; \
+    done
