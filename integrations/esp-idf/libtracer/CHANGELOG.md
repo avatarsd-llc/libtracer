@@ -33,8 +33,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `tr::esp::static_sync_t` (`libtracer_esp/static_sync.hpp`) as `config_t::sync_t`: a mutex over
   a static FreeRTOS mutex (priority inheritance kept), a condition variable whose waiter sleeps
   on a binary semaphore on its own stack (as IDF's own condition wait already did), and a
-  reader-preferring shared mutex. A timed wait blocks for its duration in ticks plus one, so it
-  never reports a timeout early. The component's own links use them too. The `linux` target
+  reader-preferring shared mutex. The component's own links use them too. The `linux` target
   keeps the standard primitives. `check_no_heap.py` now refuses every `pthread_mutex_*`,
   `pthread_cond_*` and `pthread_rwlock_*` call, every out-of-line `std::condition_variable`
   member, and `xQueueCreateMutex` / `xQueueCreateCountingSemaphore`.

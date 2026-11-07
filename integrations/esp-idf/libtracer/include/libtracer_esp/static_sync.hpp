@@ -131,9 +131,12 @@ class static_condvar_t {
         tail_ = &w.next;
         portEXIT_CRITICAL(&mux_);
         lock.unlock();
-        // Untimed: the take returns only on the notify's give, so the notifier never gives a
-        // semaphore on a stack this frame has left.
-        (void)xSemaphoreTake(w.sem, portMAX_DELAY);
+        // Untimed, and retried: IDF enables `xTaskAbortDelay`, which can end even a
+        // `portMAX_DELAY` take early. The record stays linked until a notify claims it, so this
+        // frame must not leave before that notify's give, or the notifier would give a
+        // semaphore on a dead stack.
+        while (xSemaphoreTake(w.sem, portMAX_DELAY) != pdTRUE) {
+        }
         vSemaphoreDelete(w.sem);
         lock.lock();
     }
