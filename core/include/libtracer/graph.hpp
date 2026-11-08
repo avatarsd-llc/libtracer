@@ -1385,12 +1385,10 @@ class graph_t {
      *
      *       The memo was previously declined on a footprint argument — "4 bytes on rv32,
      *       where `sizeof(vertex_t)` sits at its ratchet with zero headroom" — and the #1487
-     *       census falsified its premise. There are 4 dead bytes at object offset 36–39 on
-     *       BOTH ABIs, and spending them costs zero: `sizeof(vertex_t)` stays 96 / 72 and
-     *       both `config_t` ratchets still pass, pinned to their measurements. The price is
-     *       a layering compromise, not RAM — the bytes are only reachable from inside
-     *       `path_key_t` (they are `name_`'s tail padding on x86-64), so the memo lives
-     *       there, documented as borrowed. A pointer→index side map, the other candidate,
+     *       census falsified its premise: the memo first lived in dead bytes. Since #2672
+     *       it shares one word with the vertex's name length (23 bits of slot index, 9 of
+     *       length), so it still costs nothing; a graph with more slots than 23 bits hold
+     *       resolves those by the scan. A pointer→index side map, the other candidate,
      *       would still cost strictly more than the 4 B/vertex RFC-0024 §6.4 priced.
      *
      *       What made it worth spending is that the scan was O(N) **under the shared
@@ -1399,7 +1397,7 @@ class graph_t {
      *       concurrent reader queued behind the hold. The mint is once per binding, but
      *       "once per binding" is M times, not once.
      *
-     * @warning The memo is INTERNAL. It is not exposed on `path_key_t`, is not exposed here,
+     * @warning The memo is INTERNAL. It is not exposed on `vertex_t`, is not exposed here,
      *          and is not a second staleness signal: the generation remains the whole of
      *          that (RFC-0024 §5.1). The hot path — @ref deref_vertex_slot — pays a bounds
      *          check and one compare and never comes here.
@@ -3845,34 +3843,19 @@ class graph_t {
     vertex_index_t vertex_slots_;
 
     /**
-     * @brief Stamp @p v with the index of the `vertex_slots_` entry that was just appended
-     *        for it — the write half of the #1486 reverse memo.
+     * @brief A fresh handler-less placeholder named @p record, linked under @p parent with its
+     *        index slot appended and its slot memo stamped; null, with nothing changed, when
+     *        the table source refuses the name, the slot, the vertex or the parent's child entry.
      *
-     * Called immediately after every `vertex_slots_.push_back`, under the SAME unique
-     * `map_mutex_` hold that appended, and exactly once per `vertex_t` for the life of the
-     * graph. The memo lives in bytes borrowed from `path_key_t` (`owner_slot_`, whose block
-     * comment states whose bytes those are and why they had to live there); nothing
-     * invalidates it, because a slot index is immortal — the index is insert-only and
-     * pointer-stable (ADR-0057), and retirement re-virginizes a `vertex_t` IN PLACE rather
-     * than renumbering it, which is why the generation, not the index, is the staleness
-     * signal (RFC-0024 §6.4).
-     *
-     * There is no `graph_t` state here beyond the index itself and no public reader: the
-     * memo is an implementation detail of @ref vertex_slot, which re-validates it against
-     * the deque before trusting it.
-     */
-    void note_owner_slot(vertex_t& v) noexcept;
-
-    /**
-     * @brief A fresh handler-less placeholder named @p record, with its index slot reserved;
-     *        null when the table source refuses the name, the slot or the vertex.
-     *
-     * The one construction both creating doors (the registration descent and
+     * The one creation both creating doors (the registration descent and
      * @ref register_session_anchor) share. Every draw comes from the injected table source,
-     * the name's spill block included (#1991), and nothing is linked in, so the caller's
-     * refusal leaves the tree as it was. Callers hold the unique `map_mutex_`.
+     * the name's bytes included (#1991, #2672), and the failable steps run before anything is
+     * linked in, so a refusal leaves the tree, the index and the name block as they were.
+     * The slot memo is stamped before the link, so no reader ever sees it written.
+     * Callers hold the unique `map_mutex_`.
      */
-    [[nodiscard]] vertex_t* make_placeholder(std::span<const std::byte> record) noexcept;
+    [[nodiscard]] vertex_t* make_placeholder(vertex_t& parent,
+                                             std::span<const std::byte> record) noexcept;
 
     // ---- DECLARED FIRST so it is DESTROYED LAST (#873 phase 1) -----------------------
     //
@@ -3930,8 +3913,8 @@ class graph_t {
         vertex_t anchor; /**< @brief The session anchors' private root (#1223). */
         /** @brief Both roots, their children drawing from @p src. */
         explicit roots_t(mem::block_source_t& src) noexcept
-            : root(role_t::STORED_VALUE, path_key_t{}, handlers_t{}, src),
-              anchor(role_t::STORED_VALUE, path_key_t{}, handlers_t{}, src) {}
+            : root(role_t::STORED_VALUE, {}, handlers_t{}, src),
+              anchor(role_t::STORED_VALUE, {}, handlers_t{}, src) {}
     };
     mem::block_ptr_t<roots_t> roots_;
     /** @brief The tree root. */
@@ -4529,6 +4512,75 @@ class graph_t {
     std::atomic<std::size_t> refused_release_{0}; /**< @brief See `release_refused`. */
     std::atomic<std::size_t> refused_park_{0};    /**< @brief See `park_refused`. */
     std::atomic<std::size_t> refused_retire_{0};  /**< @brief See `retire_refused`. */
+
+    /**
+     * @brief Every vertex's NAME record, as bump-carved chunks drawn from `tables_` (#2672):
+     *        the bytes `vertex_t::name()` references, so a vertex holds 8 B (rv32) of name
+     *        reference instead of a 24 B inline key.
+     *
+     * **Kept until the graph goes, and that is safe because a name never changes or leaves.**
+     * The vertex map is insert-only and a retire re-virginizes a vertex in place, keeping its
+     * name (ADR-0057), so no name is ever reclaimed before teardown: there is nothing to
+     * reclaim, no pin, and a lock-free reader sees immutable bytes for the graph's whole life.
+     * The one take-back is a refused creation's, rewound by @ref give_back before anything saw it.
+     *
+     * The same canonical bytes the vertex held inline before, stored elsewhere: not a second
+     * naming mechanism (#1681). Written only under the unique map lock.
+     *
+     * Declared here, at the end and before `park_tail_`: it moves no member the hot paths
+     * address, and it outlives the park drain. The vertex tree is destroyed after it, which is
+     * sound because a vertex's destructor and every member destroyed after this one read no
+     * name. Owning through its own destructor keeps `graph_t` without a user-provided one (the
+     * reason `immortal_list_t` gives).
+     */
+    struct name_block_t {
+        /** @brief The bytes a chunk carves, when one record does not need more. */
+        static constexpr std::size_t kChunkBytes = 256;
+        /** @brief A chunk's header; its records follow it. */
+        struct chunk_t {
+            chunk_t* prev;     /**< @brief The chunk carved before this one. */
+            std::size_t bytes; /**< @brief The whole block, header included. */
+        };
+        mem::block_source_t* src; /**< @brief Where every chunk comes from. */
+        chunk_t* head = nullptr;  /**< @brief The chunk being carved, newest first. */
+        std::byte* cur = nullptr; /**< @brief The next free byte of `head`. */
+        /** @brief An empty block drawing from @p from. */
+        explicit name_block_t(mem::block_source_t* from) noexcept : src(from) {}
+        name_block_t(const name_block_t&) = delete;
+        name_block_t& operator=(const name_block_t&) = delete;
+        /** @brief Every chunk goes back to `src`. */
+        ~name_block_t() {
+            for (chunk_t* c = head; c != nullptr;) {
+                chunk_t* const prev = c->prev;
+                src->release(c, c->bytes, alignof(chunk_t));
+                c = prev;
+            }
+        }
+        /** @brief A copy of @p rec that lives as long as this block, carved from the current
+         *         chunk or a new one drawn from `src`; null when `src` refuses that chunk. */
+        [[nodiscard]] const std::byte* try_copy(std::span<const std::byte> rec) noexcept {
+            const std::byte* const end =
+                head == nullptr ? nullptr : reinterpret_cast<std::byte*>(head) + head->bytes;
+            if (head == nullptr || static_cast<std::size_t>(end - cur) < rec.size()) {
+                const std::size_t bytes = std::max(kChunkBytes, sizeof(chunk_t) + rec.size());
+                void* const blk = src->try_alloc(bytes, alignof(chunk_t));
+                if (blk == nullptr) return nullptr;
+                head = ::new (blk) chunk_t{head, bytes};
+                cur = reinterpret_cast<std::byte*>(head + 1);
+            }
+            std::byte* const at = cur;
+            if (!rec.empty()) std::memcpy(at, rec.data(), rec.size());
+            cur += rec.size();
+            return at;
+        }
+        /** @brief Take back the record @ref try_copy just returned at @p at, @p n bytes long:
+         *         a refused creation's, which nothing has seen. The chunk it may have drawn
+         *         stays for the next record. */
+        void give_back(const std::byte* at, std::size_t n) noexcept {
+            if (at + n == cur) cur -= n;
+        }
+    };
+    name_block_t names_{tables_};
 
     /**
      * @brief The graph's own end of `park_`: the reservation count, and the drain that runs

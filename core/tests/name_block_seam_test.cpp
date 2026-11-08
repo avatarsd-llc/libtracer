@@ -1,20 +1,19 @@
 /**
  * @file
- * @brief #1991 — a vertex name longer than `path_key_t`'s inline bytes is drawn from the
- *        graph's injected source, so a registration takes nothing from the global heap.
+ * @brief #1991, #2672 — a vertex's name is drawn from the graph's injected source, into the
+ *        graph's name block, so a registration takes nothing from the global heap.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The name record of `/net/tcp/conn-192-168-1-50-47301` is 24 bytes, past the 16 a key holds
- * in place, and it used to spill to a bare `new std::byte[]`: the one 24 B block per
- * registration `bench_forward_heap`'s `reg_escape` row read. The tests drive public doors
- * only, over a source that draws from `malloc`, so a global `operator new` counter sees only
- * what went around the seam.
+ * A vertex references its NAME record in the graph's name block, chunks the graph carves from
+ * its table source (#2672). Before, a record past 16 bytes, such as the 24 B record of
+ * `/net/tcp/conn-192-168-1-50-47301`, spilled to a bare `new std::byte[]` (until #1991) and
+ * then to the table source. The tests drive public doors only, over a source that draws from
+ * `malloc`, so a global `operator new` counter sees only what went around the seam.
  *
- * - (a) `path_key_t::try_make` puts a long key on the given source and a short one in place;
- *       a copy draws from the same source; the source gets every block back.
- * - (b) `try_make` answers BACKPRESSURE when the source refuses, and holds nothing.
+ * - (a) a refused creation gives its name back: creations refused at the vertex draw, after
+ *       the name was carved, leave the name block where it was instead of filling chunks.
  * - (c) a runtime registration with a long name makes no global allocation, and the graph
  *       gives every block back at teardown.
  * - (d) every refusal a registration can meet, the name's draw included, is a BACKPRESSURE
@@ -94,7 +93,6 @@ void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { std::f
 namespace {
 
 using tr::graph::graph_t;
-using tr::graph::path_key_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
@@ -102,14 +100,14 @@ using tr::testing::check;
 
 /**
  * @brief A source over `malloc` — never `operator new` — that counts its live blocks and
- *        refuses every draw once @ref budget_ is spent.
+ *        refuses every draw once @ref budget_ is spent, and every draw of @ref refuse_bytes_.
  */
 class malloc_source_t final : public tr::mem::block_source_t {
    public:
     malloc_source_t() noexcept : tr::mem::block_source_t("malloc") {}
 
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
-        if (budget_ == 0) return nullptr;
+        if (budget_ == 0 || bytes == refuse_bytes_) return nullptr;
         if (budget_ > 0) --budget_;
         const std::size_t a = align < alignof(std::max_align_t) ? alignof(std::max_align_t) : align;
         void* const p = std::aligned_alloc(a, (bytes + a - 1) / a * a);
@@ -123,6 +121,7 @@ class malloc_source_t final : public tr::mem::block_source_t {
 
     long live_ = 0;    /**< @brief Blocks handed out and not returned. */
     long budget_ = -1; /**< @brief Draws left before refusing; negative means unlimited. */
+    std::size_t refuse_bytes_ = 0; /**< @brief A draw size always refused; 0 refuses none. */
 };
 
 /** @brief The canonical key of @p text (built before any counter is armed). */
@@ -131,45 +130,35 @@ std::vector<std::byte> key_of(const char* text) {
     return {p->key().begin(), p->key().end()};
 }
 
-/** @brief The bytes of @p s as a byte span. */
-std::span<const std::byte> bytes_of(const char* s) {
-    return std::as_bytes(std::span<const char>{s, std::strlen(s)});
-}
-
-/** @brief (a) and (b): the key itself, at its factory. */
-void test_key_on_the_seam() {
+/** @brief (a): a creation refused after its name was carved gives the name back. */
+void test_refused_creation_gives_the_name_back() {
     malloc_source_t src;
-    const char* const long_name = "conn-192-168-1-50-47301";  // 23 B > kInlineBytes
-    const char* const short_name = "temp";
     {
-        g_allocs = 0;
-        g_arm = true;
-        auto longk = path_key_t::try_make(bytes_of(long_name), src);
-        auto shortk = path_key_t::try_make(bytes_of(short_name), src);
-        g_arm = false;
-        check(longk.has_value() && shortk.has_value(), "(a) both keys are made");
-        check(g_allocs == 0, "(a) neither key draws from the global heap");
-        check(src.live_ == 1, "(a) the long key holds one source block, the short one none");
-        check(std::ranges::equal(longk->bytes(), bytes_of(long_name)), "(a) long key bytes");
-        check(std::ranges::equal(shortk->bytes(), bytes_of(short_name)), "(a) short key bytes");
-
-        g_arm = true;
-        const path_key_t copy = *longk;
-        const path_key_t moved = std::move(*longk);
-        g_arm = false;
-        check(g_allocs == 0, "(a) copy and move draw nothing from the global heap");
-        check(src.live_ == 2, "(a) the copy draws from the original's source; a move draws none");
-        check(copy == moved && longk->empty(), "(a) copy equals, moved-from reads empty");
+        graph_t g{src};
+        (void)g.register_vertex(*path_t::parse("/net/tcp"), role_t::STORED_VALUE);
+        (void)g.register_vertex(*path_t::parse("/net/tcp/conn-192-168-1-50-00000"),
+                                role_t::STORED_VALUE);
+        const long before = src.live_;
+        // Only the vertex's own draw is refused, so each attempt carves its name first.
+        src.refuse_bytes_ = sizeof(tr::graph::vertex_t);
+        bool all_refused = true;
+        for (int i = 0; i < 1000; ++i) {
+            char text[64];
+            std::snprintf(text, sizeof text, "/net/tcp/conn-192-168-1-50-%05d", i + 1);
+            const auto r = g.register_vertex_key(key_of(text), role_t::STORED_VALUE);
+            all_refused = all_refused && !r && r.error() == status_t::BACKPRESSURE;
+        }
+        src.refuse_bytes_ = 0;
+        check(all_refused, "(a) every creation refused at the vertex draw is BACKPRESSURE");
+        std::printf("  (a) 1000 refused creations: %ld more source block(s)\n", src.live_ - before);
+        check(src.live_ - before <= 1,
+              "(a) the refused names went back: at most one new chunk, not one per 256 B");
+        check(
+            g.register_vertex_key(key_of("/net/tcp/conn-192-168-1-50-00001"), role_t::STORED_VALUE)
+                .has_value(),
+            "(a) the same name registers once the source serves again");
     }
-    check(src.live_ == 0, "(a) every spill block goes back to its source");
-
-    src.budget_ = 0;
-    const auto refused = path_key_t::try_make(bytes_of(long_name), src);
-    check(!refused && refused.error() == status_t::BACKPRESSURE,
-          "(b) a refused spill draw is BACKPRESSURE");
-    const auto inline_ok = path_key_t::try_make(bytes_of(short_name), src);
-    check(inline_ok.has_value(), "(b) an inline key needs no draw, so a dry source still makes it");
-    check(src.live_ == 0, "(b) a refused key holds nothing");
+    check(src.live_ == 0, "(a) the graph gives back every block, names included");
 }
 
 /** @brief (c): a runtime registration with a long name, at the graph's public door. */
@@ -191,7 +180,7 @@ void test_registration_on_the_seam() {
         std::printf("  (c) registration: %zu global draw(s), %ld more source block(s)\n", g_allocs,
                     src.live_ - before);
         check(g_allocs == 0, "(c) a registration draws nothing around the injected source");
-        check(src.live_ - before >= 2, "(c) the source holds the vertex and its name");
+        check(src.live_ - before >= 1, "(c) the source holds the vertex (its name, a chunk)");
         check(g.find(key).has_value(), "(c) the vertex is found by its long name");
     }
     check(src.live_ == 0, "(c) the graph gives back every block, names included");
@@ -226,9 +215,9 @@ void test_every_refusal_is_a_value() {
 }  // namespace
 
 int main() {
-    std::printf("path_key_seam_test (#1991):\n");
-    test_key_on_the_seam();
+    std::printf("name_block_seam_test (#1991, #2672):\n");
+    test_refused_creation_gives_the_name_back();
     test_registration_on_the_seam();
     test_every_refusal_is_a_value();
-    return tr::testing::summary("path_key_seam");
+    return tr::testing::summary("name_block_seam");
 }

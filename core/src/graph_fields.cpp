@@ -1202,7 +1202,7 @@ result_t<view::view_t> graph_t::read_schema(vertex_t* v) const {
     // under the vertex's stripe lock, so a concurrent clear can end the borrowed bytes' life only
     // after this copy. A vertex without one keeps today's POINT byte-for-byte.
     if (!schema_protocol_part(v, settings_children) ||
-        !wire::emit_name(point_body, key_view_t{v->name().bytes()}.last_segment()) ||
+        !wire::emit_name(point_body, key_view_t{v->name()}.last_segment()) ||
         !wire::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true},
                         mem::as_span(settings_children)) ||  // SETTINGS
         !emit_intent_document(v, point_body))

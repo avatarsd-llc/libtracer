@@ -85,6 +85,15 @@ path depth). Erasure remains future work gated on a real lifetime scheme (refcou
 reclamation / tombstone) — a bare detach-from-parent would dangle every outstanding handle, the
 same class of bug as the route_handle `clear_link` dangling ref fixed in #220.
 
+**Note (2026-11-08, #2672): names live in the graph's name block.** A vertex no longer holds its
+NAME record inline. It references the record in a graph-owned block of chunks drawn from the
+graph's table source, and keeps the length and the #1486 slot memo in one word. The lifetime above
+is what makes that sound without any reclamation: no vertex is erased, a retire re-virginizes in
+place and keeps the name, and a name is set once before the vertex is linked, so the block only
+grows and is released with the graph. The bytes are the same canonical record as before, so this is
+storage, not a second naming scheme (#1681). It cut `sizeof(vertex_t)` by 16 B on rv32 (64 → 48)
+and on x86-64 (88 → 72); resolution and listing read the name through one more dependent load.
+
 ## Considered options
 
 - **Keep the flat map** — rejected: the four Context costs are structural; every follow-up
