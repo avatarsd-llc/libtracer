@@ -46,7 +46,6 @@ using tr::graph::delivery_policy_t;
 using tr::graph::edge_latch_t;
 using tr::graph::edge_snapshot_t;
 using tr::graph::edge_view_t;
-using tr::graph::path_key_t;
 using tr::graph::role_t;
 using tr::graph::subscriber_t;
 using tr::graph::vertex_t;
@@ -104,10 +103,12 @@ rope_t make_value(std::uint8_t b) {
     return rope_t{tr::view::view_t::over(std::move(seg))};
 }
 
-path_key_t key_of(std::initializer_list<std::uint8_t> bytes) {
-    std::vector<std::byte> k;
-    for (std::uint8_t b : bytes) k.push_back(std::byte{b});
-    return path_key_t{k};
+/** @brief Name bytes that outlive every vertex built here: a vertex references its name and
+ *         copies nothing (#2672), so a temporary would dangle. One byte, @p b itself. */
+std::span<const std::byte> key_of(std::uint8_t b) {
+    static std::byte names[256];
+    names[b] = std::byte{b};
+    return {&names[b], 1};
 }
 
 /**

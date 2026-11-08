@@ -43,6 +43,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -938,17 +939,29 @@ class vertex_t {
      */
     static constexpr std::size_t kNoSlot = static_cast<std::size_t>(-1);
 
+    /** @brief The longest NAME record a vertex can reference: what `%name_len_`'s bits hold.
+     *         A packed record is one length byte plus at most 255 segment bytes (RFC-0018), so
+     *         every record the graph mints fits with room to spare. */
+    static constexpr std::size_t kMaxNameBytes = (std::size_t{1} << 9) - 1;
+
     /** @brief Construct a vertex with its role, own canonical NAME record (ADR-0057 — one
      *         segment, not the full key), and handlers. The cold extension block is
      *         allocated, from @p src, only if this identity needs one (#361 §1).
+     *
+     *  The vertex REFERENCES @p name and copies nothing (#2672): the bytes must stay valid,
+     *  unchanged, for the vertex's whole life. The graph keeps every name in its own name
+     *  block, which lives as long as the graph; a vertex built outside a graph names bytes
+     *  that outlive it. A record longer than @ref kMaxNameBytes is a caller bug and stops the
+     *  node.
      *
      *  The graph builds every vertex as a handler-less placeholder (no allocation) and
      *  installs an identity through `%fill`, whose refusal is a value. A standalone
      * vertex built WITH handlers whose @p src refuses the extension block stops the node
      *  (`%mem::exhausted_at_init`): a constructor has no other way to answer. */
-    vertex_t(role_t role, path_key_t name, handlers_t handlers,
+    vertex_t(role_t role, std::span<const std::byte> name, handlers_t handlers,
              tr::mem::block_source_t& src = tr::mem::table_source())
-        : name_(std::move(name)), role_(role) {
+        : name_(name.data()), role_(role), name_len_(static_cast<std::uint32_t>(name.size())) {
+        if (name.size() > kMaxNameBytes) std::abort();
         if (!adopt_identity(handlers, src)) tr::mem::exhausted_at_init(src, "vertex_t");
     }
 
@@ -979,7 +992,7 @@ class vertex_t {
     /** @brief This vertex's own canonical NAME record (its single path segment, ADR-0057);
      *         empty at the root. The full key is a parent-walk concatenation
      *         (`graph_t`'s `try_build_key`). */
-    [[nodiscard]] const path_key_t& name() const noexcept { return name_; }
+    [[nodiscard]] std::span<const std::byte> name() const noexcept { return {name_, name_len_}; }
     /**
      * @brief Whether the lazily-allocated cold extension block EXISTS on this vertex (#361 §1).
      *
@@ -1262,9 +1275,9 @@ class vertex_t {
         }
         tr::mem::block_array_t<vertex_t*>& sorted = children_->sorted;
         vertex_t* const* const pos =
-            std::lower_bound(sorted.begin(), sorted.end(), child->name().bytes(),
+            std::lower_bound(sorted.begin(), sorted.end(), child->name(),
                              [](const vertex_t* c, std::span<const std::byte> n) {
-                                 return std::ranges::lexicographical_compare(c->name().bytes(), n);
+                                 return std::ranges::lexicographical_compare(c->name(), n);
                              });
         if (sorted.emplace_at(static_cast<std::size_t>(pos - sorted.begin()), child) == nullptr)
             return nullptr;
@@ -1284,10 +1297,10 @@ class vertex_t {
         const auto it =
             std::lower_bound(sorted.begin(), sorted.end(), record,
                              [](const vertex_t* c, std::span<const std::byte> r) {
-                                 return std::ranges::lexicographical_compare(c->name().bytes(), r);
+                                 return std::ranges::lexicographical_compare(c->name(), r);
                              });
         if (it == sorted.end()) return nullptr;
-        const bool matches = std::ranges::equal((*it)->name().bytes(), record);
+        const bool matches = std::ranges::equal((*it)->name(), record);
         return matches ? *it : nullptr;
     }
 
@@ -3730,9 +3743,13 @@ class vertex_t {
      *         `%lkv_slot.hpp` documents both and the contract any policy must satisfy. */
     lkv_slot_t lkv_{};
 
-    path_key_t name_;  // own canonical NAME record (one segment; empty at the root) — the
-                       // full key is rendered on demand by walking parent_ (ADR-0057);
-                       // immutable once the node is linked (lock-free parent walks)
+    /** @brief This vertex's own canonical NAME record (one segment; empty at the root),
+     *         REFERENCED, not held (#2672): the bytes live in the graph's name block, drawn
+     *         from its table source and kept until the graph is destroyed. The full key is
+     *         rendered on demand by walking `parent_` (ADR-0057). Set once, before the node
+     *         is linked, and never written again, so a lock-free parent walk reads it plainly.
+     *         Its length is `%name_len_`, which packs beside `retire_gen_`. */
+    const std::byte* name_ = nullptr;
 
     // The fan-out edges (#635). Null until this vertex is first subscribed to, which is the
     // overwhelming majority of an MCU node's vertices — where an always-present empty
@@ -3779,8 +3796,8 @@ class vertex_t {
     // not a benign torn read. Byte-wide as an atomic too, so the group stays four bytes.
     std::atomic<delivery_mode_t> delivery_mode_{delivery_mode_t::IF_NEWER};
     // Lock-free predicates (see flag_t), packed into ONE byte so the flag group stays exactly four
-    // bytes wide and `sizeof(vertex_t)` stays at the size the ratchets pin (88 B on x86-64,
-    // 72 B on rv32 — the #361 diet's measurement as re-taken by the #1487 census) — the size
+    // bytes wide and `sizeof(vertex_t)` stays at the size the ratchets pin (72 B on x86-64,
+    // 48 B on rv32, #2672) — the size
     // gate's own failure message says to put a new member behind vertex_ext_t rather than
     // inline it, and a bit costs less than either. (`ENUM_HIDDEN`, the RFC-0014 §3 hide seam,
     // is the third: it went here rather than beside `registered_` for exactly that reason.)
@@ -3808,6 +3825,26 @@ class vertex_t {
      * leaves that retire most often. 32-bit wrap needs 2^32 retirements of one vertex.
      */
     std::atomic<std::uint32_t> retire_gen_{0};
+
+    /** @brief `%slot_memo_`'s "no memo recorded" value: the top of its 23 bits. It cannot
+     *         name a real slot below it, and a graph past it falls back to the scan. */
+    static constexpr std::uint32_t kNoSlotMemo = (std::uint32_t{1} << 23) - 1;
+    /** @brief `name_`'s byte length. Set by the constructor and never written again. */
+    std::uint32_t name_len_ : 9;
+    /**
+     * @brief The index of the `graph_t::vertex_slots_` entry that names this vertex (#1486),
+     *        or @ref kNoSlotMemo for a vertex no graph slotted.
+     *
+     * It makes `graph_t::vertex_slot` a load instead of an O(N) scan of the index under the
+     * shared map lock (450 ns at 10^3 resident vertices, 410 us at 10^6). The graph stamps it
+     * once, before the vertex is linked into the tree, so no reader can see it change; the slot
+     * index is immortal (the index is insert-only and a retire re-virginizes in place), so
+     * nothing invalidates it. `vertex_slot` re-validates it against the index before trusting
+     * it. It shares a word with `%name_len_` (#2672): a record is at most
+     * @ref kMaxNameBytes, so 23 bits remain, and a graph with more slots than that resolves the
+     * rest by the scan. Internal: no accessor exists, and it is not a second staleness signal.
+     */
+    std::uint32_t slot_memo_ : 23 = kNoSlotMemo;
 
     // Composite tree links (ADR-0057) at the cold tail. parent_ is immutable once the
     // node is linked (lock-free parent walks); children/registered_ are guarded by
@@ -3859,11 +3896,10 @@ class vertex_t {
     [[nodiscard]] vertex_t* next_sibling_of(const vertex_t& c) const noexcept {
         if (children_ == nullptr) return nullptr;
         const tr::mem::block_array_t<vertex_t*>& sorted = children_->sorted;
-        auto it =
-            std::lower_bound(sorted.begin(), sorted.end(), c.name().bytes(),
-                             [](const vertex_t* e, std::span<const std::byte> n) {
-                                 return std::ranges::lexicographical_compare(e->name().bytes(), n);
-                             });
+        auto it = std::lower_bound(sorted.begin(), sorted.end(), c.name(),
+                                   [](const vertex_t* e, std::span<const std::byte> n) {
+                                       return std::ranges::lexicographical_compare(e->name(), n);
+                                   });
         while (it != sorted.end() && *it != &c) ++it;
         if (it == sorted.end()) return nullptr;  // not our child — caller error, walk stops
         ++it;

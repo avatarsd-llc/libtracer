@@ -11,7 +11,7 @@ Arrows point from a module to the module(s) whose interface it uses.
 flowchart TD
     APP["application / bench"]:::app
     GRAPH["graph<br/><small>graph_t · vertex_t · role_t</small>"]
-    PATH["path<br/><small>path_t · path_key_t</small>"]
+    PATH["path<br/><small>path_t · target_key_t</small>"]
     FWD["fwd-router<br/><small>fwd_router_t · child_registry_t</small>"]
     TVERT["transport-vertex<br/><small>transport_vertex_t (/net)</small>"]
     TRANSPORT["transport<br/><small>transport_t · loopback/UDP/TCP/WS/CAN</small>"]
