@@ -409,6 +409,8 @@ The string-at-hot-path mode is **NOT required** of conforming implementations an
 
 ```mermaid
 flowchart LR
+  accTitle: Where a path handle's bytes come from
+  accDescr: A path is encoded once, either at build time into read-only bytes or at node init into a heap segment with the same bytes. Either way the hot path writes through a path handle, and router dispatch byte-compares the PATH bytes.
   subgraph Build["Build time"]
     S["Source path string<br/>&quot;/sensor/temp&quot;"]
     M["path_t(&quot;/sensor/temp&quot;)<br/>parse-once ctor / codegen"]
@@ -533,6 +535,8 @@ A single-PATH-plus-index form — encoding `/camera/frame` once and supplying `i
 
 ```mermaid
 sequenceDiagram
+    accTitle: A write through a pre-built path handle
+    accDescr: The application loads a path handle and calls write with it. Router dispatch hashes and byte-compares the PATH bytes without parsing or allocating, stores the value as the vertex's last-known value, and refcount-bumps it to each subscriber.
     participant App as Application (ISR / sample loop)
     participant Hnd as Path handle (.rodata)
     participant Disp as Router dispatch
