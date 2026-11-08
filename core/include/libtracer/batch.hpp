@@ -494,29 +494,32 @@ struct batch_view_t {
     [[nodiscard]] constexpr std::optional<std::int64_t> sample_time_ns(
         std::size_t i) const noexcept {
         if (i >= count) return std::nullopt;
-        if (!uniform()) {
+        // One unsigned sum for both arms, and one place each field is read. Unsigned so that
+        // no `base_ns` a caller may put in this aggregate (`read_batch` pins it `>= 0`, a
+        // non-wire source need not) makes a guard signed overflow (#1600, #1580); and one
+        // sum because GCC 13 reported a `-Wmaybe-uninitialized` false positive on the old
+        // per-arm reads when the caller tested an optional view before calling (#2393).
+        const std::uint64_t base = static_cast<std::uint64_t>(base_ns);
+        std::uint64_t step = 0;
+        bool wraps = false;
+        if (uniform()) {
+            // `int64max - base_ns`, exact in u64 for every base: the room above the base.
+            const std::uint64_t headroom =
+                static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) - base;
+            wraps = static_cast<std::uint64_t>(i) > headroom / dt_ns;
+            step = static_cast<std::uint64_t>(i) * dt_ns;
+        } else {
+            // On the base biased into u64 order, the i32 offset leaves the epoch exactly when
+            // the sum carries (a positive offset) or fails to borrow (a negative one).
             const std::int64_t off = offset_ns(i);
-            if (off > 0 && base_ns > std::numeric_limits<std::int64_t>::max() - off)
-                return std::nullopt;
-            if (off < 0 && base_ns < std::numeric_limits<std::int64_t>::min() - off)
-                return std::nullopt;
-            return base_ns + off;
+            const std::uint64_t biased = base ^ (std::uint64_t{1} << 63);
+            step = static_cast<std::uint64_t>(off);
+            wraps = (biased + step < biased) != (off < 0);
         }
-        // Two arms, for the same reason the non-uniform arm above is guarded: `read_batch`
-        // pins `base_ns >= 0`, but `batch_view_t` is an aggregate a caller may fill from a
-        // non-wire source, and `int64max - base_ns` is signed overflow for a negative base
-        // (#1600 — the defect #1580 fixed in the playout re-prime).
-        const std::uint64_t headroom =
-            base_ns >= 0
-                ? static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() - base_ns)
-                : static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) +
-                      (0u - static_cast<std::uint64_t>(base_ns));
-        if (static_cast<std::uint64_t>(i) > headroom / dt_ns) return std::nullopt;
-        // `base_ns + i * dt_ns` is in range by the guard, so the unsigned sum carries the right
-        // two's-complement bits — and, unlike the signed spelling, it stays defined for a step
-        // that alone exceeds `int64max` (reachable only when `base_ns < 0`).
-        return static_cast<std::int64_t>(static_cast<std::uint64_t>(base_ns) +
-                                         static_cast<std::uint64_t>(i) * dt_ns);
+        if (wraps) return std::nullopt;
+        // In range by the guard, so the unsigned sum carries the right two's-complement bits,
+        // and it stays defined for a step that alone exceeds `int64max` (only when `base_ns < 0`).
+        return static_cast<std::int64_t>(base + step);
     }
 };
 
