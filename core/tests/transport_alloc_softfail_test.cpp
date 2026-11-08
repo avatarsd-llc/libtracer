@@ -32,8 +32,9 @@
  *   - ws client `send(span)` — the one nothrow twin (A5);
  *   - tcp `send(iov)` and the multi-peer broadcast scratch;
  *   - udp `send(iov)`;
- *   - can `can_transport_t::send` — its advertise (A1 — the allocation is DELETED, not
- *     guarded, so the case is an allocation BUDGET on the transport, not a drop leg);
+ *   - can `can_transport_t::send` — its advertise and its payload (A1, #2661 — both
+ *     allocations are DELETED, not guarded, so the cases are a zero-allocation census on the
+ *     transport and a send under refusing stores, not a drop leg);
  *   - the oversized / non-final control frame fails the connection instead of being echoed;
  *   - #1780: the transports' own growth sites on the allocation seam — the ws server's
  *     session and handshake store, a factory's link object, the CAN reassembler and the CAN
@@ -58,7 +59,7 @@
  * `std::string` path copy in TWO places, and only one of them is gated. MEASURED, by putting
  * each line back and rebuilding:
  *   - `send_impl`'s `adv.path = cfg_.path` restored => A1 REDDENS (91 PASS / 1 FAIL, rc=1):
- *     "a CAN send allocates for its payload and window table ONLY — the advertise adds none".
+ *     "a CAN send allocates NOTHING — payload, framing and advertise alike".
  *   - `emit_hello`'s `hello.path = cfg_.path` restored (`core/src/transport_can.cpp:224`)
  *     => everything stays green: 92 PASS / 0 FAIL here, 88/88 under `ctest`.
  * That gap is a DIFFERENT reason from the two PONG sites above, not a weaker version of it.
@@ -103,6 +104,7 @@
 #include "libtracer/graph.hpp"
 #include "libtracer/iov_table.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_slab_pool.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/transport_can.hpp"
 #include "libtracer/transport_tcp.hpp"
@@ -1312,20 +1314,19 @@ void test_can_emit_advertise_wire_identical() {
 }
 
 /**
- * @brief A1, at the TRANSPORT: the advertise a real `can_transport_t::send` emits costs ZERO
- *        allocations, and still lands on the wire whole.
+ * @brief A1 and #2661, at the TRANSPORT: a real `can_transport_t::send` costs ZERO allocations,
+ *        and still lands on the wire whole.
  *
- * The free `encode_advertise_header` being stack-only proves nothing about `can_transport_t` —
- * only this drives the site `send_impl` actually reaches. The budget is DERIVED rather than
- * hard-coded: a send legitimately owns exactly ONE allocating step, the payload block
- * (`view::over_bytes`), so running it standalone gives the number `send` must not exceed —
- * the framing adds nothing, which is the point asserted just below. Both halves of the
- * deleted allocation show up here as one over budget on EVERY send — the retired contiguous
- * encoder's `std::vector`, and the `adv.path = cfg_.path` copy that used to feed it (the path is
- * past the SSO bound on purpose).
+ * Only this drives the site `send_impl` actually reaches. The budget is zero: the advertise is
+ * walked from the stack and `cfg_.path` in place (#848), and the data slices are carved straight
+ * out of the caller's span (#2661). Before #2661 a send copied its payload with
+ * `view::over_bytes`, a draw from the process value pool, not from any store the deployer
+ * injects (ADR-0079 §Decision 4). The census below trims the host pools first, so such a draw
+ * takes a fresh slab and shows up as an `operator new` and as a value-pool balance that moved.
+ * The path is past the SSO bound on purpose, so an `adv.path = cfg_.path` copy would show too.
  */
-void test_can_send_advertise_allocates_nothing() {
-    std::printf("can send — the advertise costs the transport ZERO allocations (A1):\n");
+void test_can_send_allocates_nothing() {
+    std::printf("can send — no allocation, no process-pool draw (A1, #2661):\n");
     tr::net::transport_can_config_t cfg;
     cfg.node = 9;
     cfg.path = "node9/sensor/temperature";  // 24 chars: past SSO, so a copy WOULD allocate
@@ -1335,24 +1336,10 @@ void test_can_send_advertise_allocates_nothing() {
 
     const std::vector<std::byte> payload(24, std::byte{0xA5});  // 3 CLASSIC windows
 
-    // The budget. `owned` outlives the measured lambda so the optimizer cannot elide the
-    // very allocation being counted.
-    // The payload block comes from the host value sub-pool (#1777): warm its class first, so
-    // the budget and the send below both see the same warm pool rather than one cold slab.
-    std::optional<tr::view::view_t> owned = tr::view::over_bytes(payload);
-    owned.reset();
-    const std::size_t budget = count_allocs([&] { owned = tr::view::over_bytes(payload); });
-    check(owned.has_value() && tr::net::can::can_frame_count(*owned, cfg.mode) == 3,
-          "the budget's one step ran, over a 3-window payload");
-
-    // #1110/#932 — the framing itself allocates NOTHING, asserted directly. The derived
-    // budget above cannot say this: it is a count, and it would go on passing at 2 as
-    // contentedly as at 1. The payload here is deliberately large, because the growth this
-    // replaced scaled with the payload — 4096 bytes is 512 CLASSIC windows, i.e. ~9
-    // reallocations of a std::vector<view_t> on a count the SENDING PEER chooses, and a
-    // THROWING push_back on the -fno-exceptions profile. Deriving each window on demand
-    // makes that the same zero, and walking ALL 512 here (not just counting them) is what
-    // proves the derivation kept no hidden table.
+    // #1110/#932 — the framing itself allocates NOTHING, asserted directly. The payload here is
+    // deliberately large, because the growth this replaced scaled with the payload — 4096 bytes
+    // is 512 CLASSIC windows. Walking ALL 512 (not just counting them) is what proves the
+    // derivation kept no hidden table.
     const std::vector<std::byte> wide_payload(4096, std::byte{0x5A});
     const auto wide_owned = tr::view::over_bytes(wide_payload);
     check(wide_owned.has_value(), "the wide payload block was taken (outside the count)");
@@ -1371,9 +1358,12 @@ void test_can_send_advertise_allocates_nothing() {
           "  ...whose first and last windows are the right size");
 
     raw->reset();  // forget the join hello — measure one send
+    tr::mem::host_root().trim();
+    const std::size_t values_before = tr::mem::value_source().stats().in_use;
     const std::size_t actual = count_allocs([&] { can_tx.send(payload); });
-    check(actual == budget,
-          "a CAN send allocates for its payload block ONLY — framing and advertise add none");
+    check(actual == 0, "a CAN send allocates NOTHING — payload, framing and advertise alike");
+    check(tr::mem::value_source().stats().in_use == values_before,
+          "  ...and draws nothing from the process value pool (#2661)");
 
     // ...and the advertise is still whole on the wire, walked out of two sources.
     const std::vector<std::byte> stream = raw->stream();
@@ -1386,6 +1376,46 @@ void test_can_send_advertise_allocates_nothing() {
         check(decoded->first.slice_count == 3 && decoded->first.group_total_len == payload.size(),
               "and the group manifest the peer trims by");
     }
+}
+
+/**
+ * @brief #2661: a CAN send on a link whose every store refuses still sends the whole group, and
+ *        counts nothing.
+ *
+ * The send path has no draw left to refuse. The link's injected egress store serves nothing,
+ * and the allocator refuses the first allocation the send makes: before #2661 that was the
+ * payload copy, so the send was shed and `dropped_tx` moved. Now every frame reaches the wire,
+ * byte for byte, and no drop is counted.
+ */
+void test_can_send_under_refusing_stores() {
+    std::printf("can send — refusing stores shed nothing, there is no draw (#2661):\n");
+    tr::net::transport_can_config_t cfg;
+    cfg.node = 10;
+    cfg.path = "node10/x";
+    auto link = tr::mem::make_poly<fixed_link_t>(tr::mem::net_source());
+    fixed_link_t* raw = link.get();
+    tr::net::can_transport_t can_tx(std::move(link), cfg);
+    tight_egress_t tight;
+    can_tx.set_egress_source(tight.store);
+
+    std::vector<std::byte> payload(20);  // 3 CLASSIC windows, the last one 4 bytes
+    for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = std::byte(i + 1);
+
+    raw->reset();
+    tr::mem::host_root().trim();
+    const std::uint64_t dropped_before = can_tx.drop_stats().dropped_tx;
+    const bool escaped = escapes_at(1, [&] { can_tx.send(payload); });
+    check(!escaped, "a refused first allocation never escapes the send");
+    check(can_tx.drop_stats().dropped_tx == dropped_before, "  ...and no drop is counted");
+    check(tight.store.used() == 0, "  ...and the injected egress store is never drawn");
+
+    // Advertise (header + "node10/x" = 26 bytes, 4 classic windows) then the 3 data slices.
+    const std::vector<std::byte> stream = raw->stream();
+    const std::size_t advertise = can::kAdvertiseHeaderSize + cfg.path.size();
+    check(raw->count() == 4 + 3, "the advertise and all three data slices reached the wire");
+    check(stream.size() == advertise + payload.size() &&
+              std::equal(payload.begin(), payload.end(), stream.begin() + advertise),
+          "  ...and the slices carry the payload byte for byte");
 }
 
 // ---------------------------------------------------------------------------
@@ -1969,7 +1999,8 @@ int main() {
     test_can_advertise_header_is_allocation_free();
     test_can_over_long_path_refused();
     test_can_emit_advertise_wire_identical();
-    test_can_send_advertise_allocates_nothing();
+    test_can_send_allocates_nothing();
+    test_can_send_under_refusing_stores();
     test_retired_type_answer_allocates_nothing();
     test_ws_ping_at_the_bound_is_answered();
     test_ws_oversized_ping_fails_the_connection();
