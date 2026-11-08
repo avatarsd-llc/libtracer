@@ -3833,7 +3833,7 @@ class vertex_t {
     std::uint32_t name_len_ : 9;
     /**
      * @brief The index of the `graph_t::vertex_slots_` entry that names this vertex (#1486),
-     *        or @ref kNoSlotMemo for a vertex no graph slotted.
+     *        or `%kNoSlotMemo` for a vertex no graph slotted.
      *
      * It makes `graph_t::vertex_slot` a load instead of an O(N) scan of the index under the
      * shared map lock (450 ns at 10^3 resident vertices, 410 us at 10^6). The graph stamps it

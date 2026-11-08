@@ -4522,7 +4522,7 @@ class graph_t {
      * The vertex map is insert-only and a retire re-virginizes a vertex in place, keeping its
      * name (ADR-0057), so no name is ever reclaimed before teardown: there is nothing to
      * reclaim, no pin, and a lock-free reader sees immutable bytes for the graph's whole life.
-     * The one take-back is a refused creation's, rewound by @ref give_back before anything saw it.
+     * The one take-back is a refused creation's, rewound by `give_back` before anything saw it.
      *
      * The same canonical bytes the vertex held inline before, stored elsewhere: not a second
      * naming mechanism (#1681). Written only under the unique map lock.
@@ -4535,7 +4535,7 @@ class graph_t {
      */
     struct name_block_t {
         /** @brief The bytes a chunk carves, when one record does not need more. */
-        static constexpr std::size_t kChunkBytes = 256;
+        static constexpr std::size_t kChunkBytes = 128;
         /** @brief A chunk's header; its records follow it. */
         struct chunk_t {
             chunk_t* prev;     /**< @brief The chunk carved before this one. */
@@ -4573,7 +4573,7 @@ class graph_t {
             cur += rec.size();
             return at;
         }
-        /** @brief Take back the record @ref try_copy just returned at @p at, @p n bytes long:
+        /** @brief Take back the record `try_copy` just returned at @p at, @p n bytes long:
          *         a refused creation's, which nothing has seen. The chunk it may have drawn
          *         stays for the next record. */
         void give_back(const std::byte* at, std::size_t n) noexcept {
