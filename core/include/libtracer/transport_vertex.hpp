@@ -306,7 +306,11 @@ class transport_vertex_t {
      *                   session state, receive-thread stacks and io memory of SPEC-created
      *                   links without writing a factory of its own. Its `rx` is not read:
      *                   @p rx_backend is the receive plane. A null `io` means @p egress_src,
-     *                   a null `state` or `stack` that plane's process default. `nullptr`
+     *                   a null `state` or `stack` that plane's process default. `io` is
+     *                   not null unless written so: its initialiser is the net pool, so
+     *                   `link_memory_t{.state = ..., .stack = ...}` moves those links'
+     *                   egress store from @p egress_src to the net pool, and only
+     *                   `.io = nullptr` keeps @p egress_src (#2612). `nullptr`
      *                   (the default) changes nothing: those links draw from the net pool, as
      *                   before. A link built by a factory that names its own memory keeps
      *                   it. Read through @ref link_memory. The object and every source it

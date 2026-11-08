@@ -442,7 +442,10 @@ struct link_memory_t {
      * @brief The link's EGRESS store (ADR-0079, #873): the per-frame scratch a kind draws
      *        while one outbound frame is in flight — `ws_client_transport_t`'s masked-frame copy
      *        and the base class's gather temporary. A kind with no such draw ignores it.
-     *        Default: the process net sub-pool (#1777).
+     *        Default: the process net sub-pool (#1777), not null. So a node-wide default
+     *        (`transport_vertex_t`'s `link_memory`, #2574) that leaves this out puts every
+     *        built-in link's egress store on the net pool instead of the vertex's
+     *        `egress_src`; write `.io = nullptr` to keep `egress_src` (#2612).
      */
     mem::block_source_t* io = &mem::net_source();
 

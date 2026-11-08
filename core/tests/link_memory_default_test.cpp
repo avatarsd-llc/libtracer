@@ -9,15 +9,19 @@
  *
  * Each arm makes one SPEC-created LISTEN link of one built-in kind, the way the wire creates
  * one (`register_module`, then a `SPEC` write to the module's creator endpoint). The vertex's
- * own tables and the router's planes sit on a separate counted source, so every draw seen on
- * the three plane sources is the link's own:
+ * own tables, the router's planes and the graph itself sit on a separate counted source, so
+ * every draw seen on the three plane sources, and every net-pool draw, is the link's own:
  *  - `stack`: the link's receive thread (every kind);
  *  - `state`: a connected peer's session (tcp and ws; a udp link keeps no peer state);
  *  - `io`:    the link's egress store, read back off the link (`transport_t::egress_source`).
  *
- * With no default the three counted sources see nothing, the link's egress store is the
- * vertex's own (`egress_src`, as before), and a connected peer's session draws from the net
- * pool. A factory that names memory of its own keeps it: the default is not read.
+ * With no default the link's egress store is the vertex's own (`egress_src`, as before), and
+ * the receive thread and a connected peer's session draw from the net path (on a host the
+ * default thread-stack source is the net pool). With a default the net pool is never drawn
+ * from at all. A default whose `io` is left out keeps the member's initialiser, the net pool,
+ * so it moves the link's egress store from `egress_src` to the net pool (#2612): the natural
+ * `link_memory_t{.state = ..., .stack = ...}` does this, and only `.io = nullptr` keeps
+ * `egress_src`. A factory that names memory of its own keeps it: the default is not read.
  *
  * How a net-pool draw is seen depends on the build's root, so the test picks its instrument
  * at start (@ref net_pool_keeps_census). A slab-pool or arena root keeps a census, read through
@@ -25,7 +29,8 @@
  * the platform heap, which keeps none, so there the test counts the nothrow `operator new`
  * calls the heap source makes; it replaces those two global forms for that, which is why it
  * is its own binary. Every counted source here draws through the THROWING forms, so the count
- * is the net pool's alone.
+ * is the net pool's alone. A census answers only a balance, so a window that must see a
+ * short-lived draw trims the net pool first (@ref net_window_t).
  */
 
 #include <arpa/inet.h>
@@ -42,9 +47,11 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 #include "libtracer/builtin_transports.hpp"
 #include "libtracer/conn_spec.hpp"
+#include "libtracer/mem_slab_pool.hpp"
 #include "libtracer/mem_source_backend.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_ws.hpp"
@@ -169,6 +176,37 @@ std::size_t net_draws() {
                         : g_nothrow_news.load(std::memory_order_relaxed);
 }
 
+/**
+ * @brief Whether the net pool drew between @ref open and @ref drew: the nothrow count on a heap
+ *        root, the census elsewhere.
+ *
+ * A census counts slab bytes, not blocks, and the receive thread's boot record is released as
+ * soon as the thread runs, so @ref open first trims the net pool: every class with no live
+ * block gives its slabs back, and a draw from such a class then takes a fresh slab, which stays
+ * in the census after the block comes back. A draw from a class that still holds a live block
+ * fits that class's slab and does not show; nothing in these windows draws from one.
+ */
+class net_window_t {
+   public:
+    /** @brief Open the window: take the reading every later @ref drew compares with. */
+    void open() {
+        if (g_net_census) {
+            tr::mem::host_root().net().trim();
+            mark_ = tr::mem::net_source().stats().in_use;
+        } else {
+            mark_ = g_nothrow_news.load(std::memory_order_relaxed);
+        }
+    }
+    /** @brief Whether the net pool drew since @ref open. */
+    [[nodiscard]] bool drew() const {
+        return g_net_census ? tr::mem::net_source().stats().in_use > mark_
+                            : g_nothrow_news.load(std::memory_order_relaxed) > mark_;
+    }
+
+   private:
+    std::size_t mark_ = 0; /**< @brief The reading @ref drew compares with. */
+};
+
 /** @brief What @ref egress_of reads off a link. */
 struct egress_probe_t {
     const tr::mem::block_source_t* egress = nullptr; /**< @brief The link's egress store. */
@@ -203,7 +241,8 @@ void run_arm(const kind_arm_t& arm, bool with_default) {
     const std::uint16_t port = free_port();
     const std::string name = "net/" + std::string(arm.module) + "/peer";
 
-    tr::graph::graph_t g;
+    // The graph on the plane source too, so a net-pool draw in the window is the link's alone.
+    tr::graph::graph_t g(plane);
     tr::net::fwd_router_t router(
         g, tr::net::router_planes_t{
                .link_src = &plane, .rx = &plane, .flat = &plane_rx, .egress = &plane_rx});
@@ -214,8 +253,13 @@ void run_arm(const kind_arm_t& arm, bool with_default) {
         check(net.link_memory() == (with_default ? &node : nullptr),
               "link_memory() answers what the ctor was given");
         (void)net.register_module(std::string(arm.module), arm.kind, tr::net::conn_role_t::LISTEN);
-        const auto w = g.write(tr::graph::path_t("/net/" + std::string(arm.module) + "/conn"),
-                               tr::net::conn_spec("peer", port, arm.kind));
+        const tr::graph::path_t creator("/net/" + std::string(arm.module) + "/conn");
+        auto spec = tr::net::conn_spec("peer", port, arm.kind);
+        // Opened before the SPEC write: building a listener draws nothing from its state or io
+        // plane, so a net-pool draw while it is built is the receive thread's start.
+        net_window_t window;
+        window.open();
+        const auto w = g.write(creator, std::move(spec));
         check(w.has_value(), "the SPEC write created the listener");
 
         const tr::mem::block_source_t* const egress = egress_of(net, name);
@@ -225,6 +269,8 @@ void run_arm(const kind_arm_t& arm, bool with_default) {
         if (with_default) {
             check(eventually([&] { return stack.draws.load() > 0; }),
                   "stack: the receive thread drew from the default's stack");
+        } else {
+            check(window.drew(), "stack: the receive thread drew from the net path");
         }
 
         if (arm.keeps_peers) {
@@ -239,13 +285,47 @@ void run_arm(const kind_arm_t& arm, bool with_default) {
                       "state: the connected peer's session drew from the net pool");
             }
         }
-        if (!with_default) {
-            check(io.draws.load() == 0 && state.draws.load() == 0 && stack.draws.load() == 0,
-                  "no default: the plane sources were never asked");
+        if (with_default) {
+            check(!window.drew(), "net: the net pool was never drawn from");
         }
     }
     if (peer >= 0) ::close(peer);
     g.collect();
+}
+
+/**
+ * @brief Pin #2612: a default that leaves `io` out keeps the member's initialiser, the net
+ *        pool, so the link's egress store moves off the vertex's `egress_src`; only an explicit
+ *        `.io = nullptr` keeps `egress_src`.
+ */
+void omitted_io_is_the_net_pool() {
+    std::printf("tcp, a default that leaves io out, then one with io = nullptr:\n");
+    counting_source_t plane("plane");
+    tr::mem::source_backend_t plane_rx(plane);
+    counting_source_t state("state");
+    counting_source_t stack("stack");
+    const tr::net::link_memory_t omitted{.state = &state, .stack = &stack};
+    const tr::net::link_memory_t null_io{.io = nullptr, .state = &state, .stack = &stack};
+    check(omitted.io == &tr::mem::net_source(), "an omitted io is the net pool, not null");
+    for (const tr::net::link_memory_t* node : {&omitted, &null_io}) {
+        tr::graph::graph_t g(plane);
+        tr::net::fwd_router_t router(
+            g, tr::net::router_planes_t{
+                   .link_src = &plane, .rx = &plane, .flat = &plane_rx, .egress = &plane_rx});
+        {
+            tr::net::transport_vertex_t net(g, router, "/net", &plane_rx, &plane, node);
+            (void)net.register_module(std::string(tr::net::kTcpServerSuggestedModule), "tcp",
+                                      tr::net::conn_role_t::LISTEN);
+            const auto w = g.write(tr::graph::path_t("/net/tcp-server/conn"),
+                                   tr::net::conn_spec("peer", free_port(), "tcp"));
+            check(w.has_value(), "the SPEC write created the listener");
+            const tr::mem::block_source_t* const egress = egress_of(net, "net/tcp-server/peer");
+            check(node == &omitted ? egress == &tr::mem::net_source() : egress == &plane,
+                  node == &omitted ? "io left out: the egress store is the net pool, not egress_src"
+                                   : "io = nullptr: the egress store is the vertex's egress_src");
+        }
+        g.collect();
+    }
 }
 
 /**
@@ -310,6 +390,7 @@ int main() {
         run_arm(arm, true);
         run_arm(arm, false);
     }
+    omitted_io_is_the_net_pool();
     own_memory_wins();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
