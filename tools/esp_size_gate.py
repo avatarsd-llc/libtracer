@@ -32,6 +32,9 @@ above stays tracked. A pin holds only for the compiler it was measured with
 (PINNED_TOOLCHAIN, passed in as `--toolchain`): another compiler, or another target,
 reports the rows without comparing them (#1138). A transport the `full_node` image
 compiles but never links, or never compiles, says so instead of reading 0 B.
+Those (CAN, WebSocket) are pinned on a second, footprint-only image instead
+(`--image transport_footprint`, #2678), which links them; there the rows full_node
+pins are reported only. A pinned row that reads 0 B fails: it is no longer linked.
 
 Exit 0 = report published (and within any ceiling that was passed), 1 = broken
 input, over a ceiling the caller opted into, or a transport row over its pin. Stdlib
@@ -67,6 +70,26 @@ TRANSPORT_ROWS = (
     ("Noise link", (), None,
      "not built: header-only, and full_node leaves LIBTRACER_NOISE_CRYPTO_PSA off"),
 )
+
+# Rows pinned on the footprint-only image (#2678): integrations/esp-idf/examples/
+# transport_footprint links the two transports full_node drops, so their rows are pinned
+# there, measured the same way (esp32c6, espressif/idf:release-v6.0, PINNED_TOOLCHAIN). The
+# rows full_node pins stay pinned on full_node only; here they are reported.
+FOOTPRINT_IMAGE = "transport_footprint"
+FOOTPRINT_PINS = {
+    "CAN (transport_can + TWAI link)": 14248,
+    "WebSocket (httpd server + client link)": 33387,
+}
+
+
+def row_pin(image: str, row: str, pin: int | None, why: str | None) -> tuple[int | None, str | None]:
+    """Return the (pin, reason for no pin) of @p row in @p image's build."""
+    if image != FOOTPRINT_IMAGE:
+        return pin, why
+    if row in FOOTPRINT_PINS:
+        return FOOTPRINT_PINS[row], None
+    return None, ("pinned on full_node, not on this image" if pin is not None
+                  else "pinned on neither image")
 
 
 def transport_rows(files: dict[str, Any]) -> dict[str, int]:
@@ -189,6 +212,8 @@ def main() -> int:
     ap.add_argument("--out-json", default=None, help="write the numbers as a JSON artifact")
     ap.add_argument("--files-json", default=None,
                     help="esp-idf-size --files JSON of the same map: enables the transport rows")
+    ap.add_argument("--image", default="full_node", choices=("full_node", FOOTPRINT_IMAGE),
+                    help=f"the example the map came from: full_node or {FOOTPRINT_IMAGE} (#2678)")
     ap.add_argument("--toolchain", default="unknown",
                     help="the compiler's --version first line; the rows compare only on a match")
     args = ap.parse_args()
@@ -210,7 +235,7 @@ def main() -> int:
     verdict = ("PASS" if (flash_ok and ram_ok) else "FAIL") if gated else "REPORTED"
 
     lines = [
-        f"## libtracer footprint — `full_node` @ {args.target}",
+        f"## libtracer footprint — `{args.image}` @ {args.target}",
         "",
         f"Component archive: `{arch_name}` (from `esp-idf-size --archives`)",
         "",
@@ -246,8 +271,16 @@ def main() -> int:
             f"| Transport | Flash | {PINNED_TARGET} pin | Verdict |",
             "| --- | --- | --- | --- |",
         ]
-        for row, _stems, pin, why in TRANSPORT_ROWS:
+        for row, _stems, full_node_pin, full_node_why in TRANSPORT_ROWS:
             got = rows[row]
+            pin, why = row_pin(args.image, row, full_node_pin, full_node_why)
+            if why is not None and args.image == FOOTPRINT_IMAGE:
+                # Pinned on full_node: this image only reports it.
+                state = f"{_fmt(got)}; {why}" if got else f"not linked; {why}"
+                lines.append(f"| {row} | {state} | n/a | not measured here |")
+                rows_json.append({"row": row, "linked": got != 0, "flash_bytes": got,
+                                  "reason": why})
+                continue
             if why is not None:
                 # A row with no pin must stay out of the image; if it shows up, it needs one.
                 state = why if got == 0 else f"now linked ({_fmt(got)}): pin it"
@@ -259,6 +292,10 @@ def main() -> int:
                 continue
             if not rows_compared:
                 verdict_row = "REPORTED (pins hold for esp32c6 + the pinned toolchain only)"
+            elif got == 0:
+                # A pin on a row the image does not link would pass forever on 0 B.
+                verdict_row = "FAIL (not linked)"
+                rows_over.append(f"{row}: not linked, pin {pin:,} B")
             elif got > pin:
                 verdict_row = "FAIL"
                 rows_over.append(f"{row}: {got:,} B > pin {pin:,} B")
