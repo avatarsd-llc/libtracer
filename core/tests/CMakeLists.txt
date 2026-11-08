@@ -1805,6 +1805,16 @@ target_link_libraries(app_fields_test PRIVATE libtracer)
 libtracer_test_warnings(app_fields_test)
 add_test(NAME app_fields COMMAND app_fields_test)
 
+# #2107 — RFC-0010 Amendment 5: the borrowed intent document on `:schema` (four document x
+# table cases, the two schema/owner-intent-document vectors, a shared span, and a replace or
+# clear racing a read, which the tsan lane runs).
+add_executable(intent_document_test intent_document_test.cpp)
+target_link_libraries(intent_document_test PRIVATE libtracer)
+libtracer_test_warnings(intent_document_test)
+target_compile_definitions(intent_document_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+add_test(NAME intent_document COMMAND intent_document_test)
+
 # #869 — the field surface's READ/WRITE dispatch parity. The full field x selector matrix
 # through both doors (the characterization net behind the shared shape classifiers), the
 # three-door subscriber admission parity, and the pinned read/write divergences
