@@ -321,10 +321,18 @@ class posix_endpoint_t {
     }
 
     /**
-     * @brief Stop waiting (idempotent): detach @ref src_, and stop and join the fallback
-     *        thread. MUST be the FIRST act of every derived destructor.
+     * @brief Stop waiting (idempotent): stop and join the fallback thread, then detach
+     *        @ref src_ . MUST be the FIRST act of every derived destructor.
+     *
+     * The fallback's driver is joined before the detach, so on a private module the detach
+     * takes no lock and a teardown made under a lock a callback takes cannot deadlock on the
+     * module (the join itself still waits out a callback in flight).
      */
     void stop_and_join();
+
+    /** @brief Stop and join the fallback's thread (idempotent); a no-op on the node's
+     *         module, whose driver is the application's. */
+    void stop_driver();
 
     /**
      * @brief Arm the bounded SEND timeout (`SO_SNDTIMEO`, `kBoundedWaitMs`) on @p fd (#838).
