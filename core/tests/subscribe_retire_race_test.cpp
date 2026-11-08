@@ -14,14 +14,15 @@
  * unsubscribes `/v` against one that retires and re-registers it. Under TSan (the tsan CI lanes
  * run this suite, under `setarch -R`) the run itself is the judgement.
  *
- * The race has to be live, and a loaded host can starve one side: a retirer descheduled between
- * its retire and its re-register leaves `/v` absent, and the subscriber then spends its whole
- * count on `NOT_FOUND` (#2355). So the counts are minimums, not budgets. Both threads start
- * from one barrier, the subscriber runs until it has landed a subscribe, and the retirer keeps
- * cycling until the subscriber is done, so every landed subscribe overlapped a live retirer. The
- * wait is bounded by the retirer's own progress, never by a clock: a subscriber that lands
- * nothing past its count while the retirer makes another full count of cycles is a race that is
- * live and failing, and the check reports it.
+ * The race has to be live, and a loaded host can starve one side: the retirer re-registers `/v`
+ * and retires it again straight away, so `/v` exists only for a short window, and a subscriber
+ * can miss it for any fixed number of cycles (#2355, #2645). So the counts are minimums, not
+ * budgets. Both threads start from one barrier and race freely, neither waiting for the other,
+ * so a retire can land inside a subscribe even on one CPU. The subscriber runs its count and
+ * then keeps going until it has landed a subscribe, and the retirer keeps cycling until the
+ * subscriber is done, so every landed subscribe overlapped a live retirer. Nothing bounds the
+ * extension but progress, never a clock: the ctest `TIMEOUT` is the backstop for a race that
+ * is live and failing.
  *
  * The iteration count defaults to @ref kIterations; a first argument overrides it.
  */
@@ -59,23 +60,16 @@ void test_subscribe_against_retire(long iterations) {
         while (ready.load(std::memory_order_acquire) < 2) std::this_thread::yield();
     };
     std::atomic<bool> subscriber_done{false};
-    std::atomic<long> cycles{0};  // the retirer's completed retire/re-register cycles
     long subscribed = 0;
     long retired = 0;
     std::thread subscriber([&] {
         arrive();
-        // Past its count, a subscriber that landed nothing waits for the retirer to cycle
-        // `iterations` more times from here: those cycles are what makes the race live.
-        long extension_from = 0;
-        for (long i = 0; i < iterations ||
-                         (subscribed == 0 &&
-                          cycles.load(std::memory_order_relaxed) - extension_from < iterations);
-             ++i) {
+        // Past its count, the subscriber keeps going until a subscribe has landed.
+        for (long i = 0; i < iterations || subscribed == 0; ++i) {
             if (auto s = g.subscribe(path_t("/v"), &sink, nullptr)) {
                 ++subscribed;
                 (void)g.unsubscribe(*s);
             }
-            if (i + 1 == iterations) extension_from = cycles.load(std::memory_order_relaxed);
         }
         subscriber_done.store(true, std::memory_order_release);
     });
@@ -84,7 +78,6 @@ void test_subscribe_against_retire(long iterations) {
         for (long i = 0; i < iterations || !subscriber_done.load(std::memory_order_acquire); ++i) {
             if (auto v = g.find(path_t("/v").key()); v && g.retire(*v)) ++retired;
             (void)g.try_register_vertex(path_t("/v"), role_t::STORED_VALUE);
-            cycles.fetch_add(1, std::memory_order_relaxed);
         }
     });
     subscriber.join();
