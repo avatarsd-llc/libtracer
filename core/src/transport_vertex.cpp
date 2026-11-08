@@ -505,7 +505,7 @@ void transport_vertex_t::link_hold_thunk(void* ctx, graph::link_pair_t link, boo
 // FULL (default) ctor: the slim wiring PLUS the built-in transport-factory catalog
 // entries (config `kind` selectors) this build compiled in — udp / tcp / ws, each
 // from its own TU gated by a per-module CMake option (register_builtin_transports is
-// the full-node or CMake-generated dispatcher; see builtin_transports.hpp). Keeping the
+// the dispatcher every build generates from one template; see builtin_transports.hpp). Keeping the
 // concrete transport references out of this file lets a build DROP a transport without
 // a dangling reference — module selection is by compiled TU, no preprocessor macros.
 // Delegating to the slim ctor keeps the catalog wiring in one place; the extra call

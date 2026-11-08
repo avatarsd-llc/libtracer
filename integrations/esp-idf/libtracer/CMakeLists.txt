@@ -108,23 +108,20 @@ else()
     set(LIBTRACER_PORTABLE_WS FALSE)
 endif()
 
-set(LIBTRACER_BUILTIN_TRANSPORT_CALLS "")
+set(LIBTRACER_BUILTIN_KINDS "")
 if(CONFIG_LIBTRACER_TRANSPORT_UDP)
     list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_BUILTIN_UDP} ${LIBTRACER_SOURCES_TRANSPORT_UDP})
-    string(APPEND LIBTRACER_BUILTIN_TRANSPORT_CALLS
-        "    register_udp_transport(vertex, rx_backend);\n")
+    list(APPEND LIBTRACER_BUILTIN_KINDS udp)
 endif()
 if(CONFIG_LIBTRACER_TRANSPORT_TCP)
     list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_BUILTIN_TCP} ${LIBTRACER_SOURCES_TRANSPORT_TCP})
-    string(APPEND LIBTRACER_BUILTIN_TRANSPORT_CALLS
-        "    register_tcp_transport(vertex, rx_backend);\n")
+    list(APPEND LIBTRACER_BUILTIN_KINDS tcp)
 endif()
 # The portable WS pair rides LIBTRACER_PORTABLE_WS on top of its module bool (see above):
 # ON only where POSIX sockets are the right answer, i.e. the `linux` target.
 if(CONFIG_LIBTRACER_TRANSPORT_WS AND LIBTRACER_PORTABLE_WS)
     list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_BUILTIN_WS} ${LIBTRACER_SOURCES_TRANSPORT_WS})
-    string(APPEND LIBTRACER_BUILTIN_TRANSPORT_CALLS
-        "    register_ws_transport(vertex, rx_backend);\n")
+    list(APPEND LIBTRACER_BUILTIN_KINDS ws)
 endif()
 
 # posix_endpoint_t — the recv-thread/endpoint scaffold shared by every socket transport.
@@ -135,24 +132,14 @@ if(CONFIG_LIBTRACER_TRANSPORT_UDP OR CONFIG_LIBTRACER_TRANSPORT_TCP
     list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_POSIX_ENDPOINT})
 endif()
 
-# register_builtin_transports dispatcher: the hand-written full-node form (udp+tcp+ws)
-# when all three are on — identical to a stock node — else a CMake-generated variant
-# from src/builtin_transports.cpp.in that calls ONLY the enabled register_*_transport, so
-# a dropped transport leaves neither a glue TU nor a dangling call (same mechanism as
-# core/CMakeLists.txt). A chip target takes the GENERATED branch even with all three
-# module bools on, because its ws leg is absent (LIBTRACER_PORTABLE_WS): the hand-written
-# form's register_ws_transport call is exactly the reference that would drag the portable
-# WS objects back into the image.
-if(CONFIG_LIBTRACER_TRANSPORT_UDP AND CONFIG_LIBTRACER_TRANSPORT_TCP
-   AND CONFIG_LIBTRACER_TRANSPORT_WS AND LIBTRACER_PORTABLE_WS)
-    list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_BUILTIN_DISPATCHER})
-else()
-    configure_file(
-        "${LIBTRACER_BUILTIN_DISPATCHER_TEMPLATE}"
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp"
-        @ONLY)
-    list(APPEND LIBTRACER_SRCS "${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp")
-endif()
+# register_builtin_transports dispatcher, generated from core's one template
+# (src/builtin_transports.cpp.in, #2439) by the function core/CMakeLists.txt uses, so it
+# calls ONLY the enabled register_*_transport and passes the same arguments a core build
+# does. A chip target never lists ws (LIBTRACER_PORTABLE_WS): a register_ws_transport call
+# is exactly the reference that would drag the portable WS objects back into the image.
+libtracer_generate_builtin_transports(
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp" ${LIBTRACER_BUILTIN_KINDS})
+list(APPEND LIBTRACER_SRCS "${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp")
 
 # lwip is a PRIVATE requirement of the socket transports' .cpp files only
 # (<sys/socket.h> etc. resolve into lwIP on chip targets); the public headers

@@ -75,10 +75,9 @@ the #947 maintainer ruling: *ESP-IDF WebSocket must never use POSIX sockets*).
   per-environment** by the build hook: on lwIP its scatter-gather egress is rejected
   (`lwip_sendmsg` returns `EOPNOTSUPP` for `MSG_NOSIGNAL`), so every data frame was
   silently dropped while the handshake and PING/PONG still worked (#948) — it was a
-  working-looking transport that never delivered data on silicon. The hook also swaps
-  core's full-node `register_builtin_transports` (udp+tcp+ws) for the udp+tcp-only
-  dispatcher in `builtin_transports_udp_tcp.cpp`, so no dangling reference drags the
-  pair back in. TU selection, no feature macros.
+  working-looking transport that never delivered data on silicon. The hook generates
+  `register_builtin_transports` there with udp and tcp only, so no dangling reference
+  drags the pair back in. TU selection, no feature macros.
 - The IDF-native replacements (`httpd_ws_link_t` / `esp_ws_client_link_t`) are **not
   packaged for PlatformIO**: they depend on `esp_http_server` / `esp_websocket_client`,
   and the latter is an IDF managed component whose availability under PlatformIO's
@@ -102,8 +101,11 @@ vacuously), plus the object-tree check.
 - `pio_esp32_can.py` — the `build.extraScript` hook described above. It also owns the
   package's **source filter** (a manifest `build.srcFilter` would take precedence over
   the script's and cannot express the per-environment `espressif32` WS exclusion).
-- `builtin_transports_udp_tcp.cpp` — the udp+tcp `register_builtin_transports`
-  dispatcher the hook compiles on `espressif32` in place of core's full-node one.
+- `libtracer_builtin_transports.py` — the generator the hook runs to write
+  `register_builtin_transports` from core's one template, `core/src/builtin_transports.cpp.in`
+  (#2439): udp, tcp and ws everywhere, udp and tcp on `espressif32`. The CMake builds
+  generate theirs from the same template; `tools/check_builtin_transports.py` holds the two
+  generators byte-identical.
 
 ## Releasing
 

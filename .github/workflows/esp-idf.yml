@@ -58,6 +58,7 @@ on:
       - "core/src/**"
       - "core/include/**"
       - "tools/check_source_list.py"
+      - "tools/check_builtin_transports.py"
       - "core/cmake/**"
       - "integrations/platformio/pio_esp32_can.py"
       - "tools/check_esp_ws_plane.py"
@@ -129,6 +130,8 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Hold the component, core CMake and PlatformIO to the one core source list
         run: python3 tools/check_source_list.py
+      - name: Transport registration generated from the one template (#2439)
+        run: python3 tools/check_builtin_transports.py
       - name: Clean this job's workspace off the host runner
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
