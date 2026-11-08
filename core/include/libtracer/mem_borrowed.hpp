@@ -10,9 +10,12 @@
  * libtracer routes those bytes — no copy, no CRC imposed. The caller guarantees
  * the bytes stay valid while any view holds them.
  *
- * The control block is drawn from the default value source (`mem::value_source()`) and
- * returned to it, never from the process heap: the host root's value pool, the MCU arena,
- * or the platform heap only on the heap-rooted build (#2090). A truly zero-allocation
+ * The single-argument helpers draw the control block from the default value source
+ * (`mem::value_source()`) and return it there, never to the process heap: the host root's value
+ * pool, the MCU arena, or the platform heap only on the heap-rooted build (#2090). A graph built
+ * over an injected source draws its control blocks from that source instead, through a
+ * `borrowed_backend_t` the deployer builds over `graph_t::value_source()` and hands to the
+ * seam-taking `view::borrow_const` overload (ADR-0079 Decision 4, #2660). A truly zero-allocation
  * static descriptor — the permanent MMIO segment whose refcount is never released — is the
  * deferred mem_mmio backend.
  */
@@ -32,18 +35,19 @@
 
 namespace tr::mem {
 
-namespace detail {
-
 /**
  * @brief Backend for borrowed bytes: draws and returns only the `segment_t` control block,
  *        through the block source it was built over.
  *
  * One class serves both address spaces: @p space is what its segments report, and the tag
  * follows it, so `mem::transfer` refuses a `DEVICE` borrow like any other device segment.
+ *
+ * A deployer that injects a source into a graph builds one of these over that graph's
+ * @c value_source and borrows through it, so a borrowed value's control block is charged to
+ * the injected store like every other value draw (ADR-0079 Decision 4, #2660). Like the
+ * source, it must outlive every segment it served.
  */
 class borrowed_backend_t final : public mem_backend_t {
-    // The state comes first: a trailing `private:` in this excluded detail class leaks into
-    // the enclosing namespace under Doxygen and hides `view::borrow*` from the docs.
     block_source_t* src_; /**< @brief Where the control blocks come from. */
     mem_space_t space_;   /**< @brief What its segments report. */
 
@@ -88,6 +92,8 @@ class borrowed_backend_t final : public mem_backend_t {
         false; /**< @brief Borrows caller-owned bytes — must NOT be durably stored. */
 };
 
+namespace detail {
+
 /** @brief The process-wide borrowed backend (function-local static) over the default value
  *         source. */
 [[nodiscard]] inline borrowed_backend_t& borrowed_backend() noexcept {
@@ -120,15 +126,35 @@ namespace tr::view {
 }
 
 /**
- * @brief Wrap read-only caller-owned @p bytes (ROM, a const table, an MMIO read view).
+ * @brief The seam-taking `%borrow_const`: wrap read-only caller-owned @p bytes (ROM, a const
+ *        table, an MMIO read view), the control block drawn from @p backend's source.
+ *
+ * The overload a graph over an injected source is written through, with @p backend built over
+ * that graph's @c value_source (#2660), as the seam-taking `%over_bytes` is with its
+ * @c value_backend. A refusal is a null segment, the same by-value BACKPRESSURE channel as
+ * `%over_bytes`' `std::nullopt`: the caller answers BACKPRESSURE and does not write, so the
+ * vertex keeps its value.
+ *
+ * @param bytes   The caller-owned bytes; they must outlive every view over the segment.
+ * @param backend Where the control block comes from; it must outlive the segment.
+ * @retval nullptr The backend's source refused the control block (BACKPRESSURE).
+ */
+[[nodiscard]] inline segment_ptr_t borrow_const(std::span<const std::byte> bytes,
+                                                mem::borrowed_backend_t& backend) {
+    std::span<std::byte> writable(const_cast<std::byte*>(bytes.data()), bytes.size());
+    return segment_ptr_t::adopt(backend.wrap(writable));
+}
+
+/**
+ * @brief Wrap read-only caller-owned @p bytes, the control block drawn from the default value
+ *        source (@ref mem::value_source).
  *
  * The span is const; libtracer never writes through a borrowed-const segment,
  * so the `const_cast` only restores the segment's uniform writable-at-the-type-
  * level base.
  */
 [[nodiscard]] inline segment_ptr_t borrow_const(std::span<const std::byte> bytes) {
-    std::span<std::byte> writable(const_cast<std::byte*>(bytes.data()), bytes.size());
-    return segment_ptr_t::adopt(mem::detail::borrowed_backend().wrap(writable));
+    return borrow_const(bytes, mem::detail::borrowed_backend());
 }
 
 /**

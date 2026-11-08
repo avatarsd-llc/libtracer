@@ -29,6 +29,11 @@
  *       Before #2665 the name text
  *       was borrowed through the one-argument `view::borrow_const`, whose control block came
  *       from `tr::mem::value_source()`.
+ * - (d) a `borrow_const` write through a `borrowed_backend_t` built over the graph's value
+ *       source (#2660): the borrowed segment's control block is drawn from the injected root,
+ *       and every peak is still zero. Before #2660 the only borrow drew it from
+ *       `tr::mem::value_source()`. A source that refuses the control block answers a null
+ *       segment, so the caller answers BACKPRESSURE and the vertex keeps its value.
  *
  * Every case also checks that its draw reached the injected root (a count of the blocks it
  * served), so a zero on the default root is not the zero of a path that never ran.
@@ -42,6 +47,7 @@
 
 #include "libtracer/conn_spec.hpp"
 #include "libtracer/fwd_router.hpp"
+#include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source_backend.hpp"
 #include "libtracer/tracer.hpp"
@@ -115,6 +121,9 @@ int main() {
     tr::mem::block_source_t& heap = tr::mem::heap_source();
     tr::mem::source_backend_t backend(heap);
     counting_source_t root;
+    // Case (d)'s borrow seam, over the source the graph is built on. Declared BEFORE the graph:
+    // a value the vertex tree still holds at teardown returns its control block through it.
+    tr::mem::borrowed_backend_t borrowed(root, tr::mem::mem_space_t::HOST);
 
     graph_t g(root);
     fwd_router_t router(g, {.link_src = &heap, .rx = &heap, .flat = &backend, .egress = &backend});
@@ -201,5 +210,37 @@ int main() {
     std::printf("  composed read of 1 root + 3 named members: %zu draws\n", root.draws - first);
     report_default_root();
     check(default_root_peak() == 0, "and the folded reads took nothing from the default root");
+
+    // (d) A borrowed value written to a vertex: its control block is the graph's draw.
+    std::printf("(d) a borrow_const write draws its control block from the graph's source:\n");
+    {
+        static constexpr std::byte kFour[4] = {std::byte{1}, std::byte{2}, std::byte{3},
+                                               std::byte{4}};
+        const auto v = g.register_vertex(at("/c/v"), role_t::STORED_VALUE);
+        check(&g.value_source() == &root, "the graph's value source is the injected root");
+        before = root.draws;
+        tr::view::segment_ptr_t seg = tr::view::borrow_const(std::span(kFour), borrowed);
+        check(seg && seg->backend == &borrowed, "the borrow is a segment of the graph's backend");
+        check(root.draws == before + 1, "its control block is one draw from the graph's source");
+        check(g.write(v, tr::view::view_t::over(std::move(seg))).has_value(), "the write lands");
+        const auto stored = g.read(v);
+        check(stored.has_value() && (*stored)->link_count() == 1 &&
+                  (*stored)->only().owner->backend == &borrowed &&
+                  (*stored)->only().bytes().data() == kFour,
+              "the vertex holds the borrowed bytes in place");
+        report_default_root();
+        check(default_root_peak() == 0, "and the borrow took nothing from the default root");
+
+        // A refusing source: the borrow answers a null segment, the BACKPRESSURE the caller
+        // answers instead of writing, as with `over_bytes`' nullopt.
+        tr::mem::borrowed_backend_t refusing(tr::mem::null_source(), tr::mem::mem_space_t::HOST);
+        static constexpr std::byte kOther[2] = {std::byte{9}, std::byte{9}};
+        check(!tr::view::borrow_const(std::span(kOther), refusing),
+              "a refused control block is a null segment");
+        const auto kept = g.read(v);
+        check(kept.has_value() && (*kept)->link_count() == 1 &&
+                  (*kept)->only().bytes().data() == kFour,
+              "and the vertex keeps its value");
+    }
     return tr::testing::summary("injected_scratch");
 }
