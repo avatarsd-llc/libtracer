@@ -376,6 +376,57 @@ class ShippedPins(unittest.TestCase):
     def test_the_band_is_at_least_the_measured_spread(self):
         self.assertGreaterEqual(self.pins["band_bytes"], self.pins["measured_spread_bytes"])
 
+    def test_the_shipped_ratchet_fails_on_growth(self):
+        """#2414: warn mode let the pins go stale by 22,944 B before anyone looked."""
+        self.assertEqual(self.pins["activation"]["mode"], "fail")
+
+
+def transcript_at(pins: dict, links_grow_bytes: int = 0) -> str:
+    """@brief A transcript whose occupancy equals @p pins, optionally grown per link.
+
+    Each (arm, T) cell gets one store row carrying its whole pinned `used_total` and
+    `stores - 1` empty rows, so the count matches too. @p links_grow_bytes is added once
+    per link: every lane attaches two (`build_graph` in store_sweep_node.hpp), so a cell
+    at T lanes grows by 2 * T * @p links_grow_bytes.
+    """
+    cells: dict[tuple[str, int], dict[str, int]] = {}
+    for p in pins["pins"]:
+        cells.setdefault((p["arm"], p["threads"]), {})[p["metric"]] = p["value"]
+    rows = ["# scope: deterministic", "CALIBRATE\ttotal_failures\t0\t-"]
+    for (arm, t), cell in sorted(cells.items()):
+        used = cell["used_total"] + 2 * t * links_grow_bytes
+        rows.append(f"RESULT_STORE_HWM\t{arm}\t{t}\tgraph\t0\t{used}\t65536\t1\t0")
+        rows += [f"RESULT_STORE_HWM\t{arm}\t{t}\tlane\t{i}\t0\t4096\t0\t0"
+                 for i in range(cell["stores"] - 1)]
+    rows.append("CALIBRATE\ttotal_failures\t0\t-")
+    return "\n".join(rows) + "\n"
+
+
+class ShippedPinsFailOnPerLinkGrowth(unittest.TestCase):
+    """#2414's acceptance check, run against the pins that ship: 8 B more per link (the
+    size of #2282's tenancy word) must red the job, on every pinned cell."""
+
+    def setUp(self):
+        self.pins = json.loads(
+            (pathlib.Path(ssg.HERE) / "store_sweep_pins.json").read_text())
+        # The decision rule, not the toolchain downgrade (ToolchainAttribution covers it).
+        self.pins["toolchain"] = ssg.host_guard.compiler_identity()
+        self.mode = self.pins["activation"]["mode"]
+
+    def test_the_pinned_occupancy_passes(self):
+        code, out = run_gate(transcript_at(self.pins), self.pins, "--mode", self.mode)
+        self.assertEqual(code, 0, out)
+        self.assertIn("STORE_SWEEP_GATE\tPASS", out)
+
+    def test_eight_bytes_more_per_link_fails(self):
+        code, out = run_gate(transcript_at(self.pins, links_grow_bytes=8), self.pins,
+                             "--mode", self.mode)
+        self.assertEqual(code, 1, out)
+        self.assertIn("STORE_SWEEP_GATE\tFAIL", out)
+        self.assertIn("NARROW/T24/used_total grew 384", out)
+        used = [p for p in self.pins["pins"] if p["metric"] == "used_total"]
+        self.assertEqual(out.count("::warning::ADR-0079 store occupancy drift"), len(used))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
