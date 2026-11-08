@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <charconv>
 #include <cstring>
 #include <optional>
@@ -180,6 +181,12 @@ void can_transport_t::shut_down() {
 }
 
 can_transport_t::~can_transport_t() {
+    // The owner quiesced every sender before this (see transport_t::shut_down); a group still
+    // in flight is a teardown-order bug in the owner. Asserts-on builds only, and no wait (#2403).
+    assert([this] {
+        const std::lock_guard lock(tx_m_);
+        return tx_in_flight_ == 0;
+    }() && "~can_transport_t with a send in flight: quiesce senders first");
     // Drop the receivers first (both the peer-named slot and the flat fallback);
     // then releasing the link stops its receive thread, which can no longer
     // re-enter a half-destroyed transport.
