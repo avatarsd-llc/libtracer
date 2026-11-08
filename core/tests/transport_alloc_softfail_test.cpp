@@ -1321,9 +1321,10 @@ void test_can_emit_advertise_wire_identical() {
  * walked from the stack and `cfg_.path` in place (#848), and the data slices are carved straight
  * out of the caller's span (#2661). Before #2661 a send copied its payload with
  * `view::over_bytes`, a draw from the process value pool, not from any store the deployer
- * injects (ADR-0079 §Decision 4). The census below trims the host pools first, so such a draw
- * takes a fresh slab and shows up as an `operator new` and as a value-pool balance that moved.
- * The path is past the SSO bound on purpose, so an `adv.path = cfg_.path` copy would show too.
+ * injects (ADR-0079 §Decision 4). On a slab-pool build the census trims the host pools first, so
+ * such a draw takes a fresh slab and shows up as an `operator new` and as a value-pool balance that
+ * moved. The path is past the SSO bound on purpose, so an `adv.path = cfg_.path` copy would show
+ * too.
  */
 void test_can_send_allocates_nothing() {
     std::printf("can send — no allocation, no process-pool draw (A1, #2661):\n");
@@ -1358,7 +1359,9 @@ void test_can_send_allocates_nothing() {
           "  ...whose first and last windows are the right size");
 
     raw->reset();  // forget the join hello — measure one send
-    tr::mem::host_root().trim();
+    // Only a slab-pool build has host pools to trim (host_root() aborts on a heap-rooted one,
+    // the NARROW preset); there every block is an operator new, counted without a trim.
+    if constexpr (tr::mem::kSlabPool) tr::mem::host_root().trim();
     const std::size_t values_before = tr::mem::value_source().stats().in_use;
     const std::size_t actual = count_allocs([&] { can_tx.send(payload); });
     check(actual == 0, "a CAN send allocates NOTHING — payload, framing and advertise alike");
@@ -1402,7 +1405,9 @@ void test_can_send_under_refusing_stores() {
     for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = std::byte(i + 1);
 
     raw->reset();
-    tr::mem::host_root().trim();
+    // Only a slab-pool build has host pools to trim (host_root() aborts on a heap-rooted one,
+    // the NARROW preset); there every block is an operator new, counted without a trim.
+    if constexpr (tr::mem::kSlabPool) tr::mem::host_root().trim();
     const std::uint64_t dropped_before = can_tx.drop_stats().dropped_tx;
     const bool escaped = escapes_at(1, [&] { can_tx.send(payload); });
     check(!escaped, "a refused first allocation never escapes the send");
