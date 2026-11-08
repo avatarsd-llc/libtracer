@@ -1199,15 +1199,13 @@ result_t<view::view_t> graph_t::read_schema(vertex_t* v) const {
     mem::bytes_t point_body(*tables_);
     // The intent document (RFC-0010 Amendment 5), iff installed, follows the protocol part as
     // `NAME "doc" VALUE <doc>` at the POINT level, before the owner part. It is copied verbatim
-    // under the vertex mutex, so a concurrent clear can end the borrowed bytes' life only after
-    // this copy. A vertex without one keeps today's POINT byte-for-byte.
+    // under the vertex's stripe lock, so a concurrent clear can end the borrowed bytes' life only
+    // after this copy. A vertex without one keeps today's POINT byte-for-byte.
     if (!schema_protocol_part(v, settings_children) ||
         !wire::emit_name(point_body, key_view_t{v->name().bytes()}.last_segment()) ||
         !wire::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true},
                         mem::as_span(settings_children)) ||  // SETTINGS
-        !v->with_intent_document([&point_body](std::string_view doc) {
-            return wire::emit_name_value(point_body, "doc", doc);
-        }))
+        !emit_intent_document(v, point_body))
         return std::unexpected(status_t::BACKPRESSURE);
 
     // The owner part (RFC-0010 §B.2), present iff a descriptor table is installed —

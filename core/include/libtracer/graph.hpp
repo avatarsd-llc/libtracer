@@ -2181,10 +2181,11 @@ class graph_t {
      * clear or a replacement returns, no read touches the old bytes again. A local host
      * call, so no ACL gate. A retirement clears it with the vertex's other declarations.
      *
-     * @return `BACKPRESSURE` when the document did not land: the table source refused the
-     *         block that holds the view (a vertex with no field table draws one on its first
-     *         install), or a concurrent retirement dropped that block mid-call. @p v then holds
-     *         no new document. A clear never fails.
+     * The view is held off the vertex, in one graph-side node per vertex address that ever
+     * installed a document, so a vertex without one pays no byte for the feature.
+     *
+     * @return `BACKPRESSURE` when the table source refused that node on the address's first
+     *         install; @p v is then unchanged. A clear never fails.
      */
     [[nodiscard]] result_t<void> set_intent_document(vertex_handle_t v, std::string_view doc);
     /** @brief Remove @p v's intent document, if it has one: its `:schema` read is then the
@@ -4322,6 +4323,36 @@ class graph_t {
      * on a `:schema` read. A node that declares nothing allocates nothing and never walks.
      */
     immortal_list_t<schema_catalog_node_t> schema_catalogs_;
+
+    /** @brief One vertex address's intent document (RFC-0010 Amendment 5, #2107), as a node of
+     *         `%intent_documents_`. `doc` is a BORROWED view, empty once cleared, guarded by
+     *         the vertex's stripe lock (`vertex_stripe_of(v)`). */
+    struct intent_document_node_t {
+        const vertex_t* v = nullptr;            /**< @brief The installing vertex. */
+        std::string_view doc;                   /**< @brief The installed bytes, or empty. */
+        intent_document_node_t* next = nullptr; /**< @brief The previously linked node. */
+    };
+
+    /**
+     * @brief The intent documents (RFC-0010 Amendment 5) of every vertex address that ever
+     *        installed one.
+     *
+     * **Why it is here and not on the vertex**, the argument `%schema_catalogs_` makes: every
+     * per-vertex home charges the vertices that install none. On the app-field group it was
+     * +16 B on every vertex with a field table (the `vertex_app5` memory probes). Here a vertex
+     * without a document pays nothing, and a `:schema` read of one walks this list, which is
+     * empty unless a document was ever installed. A vertex with a document pays one node.
+     * Retirement empties the node, so the next occupant at the address inherits nothing.
+     */
+    immortal_list_t<intent_document_node_t> intent_documents_;
+
+    /** @brief Set @p v's document to @p doc (empty clears it). Call with `map_mutex_` held
+     *         UNIQUE. @retval false The table source refused the node; nothing changed. */
+    [[nodiscard]] bool store_intent_document(const vertex_t* v, std::string_view doc) noexcept;
+
+    /** @brief Append @p v's document, if it has one, to @p out as `NAME "doc"` → `VALUE`,
+     *         copied under @p v's stripe lock. @retval false @p out's source refused. */
+    [[nodiscard]] bool emit_intent_document(const vertex_t* v, mem::bytes_t& out) const noexcept;
 
     /** @brief Publish @p catalog as @p v's declaration and set its flag. Call with `map_mutex_`
      *         held UNIQUE (the registration hold). An empty catalog is ignored.

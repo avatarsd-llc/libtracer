@@ -214,6 +214,18 @@ void test_shared_span() {
           "... and the other still serves the document, intact");
 }
 
+/** @brief A retirement drops the document: the next occupant at the address inherits none. */
+void test_retire_drops_the_document() {
+    std::printf("a retirement drops the document:\n");
+    graph_t g;
+    const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    (void)g.set_intent_document(v, kDocAlone);
+    check(g.retire(v).has_value(), "the vertex retires");
+    (void)g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    check(read_bytes(g, "/x:schema") == expected_schema("x", {}, {}),
+          "the next occupant serves today's record, with no document");
+}
+
 /** @brief The document is schema, not a value: no `:settings` read carries it. */
 void test_not_a_setting() {
     std::printf("the document is not a setting:\n");
@@ -305,6 +317,7 @@ int main() {
     test_four_cases();
     test_conformance_vectors();
     test_shared_span();
+    test_retire_drops_the_document();
     test_not_a_setting();
     test_replace_and_clear_race_a_read();
     test_clear_ends_the_borrow();

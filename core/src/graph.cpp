@@ -529,6 +529,7 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
     // from the value sub-pool on that build.
     if (!is_default_source(&src)) value_backend_ = &src_backend_;
     schema_catalogs_.src = tables_;
+    intent_documents_.src = tables_;
     admissions_.src = tables_;
     // Both structural roots, in one table-source block. The anchors' private root (#1223)
     // takes NO vertex slot: it is never an anchor itself and no element can name it, and
@@ -916,6 +917,7 @@ void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
         // Parking links the seam into an intrusive chain, and the slot table moves into room
         // `retire` reserved, so neither step can fail mid-walk (#1778).
         detached_edges_t table(*tables_);
+        (void)store_intent_document(&x, {});  // a clear: draws nothing, cannot fail
         if (value_handlers_t* seam = x.revert_to_placeholder(table))
             (void)park_.push_back({{seam, nullptr}});  // reserved: cannot fail
         (void)gone.push_back(std::move(table));        // reserved: cannot fail
@@ -1691,9 +1693,28 @@ result_t<void> graph_t::set_policy(vertex_handle_t v, vertex_policy_t policy) {
 }
 
 result_t<void> graph_t::set_intent_document(vertex_handle_t v, std::string_view doc) {
-    if (!v.get()->set_intent_document(doc, *tables_))
-        return std::unexpected(status_t::BACKPRESSURE);
+    const std::unique_lock lock(map_mutex_);
+    if (!store_intent_document(v.get(), doc)) return std::unexpected(status_t::BACKPRESSURE);
     return {};
+}
+
+bool graph_t::store_intent_document(const vertex_t* v, std::string_view doc) noexcept {
+    // A clear never draws a node: an address with none has nothing to clear.
+    intent_document_node_t* const n =
+        doc.empty() ? intent_documents_.find(v) : intent_documents_.find_or_make(v);
+    if (n == nullptr) return doc.empty();
+    const std::lock_guard lock(vertex_stripe_of(v).m);
+    n->doc = doc;
+    return true;
+}
+
+bool graph_t::emit_intent_document(const vertex_t* v, mem::bytes_t& out) const noexcept {
+    const intent_document_node_t* const n = intent_documents_.find(v);
+    if (n == nullptr) return true;
+    // Copied under the stripe lock the writer takes, so once a clear or a replacement returns
+    // no read touches the old bytes.
+    const std::lock_guard lock(vertex_stripe_of(v).m);
+    return n->doc.empty() || wire::emit_name_value(out, "doc", n->doc);
 }
 
 /**

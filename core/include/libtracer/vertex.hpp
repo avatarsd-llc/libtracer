@@ -3022,43 +3022,6 @@ class vertex_t {
         return out;
     }
 
-    /**
-     * @brief Install, replace or clear (an empty @p doc) this vertex's intent document
-     *        (RFC-0010 Amendment 5): a borrowed view, never a copy.
-     *
-     * Installing draws the extension block and the app-field group when the vertex has
-     * neither; an empty group reads back as no table, so the `:schema` owner part stays absent.
-     * Clearing draws nothing. No copy is held: each `:schema` read copies the bytes into its
-     * reply under the vertex mutex, so a clear that returns ends every read of the old bytes.
-     * @return `false` iff the document did not land: the table source refused a block, or a
-     *         concurrent retirement dropped the group. The vertex then holds no new document.
-     */
-    [[nodiscard]] bool set_intent_document(std::string_view doc, tr::mem::block_source_t& tables) {
-        vertex_ext_t* const e =
-            doc.empty() ? ext_.load(std::memory_order_acquire) : stage_policy(false, true, tables);
-        if (e == nullptr) return doc.empty();
-        const std::lock_guard lock(vertex_stripe_of(this).m);
-        // A concurrent retirement may have dropped the group since it was staged: then the
-        // document did not land, and only a clear succeeds.
-        if (e->app == nullptr) return doc.empty();
-        e->app->doc = doc;
-        return true;
-    }
-
-    /**
-     * @brief Call @p f with the installed intent document, under the vertex mutex, so a
-     *        concurrent clear or replacement can never end the bytes' lifetime while @p f
-     *        reads them. With no document installed, @p f is not called.
-     * @return `true` when there is no document; otherwise what @p f returns.
-     */
-    template <class F>
-    [[nodiscard]] bool with_intent_document(F&& f) const {
-        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        if (e == nullptr) return true;
-        const std::lock_guard lock(vertex_stripe_of(this).m);
-        return e->app == nullptr || e->app->doc.empty() || f(e->app->doc);
-    }
-
     // -- owner-side storage declarations & propagation policy ----------------------------
 
     /**

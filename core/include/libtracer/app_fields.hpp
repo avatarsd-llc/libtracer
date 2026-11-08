@@ -452,15 +452,13 @@ using app_field_write_hook_t = hook_t<void(std::string_view name, const view::vi
 
 /**
  * @brief The lazily-allocated APP-FIELD group of the extension block (ADR-0058 Step 2):
- *        the RFC-0010 descriptor table plus its owner apply seam, together, and the
- *        vertex's intent document (Amendment 5), which is owner schema like the table.
+ *        the RFC-0010 descriptor table plus its owner apply seam, together.
  *
  * `on_app_field_write` co-occurs with the field table (it is the table's apply seam), NOT
  * with the vertex's value seam — so it lives here, not in
  * @ref value_handlers_t. A vertex with no app fields and no apply seam keeps this group
  * null and pays neither the table nor the 16 B hook. Allocated on the first of
- * `vertex_policy_t::app_fields` (the table), an `on_app_field_write` at registration, or
- * `graph_t::set_intent_document`;
+ * either `vertex_policy_t::app_fields` (the table) or an `on_app_field_write` at registration;
  * guarded by the vertex mutex, insert-only (never freed before the vertex).
  */
 struct app_field_group_t {
@@ -475,17 +473,6 @@ struct app_field_group_t {
      *         app-field-bearing vertex, and a filter almost none of them install may not cost
      *         all of them a hook. */
     app_field_write_hook_t on_app_field_write;
-    /**
-     * @brief The owner's intent document (RFC-0010 Amendment 5, #2107): a BORROWED view of
-     *        UTF-8 bytes in constant storage, empty when none is installed.
-     *
-     * `:schema` serves it verbatim as `NAME "doc"` → `VALUE` at the `POINT` level. The runtime
-     * holds no copy and never parses or validates it. Many vertices may view the same bytes.
-     * The installer keeps them alive while they are installed. Each `:schema` read copies the
-     * bytes into its reply under the vertex mutex that guards this member, so once a clear or
-     * a replacement returns, no read touches the old bytes again.
-     */
-    std::string_view doc;
 };
 
 }  // namespace tr::graph
