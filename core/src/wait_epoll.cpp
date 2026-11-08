@@ -93,12 +93,17 @@ wait_module_t::~wait_module_t() {
 }
 
 bool wait_module_t::attach(wait_source_t& s) noexcept {
-    bool done = false;
-    locked([&] {
-        done = !s.attached && register_interest(fd_[0], EPOLL_CTL_ADD, s) == 0;
-        s.attached = s.attached || done;
-    });
-    return done;
+    // No dispatch lock: a source the set does not hold yet cannot be in the batch the driver
+    // is running, so there is nothing to wait out, and `epoll_ctl` is safe against a
+    // concurrent wait. A creator that holds its own lock (a transport vertex building a link
+    // under its control-plane lock) therefore never waits on a callback that takes that lock.
+    // The flag is set before the registration: once the kernel holds the source, a callback
+    // may detach it, and that detach must find it attached.
+    if (s.attached) return false;
+    s.attached = true;
+    if (register_interest(fd_[0], EPOLL_CTL_ADD, s) == 0) return true;
+    s.attached = false;
+    return false;
 }
 
 void wait_module_t::detach(wait_source_t& s) noexcept {

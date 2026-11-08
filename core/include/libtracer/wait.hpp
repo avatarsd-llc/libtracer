@@ -40,16 +40,22 @@
  * pays).
  *
  * **Detach under a lock deadlocks (slice 1).** The driving thread holds the module's dispatch
- * lock for a whole batch of callbacks, and an @ref tr::net::wait_module_t::attach or
- * @ref tr::net::wait_module_t::detach from any other thread takes that lock, so it waits out
- * the batch. If the caller holds a lock that one of the batch's callbacks takes (a sink's or
- * the application's lock, reached from a delivery), the callback blocks on the caller and the
- * caller on the callback: both threads stop for good. A link's teardown detaches, so stopping
- * or destroying a link counts. The caller must not attach, detach, stop or destroy a link on
- * a module while holding any lock a callback on that module can take, and must not do so from
- * inside a callback of a second module whose own callbacks reach back into the first. From
- * inside a callback on the same module both calls return at once and are safe. This must be
- * designed out, or every caller audited, before slice 3 (ruling 44).
+ * lock for a whole batch of callbacks, and a @ref tr::net::wait_module_t::detach from any other
+ * thread takes that lock, so it waits out the batch. So does the poll adapter's
+ * @ref tr::net::wait_module_t::attach, which grows the table the driver walks; the epoll
+ * adapter's attach takes no lock (a source the set does not hold yet is in no batch), so a link
+ * built under a lock on the WIDE host never waits on a callback. Neither call takes the lock
+ * once the module is stopped and its driver has left @ref tr::net::wait_module_t::run, so a
+ * link on a private module (no config `wait`) joins its driver first and its teardown takes no
+ * module lock; the join itself still waits out a callback in flight, as a link's own receive
+ * thread always did. If the caller holds a lock that
+ * one of the batch's callbacks takes (a sink's or the application's lock, reached from a delivery),
+ * the callback blocks on the caller and the caller on the callback: both threads stop for good. A
+ * link's teardown detaches, so stopping or destroying a link counts. The caller must not attach,
+ * detach, stop or destroy a link on a module while holding any lock a callback on that module can
+ * take, and must not do so from inside a callback of a second module whose own callbacks reach back
+ * into the first. From inside a callback on the same module both calls return at once and are safe.
+ * This must be designed out, or every caller audited, before slice 3 (ruling 44).
  *
  * **One slow sink delays every link on the module** (ADR-0087 §Consequences): delivery runs
  * inline on the driving thread. A callback that blocks is an application bug the module makes
@@ -112,7 +118,9 @@ struct wait_source_t {
     std::atomic<int> fd{-1};
     /** @brief Write interest, as last armed (@ref wait_module_t::want_write). */
     std::atomic<bool> write{false};
-    /** @brief True while attached. Changed only under the module's dispatch lock. */
+    /** @brief True while attached. Set by @ref wait_module_t::attach before it registers the
+     *         socket (with no lock on the epoll adapter: a callback reads it only once the kernel
+     *         reports the socket); cleared only under the module's dispatch lock. */
     bool attached = false;
 };
 
@@ -122,9 +130,10 @@ struct wait_source_t {
  *
  * Thread safety: @ref attach, @ref detach, @ref want_write and @ref stop may be called from any
  * thread, and from inside a callback. A @ref detach from another thread waits out the callbacks
- * the driver is running, so once it returns the source's callback never runs again. An
- * @ref attach or @ref detach from another thread must not be called holding a lock a callback
- * takes: that deadlocks (see the file's "Detach under a lock deadlocks"). @ref run is called by
+ * the driver is running, so once it returns the source's callback never runs again. A
+ * @ref detach, or the poll adapter's @ref attach, from another thread must not be called
+ * holding a lock a callback takes: that deadlocks (see the file's "Detach under a lock
+ * deadlocks"). The epoll adapter's @ref attach takes no lock. @ref run is called by
  * one thread at a time.
  */
 class wait_module_t {
@@ -188,10 +197,14 @@ class wait_module_t {
 
    private:
     /** @brief Run @p op under the dispatch lock, or straight away on the driving thread,
-     *         which already holds it. */
+     *         which already holds it, or once the module is stopped and no thread is in
+     *         @ref run (a stopped module dispatches nothing again). */
     template <class Op>
     void locked(Op&& op) noexcept {
-        if (driver_.load(std::memory_order_acquire) == detail::this_thread_id()) {
+        const bool stopped = stopping_.load(std::memory_order_acquire);
+        const detail::thread_id_t driver = driver_.load(std::memory_order_acquire);
+        if (driver == detail::this_thread_id() ||
+            (stopped && driver == detail::unowned_thread_id())) {
             op();
             return;
         }

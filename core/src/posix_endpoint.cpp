@@ -224,13 +224,20 @@ bool posix_endpoint_t::start(std::size_t stack_size, mem::block_source_t& src) {
     return false;
 }
 
-void posix_endpoint_t::stop_and_join() {
-    wait_module_t* const w = wait_.load(std::memory_order_acquire);
-    if (w == nullptr) return;
-    w->detach(src_);
+void posix_endpoint_t::stop_driver() {
     if (!own_) return;
     own_->stop();
     thread_.join();
+}
+
+void posix_endpoint_t::stop_and_join() {
+    wait_module_t* const w = wait_.load(std::memory_order_acquire);
+    if (w == nullptr) return;
+    // A private module's driver goes first: once it is joined no callback can run, so the
+    // detach takes no lock and waits on nobody, and a teardown made under the caller's lock
+    // (a transport vertex's control plane) cannot cross a callback that takes that lock.
+    stop_driver();
+    w->detach(src_);
 }
 
 void posix_endpoint_t::set_snd_timeout(int fd) {
@@ -885,8 +892,10 @@ void slot_server_t::shut_down_slots() {
 }
 
 void slot_server_t::stop_and_join() {
-    // The listener first: `slots_` grows only in its callback, so once its detach has waited
-    // that out the table is still, and the sessions can be walked off. Then a fallback thread.
+    // A fallback thread first, for the reason posix_endpoint_t::stop_and_join gives. Then the
+    // listener: `slots_` grows only in its callback, so once its detach has waited that out
+    // (or the driver is joined) the table is still, and the sessions can be walked off.
+    stop_driver();
     if (wait_module_t* const w = waiting()) {
         w->detach(src_);
         for (const mem::poly_ptr_t<session_base_t>& s : slots_) w->detach(*s);
