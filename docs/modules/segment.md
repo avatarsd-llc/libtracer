@@ -44,7 +44,7 @@ On a core with no atomic read-modify-write — Cortex-M0/M0+ (no LDREX/STREX), r
 the count takes its *guarded* binding instead: a load and a store inside one section of
 the build's guard, `config_t::guard_t` (`core/include/libtracer/segment.hpp:inline constexpr bool kNativeRefCount`,
 `core/include/libtracer/segment.hpp:class basic_ref_count_t`). The choice is made from the target, the same
-way `tr::rmw_counter_t` makes it for a vertex's write sequence; nothing is defined on the
+way `tr::rmw_counter_t` picks its binding; nothing is defined on the
 command line. A single-threaded node makes the guard free by binding `tr::no_guard_t` in
 its `libtracer/config_override.hpp`, which is what the footprint sentinels do
 (`core/tests/footprint/config/libtracer/config_override.hpp`). On a host the substrate test

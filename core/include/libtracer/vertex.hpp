@@ -701,7 +701,7 @@ struct ring_state_t {
     bool reliable = false;
     /** @brief STREAM drain cursor (RFC-0008 §E): ring APPENDS not yet flushed, so a
      *         propagate drains only what was appended; guarded by the vertex mutex. NOT a
-     *         `write_seq_` delta (#925) — that bumps on a SHED append, fabricating a tail.
+     *         count of writes (#925) — a write lands on a SHED append too, fabricating a tail.
      *
      *         Lives here, not on `%vertex_ext_t`, because it counts entries of THIS ring: it
      *         dies with the ring and @ref release_all zeroes it, so "a non-zero cursor implies
@@ -900,64 +900,6 @@ struct vertex_ext_t {
 };
 
 /**
- * @brief A vertex's WRITE SEQUENCE: the await cursor, bumped once per publish (RFC-0028 D6,
- *        #1621).
- *
- * 32 bits on every target, with no configuration trait. On a 64-bit host a 32- and a 64-bit
- * `lock xadd` cost the same and `vertex_t`'s tail padding absorbs the 4 bytes, so the wide
- * form bought nothing there; on rv32 it was 8 B wide and 8-aligned (4 B of padding) and every
- * publish called `__atomic_fetch_add_8`, which masks interrupts on ESP-IDF. The 32-bit bump
- * is one `amoadd.w` where the core has atomic RMW, and one section of `guard_t` where
- * it has none (rv32imc, Cortex-M0): `vertex_t::write_seq_` is a `tr::rmw_counter_t`, which
- * picks the binding at compile time.
- *
- * It is compared for EQUALITY only (`await` waits for `current != seq0`), never ordered, so a
- * wrap is not an event. The one alias is exactly 2^32 publishes to one vertex inside one
- * await window (49 days of a 1 kHz publisher), and that reads as "no change" until the
- * waiter's timeout fires: a spurious timeout, never a lost value.
- */
-using write_seq_t = std::uint32_t;
-
-/**
- * @brief This build's `tr::rmw_counter_t` over @p T — native where `T` is lock-free on the
- *        target, otherwise the guarded binding over @ref guard_t (#1697).
- *
- * The one place the binding rule is spelled, so every hot counter the library owns picks it the
- * same way: one hardware RMW where the core has one (`amoadd.w` on rv32imac, `lock xadd` on
- * x86-64), one section of the build's guard where it has none (rv32imc such as the ESP32-C3,
- * Cortex-M0/M0+), and never a libatomic call. @ref kForceGuardedRmw selects the guarded
- * binding on a host whose atomics are native, so that path is testable there.
- *
- * @tparam T      An unsigned integer, at most a machine word wide.
- * @tparam kOrder The memory order of every access: `seq_cst` by default (the write sequence's
- *                Dekker pair needs it), `relaxed` for a tally that orders nothing.
- */
-template <class T, std::memory_order kOrder = std::memory_order_seq_cst>
-using bound_rmw_counter_t =
-    ::tr::rmw_counter_t<T, guard_t, !kForceGuardedRmw && std::atomic<T>::is_always_lock_free,
-                        kOrder>;
-
-/**
- * @brief The counter that carries `write_seq_t` — native where the width is lock-free,
- *        otherwise the guarded binding over @ref guard_t (#1715).
- *
- * @ref kForceGuardedRmw selects the guarded binding on a host whose atomics are native, so the
- * path a target without atomic RMW takes is testable there. Every guarded bump of a vertex's
- * counter takes the guard anchored at that vertex's LKV slot, so the bump fuses into the
- * publish section (see `vertex_t::store`).
- */
-using write_seq_counter_t = bound_rmw_counter_t<write_seq_t>;
-
-/**
- * @brief TEST-ONLY door that presets a vertex's write sequence, so a test can drive the real
- *        atomic through the 2^32 wrap (#1621) without 4 x 10^9 publishes.
- *
- * Declared here and never defined by the library: only `core/tests/write_seq_test.cpp`
- * defines it. It is not part of the API; code outside the test suite must not define it.
- */
-struct vertex_seq_test_door_t;
-
-/**
  * @brief An L4 graph vertex: a named, addressable position holding a value, a bounded
  *        history, or a user handler (docs/reference/11 §roles).
  *
@@ -967,7 +909,7 @@ struct vertex_seq_test_door_t;
  * history ring, the subscriber list, and the await waiter accounting. Non-copyable.
  *
  * The public surface is a VERB interface — reading the stored value (@ref read_stored),
- * readiness (@ref note_write / @ref wait_for_change / the seq cursors), edges
+ * readiness (@ref wake_waiters / @ref wait_for_change), edges
  * (@ref add_edge / @ref clear_edge / @ref snapshot_edges), and ACL state (@ref set_acl /
  * @ref with_acl / @ref with_aces / @ref with_effective_aces) — each verb taking the vertex mutex
  * internally (the LKV slot stays
@@ -1151,8 +1093,7 @@ class vertex_t {
     }
 
    private:
-    friend class graph_t;                  // sole caller of the map-lock mutators below (#867).
-    friend struct vertex_seq_test_door_t;  // test-only: presets write_seq_ to reach the wrap.
+    friend class graph_t;  // sole caller of the map-lock mutators below (#867).
 
     /**
      * @brief Fill this node with a registration's identity: set the role and handlers, and
@@ -1529,7 +1470,7 @@ class vertex_t {
     // claimable by any user who defines a class of that name.
     /**
      * @brief Publish @p value as this vertex's state: swap the last-known-value (lock-free),
-     *        bump the write sequence, and wake awaiters. **A PRODUCER NEVER QUEUES.**
+     *        and wake awaiters. **A PRODUCER NEVER QUEUES.**
      *
      * ONE tail, for every role (RFC-0025 §4.6.1 Amendment 2, clause 1). The producer-side ring
      * machinery this verb used to run — the `kRingAppendProbe = 1024` heuristic, the deque
@@ -1543,7 +1484,7 @@ class vertex_t {
      * Zero allocations here: the caller minted the one `value_t` block the publish costs
      * (RFC-0028 §5.1; `graph_t::store_value` draws it from the graph's source) and this verb
      * only publishes it. Not for Handler-role writes — the graph runs `handlers().on_write`
-     * and calls @ref note_write instead.
+     * and calls @ref wake_waiters instead.
      *
      * @note **Cross-writer total order is no longer implied here.** The stripe mutex used to
      *       serialize STREAM appends, so ring order doubled as a global order across writers.
@@ -1572,44 +1513,11 @@ class vertex_t {
         // vertex is not actually holding.
         auto* v = const_cast<value_t*>(value.get());
         v->retain();
-        if constexpr (kFusedPublish) {
-            // FUSED PUBLISH (#1715): the counter is guarded and the slot publishes under that
-            // same guard, so the bump runs inside the slot's section — one guard section per
-            // publish instead of two. The publication argument for the fused form is restated
-            // on the slot's `store(v, in_section)` in lkv_slot.hpp; the bump stays a seq_cst
-            // store, so the waiterless pair below is unchanged.
-            (void)publish_fused(lkv_, write_seq_, v);
-        } else {
-            if (!lkv_.store(v)) {  // #477 soft-fail — the graph maps it to BACKPRESSURE
-                value_t::release(v);
-                return false;
-            }
+        if (!lkv_.store(v)) {  // #477 soft-fail — the graph maps it to BACKPRESSURE
+            value_t::release(v);
+            return false;
         }
-
-        // WAITERLESS PUBLISH: no ring to append and nobody in `await` ⇒ take no lock at all
-        // (#555). #370 already skipped the condvar CALL on this path; the mutex itself was
-        // what remained, and it was not free: measured, it sits immediately downstream of the
-        // `lkv_` atomic publish, so the two serializing regions land back-to-back on the
-        // critical dependency chain and cost ~38 cycles of the write's ~335. (The stripe lock
-        // in `snapshot_edges` overlaps the tail and measures zero — this one does not.)
-        //
-        // Why this cannot lose a wakeup. Both sides are seq_cst, so they share one total
-        // order. WRITER: bump `write_seq_`, THEN read `waiters`. WAITER: publish `++waiters`,
-        // THEN read `write_seq_` to evaluate its predicate. If the writer reads `waiters == 0`
-        // it is ordered before the waiter's store, hence before the waiter's read of the
-        // sequence — so the waiter observes the bump and `wait_for` returns on its FIRST
-        // predicate evaluation, without ever blocking. If instead the waiter got there first,
-        // the writer reads a non-zero count and takes the slow path below, which acquires the
-        // stripe mutex the waiter must hold to block. Neither interleaving leaves a sleeper.
-        //
-        // A spurious slow path is harmless: `waiters` is per STRIPE, so an unrelated vertex's
-        // awaiter makes this publish take the lock and notify needlessly. That is the same
-        // collision `vertex_stripe_t` already documents (a spurious wake plus a re-check,
-        // never a correctness change).
-        vertex_stripe_t& st = vertex_stripe_of(this);          // one lookup per verb (#370)
-        if constexpr (!kFusedPublish) write_seq_.bump(&lkv_);  // anchored like the fused bump
-        if (st.waiters.load(std::memory_order_seq_cst) == 0) return true;
-        wake_waiters(st);
+        wake_waiters();
         return true;
     }
 
@@ -1813,27 +1721,75 @@ class vertex_t {
 
    public:
     /**
-     * @brief Record a Handler-role write: bump the write sequence and wake awaiters
-     *        (the vertex stores no value — the user handler consumed it).
+     * @brief Wake this vertex's awaiters after a write: the blocking ones, and the armed
+     *        one-shot ones (ADR-0084), which fire on this thread.
+     *
+     * Every write calls it once, after its effect: @ref store after the publish, and the
+     * graph after a Handler-role write or a write to a vertex that retains nothing. There is
+     * no write sequence (#2655): a waiter wakes because a write unlinks it.
+     *
+     * WAITERLESS: nobody in `await` on this stripe ⇒ one load and no lock at all (#555).
+     * Measured, the stripe mutex here sat immediately downstream of the `lkv_` publish, so the
+     * two serializing regions landed back-to-back on the critical dependency chain and cost
+     * ~38 cycles of the write's ~335.
+     *
+     * Why this cannot lose a wakeup. A waiter raises `waiters` (seq_cst) under the stripe
+     * mutex, in @ref arm_waiter, before it blocks, and it blocks until a write or an expiry
+     * UNLINKS it: it reads nothing of the vertex to decide. This load is seq_cst too, so the
+     * two share one total order. If it reads 0, the arm is ordered after it, so this write
+     * preceded the wait and is not the waiter's to see. Otherwise the slow path takes the
+     * stripe mutex the arm held, finds the waiter linked and unlinks it. Neither interleaving
+     * leaves a sleeper that this write should have woken.
+     *
+     * A spurious slow path is harmless: `waiters` is per STRIPE, so an unrelated vertex's
+     * awaiter makes this write take the lock needlessly. The slow path unlinks only THIS
+     * vertex's waiters; the collision costs a notify and a re-check (`vertex_stripe_t`).
+     *
+     * The fired waiters are unlinked under the stripe mutex and called AFTER it is released,
+     * so a fire that sends a reply, or arms a fresh waiter on this very stripe, cannot
+     * deadlock against it. `next` is read before each call because the callee owns its
+     * waiter and may release it.
      */
-    void note_write() {
-        vertex_stripe_t& st = vertex_stripe_of(this);  // one lookup per verb (#370)
-        // Anchored at the LKV slot: every guarded bump of one counter takes the same guard,
-        // so this one serializes against the fused bump in `store` (#1715).
-        write_seq_.bump(&lkv_);
+    void wake_waiters() noexcept {
+        vertex_stripe_t& st = vertex_stripe_of(this);                 // one lookup per verb (#370)
         if (st.waiters.load(std::memory_order_seq_cst) == 0) return;  // waiterless (#555)
-        wake_waiters(st);
+        await_waiter_t* fired = nullptr;
+        {
+            const std::lock_guard lock(st.m);
+            vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
+            for (await_waiter_t** p = &st.armed; *p != nullptr;) {
+                await_waiter_t* const w = *p;
+                if (w->vertex != this) {
+                    p = &w->next;
+                    continue;
+                }
+                *p = w->next;
+                w->armed = false;
+                w->next = nullptr;
+                st.waiters.fetch_sub(1, std::memory_order_seq_cst);
+                // A blocking await's waiter (no fire) only leaves the list: the notify above
+                // wakes its thread, which owns it from here and may already be returning.
+                if (w->fire == nullptr) continue;
+                w->next = fired;
+                fired = w;
+            }
+        }
+        while (fired != nullptr) {
+            await_waiter_t* const next = fired->next;
+            fired->next = nullptr;
+            fired->fire(fired->ctx, *fired);
+            fired = next;
+        }
     }
 
     /**
      * @brief Arm the one-shot waiter @p w on this vertex (ADR-0084): it fires on the next
      *        change, on the writer's thread, instead of blocking the caller.
      *
-     * The non-blocking twin of @ref wait_for_change, and the same half of the Dekker pair
-     * documented on `store`. The waiter count is raised (seq_cst) under the stripe mutex
-     * before this returns, so a publish ordered after the arm takes the slow path and finds
-     * @p w, and a publish ordered before it is a change that preceded the wait — exactly what
-     * @ref wait_for_change's snapshot treats as "before".
+     * The non-blocking twin of @ref wait_for_change, and the waiter's half of the ordering
+     * argued on @ref wake_waiters. The waiter count is raised (seq_cst) under the stripe mutex
+     * before this returns, so a write ordered after the arm takes the slow path and finds
+     * @p w, and a write ordered before it is a change that preceded the wait.
      * @param w An unarmed waiter whose `fire` is set; it must stay alive until it fires or
      *          @ref disarm_waiter returns true for it.
      */
@@ -1875,42 +1831,32 @@ class vertex_t {
     [[nodiscard]] value_ref_t read_stored() const { return lkv_.load(); }
 
     /**
-     * @brief Block until the write sequence moves past @p seq0, or until
+     * @brief Block until a write to this vertex unlinks the waiter, or until
      *        `graph_t::expire_awaits` is passed a `now` that reaches @p d's deadline.
      *
      * A blocking await is an armed waiter with no `fire` (#2579): @ref arm_waiter links it and
-     * raises the stripe's waiter count, the waiter's half of the Dekker pair documented on
-     * `store`, so a publish ordered after the arm takes the slow path, unlinks it and notifies
-     * the stripe's condvar, and one ordered before it moved the sequence the predicate reads.
-     * No timed wait runs: the deadline is the application's, and an expiry unlinks the waiter
-     * the same way a change does.
-     * @param seq0 The @ref current_seq snapshot the caller waits to see surpassed.
-     * @param d    Whose wait it is and its deadline; it must outlive this call.
-     * @return true iff a change was observed (`write_seq_ != seq0`: an equality test, so a
-     *         wrap between the snapshot and the check is still a change); false on expiry.
+     * raises the stripe's waiter count, so a write ordered after the arm takes the slow path of
+     * @ref wake_waiters, unlinks it and notifies the stripe's condvar. A write ordered before
+     * the arm preceded the wait. No timed wait runs: the deadline is the application's, and an
+     * expiry unlinks the waiter the same way a write does, marking @p d expired.
+     * @param d Whose wait it is and its deadline; it must outlive this call.
+     * @return true iff a write ended the wait; false on expiry.
      */
-    [[nodiscard]] bool wait_for_change(write_seq_t seq0, await_deadline_t& d) {
+    [[nodiscard]] bool wait_for_change(await_deadline_t& d) {
         const std::size_t idx = vertex_stripe_index(this);
         await_waiter_t w{.ctx = &d};
         arm_waiter(w);
-        // Disarmed on every exit, a throwing lock included: a change that won the race, or an
-        // exception, would otherwise leave this stack waiter linked on the stripe.
+        // Disarmed on every exit, a throwing lock included: an exception would otherwise
+        // leave this stack waiter linked on the stripe.
         struct disarm_on_exit_t {
             await_waiter_t& w;
             ~disarm_on_exit_t() { (void)disarm_waiter(w); }
         } const disarm{w};
         std::unique_lock lock(vertex_stripe_at(idx).m);
-        vertex_stripe_cv(idx).wait(lock, [&] { return !w.armed || write_seq_.load() != seq0; });
-        lock.unlock();  // disarm_waiter takes the same stripe mutex
-        return write_seq_.load() != seq0;
-    }
-
-    /** @brief The current write sequence (bumped per assign — the await predicate base).
-     *         32-bit and wrapping (`write_seq_t`): compare it for equality only. */
-    [[nodiscard]] write_seq_t current_seq() const {
-        // Lock-free (#555): the sequence is atomic, and a publish no longer holds the stripe
-        // mutex while bumping it — so taking the lock here would synchronize against nothing.
-        return write_seq_.load();
+        vertex_stripe_cv(idx).wait(lock, [&] { return !w.armed; });
+        const bool changed = !d.expired;  // written by expire_awaits under this mutex
+        lock.unlock();                    // disarm_waiter takes the same stripe mutex
+        return changed;
     }
 
     /**
@@ -1941,9 +1887,9 @@ class vertex_t {
      *       ADR-0065 `%tr::mem::block_array_t` seam: its element is a `std::shared_ptr`,
      *       which the seam's memcpy relocation would tear, and @p out is caller storage of a
      *       type this signature fixes.
-     * @note Counts ring APPENDS, never a `write_seq_` delta (#925): that sequence is the
-     *       await/readiness cursor and bumps on a SHED append too, so the surplus would
-     *       re-take an ALREADY-FLUSHED entry — a drain removes nothing from the ring.
+     * @note Counts ring APPENDS, never writes (#925): a write lands on a SHED append too, so
+     *       the surplus would re-take an ALREADY-FLUSHED entry — a drain removes nothing from
+     *       the ring.
      * @param out       Caller storage the drained entries are assigned into (overwritten).
      * @param gap_before Optional out: shed points observed on this ring since the previous
      *                  drain — the in-order `tr::flow::address_shift_gap` signal of RFC-0025
@@ -2672,12 +2618,10 @@ class vertex_t {
      *        owner: the value seam (swap-and-park, never freed — a lock-free reader may
      *        still hold the old pointer), the stored value and history, the `:acl` (own
      *        ACEs + the cached merge), the app-field table, the storage policy, the role,
-     *        and the delivery mode. **Survives** by design: `write_seq_` (forward-only per
-     *        address, mod 2^32; a reset would hand a live `await` snapshot back its own
-     *        value), `listeners_above_` (counts ANCESTOR subscribers, which retiring THIS
-     *        vertex never touched — the graph adjusts it for cleared descendant edges), and
-     *        the allocation / name / links (ADR-0057 insert-only — emptied, never freed or
-     *        detached).
+     *        and the delivery mode. **Survives** by design: `listeners_above_` (counts ANCESTOR
+     * subscribers, which retiring THIS vertex never touched — the graph adjusts it for cleared
+     * descendant edges), and the allocation / name / links (ADR-0057 insert-only — emptied, never
+     * freed or detached).
      *
      * @note `registered_` is NOT touched here — it is map-lock state the graph flips, and it
      *       flips it for the whole subtree BEFORE calling this, so an access check that
@@ -3810,78 +3754,6 @@ class vertex_t {
     // Null for the common default leaf. Published once by ensure_ext (CAS), never
     // cleared; freed by the destructor.
     std::atomic<vertex_ext_t*> ext_{nullptr};
-    // Bumped per assign (seq_cst: the writer half of the lost-wakeup pair in `store`); await
-    // waits for it to differ from its snapshot. 32-bit since #1621 (see write_seq_t): one
-    // `amoadd.w` on rv32imac where the 64-bit form was a libatomic call, and a guarded store
-    // on a core with no atomic RMW (rmw_counter_t). Nothing else reads it: the propagate
-    // sweep's IF_NEWER test is its pending set (RFC-0008 §B), not a sequence, and the wire
-    // never carries it.
-    write_seq_counter_t write_seq_;
-
-    /**
-     * @brief The slow half of a publish that saw `waiters != 0`: wake the blocking awaiters
-     *        and fire this vertex's armed one-shot waiters (ADR-0084).
-     *
-     * The fired waiters are unlinked under the stripe mutex and called AFTER it is released,
-     * so a fire that sends a reply, or arms a fresh waiter on this very stripe, cannot
-     * deadlock against it. `next` is read before each call because the callee owns its
-     * waiter and may release it.
-     */
-    void wake_waiters(vertex_stripe_t& st) noexcept {
-        await_waiter_t* fired = nullptr;
-        {
-            const std::lock_guard lock(st.m);
-            vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
-            for (await_waiter_t** p = &st.armed; *p != nullptr;) {
-                await_waiter_t* const w = *p;
-                if (w->vertex != this) {
-                    p = &w->next;
-                    continue;
-                }
-                *p = w->next;
-                w->armed = false;
-                w->next = nullptr;
-                st.waiters.fetch_sub(1, std::memory_order_seq_cst);
-                // A blocking await's waiter (no fire) only leaves the list: the notify above
-                // wakes its thread, which owns it from here and may already be returning.
-                if (w->fire == nullptr) continue;
-                w->next = fired;
-                fired = w;
-            }
-        }
-        while (fired != nullptr) {
-            await_waiter_t* const next = fired->next;
-            fired->next = nullptr;
-            fired->fire(fired->ctx, *fired);
-            fired = next;
-        }
-    }
-
-    /**
-     * @brief The fused publish: swap @p v into @p slot and bump @p seq inside the slot's one
-     *        guard section (#1715).
-     *
-     * A template so its fused arm is only instantiated where it applies: `vertex_t` is not a
-     * template, so an `if constexpr` in `store` alone would still check the arm a native or
-     * `hazard_slot_t` build cannot compile. The other arm is the separated form, kept valid
-     * for that reason and never called.
-     */
-    template <class Slot, class Seq>
-    [[nodiscard]] static bool publish_fused(Slot& slot, Seq& seq, value_t* v) noexcept {
-        if constexpr (publishes_under<Slot, guard_t> && !Seq::is_native) {
-            return slot.store(v, [&seq]() noexcept { seq.bump_in_section(); });
-        } else {
-            const bool stored = slot.store(v);
-            if (stored) seq.bump(&slot);
-            return stored;
-        }
-    }
-
-    /** @brief Whether `store` bumps `write_seq_` inside the LKV slot's guard section (#1715):
-     *         the counter is guarded and the bound slot publishes under that same guard. */
-    static constexpr bool kFusedPublish =
-        !write_seq_counter_t::is_native && publishes_under<lkv_slot_t, guard_t>;
-
     // Subtree-subscription bookkeeping (RFC-0005): every subscription observes its
     // vertex AND all descendants, so a write must fan out to ancestor subscribers
     // too ("vertical bubbling"). These lock-free counters keep the idle write path

@@ -344,7 +344,7 @@ notion of a batch:
 
 | Call | State | Edges |
 | --- | --- | --- |
-| `assign(v, value)` | swaps the LKV, appends to the stream ring, bumps the write sequence (waking `await`), marks `v` for the next covering sweep | none |
+| `assign(v, value)` | swaps the LKV, appends to the stream ring, wakes `await`, marks `v` for the next covering sweep | none |
 | `propagate(v)` | none | delivers `v`'s current value, plus the qualifying descendants of `v`'s subtree |
 | `write(v, value)` | as `assign` | delivers immediately |
 

@@ -119,10 +119,10 @@ void test_stored_value() {
 /**
  * @brief The LKV publish and the seq bump that publishes nothing, through the handle (#1300).
  *
- * Restates what the bare-`vertex_t` storage suite asserted on `store()` / `note_write()`
+ * Restates what the bare-`vertex_t` storage suite asserted on `store()` / the readiness wake
  * directly before `vertex_t::store()` became `graph_t`'s alone: `assign` is the verb that
- * publishes a last-known-value, and a HANDLER write is the verb that moves the readiness
- * cursor without publishing one.
+ * publishes a last-known-value, and a HANDLER write is the verb that wakes awaiters
+ * without publishing one.
  */
 void test_assign_lkv_and_seq_bump() {
     std::printf("assign — the LKV publish, and a seq bump that publishes nothing:\n");
@@ -140,17 +140,17 @@ void test_assign_lkv_and_seq_bump() {
           "a later assign wins (last-writer-wins)");
 
     // The "bump without storing" half: a HANDLER whose on_write consumes and whose on_read is
-    // unset. The write bumps the await cursor — a blocked awaiter WAKES — and nothing lands,
-    // so the wake answers NOT_FOUND rather than TIMEOUT. That is `note_write` observed through
-    // the only public seam that can see it.
+    // unset. The write wakes a blocked awaiter and nothing lands, so the
+    // wake answers NOT_FOUND rather than TIMEOUT. That is the HANDLER wake observed through the
+    // only public seam that can see it.
     tr::graph::handlers_t h;
     auto h_on_write = [](const tr::graph::value_t&,
                          const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> { return {}; };
     h.on_write = tr::graph::thunk(h_on_write);
     tr::graph::vertex_handle_t hv =
         g.register_vertex(path_t("/lkv/sink"), role_t::HANDLER, std::move(h));
-    // The #1418 edge-trigger again, on the HANDLER arm: `note_write` bumps the same sequence
-    // `await` snapshots on entry, so a write that beats this thread into `await` is missed and
+    // The #1418 edge-trigger again, on the HANDLER arm: `await` sees a write ordered after it
+    // arms, so a write that beats this thread into `await` is missed and
     // the await times out — which would report TIMEOUT where the assertion demands NOT_FOUND.
     // Re-arm from the writer under a deadline, exactly as `test_await` below does.
     std::atomic<bool> awaited{false};
@@ -281,7 +281,7 @@ void test_await() {
     graph_t g;
     tr::graph::vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 
-    // Same edge-trigger as #1418: `await` snapshots `write_seq_` on entry, so a write that
+    // Same edge-trigger as #1418: `await` sees a write ordered after it arms, so a write that
     // lands before THIS thread gets into `await` is never observed and the await runs to its
     // full timeout. The `sleep_for(40ms)` this replaced was a guess that the awaiter would be
     // parked by then. Re-arm from the writer instead, until the awaiter is out; the writer's
@@ -1091,7 +1091,7 @@ void test_assign_propagate() {
 
     // Self-clearing: a second sweep with nothing newly assigned delivers nothing.
     (void)g.propagate(r);
-    check(*ca == 1, "a clean subtree flushes nothing (write_seq did not advance)");
+    check(*ca == 1, "a clean subtree flushes nothing (nothing is pending)");
 
     // Selective subtree propagation: assign b and c, one propagate delivers exactly them.
     (void)g.assign(b, make_value({0x10}));

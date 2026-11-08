@@ -342,7 +342,7 @@ constexpr std::size_t kScratchBytes = 256;
  * Sampled in a single call, in the vocabulary `core/STYLE.md` §Introspection fixes, in the
  * declaration order of the underlying POD. The member set is a function of the SEAM CLASS,
  * so `mem.control` and `mem.ring` are byte-shaped alike and a reader parses one block per
- * class. Nothing here bumps `write_seq_` — counters are not writes, which is precisely why
+ * class. Nothing here wakes an awaiter — counters are not writes, which is precisely why
  * the field is readable and never awaitable.
  *
  * A free function rather than a `graph_t` member on purpose: every accessor it reads is

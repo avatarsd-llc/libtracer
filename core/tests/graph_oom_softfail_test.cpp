@@ -667,9 +667,9 @@ void test_ring_reliable_answers_backpressure() {
  * @brief A SHED ring append must not make the next drain re-deliver the previous entry
  *        (#925) — the drain counts APPENDS, not write-sequence bumps.
  *
- * `store` bumps `write_seq_` unconditionally (it is the await/readiness cursor, and the
- * LKV publish above it DID land), so a drain that derives "how many entries are new" from
- * a sequence delta claims a tail entry the shed never appended. Nothing is ever removed
+ * A write counts as a write whether or not its append was shed (the LKV publish above it
+ * DID land), so a drain that derived "how many entries are new" from a count of writes
+ * would claim a tail entry the shed never appended. Nothing is ever removed
  * from the ring on a drain, so it re-takes the newest ALREADY-FLUSHED entry and the
  * subscriber observes the same stream element twice — on machinery whose whole point is
  * an in-order queue rather than a coalesce (RFC-0008 §E).

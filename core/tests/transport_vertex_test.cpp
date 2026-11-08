@@ -185,13 +185,13 @@ void test_await_link_state() {
         const auto r = tr::testing::await_within(node, path_t("/net/ws-client/up"), 2s);
         woke.set_value(r.has_value());
     });
-    // `await` is EDGE-triggered: `graph_t::await` snapshots `write_seq_` on ENTRY, on the
-    // WAITER's own thread (`seq0 = v->current_seq()`, core/src/graph.cpp), then blocks for a
-    // bump past it. A link-up write that lands before the waiter got there is therefore never
-    // observed, and the waiter runs to its full 2 s timeout. That is intended — reference/04
-    // says await blocks until the NEXT write — so the fix is here, not in the library. The
-    // `sleep_for(20ms)` this replaced was a guess that 20 ms is enough for a thread to reach a
-    // blocking call, and on a loaded CI container it is not (#1418).
+    // `await` is EDGE-triggered: `graph_t::await` arms its waiter on ENTRY, on the
+    // WAITER's own thread (core/src/graph.cpp), then blocks until a write unlinks it. A link-up
+    // write that lands before the waiter got there is therefore never observed, and the waiter runs
+    // to its full 2 s timeout. That is intended — reference/04 says await blocks until the NEXT
+    // write — so the fix is here, not in the library. The `sleep_for(20ms)` this replaced was a
+    // guess that 20 ms is enough for a thread to reach a blocking call, and on a loaded CI
+    // container it is not (#1418).
     //
     // Re-arm the edge instead, until the waiter is SEEN to have taken it: `set_link_state` has
     // no "already UP" short-circuit, so every repeat reaches `graph_.write` and bumps the

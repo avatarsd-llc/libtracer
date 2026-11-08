@@ -1144,8 +1144,7 @@ class graph_t {
      * registration that revives the same address
      * inherits **nothing** of the retired owner — in particular the revived path inherits
      * its live ancestor's ACL policy, never the retired one's (the §Discussion-7 ruling:
-     * an ACL does not survive churn). `write_seq_` survives (forward-only per address,
-     * modulo 2^32).
+     * an ACL does not survive churn).
      *
      * Delivers nothing and wakes no `await` (§B.5). Idempotent (§B.4): retiring an
      * already-retired or unregistered vertex succeeds and does nothing. The root cannot be
@@ -1209,8 +1208,8 @@ class graph_t {
      *          in @ref await are invisible here — this counts subscription edges only, which
      *          ADR-0006 makes a field-write to `:subscribers[]` rather than one of its three
      *          verbs. A producer that skips its *delivery* on `false` is fine; one that also
-     *          skips the VALUE STORE starves every awaiter (no `write_seq_` bump to wake
-     *          them) and freezes the LKV for every reader.
+     *          skips the VALUE STORE starves every awaiter (no write to wake them) and
+     *          freezes the LKV for every reader.
      *
      * @warning **A skip here has no durability-latch backstop.** ADR-0049's latch belongs to
      *          @ref vertex_t::own_subs_ordered's fan-out skip, whose protocol is *store the

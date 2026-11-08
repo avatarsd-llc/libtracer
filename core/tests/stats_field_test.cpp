@@ -303,7 +303,7 @@ void test_census_is_read_only() {
  * @brief The counters are not writes: reading them advances nothing an `await` could see.
  *
  * The C++-side half of "readable, never awaitable" (§D.6). Counter updates deliberately do
- * NOT bump `write_seq_` — making them real writes would put a publish on the hot path — so
+ * NOT wake awaiters — making them real writes would put a publish on the hot path — so
  * nothing can ever wake a wait on this surface, which is why the wire door refuses the
  * AWAIT by value instead of sleeping forever.
  */

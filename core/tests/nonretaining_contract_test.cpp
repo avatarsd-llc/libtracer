@@ -62,7 +62,7 @@ using tr::testing::make_value;
 /**
  * @brief Await @p v while a writer thread re-arms the write until the await is out.
  *
- * `await` is EDGE-triggered — it snapshots `write_seq_` on entry — so a single write racing the
+ * `await` is EDGE-triggered — it sees a write ordered after it arms — so a single write racing the
  * call is legitimately unobservable (#1418). Re-arming from the writer removes the race without
  * guessing at a sleep, under a deadline that exceeds the await timeout so a broken wake path
  * fails rather than hangs. Every re-arm writes the SAME byte, so the value assertion is exact.

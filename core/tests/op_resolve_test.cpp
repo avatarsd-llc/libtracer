@@ -234,8 +234,8 @@ void test_await() {
     tr::detail::store_le<std::uint64_t>(tobuf, 5'000'000'000ull);  // 5s
     const auto fwd = b_fwd(fwd_op_t::AWAIT, b_path({"sensor", "temp"}), b_path({"reply-ep"}), {},
                            b_value(tobuf));
-    // The AWAIT op resolves through `graph_t::await`, which is EDGE-triggered (it snapshots
-    // `write_seq_` on entry), so a write landing before the resolve gets there is never
+    // The AWAIT op resolves through `graph_t::await`, which is EDGE-triggered (it sees a
+    // write ordered after it arms), so a write landing before the resolve gets there is never
     // observed — the #1418 defect. The `sleep_for(40ms)` this replaced was a guess about how
     // long that takes. Re-arm from the writer until the resolve is out, under a deadline that
     // exceeds the 5 s await timeout above so a broken wake path still fails rather than hangs.
@@ -345,8 +345,8 @@ void test_await_field_selector_is_enotty() {
     }
 
     // The node-scoped census (#1503 step 5, RFC-0010 Amendment 1 §D.6). "Readable, never
-    // awaitable" needs NO new guard and mints no new status: counters do not bump
-    // `write_seq_`, so nothing could ever fire such a wait, and the unconditional refusal
+    // awaitable" needs NO new guard and mints no new status: counters are not writes
+    // and wake no awaiter, so nothing could ever fire such a wait, and the unconditional refusal
     // above already answers it — the amendment CITES this rule rather than adding one.
     // Named here so a future narrowing of that guard fails a test that says `:stats`.
     {

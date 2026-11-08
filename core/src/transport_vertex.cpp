@@ -1339,7 +1339,7 @@ result_t<void> transport_vertex_t::set_link_state_locked(ctl_txn_t& txn, std::st
                                                          link_state_t state) {
     conn_t* const it = conns_.find(name);
     if (it == nullptr) return std::unexpected(status_t::NOT_FOUND);
-    // Resolution is all that happens under the lock. The write itself bumps write_seq_ and
+    // Resolution is all that happens under the lock. The write itself wakes awaiters and
     // DELIVERS to subscribers (RFC-0008 §D) — so await(/net/<name>) fires and a subscribe
     // streams the transition — and a routing-plane subscriber of this very connection's
     // liveness drives `acquire_link`/`release_link` (RFC-0014 §4's standing-binding seam),
