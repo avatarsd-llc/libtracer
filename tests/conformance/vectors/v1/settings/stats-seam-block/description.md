@@ -54,8 +54,8 @@ a node's memory census is not first-contact material, so a denied caller is refu
 thereby learns the seam exists — intended, and no more than the published `settings` /
 `children` namespaces already disclose. The fourth row needs no new rule at all: every
 field-tailed AWAIT has answered `SCHEMA_NOT_FOUND` unconditionally since
-[#585](https://github.com/avatarsd-llc/libtracer/issues/585), and counters do not bump
-`write_seq_`, so nothing could ever fire such a wait.
+[#585](https://github.com/avatarsd-llc/libtracer/issues/585), and counters are not writes,
+so nothing could ever fire such a wait.
 
 **Behavioural binding** (see [`../../../HARNESS.md`](../../../HARNESS.md) § *What a vector
 gates*): `core/tests/stats_field_test.cpp` pins these bytes byte-exact, the node-scoped

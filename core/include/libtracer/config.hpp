@@ -581,8 +581,8 @@ struct default_config_t {
      * (`spin_sync_t` / `portmux_sync_t`), bound separately from this one. It must model
      * `tr::guard` (`%guard.hpp`): `lock()` / `unlock()`, a static `for_address(const void*)`
      * the slot takes, and the `is_isr_safe` / `is_nonblocking` / `may_spin` / `name` traits.
-     * It also serializes the write-sequence bump on a core with no atomic read-modify-write
-     * (`tr::rmw_counter_t`).
+     * It also serializes a `tr::rmw_counter_t` bump on a core with no atomic
+     * read-modify-write.
      *
      * Spelled `reader_guard_t` until #1703. A fragment that still defines that name is refused
      * at compile time (see the tripwire after @ref config_t), because a fragment whose binding

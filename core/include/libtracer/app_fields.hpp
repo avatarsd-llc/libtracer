@@ -51,7 +51,7 @@ namespace tr::graph {
  * nothing |
  *
  * `NONE` on a value vertex is the pure-relay shape: the write is delivered to every
- * subscriber and released, the write sequence still moves (so `await` wakes), and `read`
+ * subscriber and released, `await` still wakes, and `read`
  * answers `NOT_FOUND`. It is a permitted policy, not a named role (RFC-0028 §11 ruling 3).
  * Owner-side and host-only: no peer reads or writes it.
  */

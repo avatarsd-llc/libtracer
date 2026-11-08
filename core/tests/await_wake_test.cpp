@@ -198,11 +198,15 @@ void test_write_in_the_entry_window_wakes() {
 void test_write_between_arm_and_wait_is_seen() {
     std::printf("wait_for_change: a write between arm and wait returns at once:\n");
     vertex_t v{role_t::STORED_VALUE, {}, {}};
-    tr::graph::await_deadline_t d{};  // kNoDeadline: only a write can end it
+    graph_t g;  // owns the deadline: a regression expires (returns false) instead of hanging
+    const std::uint64_t now = tr::testing::now_ns();
+    tr::graph::await_deadline_t d{.owner = &g, .deadline = now + 5'000'000'000ull};
     tr::graph::await_waiter_t w{.ctx = &d};
     v.arm_waiter(w);
     v.wake_waiters();  // the write's wake, after the arm, before the wait
-    check(vertex_t::wait_for_change(w), "returns true without blocking: the write unlinked it");
+    const bool changed =
+        tr::testing::with_expiry(g, d.deadline, [&] { return vertex_t::wait_for_change(w); });
+    check(changed, "returns true without blocking: the write unlinked it");
     check(!vertex_t::disarm_waiter(w), "nothing left to disarm");
 }
 

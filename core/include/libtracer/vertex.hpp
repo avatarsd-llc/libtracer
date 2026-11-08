@@ -127,8 +127,8 @@ static_assert(lkv_slot<lkv_slot_t>,
               "lkv_slot.hpp)");
 
 /**
- * @brief The bound guard models `tr::guard` — the one critical-section trait the slot, the
- *        pool and the write-sequence bump share (RFC 0028 §5.5).
+ * @brief The bound guard models `tr::guard` — the one critical-section trait the slot and the
+ *        pool share (RFC 0028 §5.5).
  */
 static_assert(::tr::guard<guard_t>,
               "the bound guard_t does not model tr::guard (lock()/unlock(), for_address(), "
@@ -1682,7 +1682,7 @@ class vertex_t {
      *        %take_unflushed share.
      *
      * The window is the newest `min(appended_since_flush, count)` entries: APPENDS, never a
-     * write-sequence delta (#925), and never more than the ring still holds (entries trimmed
+     * count of writes (#925), and never more than the ring still holds (entries trimmed
      * before the take are bounded history). The cursor advances only once @p out has room, so
      * a refused spill defers the window to the next flush instead of losing it (#477).
      * @return The number of entries taken.

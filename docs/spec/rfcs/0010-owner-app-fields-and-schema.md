@@ -1426,7 +1426,9 @@ the same correction for the sequence itself.
 
 **The correction.** §C drops the clause and keeps the two that carry the rule: a field write does
 not wake `await` and does not propagate. §D.6 now says that counters are not writes, so they
-wake no `await`. Neither rule changes.
+wake no `await`. The same sentence in the normative annex
+[reference/05](../../reference/05-protocol-tlvs.md) (§`:stats`, "Read-only, and never awaitable")
+is reworded the same way. Neither rule changes.
 
 **Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
 wire surface moves.** No frame, type code, error identity or conformance vector changes.

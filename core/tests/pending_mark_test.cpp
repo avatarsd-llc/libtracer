@@ -291,7 +291,7 @@ void test_mark_clear_race() {
 
     // One PUBLISHER per leaf, alternating assign (raises the hint) and eager write (drops it
     // under the sweep lock) — one writer per vertex, the calling plane's contract, so the
-    // write sequence and the LKV agree on what "current" is. The sweeper drops hints AFTER
+    // pending mark and the LKV agree on what "current" is. The sweeper drops hints AFTER
     // the sweep lock, on its own thread: that is the cross-thread mark/clear race. Every tag
     // is unique, so a seen tag names the one operation that published it.
     std::vector<std::thread> publishers;

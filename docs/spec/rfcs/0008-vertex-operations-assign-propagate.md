@@ -134,7 +134,8 @@ a terminus *is* an `assign` followed by a `propagate` of that vertex.
 > This section first defined pending as `write_seq > swept_seq` over a *monotonic* sequence.
 > No `swept_seq` exists and nothing orders two sequence values: pending is a **mark** that an
 > `assign` sets and a covering sweep drains, and the write sequence is an **equality-only
-> change counter**. Rules 1 and 2 below stand verbatim.
+> change counter**. Rules 1 and 2 below stood verbatim then; the 2026-11-08 erratum (above
+> note, and §Erratum at the end) rewords them for the deleted sequence, their substance unchanged.
 
 An `assign` marks the vertex **pending** — it was assigned since a sweep last covered it —
 and wakes any `await` waiter on it. Neither looks at the value's bytes, and no per-vertex

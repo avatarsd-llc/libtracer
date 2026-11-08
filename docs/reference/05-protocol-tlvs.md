@@ -1176,8 +1176,8 @@ Normative rules:
   `ERROR{tr::access::denied}` (`0x0050`), which discloses that the seam exists; that is intended,
   because the seam namespace is published spec, identical on every node.
 - **Read-only, and never awaitable.** A write of any `:stats` spelling answers
-  `ERROR{tr::schema::not_found}` caller-independently. Counters do not advance the vertex's write
-  sequence, so no `await` could ever fire on them — and every field-tailed `await` already answers
+  `ERROR{tr::schema::not_found}` caller-independently. Counters are not writes, so they wake no
+  `await` and no `await` could ever fire on them — and every field-tailed `await` already answers
   `ERROR{tr::schema::not_found}` regardless (§`0x0F` FWD).
 - **A reader MUST ignore unknown `NAME`s** and MUST NOT depend on the member count: a seam may
   grow a noun. A node that does not publish a seam answers `SCHEMA_NOT_FOUND`, which a monitor

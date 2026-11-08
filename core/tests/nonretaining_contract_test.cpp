@@ -158,7 +158,7 @@ void test_await_at_a_seamless_handler_is_still_not_found() {
  * @brief Vector 3 — REGRESSION PIN: a retaining vertex's AWAIT is unchanged.
  *
  * The stored arm keeps its `read_stored()` fast path; no handler dispatch was added to it. A
- * branch vertex is pinned too: `await` watches its OWN write sequence (RFC-0008 §A), so it
+ * branch vertex is pinned too: `await` watches writes to its OWN vertex (RFC-0008 §A), so it
  * hands back its own last-known-value, never the composed subtree fold `read` would serve.
  */
 void test_await_at_a_retaining_vertex_is_unchanged() {

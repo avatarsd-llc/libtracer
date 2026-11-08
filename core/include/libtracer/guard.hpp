@@ -3,7 +3,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * guard — the one critical-section vocabulary (RFC-0028 §5.5, slice 10), freestanding. The LKV
- * slot, both memory-layer pools and the write-sequence bump all bind it.
+ * slot, both memory-layer pools and `tr::rmw_counter_t`'s guarded bump all bind it.
  */
 #pragma once
 
@@ -51,7 +51,7 @@ concept lockable = requires(L& l) {
  *
  * The build binds it once, as `tr::graph::config_t::guard_t`. It was spelled `reader_guard_t`
  * until #1703, a name that undersold it: the guard serializes writers, the pool and the
- * write-sequence bump, not only readers.
+ * guarded counter bump, not only readers.
  *
  * The traits are what a caller reasons with, in place of prose:
  * - `is_isr_safe` — the section may be entered from an interrupt;

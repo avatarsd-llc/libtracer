@@ -665,7 +665,7 @@ void test_ring_reliable_answers_backpressure() {
 
 /**
  * @brief A SHED ring append must not make the next drain re-deliver the previous entry
- *        (#925) — the drain counts APPENDS, not write-sequence bumps.
+ *        (#925) — the drain counts APPENDS, not writes.
  *
  * A write counts as a write whether or not its append was shed (the LKV publish above it
  * DID land), so a drain that derived "how many entries are new" from a count of writes

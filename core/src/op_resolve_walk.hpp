@@ -897,8 +897,8 @@ template <class N, class ReplyError>
     // `tr::flow::timeout`, which is indistinguishable from a quiet link.
     //
     // RFC-0010 §C settles the direction rather than leaving it open: a field write
-    // "does NOT wake `await` on the vertex, does not advance the vertex's write
-    // sequence, and does not propagate ... `await` on a single field is
+    // "does NOT wake `await` on the vertex and does not propagate ... `await` on a
+    // single field is
     // deliberately unsupported." Nothing can ever fire such a wait, so answering
     // it is the ENOTTY of an unsupported ioctl -- SCHEMA_NOT_FOUND, the same code
     // READ and WRITE already return for a facet they do not serve (CONTEXT.md
