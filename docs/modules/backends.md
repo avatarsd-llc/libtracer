@@ -328,6 +328,15 @@ off the size-class table; neither is a runtime member.
 :members:
 ```
 
+The borrowed backend wraps bytes the caller already holds and draws only the segment's control
+block from the source it is built over; a deployer that injects a graph source builds one over
+`graph_t::value_source()` (#2660):
+
+```{doxygenclass} tr::mem::borrowed_backend_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenfunction} tr::mem::heap_backend
 :project: libtracer
 ```
@@ -470,6 +479,12 @@ classDiagram
   returns the control block to its block source and nothing else (`core/include/libtracer/mem_borrowed.hpp:borrowed_backend_t::destroy`),
   so a borrow over a stack buffer or a scratch frame becomes a dangling read the moment
   that storage goes away. Durable storage of a value wants an owning backend.
+- **A borrow on an injected-source graph names that graph's source.** The single-argument
+  `view::borrow_const` draws its control block from the default value source. A graph built
+  over an injected source is written through the seam-taking overload instead, with a
+  `mem::borrowed_backend_t` built over `graph_t::value_source()`, so the control block is
+  charged to the store the deployer sized (#2660). A refused control block is a null segment:
+  answer BACKPRESSURE and do not write.
 - **`bump_source_t` is scope-lifetime only.** Blocks carved from its buffer are never
   individually reclaimed, so a bump source wired as a long-lived seam fills
   monotonically and then refuses everything. Construct it per operation, or `reset` it

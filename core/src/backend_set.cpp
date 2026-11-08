@@ -110,8 +110,6 @@ bool transfer(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir) noe
 
 #else
 
-using detail::borrowed_backend_t;
-
 // The multi-member host module set: a switch to a devirtualized (`final`-class,
 // qualified) direct call per linked backend, with the virtual `destroy` as the
 // fallback for any tag not in the fast set.

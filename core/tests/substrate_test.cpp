@@ -258,8 +258,7 @@ static_assert(!tr::mem::heap_backend_t::is_isr_safe, "operator new/delete is not
 static_assert(!tr::mem::heap_backend_t::is_nonblocking,
               "operator new/delete may lock or syscall — not nonblocking (#928)");
 static_assert(tr::mem::heap_backend_t::owns_bytes, "the heap owns its bytes (durably storable)");
-static_assert(!tr::mem::detail::borrowed_backend_t::owns_bytes,
-              "a borrow must NOT be durably stored");
+static_assert(!tr::mem::borrowed_backend_t::owns_bytes, "a borrow must NOT be durably stored");
 
 void test_mem_transfer() {
     std::printf("mem::transfer — host byte-move + cache-hook seam (ADR-0047 §2):\n");

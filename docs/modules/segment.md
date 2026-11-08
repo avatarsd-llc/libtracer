@@ -84,7 +84,11 @@ backends, because what they produce is an L1 handle:
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::view::borrow_const
+```{doxygenfunction} tr::view::borrow_const(std::span<const std::byte> bytes)
+:project: libtracer
+```
+
+```{doxygenfunction} tr::view::borrow_const(std::span<const std::byte> bytes, mem::borrowed_backend_t &backend)
 :project: libtracer
 ```
 
