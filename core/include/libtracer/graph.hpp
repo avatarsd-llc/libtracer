@@ -2163,6 +2163,31 @@ class graph_t {
      *         the policy is all-or-nothing (#1883), so this too changes no member.
      */
     [[nodiscard]] result_t<void> set_policy(vertex_handle_t v, vertex_policy_t policy);
+    /**
+     * @brief Install @p doc as @p v's intent document (RFC-0010 Amendment 5), or replace the
+     *        installed one. An empty @p doc clears it, as @ref clear_intent_document does.
+     *
+     * The device maker's statement of what the vertex is: UTF-8 text, a JSON-compatible YAML
+     * subset whose one normative key is `contract`. Every reader the READ gate admits gets it
+     * verbatim from `read <v>:schema`, as `NAME "doc"` → `VALUE <doc>` at the `POINT` level,
+     * after the protocol part and before the owner part (`NAME "app"`), which stays present
+     * iff a field table is installed. It never appears in a `:settings` read, and no wire
+     * operation installs, replaces or removes it.
+     *
+     * The document is BORROWED, the same contract as a borrowed field table: the graph never
+     * copies, parses or validates it, and the caller keeps the bytes alive while they are
+     * installed, typically a constant in flash. Many vertices may install the same bytes. Once
+     * a clear or a replacement returns, no read touches the old bytes again. A local host
+     * call, so no ACL gate. A retirement clears it with the vertex's other declarations.
+     *
+     * @return `BACKPRESSURE` when the table source refused the block that holds the view (a
+     *         vertex with no field table draws one on its first install); @p v is then
+     *         unchanged. A clear never fails.
+     */
+    [[nodiscard]] result_t<void> set_intent_document(vertex_handle_t v, std::string_view doc);
+    /** @brief Remove @p v's intent document, if it has one: its `:schema` read is then the
+     *         record it was before any install. Never fails, and allocates nothing. */
+    void clear_intent_document(vertex_handle_t v) { (void)set_intent_document(v, {}); }
     /** @brief Bytes @p v's receiver ring currently holds RESERVED against its source — the
      *         byte bound's observable. `SCHEMA_NOT_FOUND` on a non-STREAM role, matching
      *         @ref history. */

@@ -1,0 +1,12 @@
+{
+  "name": "owner-intent-document",
+  "category": "schema",
+  "hex": "074080000200040074656D700B40000002000300646F6301006900636F6E74726163743A202268747470733A2F2F76656E646F722E6578616D706C652F636F6E7472616374732F746865726D6F2F312E30220A68656C703A2022526F6F6D2074656D7065726174757265220A747970653A2022663332220A756E69743A202243656C220A",
+  "total_bytes": 132,
+  "decoded": {
+    "type": "0x07 POINT",
+    "structured": true,
+    "meaning": "POINT{ NAME \"temp\", SETTINGS{}, NAME \"doc\", VALUE <intent document> } — the RFC-0010 Amendment 5 `:schema` of a vertex with an intent document and no field table: the document sits at the POINT level after the protocol part, and no owner part follows",
+    "note": "bytes emitted by the libtracer reference implementation (read_schema on a vertex named `temp` after graph_t::set_intent_document, with no field descriptor table installed); the VALUE is the installed document verbatim"
+  }
+}
