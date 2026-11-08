@@ -1118,6 +1118,12 @@ target_link_libraries(delivery_mode_race_test PRIVATE libtracer Threads::Threads
 libtracer_test_warnings(delivery_mode_race_test)
 add_test(NAME delivery_mode_race COMMAND delivery_mode_race_test)
 
+# #2423: delivery order across two concurrent writers to one vertex (reference/15 O3).
+add_executable(writer_order_race_test writer_order_race_test.cpp)
+target_link_libraries(writer_order_race_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(writer_order_race_test)
+add_test(NAME writer_order_race COMMAND writer_order_race_test)
+
 # #1884 — `retire` against a registration under the retired prefix: the newcomer's sweep-set
 # entries must survive the retire's cleanup. Also a TSan target.
 add_executable(retire_sweep_race_test retire_sweep_race_test.cpp)
