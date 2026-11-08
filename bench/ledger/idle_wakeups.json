@@ -18,9 +18,9 @@
       "source": "measured",
       "arm": "tcp-idle-32",
       "metric": "wakeups_per_s",
-      "value": 330,
+      "value": 0,
       "goal": 0,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2617 (wait module, slice 1, #2147: the 100 ms receive timeouts are deleted, an idle link sleeps in one wait module per node, 330 -> 0/s)"
     },
     {
       "id": "ws-idle-32",
@@ -28,9 +28,9 @@
       "source": "measured",
       "arm": "ws-idle-32",
       "metric": "wakeups_per_s",
-      "value": 317,
+      "value": 0,
       "goal": 0,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2617 (wait module, slice 1, #2147: the 100 ms receive timeouts are deleted, an idle link sleeps in one wait module per node, 317 -> 0/s)"
     },
     {
       "id": "udp-idle-32",
@@ -38,9 +38,9 @@
       "source": "measured",
       "arm": "udp-idle-32",
       "metric": "wakeups_per_s",
-      "value": 320,
+      "value": 0,
       "goal": 0,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2617 (wait module, slice 1, #2147: the 100 ms receive timeouts are deleted, an idle link sleeps in one wait module per node, 320 -> 0/s)"
     },
     {
       "id": "esp_ws_client link",
