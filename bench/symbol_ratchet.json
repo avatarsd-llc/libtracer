@@ -29,8 +29,8 @@
     {
       "binary": "bench_libtracer",
       "symbol": "tr::graph::graph_t::find_ptr",
-      "bytes": 542,
-      "note": "RE-PINNED 540 -> 542 (+2 B) by the terminus registration recheck (PR #2061). vertex_t::registered_ became std::atomic<bool> so the access check can reread it without the map lock; the walk's final registered() test is now a relaxed atomic load, a different encoding of the same one-byte read. The descent and child_by_record are unchanged. PREVIOUS NOTE: RE-PINNED 546 -> 540 (-6 B) by #1778 (graph core onto the table source). The walk's start is now the tree root inside the one `roots_` block (`&roots_->root`, a load of the owner's pointer word) where it was `root_.get()` on a `unique_ptr`; the descent and `child_by_record` are unchanged, and every other pin is +0. A SHRINK, re-pinned as the new floor."
+      "bytes": 510,
+      "note": "LOWERED 542 -> 510 (-32 B) by #2672 (vertex name is a pointer plus a packed length; the per-level record compare reads one word instead of the inline/spill tag). RE-PINNED 540 -> 542 (+2 B) by the terminus registration recheck (PR #2061). vertex_t::registered_ became std::atomic<bool> so the access check can reread it without the map lock; the walk's final registered() test is now a relaxed atomic load, a different encoding of the same one-byte read. The descent and child_by_record are unchanged. PREVIOUS NOTE: RE-PINNED 546 -> 540 (-6 B) by #1778 (graph core onto the table source). The walk's start is now the tree root inside the one `roots_` block (`&roots_->root`, a load of the owner's pointer word) where it was `root_.get()` on a `unique_ptr`; the descent and `child_by_record` are unchanged, and every other pin is +0. A SHRINK, re-pinned as the new floor."
     },
     {
       "binary": "bench_chain_delivery",
