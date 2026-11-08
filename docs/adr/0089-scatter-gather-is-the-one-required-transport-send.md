@@ -1,8 +1,8 @@
 # Scatter-gather is the one required transport send; the span send is a non-virtual wrapper and the retained send stays an optional override
 
-<!-- status: proposed -->
+<!-- status: accepted -->
 
-Status: **proposed** (2026-11-08, design note for #2442 (T1 of the #2432 from-scratch cleanup), for maintainer ruling; nothing is implemented). Reference-implementation domain per [GOVERNANCE.md](../../.github/GOVERNANCE.md): it changes the C++ `tr::net::transport_t` contract and no wire byte, so it is an ADR, not an RFC (see §Why not an RFC). Amends the send surface that [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md) §1 kept virtual, without changing that ruling. Keeps the standing design rules of [`CLAUDE.md`](../../CLAUDE.md) §Design rules: no timers or clock reads, complexity lowered by deletion, compile-time by default, receiver pays, no library-internal buffers.
+Status: **accepted** (2026-11-08, ruling 47, for #2442 (T1 of the #2432 from-scratch cleanup); the six open questions are answered in §Rulings, and the work is ticketed as #2679 (step 1), #2680 (step 2) and #2681 (step 3)). Reference-implementation domain per [GOVERNANCE.md](../../.github/GOVERNANCE.md): it changes the C++ `tr::net::transport_t` contract and no wire byte, so it is an ADR, not an RFC (see §Why not an RFC). Amends the send surface that [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md) §1 kept virtual, without changing that ruling. Keeps the standing design rules of [`CLAUDE.md`](../../CLAUDE.md) §Design rules: no timers or clock reads, complexity lowered by deletion, compile-time by default, receiver pays, no library-internal buffers.
 
 Every `file:line` below is read at `origin/main` `3f0def32f62fd80319bd3ceb8354de1630d8172c`. Figures marked [est] are read from code, not measured.
 
@@ -189,7 +189,18 @@ The change reaches no normative page. [v1.md §3](../spec/v1.md) incorporates re
 - **UDP's span path changes syscall** from `sendto` to a one-entry `sendmsg`. Same datagram; the cost difference is the `msghdr` setup [est, not measured]. The UDP rows in `bench_transports.cpp` cover it (Q6).
 - **Out-of-tree links break at compile time, not at run time.** This is the safe direction: no link silently falls back to a gather that no longer exists.
 
-## Open questions for the maintainer
+## Rulings (2026-11-08, ruling 47)
+
+The maintainer took every recommendation below.
+
+1. **Q1.** Option B: distinct protected `send_gather` / `send_retained`, and a non-virtual caller-facing `send`.
+2. **Q2.** The retained send (head plus value) stays a separate optional override.
+3. **Q3.** CAN cuts its slices from the caller's spans with a cursor, so it makes 0 copies. `can_frame_at` moves into the tests as the oracle.
+4. **Q4.** No flatten helper.
+5. **Q5.** Steps 1 and 2 ship in v0.23.0 (#2679, #2680). Step 3, the breaking switch-over, ships in the next release, after #2617 (#2681). In step 1 loopback makes only the 2 -> 1 cut, and #2266 (loopback: three copies per frame) stays open.
+6. **Q6.** UDP's `sendto` body is deleted, and single spans go through a one-entry `sendmsg`, with a bench in the PR.
+
+## Open questions as posed (answered in §Rulings)
 
 1. **Q1, override names.** Option B (`send_gather` / `send_retained`, non-virtual `send`), or option A (keep `send` virtual on the iov form, with `using transport_t::send;` in every subclass)? Recommendation: B. The names are new vocabulary; CONTEXT.md gains no entry, because they are C++ member names, not domain terms.
 2. **Q2, retained send.** Keep it as a separate optional override (recommended), or fold all three forms into one descriptor-taking virtual (option C)?
