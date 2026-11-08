@@ -149,36 +149,27 @@ if(LIBTRACER_NET_PLANE)
         target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_SELF_HEAL_LINKS})
     endif()
     # The built-in transport-factory registrations transport_vertex_t wires up. One glue
-    # TU per enabled builtin (udp/tcp/ws), plus a dispatcher (register_builtin_transports)
-    # that calls exactly the enabled ones: the hand-written src/builtin_transports.cpp for
-    # a FULL node (also what PlatformIO and the ESP-IDF component compile), else a
-    # CMake-generated variant naming only the enabled register_*_transport. No preprocessor
-    # macros — a disabled transport contributes neither its glue TU nor a call, so nothing
-    # references a dropped transport (the decoupling that lets a transport TU be omitted).
-    set(_libtracer_builtin_calls "")
+    # TU per enabled builtin (udp/tcp/ws), plus the dispatcher (register_builtin_transports)
+    # generated from the one template, src/builtin_transports.cpp.in (#2439), calling
+    # exactly the enabled ones. The ESP-IDF component generates it with the same function,
+    # and PlatformIO with its build script. No preprocessor macros: a disabled transport
+    # contributes neither its glue TU nor a call, so nothing references a dropped transport.
+    set(_libtracer_builtin_kinds "")
     if(LIBTRACER_TRANSPORT_UDP)
         target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_BUILTIN_UDP})
-        string(APPEND _libtracer_builtin_calls "    register_udp_transport(vertex, rx_backend, egress_src);\n")
+        list(APPEND _libtracer_builtin_kinds udp)
     endif()
     if(LIBTRACER_TRANSPORT_TCP)
         target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_BUILTIN_TCP})
-        string(APPEND _libtracer_builtin_calls "    register_tcp_transport(vertex, rx_backend, egress_src);\n")
+        list(APPEND _libtracer_builtin_kinds tcp)
     endif()
     if(LIBTRACER_TRANSPORT_WS)
         target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_BUILTIN_WS})
-        string(APPEND _libtracer_builtin_calls "    register_ws_transport(vertex, rx_backend, egress_src);\n")
+        list(APPEND _libtracer_builtin_kinds ws)
     endif()
-    if(LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
-        target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_BUILTIN_DISPATCHER})
-    else()
-        set(LIBTRACER_BUILTIN_TRANSPORT_CALLS "${_libtracer_builtin_calls}")
-        configure_file(
-            ${LIBTRACER_BUILTIN_DISPATCHER_TEMPLATE}
-            ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp
-            @ONLY)
-        target_sources(libtracer PRIVATE
-            ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp)
-    endif()
+    libtracer_generate_builtin_transports(
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp ${_libtracer_builtin_kinds})
+    target_sources(libtracer PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp)
 endif()
 
 # Socket transports — tcp/udp/ws share posix_endpoint_t (the recv-thread/endpoint

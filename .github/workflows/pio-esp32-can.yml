@@ -66,6 +66,7 @@ on:
       - "tests/packaging/pio_esp32_can/**"
       - "tools/check_esp_ws_plane.py"
       - "tools/check_source_list.py"
+      - "tools/check_builtin_transports.py"
       - "core/cmake/libtracer_sources.cmake"
       - ".github/workflows/pio-esp32-can.yml"
       - "!**/*.md" # Markdown is never an input here (core-ci.yml, DOCS-ONLY PULL REQUESTS)
@@ -110,6 +111,8 @@ jobs:
       # names the file, before a multi-minute toolchain download.
       - name: PlatformIO deny-lists match the core source list
         run: python3 tools/check_source_list.py
+      - name: Transport registration generated from the one template (#2439)
+        run: python3 tools/check_builtin_transports.py
 
       # PINNED on purpose. The hook reads `pio_lib_builder.path` — a PlatformIO
       # builder internal, and the handle this hook uses to reach the package root
@@ -139,7 +142,7 @@ jobs:
       # WS-plane gate on the LINKED PlatformIO image (#984 — the #947 ruling's
       # PlatformIO half, same shape as esp-idf.yml's): the espressif32 packaging
       # ships NO WebSocket plane. The extra script excludes the portable POSIX
-      # transport_ws pair per-environment and swaps in a udp+tcp-only
+      # transport_ws pair per-environment and generates a udp+tcp-only
       # register_builtin_transports dispatcher; the IDF-native links are not
       # packaged for PlatformIO at all. `--ws-plane none` asserts both halves —
       # zero portable-WS AND zero native-link symbols in firmware.elf (nm, with

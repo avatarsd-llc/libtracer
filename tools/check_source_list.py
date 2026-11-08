@@ -49,8 +49,8 @@ PIO_DENY = {
     "DENY_WITHOUT_BUS_LINKS": {"TRANSPORT_CAN", "SOCKETCAN_STUB"},
     # The self-heal-links opt-in (#1670) is off.
     "DENY_WITHOUT_SELF_HEAL_LINKS": {"SELF_HEAL_LINKS"},
-    # espressif32 (#984): no portable WS pair, and no full-node dispatcher naming it.
-    "DENY_ESPRESSIF32": {"TRANSPORT_WS", "BUILTIN_WS", "BUILTIN_DISPATCHER"},
+    # espressif32 (#984): no portable WS pair (its generated dispatcher lists no ws).
+    "DENY_ESPRESSIF32": {"TRANSPORT_WS", "BUILTIN_WS"},
 }
 
 _SET_RE = re.compile(r"\bset\(\s*LIBTRACER_SOURCES_(\w+)\s+(.*?)\)", re.S)

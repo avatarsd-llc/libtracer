@@ -66,12 +66,52 @@ set(LIBTRACER_SOURCES_SELF_HEAL_LINKS
     "${_libtracer_src}/self_heal_link.cpp"
 )
 
-# The hand-written FULL-node register_builtin_transports dispatcher (udp + tcp + ws). Any
-# other transport set compiles the template below, configured with only the enabled calls.
-set(LIBTRACER_SOURCES_BUILTIN_DISPATCHER
-    "${_libtracer_src}/builtin_transports.cpp"
-)
+# The register_builtin_transports dispatcher has ONE source, this template (#2439). Every
+# build generates its copy from it: the two CMake consumers through the function below,
+# PlatformIO through integrations/platformio/libtracer_builtin_transports.py.
 set(LIBTRACER_BUILTIN_DISPATCHER_TEMPLATE "${_libtracer_src}/builtin_transports.cpp.in")
+
+# libtracer_generate_builtin_transports(<out_file> [<kind>...])
+#
+# Write the dispatcher for the built-in transports <kind>... (udp, tcp, ws: the glue TUs
+# the caller compiles) to <out_file>. Each template call carries a `// builtin: <kind>`
+# marker: the call of a listed kind is kept with its marker dropped, every other marked
+# line is deleted. A kind the template does not know is a configure error. The file is
+# rewritten only when its content changes, so a reconfigure recompiles nothing.
+# tools/check_builtin_transports.py holds this and the PlatformIO generator byte-identical.
+function(libtracer_generate_builtin_transports out_file)
+    file(READ "${LIBTRACER_BUILTIN_DISPATCHER_TEMPLATE}" _text)
+    string(REGEX MATCHALL "  // builtin: [a-z0-9_]+\n" _markers "${_text}")
+    set(_known "")
+    foreach(_marker IN LISTS _markers)
+        string(REGEX REPLACE "^  // builtin: ([a-z0-9_]+)\n$" "\\1" _kind "${_marker}")
+        list(APPEND _known "${_kind}")
+    endforeach()
+    foreach(_kind IN LISTS ARGN)
+        if(NOT _kind IN_LIST _known)
+            message(FATAL_ERROR "libtracer: no built-in transport '${_kind}' in "
+                                "${LIBTRACER_BUILTIN_DISPATCHER_TEMPLATE} (known: ${_known})")
+        endif()
+    endforeach()
+    foreach(_kind IN LISTS _known)
+        if(_kind IN_LIST ARGN)
+            string(REPLACE "  // builtin: ${_kind}\n" "\n" _text "${_text}")
+        else()
+            string(REGEX REPLACE "\n[^\n]*  // builtin: ${_kind}\n" "\n" _text "${_text}")
+        endif()
+    endforeach()
+    set(_old "")
+    if(EXISTS "${out_file}")
+        file(READ "${out_file}" _old)
+    endif()
+    if(NOT _old STREQUAL _text)
+        file(WRITE "${out_file}" "${_text}")
+    endif()
+    if(NOT CMAKE_SCRIPT_MODE_FILE)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                     "${LIBTRACER_BUILTIN_DISPATCHER_TEMPLATE}")
+    endif()
+endfunction()
 
 # The builtin socket transports: each transport's own TU, and separately its factory glue
 # TU (register_<kind>_transport), which only a net-plane build compiles.

@@ -11,8 +11,9 @@
 #
 # It also owns the package's SOURCE FILTER on EVERY platform (see the SRC_FILTER
 # block below): the portable baseline everywhere, minus the portable WS pair on
-# espressif32 (#984 — no WebSocket ships there; a udp+tcp-only builtin dispatcher
-# is compiled in its place). Beyond that, on a non-espressif32 platform the ESP
+# espressif32 (#984 — no WebSocket ships there). It also generates the package's
+# register_builtin_transports dispatcher from core's one template (#2439, see the
+# BUILTIN DISPATCHER block below). Beyond that, on a non-espressif32 platform the ESP
 # glue is a NO-OP: twai_link needs ESP-IDF TWAI + FreeRTOS headers, which only
 # exist on espressif32/espidf. The guard keeps it from affecting any non-esp32
 # PlatformIO build.
@@ -26,6 +27,7 @@
 # any header no translation unit here includes) can be dropped without reddening the job.
 # That frames no CAN bit: moving frames on real silicon is still the open on-bus
 # sign-off, and nothing in CI energises a pin.
+import importlib.util
 import os
 
 Import("env", "pio_lib_builder")  # noqa: F821  (injected by PlatformIO/SCons at build time)
@@ -61,10 +63,9 @@ DENY_WITHOUT_BUS_LINKS = [  # LIBTRACER_SOURCES_TRANSPORT_CAN + LIBTRACER_SOURCE
 DENY_WITHOUT_SELF_HEAL_LINKS = [  # LIBTRACER_SOURCES_SELF_HEAL_LINKS
     "self_heal_link.cpp",
 ]
-DENY_ESPRESSIF32 = [  # TRANSPORT_WS + BUILTIN_WS + BUILTIN_DISPATCHER (see #984 below)
+DENY_ESPRESSIF32 = [  # TRANSPORT_WS + BUILTIN_WS (see #984 below)
     "transport_ws.cpp",
     "builtin_transport_ws.cpp",
-    "builtin_transports.cpp",
 ]
 
 
@@ -153,32 +154,69 @@ if _cfg_prev != _cfg_text:  # write only on change, so an unchanged build rebuil
 env.PrependUnique(CPPPATH=[_cfg_dir])  # noqa: F821
 DefaultEnvironment().PrependUnique(CPPPATH=[_cfg_dir])  # noqa: F821
 
+# PlatformIO exec()s a library extraScript as an SCons SConscript, and SCons runs it
+# against SConscript globals where `__file__` is NOT defined — deriving the package root
+# from it raises NameError and fails the whole build. The exported library builder
+# carries that root directly (LibBuilderBase.path, which piolib.py builds with
+# os.path.abspath — absolute, but NOT symlink-resolved; do not rely on it being
+# canonical), so take it from there and do no dirname arithmetic at all.
+_pkg = pio_lib_builder.path  # noqa: F821
+_espressif32 = env.get("PIOPLATFORM", "") == "espressif32"  # noqa: F821
+
+# BUILTIN DISPATCHER (#2439). register_builtin_transports is generated from core's one
+# template, core/src/builtin_transports.cpp.in, by the same rule the CMake builds apply
+# (libtracer_builtin_transports.py; tools/check_builtin_transports.py holds the two
+# generators byte-identical). This package compiles every built-in transport's glue TU,
+# except ws on espressif32 (#984, below), so the dispatcher lists the same kinds.
+_gen_spec = importlib.util.spec_from_file_location(
+    "libtracer_builtin_transports",
+    os.path.join(_pkg, "integrations", "platformio", "libtracer_builtin_transports.py"))
+_gen = importlib.util.module_from_spec(_gen_spec)
+_gen_spec.loader.exec_module(_gen)
+with open(os.path.join(_pkg, "core", "src", "builtin_transports.cpp.in"),
+          encoding="utf-8") as _f:
+    _template = _f.read()
+_builtin_kinds = ["udp", "tcp"] if _espressif32 else ["udp", "tcp", "ws"]
+_disp_dir = env.subst(os.path.join("$BUILD_DIR", "libtracer_generated"))  # noqa: F821
+_disp_path = os.path.join(_disp_dir, "builtin_transports.cpp")
+_disp_text = _gen.render(_template, _builtin_kinds)
+_disp_prev = None
+if os.path.isfile(_disp_path):
+    with open(_disp_path, encoding="utf-8") as _f:
+        _disp_prev = _f.read()
+if _disp_prev != _disp_text:  # write only on change, so an unchanged build rebuilds nothing
+    os.makedirs(_disp_dir, exist_ok=True)
+    with open(_disp_path, "w", encoding="utf-8") as _f:
+        _f.write(_disp_text)
+# ONCE per `pio run`, with the marker on the shared DefaultEnvironment: the espidf
+# framework builder constructs library builders twice, so an unguarded BuildSources
+# double-links every symbol in the TU (the twai_link guard below explains it in full).
+_shared = DefaultEnvironment()  # noqa: F821  (an SCons SConscript global)
+if not _shared.get("LIBTRACER_PIO_DISPATCHER_ADDED"):
+    _shared["LIBTRACER_PIO_DISPATCHER_ADDED"] = True
+    env.BuildSources(  # noqa: F821
+        os.path.join("$BUILD_DIR", "libtracer_pio_glue"),
+        _disp_dir,
+        src_filter=["-<*>", "+<builtin_transports.cpp>"],
+    )
+
 # Only the Espressif 32 platform ships the TWAI + FreeRTOS headers twai_link needs.
-if env.get("PIOPLATFORM", "") == "espressif32":
+if _espressif32:
     # #984 (the #947 ruling's PlatformIO half): the portable POSIX-socket WS pair must
     # not reach silicon. On lwIP its egress path is unusable — `write_all_iov` sends
     # with MSG_NOSIGNAL, `lwip_sendmsg` rejects that flag with EOPNOTSUPP, the helper
     # reads it as peer-gone, and every scatter-gather data frame silently vanishes
-    # while the handshake and PING/PONG still work (#948). Exclude the pair, and with
-    # it core's hand-written full-node dispatcher whose register_ws_transport call is
-    # the reference that keeps the WS objects reachable past --gc-sections; the
-    # udp+tcp replacement dispatcher is compiled below. Selection by which TU
-    # compiles — the no-feature-macro doctrine — same as the ESP-IDF component's
-    # CMake does it. Net effect, documented in this directory's README: a PlatformIO
-    # espressif32 build ships NO WebSocket transport (the IDF-native links are not
+    # while the handshake and PING/PONG still work (#948). Exclude the pair; the
+    # generated dispatcher above lists no ws here, since a register_ws_transport call is
+    # the reference that would keep the WS objects reachable past --gc-sections.
+    # Selection by which TU compiles — the no-feature-macro doctrine — same as the
+    # ESP-IDF component's CMake does it. Net effect, documented in this directory's
+    # README: a PlatformIO espressif32 build ships NO WebSocket transport (the IDF-native links are not
     # packaged here — see #984 for the follow-up that could add them). Gated by the
     # `pio-esp32-can` workflow via tools/check_esp_ws_plane.py --ws-plane none on the
     # linked fixture image.
     env.Append(SRC_FILTER=_deny(DENY_ESPRESSIF32))  # noqa: F821
-    # PlatformIO exec()s a library extraScript as an SCons SConscript, and SCons
-    # runs it against SConscript globals where `__file__` is NOT defined — deriving
-    # the package root from it raises NameError and fails the whole build. The
-    # exported library builder carries that root directly (LibBuilderBase.path,
-    # which piolib.py builds with os.path.abspath — absolute, but NOT symlink-
-    # resolved; do not rely on it being canonical), so take it from there and
-    # do no dirname arithmetic at all. twai_link lives in the ESP-IDF component
-    # tree, not core/.
-    _pkg = pio_lib_builder.path  # noqa: F821
+    # twai_link lives in the ESP-IDF component tree, not core/.
     _twai_dir = os.path.join(_pkg, "integrations", "esp-idf", "libtracer")
     _twai_src = os.path.join(_twai_dir, "twai_link.cpp")
 
@@ -191,20 +229,6 @@ if env.get("PIOPLATFORM", "") == "espressif32":
     _compat = os.path.join(_twai_dir, "compat", "include")
     if os.path.isdir(_compat):
         env.Append(CPPPATH=[_compat])
-
-    # The udp+tcp register_builtin_transports dispatcher that replaces core's excluded
-    # full-node (udp+tcp+ws) one — see the SRC_FILTER block above. Compiled the same
-    # way twai_link.cpp is below, with the same ONCE-per-run guard on the shared
-    # DefaultEnvironment (the espidf framework builder constructs library builders
-    # twice, so an unguarded BuildSources double-links every symbol in the TU).
-    _shared = DefaultEnvironment()  # noqa: F821  (an SCons SConscript global)
-    if not _shared.get("LIBTRACER_PIO_DISPATCHER_ADDED"):
-        _shared["LIBTRACER_PIO_DISPATCHER_ADDED"] = True
-        env.BuildSources(
-            os.path.join("$BUILD_DIR", "libtracer_pio_glue"),
-            os.path.join(_pkg, "integrations", "platformio"),
-            src_filter=["-<*>", "+<builtin_transports_udp_tcp.cpp>"],
-        )
 
     # TWAI is a CAN link, so it rides the bus opt-in with transport_can.cpp (#1670).
     if _bus_links and os.path.isfile(_twai_src):

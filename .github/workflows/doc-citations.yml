@@ -75,6 +75,7 @@ on:
       - "tools/gen_file_map.py"
       - "tools/check_type_names.py"
       - "tools/tests/test_check_type_names.py"
+      - "tools/check_builtin_transports.py"
       - ".github/workflows/doc-citations.yml"
       # Non-source files a doc may cite outside the trees above (#1095). Listed exactly
       # rather than as `.github/workflows/**` and `bindings/**`, for the same reason
@@ -104,6 +105,7 @@ on:
       - "tools/gen_file_map.py"
       - "tools/check_type_names.py"
       - "tools/tests/test_check_type_names.py"
+      - "tools/check_builtin_transports.py"
       - ".github/workflows/doc-citations.yml"
       - ".github/workflows/core-ci.yml"
       - ".github/workflows/footprint-cortexm0.yml"
@@ -187,6 +189,12 @@ jobs:
         run: python3 tools/check_type_names.py
       - name: Every CI image reference matches the Dockerfile hash
         run: python3 tools/check_ci_image_tag.py
+      # One source for built-in transport registration (#2439): the CMake and PlatformIO
+      # generators agree on every kind set and no build spells the calls itself. Here, and
+      # not only in the esp-idf and pio jobs, because those run only on landing; `core/**`
+      # and `integrations/**` already fire this job. cmake is in the CI image.
+      - name: Every build generates its transport registration from the one template
+        run: python3 tools/check_builtin_transports.py
       - name: Clean this job's workspace off the host runner
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
