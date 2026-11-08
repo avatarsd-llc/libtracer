@@ -162,7 +162,8 @@ state it named.)
   subscriber lagging its producer observes the latest state, not the history. This
   is the LKV contract and the default.
 - **`1` immediate** — every write is delivered as its own event, lowest latency,
-  no producer-side accumulation. Order-preserving; never conflated.
+  no producer-side accumulation. Order-preserving per delivering thread; never
+  conflated.
 - **`2` batch** — the **wire encoding of RFC-0008's `assign`/`propagate` flush**
   (§4.1.2, Amendment 3), **orchestrated by the application** (§4.1.3, Amendment 4).
   **Accumulation is the source vertex's own state, never a per-subscriber queue at
@@ -173,9 +174,10 @@ state it named.)
   owner composed**: the app ropes its sample frames into one value, swaps it in
   through the ordinary atomic LKV publish, and triggers `propagate`/push. The graph
   holds **no counter, no window and no buffer** — it never derives, interprets or
-  waits on time. Order-preserving; a STREAM's list is never conflated.
-- **`3` stream** — append-preserving: every write is delivered, in order, none
-  conflated, with the §4.4 pressure contract governing overload. This is the
+  waits on time. Order-preserving per delivering thread; a STREAM's list is never
+  conflated.
+- **`3` stream** — append-preserving: every write is delivered, in order per
+  delivering thread (see the 2026-11-08 erratum), none conflated, with the §4.4 pressure contract governing overload. This is the
   signal-plane class; it is what makes the existing STREAM-role drain machinery
   demand-driven rather than a storage-side special case.
 
@@ -1324,8 +1326,8 @@ New vectors (the `stream/*` family, phase-3 unless noted):
 
 1. `subscriber/policy-class-absent` — bits 6–7 absent/zero ⇒ conflating delivery,
    byte-identical to today (tightens `subscriber/policy-absent`).
-2. `stream/class-immediate-order` — class 1 delivers every write, in order, none
-   conflated.
+2. `stream/class-immediate-order` — class 1 delivers every write, in order (one
+   writer's writes, in that writer's order), none conflated.
 3. ~~`stream/class-batch-flush`~~ — **RETIRED by Amendment 4 (§4.1.3)**: there is no
    `batch_count` and no `batch_window_ns` to flush on. What survives of it is the
    no-trim/no-loss half, which is covered by `stream/loss-accounting` (9) at the receiving
@@ -1693,3 +1695,23 @@ block, which acknowledged §4.4 as selecting from the subscription's bits),
 [reference/18](../../reference/18-composition-over-the-network.md) and
 `bindings/ros2/README.md` (the rmw `reliability` mapping is carried-but-unhonoured in the
 reference implementation).
+
+## Erratum (2026-11-08) — §4.1's "in order" is order per delivering thread ([#2662](https://github.com/avatarsd-llc/libtracer/issues/2662))
+
+**What the text said.** §4.1 called class `1` and class `2` *"Order-preserving"* and class `3`
+*"every write is delivered, in order"*, and §7's vector `stream/class-immediate-order` read
+*"class 1 delivers every write, in order"*. None of them said whose order.
+
+**What was wrong.** The scope, not the classes. A write delivers on the thread that made it, after
+its store, with no lock spanning the two, and a `propagate` or an ancestor sweep reads the stored
+value and delivers it on its own thread the same way. The deliveries one thread issues reach each
+subscriber in that thread's order. Deliveries from different threads (two writers, or a writer and
+a concurrent `propagate` or ancestor sweep) are not ordered against each other.
+[reference/15](../../reference/15-concurrency-and-scaling.md) O3 states this, and
+`core/tests/writer_order_race_test.cpp` forces the overtake
+([#2658](https://github.com/avatarsd-llc/libtracer/pull/2658)).
+
+**What changes.** §4.1's class `1`, `2` and `3` bullets and the §7 vector description now say
+*per delivering thread*, and [reference/05](../../reference/05-protocol-tlvs.md) §class semantics
+says the same. Wording only: no frame shape, type code, bit or vector byte moves, and the vector
+`stream/class-immediate-order`, which `core/tests/delivery_class_honour_test.cpp` drives from one thread, passes unchanged.
