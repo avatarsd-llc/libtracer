@@ -18,14 +18,22 @@
  *       gives every block back at teardown.
  * - (d) every refusal a registration can meet, the name's draw included, is a BACKPRESSURE
  *       value that registers nothing and leaks nothing.
+ * - (e) a reader that renders keys with no lock (`key_of`) and reads the slot memo
+ *       (`vertex_slot`) while a writer keeps registering, and so keeps carving new chunks, sees
+ *       every name whole. Run under ThreadSanitizer, this is the proof that a name is valid
+ *       under the existing reclamation rules: the bytes are written before the vertex is linked
+ *       and never again.
  */
 
+#include <atomic>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <optional>
 #include <span>
+#include <thread>
 #include <vector>
 
 #include "libtracer/tracer.hpp"
@@ -212,6 +220,47 @@ void test_every_refusal_is_a_value() {
     check(registered_once, "(d) a large enough budget registers the vertex");
 }
 
+/** @brief (e): lock-free name readers against a writer that keeps carving chunks. */
+void test_readers_see_whole_names() {
+    constexpr std::size_t kNames = 3000;
+    graph_t g{tr::mem::heap_source()};
+    (void)g.register_vertex(*path_t::parse("/n"), role_t::STORED_VALUE);
+    std::vector<std::vector<std::byte>> keys(kNames);
+    for (std::size_t i = 0; i < kNames; ++i) {
+        char text[64];
+        std::snprintf(text, sizeof text, "/n/a-name-of-some-length-%05zu", i);
+        keys[i] = key_of(text);
+    }
+    std::vector<std::optional<tr::graph::vertex_handle_t>> handles(kNames);
+    std::atomic<std::size_t> published{0};
+    std::thread writer([&] {
+        for (std::size_t i = 0; i < kNames; ++i) {
+            const auto h = g.register_vertex_key(keys[i], role_t::STORED_VALUE);
+            if (!h) return;
+            handles[i] = *h;
+            published.store(i + 1, std::memory_order_release);
+        }
+    });
+    bool whole = true;
+    bool slotted = true;
+    std::size_t reads = 0;
+    tr::mem::bytes_t out(tr::mem::heap_source());
+    for (std::size_t seen = 0; seen < kNames;) {
+        seen = published.load(std::memory_order_acquire);
+        for (std::size_t i = seen > 64 ? seen - 64 : 0; i < seen; ++i) {
+            whole = whole && g.key_of(*handles[i], out).has_value() &&
+                    std::ranges::equal(tr::mem::as_span(out), keys[i]);
+            slotted = slotted && g.vertex_slot(*handles[i]).has_value();
+            ++reads;
+        }
+    }
+    writer.join();
+    std::printf("  (e) %zu lock-free key renders against %zu registrations\n", reads, kNames);
+    check(published.load() == kNames, "(e) every name registers");
+    check(whole, "(e) every key a reader rendered is the registered name, byte for byte");
+    check(slotted, "(e) every slot memo a reader read resolves");
+}
+
 }  // namespace
 
 int main() {
@@ -219,5 +268,6 @@ int main() {
     test_refused_creation_gives_the_name_back();
     test_registration_on_the_seam();
     test_every_refusal_is_a_value();
+    test_readers_see_whole_names();
     return tr::testing::summary("name_block_seam");
 }

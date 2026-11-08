@@ -3084,7 +3084,7 @@ libtracer_test_warnings(retention_only_vertex_heap_test)
 add_test(NAME retention_only_vertex_heap COMMAND retention_only_vertex_heap_test)
 # #1991, #2672 — a vertex name is drawn from the graph's injected source into its name block.
 add_executable(name_block_seam_test name_block_seam_test.cpp)
-target_link_libraries(name_block_seam_test PRIVATE libtracer)
+target_link_libraries(name_block_seam_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(name_block_seam_test)
 add_test(NAME name_block_seam COMMAND name_block_seam_test)
 
