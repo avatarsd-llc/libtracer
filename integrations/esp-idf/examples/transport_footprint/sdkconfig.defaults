@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Defaults for the footprint-only transport example (#2678). The rows it feeds are
+# compared with full_node's, so it compiles the same way: for size (-Os).
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# The WebSocket server link rides esp_http_server's native WS API (off by default in IDF).
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# The bus tier carries both bus links; CAN and the WS server are only offered with it.
+# UDP and TCP stay off: full_node already pins their rows.
+CONFIG_LIBTRACER_BUS_LINKS=y
+CONFIG_LIBTRACER_WS_SERVER=y
+CONFIG_LIBTRACER_TRANSPORT_CAN=y
+CONFIG_LIBTRACER_TRANSPORT_WS=y
+CONFIG_LIBTRACER_TRANSPORT_UDP=n
+CONFIG_LIBTRACER_TRANSPORT_TCP=n
+
+# The poll wait adapter needs lwIP's loopback netif (#2617 checks it at configure time).
+CONFIG_LWIP_NETIF_LOOPBACK=y
