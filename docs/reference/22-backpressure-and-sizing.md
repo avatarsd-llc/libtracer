@@ -584,8 +584,8 @@ Three properties hold by construction:
   measures. If a saturated shared link delays it past its deadline, *that is the hard congestion
   signal* — a fail-deadly health check. The link-seam counters distinguish link saturation from
   vertex pressure after the fact.
-- **Poll-only.** Introspection fields are readable and never awaitable: counters do not bump the
-  write sequence, so nothing wakes on them. A monitor polls; it does not subscribe. An `await`
+- **Poll-only.** Introspection fields are readable and never awaitable: counters are not writes,
+  so nothing wakes on them. A monitor polls; it does not subscribe. An `await`
   carrying a `:stats` selector answers `ERROR{tr::schema::not_found}`, as every field-tailed
   `await` does.
 

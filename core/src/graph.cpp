@@ -3157,13 +3157,23 @@ result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, vie
 result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::uint64_t now, std::uint64_t deadline,
                                      std::string_view caller) {
     vertex_t* v = vh.get();
-    // await is the readiness form of a data READ — same gate, checked up front so a
-    // denied caller cannot camp on the condvar.
+    // ARM FIRST (#2655): the arm is where this await begins. Nothing before it reads the
+    // vertex, so a write ordered before it is exactly a write before the call, and every write
+    // after it unlinks the waiter, the gate below included (the subject seam is application
+    // code and may write). Disarmed on every exit, a throwing wait included.
+    await_deadline_t d{.owner = this, .deadline = deadline};
+    await_waiter_t w{.ctx = &d};
+    v->arm_waiter(w);
+    struct disarm_on_exit_t {
+        await_waiter_t& w;
+        ~disarm_on_exit_t() { (void)vertex_t::disarm_waiter(w); }
+    } const disarm{w};
+    // await is the readiness form of a data READ — same gate, and a denied caller never
+    // sleeps: it leaves before the wait, its waiter unlinked on the way out.
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
     if (deadline <= now) return std::unexpected(status_t::TIMEOUT);
-    await_deadline_t d{.owner = this, .deadline = deadline};
-    if (!v->wait_for_change(d)) return std::unexpected(status_t::TIMEOUT);
+    if (!vertex_t::wait_for_change(w)) return std::unexpected(status_t::TIMEOUT);
     return await_value(vh);
 }
 

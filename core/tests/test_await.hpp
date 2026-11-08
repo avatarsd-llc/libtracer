@@ -84,14 +84,20 @@ auto await_within(tr::graph::graph_t& g, const T& target, std::chrono::nanosecon
 }
 
 /**
- * @brief `v.wait_for_change(...)` with a deadline @p within from now on the suite's clock,
- *        owned by @p g (whose `expire_awaits` ends it).
+ * @brief Arm a blocking waiter on @p v, then `vertex_t::wait_for_change` on it, with a
+ *        deadline @p within from now on the suite's clock, owned by @p g (whose
+ *        `expire_awaits` ends it).
  */
 inline bool wait_for_change_within(tr::graph::graph_t& g, tr::graph::vertex_t& v,
                                    std::chrono::nanoseconds within) {
     tr::graph::await_deadline_t d{
         .owner = &g, .deadline = now_ns() + static_cast<std::uint64_t>(within.count())};
-    return with_expiry(g, d.deadline, [&] { return v.wait_for_change(d); });
+    tr::graph::await_waiter_t w{.ctx = &d};
+    v.arm_waiter(w);
+    const bool changed =
+        with_expiry(g, d.deadline, [&] { return tr::graph::vertex_t::wait_for_change(w); });
+    (void)tr::graph::vertex_t::disarm_waiter(w);
+    return changed;
 }
 
 }  // namespace tr::testing

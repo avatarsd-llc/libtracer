@@ -77,8 +77,8 @@ await surface:
   field is writable.
 - **Awaiting a field is refused.** A remote `FWD{AWAIT}` that carries any `:` selector answers
   `tr::schema::not_found` (`core/src/op_resolve_walk.hpp:A FIELD selector has no await surface`).
-- **A field write is silent.** A field write, local or remote, does not wake `await`, does not
-  advance the vertex's write sequence and does not propagate
+- **A field write is silent.** A field write, local or remote, does not wake `await` and does
+  not propagate
   ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §C;
   `core/src/graph_fields.cpp:field write itself deliberately neither wakes`).
 

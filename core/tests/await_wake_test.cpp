@@ -12,6 +12,9 @@
  *  - the WAKE on all three shapes a publish can take: a STORED_VALUE vertex, a HANDLER vertex
  *    (stores nothing; its `on_write` consumes), and a `retention_t::NONE` value vertex (stores
  *    nothing). The last two are why the wake cannot be keyed on the published value;
+ *  - the ENTRY WINDOW, deterministically: a write that lands after `await` is entered and
+ *    before it sleeps (here, from inside its own ACL gate) wakes it, with no second write and
+ *    no expiry. `graph_t::await` arms before its gate, so the arm is where the wait begins;
  *  - BOTH `rmw_counter_t` bindings count every bump exactly under concurrent bumpers: the
  *    native `fetch_add`, and the guarded load + store a core with no atomic RMW (ESP32-C3,
  *    Cortex-M0) compiles to, driven here on the host by naming that binding, across the wrap.
@@ -21,9 +24,12 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <expected>
+#include <string_view>
 #include <thread>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/guard.hpp"
 #include "libtracer/guard_mutex.hpp"
 #include "libtracer/tracer.hpp"
@@ -53,6 +59,7 @@ using tr::graph::retention_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
 using tr::graph::vertex_handle_t;
+using tr::graph::vertex_t;
 using tr::testing::check;
 using tr::testing::make_value;
 
@@ -149,10 +156,62 @@ void test_await_wakes_every_role() {
           "retention NONE: woken (NOT_FOUND, not TIMEOUT) by a write that retained nothing");
 }
 
+/** @brief What the subject seam below needs: the graph, the vertex, and whether it wrote. */
+struct gate_write_t {
+    graph_t* g = nullptr;
+    vertex_handle_t v;
+    int writes = 0;
+};
+
+/**
+ * @brief A subject seam that, the first time it runs, writes @ref gate_write_t::v from
+ *        INSIDE the ACL gate, on the awaiting thread: after `await` was entered, before it
+ *        sleeps. The write carries no caller, so it is trusted and never re-enters the seam.
+ */
+std::expected<void, tr::wire::err_t> write_in_gate(void* ctx, std::string_view caller,
+                                                   tr::mem::bytes_t& out, std::uint64_t&) {
+    auto& gw = *static_cast<gate_write_t*>(ctx);
+    if (gw.writes++ == 0) (void)gw.g->write(gw.v, make_value({0x6B}));
+    return tr::testing::subject_into(out, caller);
+}
+
+/**
+ * @brief The entry window (#2655): a write between `await`'s entry and its sleep wakes it.
+ *
+ * No sleep, no second write, no clock in the assertion: the only write is the one the gate
+ * makes, synchronously, on the awaiting thread. The 5 s deadline is a backstop that turns a
+ * regression into a TIMEOUT failure instead of a hung suite.
+ */
+void test_write_in_the_entry_window_wakes() {
+    std::printf("await: a write after entry and before the sleep wakes it:\n");
+    graph_t g;
+    const vertex_handle_t v = g.register_vertex(path_t("/wake/window"), role_t::STORED_VALUE);
+    gate_write_t gw{.g = &g, .v = v};
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {write_in_gate, &gw});
+    const auto r = tr::testing::await_within(g, v, 5s, std::string_view{"app"});
+    check(gw.writes >= 1, "the gate ran, and wrote, inside await");
+    check(r.has_value() && std::to_integer<int>((*r)->only().bytes()[0]) == 0x6B,
+          "await returned the value written in its entry window (no other write, no expiry)");
+}
+
+/** @brief The same window on a bare vertex: a write between the arm and the wait is seen. */
+void test_write_between_arm_and_wait_is_seen() {
+    std::printf("wait_for_change: a write between arm and wait returns at once:\n");
+    vertex_t v{role_t::STORED_VALUE, {}, {}};
+    tr::graph::await_deadline_t d{};  // kNoDeadline: only a write can end it
+    tr::graph::await_waiter_t w{.ctx = &d};
+    v.arm_waiter(w);
+    v.wake_waiters();  // the write's wake, after the arm, before the wait
+    check(vertex_t::wait_for_change(w), "returns true without blocking: the write unlinked it");
+    check(!vertex_t::disarm_waiter(w), "nothing left to disarm");
+}
+
 }  // namespace
 
 int main() {
     test_both_bindings_count_exactly();
     test_await_wakes_every_role();
+    test_write_in_the_entry_window_wakes();
+    test_write_between_arm_and_wait_is_seen();
     return tr::testing::summary("await_wake");
 }

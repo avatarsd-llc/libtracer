@@ -382,7 +382,7 @@ Unchanged and now normative in one place (this restates the 2026-07-08
 backlog ruling / fw ADR-0076 decision 1; it changes nothing):
 
 - A field write — protocol or app, local or remote — does **NOT** wake `await`
-  on the vertex, does **not** advance the vertex's write sequence, and does
+  on the vertex and does
   **not** propagate along subscription edges. The property plane is silent by
   design; `await` on a single field is deliberately unsupported.
 - A property change that consumers should notice is followed by an ordinary
@@ -883,7 +883,7 @@ existence was never secret.
   `ERROR{tr::schema::not_found}` (`0x0031`), caller-independently — the ENOTTY of a facet
   with no write surface, exactly as `:identity`'s write already answers.
 - **Never awaitable, and this mints nothing.** Counters are updated off the failure path and
-  **do not bump the vertex's write sequence**; making them real writes would put a publish on
+  **are not writes, so they wake no `await`**; making them real writes would put a publish on
   the hot path, which the `core/STYLE.md` §Introspection counting doctrine forbids. Nothing
   could ever fire a wait on this surface. No new status and no new guard are needed: **every
   field-tailed AWAIT already answers `ERROR{tr::schema::not_found}` unconditionally** — the
@@ -1411,3 +1411,22 @@ consequence of a retirement RFC-0029 already made normative (§1, §5.3, §11), 
 of these nouns by S3 the maintainer-ruled §Erratum (2026-10-09) above assigned and #2244
 executes. This erratum changes
 no other seam name, noun, frame, type code, grammar rule or error identity.
+
+## Erratum (2026-11-08) — §C and §D.6 cite a per-vertex write sequence that does not exist ([#2655](https://github.com/avatarsd-llc/libtracer/issues/2655))
+
+**What the text said.** Two places relied on a per-vertex write sequence. The §C property-plane
+rule said a field write "does **not** advance the vertex's write sequence". Amendment 1 §D.6
+said counters "**do not bump the vertex's write sequence**".
+
+**What was wrong.** The reference implementation deleted the write sequence (#2655, ruled under
+[#1621](https://github.com/avatarsd-llc/libtracer/issues/1621)), so the text cited a field that no
+vertex carries. Both rules were always about `await`: a field write or a counter update does
+not wake it. [RFC-0008](0008-vertex-operations-assign-propagate.md) §Erratum 2026-11-08 makes
+the same correction for the sequence itself.
+
+**The correction.** §C drops the clause and keeps the two that carry the rule: a field write does
+not wake `await` and does not propagate. §D.6 now says that counters are not writes, so they
+wake no `await`. Neither rule changes.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves.** No frame, type code, error identity or conformance vector changes.

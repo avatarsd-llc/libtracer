@@ -1831,32 +1831,24 @@ class vertex_t {
     [[nodiscard]] value_ref_t read_stored() const { return lkv_.load(); }
 
     /**
-     * @brief Block until a write to this vertex unlinks the waiter, or until
-     *        `graph_t::expire_awaits` is passed a `now` that reaches @p d's deadline.
+     * @brief Block until a write unlinks the ARMED blocking waiter @p w, or until
+     *        `graph_t::expire_awaits` is passed a `now` that reaches its deadline.
      *
-     * A blocking await is an armed waiter with no `fire` (#2579): @ref arm_waiter links it and
-     * raises the stripe's waiter count, so a write ordered after the arm takes the slow path of
-     * @ref wake_waiters, unlinks it and notifies the stripe's condvar. A write ordered before
-     * the arm preceded the wait. No timed wait runs: the deadline is the application's, and an
-     * expiry unlinks the waiter the same way a write does, marking @p d expired.
-     * @param d Whose wait it is and its deadline; it must outlive this call.
+     * The caller arms @p w first (@ref arm_waiter, no `fire`, `ctx` pointing at its
+     * `%await_deadline_t`) and disarms it on every exit (@ref disarm_waiter). Between the two
+     * it may do anything: a write that lands after the arm has already unlinked @p w, so this
+     * returns at once and nothing is lost. That is why `graph_t::await` arms BEFORE its gate
+     * (#2655): the arm is where the wait begins, and no write after it can be missed. No timed
+     * wait runs: the deadline is the application's, and an expiry unlinks @p w the same way a
+     * write does, marking its deadline expired.
+     * @param w An armed blocking waiter whose `ctx` is its `%await_deadline_t`.
      * @return true iff a write ended the wait; false on expiry.
      */
-    [[nodiscard]] bool wait_for_change(await_deadline_t& d) {
-        const std::size_t idx = vertex_stripe_index(this);
-        await_waiter_t w{.ctx = &d};
-        arm_waiter(w);
-        // Disarmed on every exit, a throwing lock included: an exception would otherwise
-        // leave this stack waiter linked on the stripe.
-        struct disarm_on_exit_t {
-            await_waiter_t& w;
-            ~disarm_on_exit_t() { (void)disarm_waiter(w); }
-        } const disarm{w};
+    [[nodiscard]] static bool wait_for_change(await_waiter_t& w) {
+        const std::size_t idx = vertex_stripe_index(w.vertex);
         std::unique_lock lock(vertex_stripe_at(idx).m);
         vertex_stripe_cv(idx).wait(lock, [&] { return !w.armed; });
-        const bool changed = !d.expired;  // written by expire_awaits under this mutex
-        lock.unlock();                    // disarm_waiter takes the same stripe mutex
-        return changed;
+        return !static_cast<const await_deadline_t*>(w.ctx)->expired;  // written under this mutex
     }
 
     /**

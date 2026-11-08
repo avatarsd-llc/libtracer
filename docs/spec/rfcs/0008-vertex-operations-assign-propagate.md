@@ -38,7 +38,7 @@ call) splits into the **two irreducible operations** it was always hiding:
 - **`assign`** — the vertex-local state transition: replace the vertex's value. Reads
   no edge and sends nothing. (In graph terms, relabel a vertex; in C++ terms, the
   `operator=` — and with rope-valued vertices ([ADR-0053](../../adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md) §6) it is literally an atomic
-  last-known-value swap.) It also advances the vertex's **write sequence** (§B) and marks it pending.
+  last-known-value swap.) It also marks the vertex pending (§B) and wakes any `await` waiter on it.
 - **`propagate`** — the edge transition: deliver a vertex's value along its
   subscription edges to other vertices (and remote subscribers). Sends; does not
   mutate.
@@ -47,8 +47,8 @@ The runtime **stops inspecting vertex values to decide delivery.** The value-bas
 delivery filter (`delivery_mode == ON_CHANGE`, "deliver only when the value bytes
 differ from last delivered") and the throttle (`THROTTLED` / `min_interval_ns`) are
 **removed** — including from the `SUBSCRIBER.qos_settings` wire encoding. In their
-place, selective propagation is **structural**: `assign` advances a vertex's write
-sequence; a `propagate(root)` sweep flushes **only the descendants actually assigned
+place, selective propagation is **structural**: `assign` marks a vertex pending; a
+`propagate(root)` sweep flushes **only the descendants actually assigned
 since the sweep last covered them** — no value comparison. What "changed" means is
 decided by *which operations the caller performed*, never by comparing bytes.
 
@@ -81,7 +81,7 @@ served structurally. A producer updates **some** vertices of a subtree, then —
 timer, at a rate it chooses — calls **one** `propagate` at a parent covering that
 subtree, and wants **only the vertices it actually touched** delivered, not the whole
 subtree re-sent. That is *coalescing keyed on which vertices were operated on*, and
-the signal for it is the vertex's **write sequence** advancing under `assign` — a fact
+the signal for it is the vertex's **pending mark**, set by `assign` — a fact
 the runtime owns, recorded at the moment of the operation — not a value comparison.
 Separating `assign` from `propagate` makes this expressible and makes every delivery
 an explicit act: the graph never fans out behind the caller's back. And where a
@@ -98,10 +98,10 @@ A vertex sits in two orthogonal planes. The **state plane** holds its value; the
 on a vertex, and they touch disjoint planes:
 
 - **`assign(v, value)`** — replace `v`'s value. Effects, all vertex-local: swap the
-  last-known-value (atomic), **increment `v`'s write sequence** (§B), append to the
+  last-known-value (atomic), **mark `v` pending** (§B), append to the
   stream ring if `v` is a stream, and wake any `await` waiter on `v`. No fan-out.
   Idempotent in *stored state* (assigning the same value twice leaves the same value)
-  but it always advances the write sequence — the record that an operation happened.
+  but it always counts as an operation: it wakes `await` and sets §B's pending mark.
 - **`propagate(v)`** — deliver, along subscription edges, the value of `v` itself
   (always — §C) **and** of the qualifying descendants in the subtree rooted at `v`
   (§B/§C). No value argument: the last-known-value is the single source of truth, so
@@ -125,17 +125,21 @@ a terminus *is* an `assign` followed by a `propagate` of that vertex.
 
 ### B. Structural selective propagation: the write sequence
 
+> **Corrected 2026-11-08 by the second write-sequence erratum ([#2655](https://github.com/avatarsd-llc/libtracer/issues/2655)) — see §Erratum at the end of this document.**
+> A vertex carries no write sequence. What this section calls the record of an `assign` is the
+> **pending mark** (selection) and the `await` **wake** (readiness); the heading keeps its old
+> name so that links into it stay valid.
+
 > **Corrected 2026-09-30 by the write-sequence erratum ([#1683](https://github.com/avatarsd-llc/libtracer/issues/1683)) — see §Erratum at the end of this document.**
 > This section first defined pending as `write_seq > swept_seq` over a *monotonic* sequence.
 > No `swept_seq` exists and nothing orders two sequence values: pending is a **mark** that an
 > `assign` sets and a covering sweep drains, and the write sequence is an **equality-only
 > change counter**. Rules 1 and 2 below stand verbatim.
 
-Every vertex carries a **write sequence** `write_seq`: a change counter (never the value's
-bytes), advanced by every `assign` and compared **for equality only** — no reader orders two
-of its values, and its width is an implementation choice (it MAY wrap). An `assign` also
-marks the vertex **pending** — it was assigned since a sweep last covered it. This is the
-structural, value-agnostic replacement for a "dirty bit".
+An `assign` marks the vertex **pending** — it was assigned since a sweep last covered it —
+and wakes any `await` waiter on it. Neither looks at the value's bytes, and no per-vertex
+counter records the assign. This is the structural, value-agnostic replacement for a "dirty
+bit".
 
 `propagate(root)` **sweeps the subtree rooted at `root`** and delivers each vertex it
 selects to that vertex's observers, then **drains** the vertex's pending mark. Selection is governed per vertex by its `delivery_mode` (§C); in
@@ -145,7 +149,7 @@ bytes match anything, but because the runtime holds no record that it was operat
 
 Two rules keep this minimal and consistent:
 
-1. **Per-vertex sequence (one small counter per vertex), delivery to the full observer
+1. **Per-vertex mark (one pending mark per vertex), delivery to the full observer
    set.** When a sweep selects `u`, `u` is delivered to *every* subscriber that
    observes it — `u`'s own edges **and** every ancestor carrying a subtree
    subscription (the [RFC-0005](0005-subtree-subscriptions.md) §A fan-out + vertical
@@ -154,10 +158,10 @@ Two rules keep this minimal and consistent:
    is observed from two different ancestors, the first sweep that covers `u` delivers it
    to *both* (bubbling reaches both) and drains its pending mark, so a second
    overlapping sweep correctly finds `u` no longer pending — no double-send, no missed
-   observer, one counter of state. (Capping delivery at `root` was considered and
+   observer, one mark of state. (Capping delivery at `root` was considered and
    rejected; it would force per-`(vertex, root)` bookkeeping — see Alternatives.)
 2. **Coalescing is free.** `assign` overwrites the last-known-value (last-writer-wins)
-   and advances the sequence; it does not enqueue — a second mark on a marked vertex is
+   and sets the mark; it does not enqueue — a second mark on a marked vertex is
    the same mark. So *k* assigns to the same vertex
    between two sweeps flush **once**, with the latest value. A producer may `assign` at
    any rate and `propagate` on a timer at a lower rate; the timer rate is the delivery
@@ -182,7 +186,7 @@ unobservable.)
 **Branch assign composes.** A `POINT` tree assigned to `v`
 ([RFC-0005](0005-subtree-subscriptions.md) §B branch write) decomposes exactly as
 before, except the store half is now `assign` at each value-carrying descendant
-(advancing each write sequence) and there is **no implicit notify**. The producer then
+(marking each pending) and there is **no implicit notify**. The producer then
 calls one `propagate(v)` to flush the whole touched set selectively — which is precisely
 the "update part of a subtree, then propagate the parent" workflow this RFC exists to
 support.
@@ -201,8 +205,8 @@ governs **whether an ancestor's `propagate` sweep includes this vertex**. Three 
 
 Two invariants make the modes coherent with §A:
 
-- **`assign` is never gated.** Whatever the mode, `assign` swaps the value and advances
-  the write sequence. The mode governs *propagation*, not *storage*. (Amendment 2 adds the
+- **`assign` is never gated.** Whatever the mode, `assign` swaps the value and wakes
+  any `await` waiter. The mode governs *propagation*, not *storage*. (Amendment 2 adds the
   one thing that is not a *mode* question: a vertex whose ROLE retains nothing has no storage
   for `assign` to swap, and refuses the verb outright.)
 - **A direct `propagate(v)` always delivers `v`.** The **argument** of a `propagate`
@@ -251,7 +255,7 @@ is introduced; `propagate` simply drives the sends it selects.
 
 ### E. Stream vertices are a queue, not a coalesce
 
-The write-sequence coalescing of §B is the **stored-value** semantic (last-writer-wins:
+The pending-mark coalescing of §B is the **stored-value** semantic (last-writer-wins:
 flush the latest once). A **stream** vertex (bounded history ring) is a *queue* — its
 contract is "observe every buffered entry," not "the latest." Its propagation is a
 **drain** of the entries buffered since the last flush, in order, not a coalesce. The
@@ -261,13 +265,13 @@ and a stream's flush delivers each ring entry appended since the previous flush.
 ### F. Determinism properties (the contract)
 
 - **No value inspection.** No operation reads a stored value's bytes to decide
-  anything about delivery. `delivery_mode` decides by *ordering and intent* (the write
-  sequence, and the three per-vertex modes), never by comparing bytes. Removing value
+  anything about delivery. `delivery_mode` decides by *ordering and intent* (the pending
+  mark, and the three per-vertex modes), never by comparing bytes. Removing value
   inspection is the point; the modes preserve it.
 - **Explicit composition, caller-ordered.** `assign` and `propagate` are sequenced by
   the caller; nothing fans out implicitly. `assign(A); assign(B); propagate(v)`
   deterministically propagates `B` (last-writer-wins).
-- **One effect each.** `assign` touches only state (value + write sequence);
+- **One effect each.** `assign` touches only state (value + pending mark);
   `propagate` touches only edges (delivery + draining the pending mark). Neither leaks into
   the other's plane.
 - **Suppression is the application's, by construction.** To not deliver, do not
@@ -290,10 +294,10 @@ and a stream's flush delivers each ring entry appended since the previous flush.
   home).
 - **[RFC-0005](0005-subtree-subscriptions.md) §A** — supersede the "per-subscriber
   delivery policy (`delivery_mode`, ON_CHANGE byte-diff, …)" clause; restate bubbling
-  in terms of `propagate` over the write-sequence selection rather than an implicit
+  in terms of `propagate` over the pending-mark selection rather than an implicit
   per-write fan-out.
-- Reference-implementation changes (`graph_t` API: `assign`/`propagate`, the write-
-  sequence selection sets, the redefined `delivery_mode_t`, removal of `ON_CHANGE` /
+- Reference-implementation changes (`graph_t` API: `assign`/`propagate`, the pending-mark
+  selection sets, the redefined `delivery_mode_t`, removal of `ON_CHANGE` /
   `min_interval_ns` / `keepalive_ns`) are recorded in `core/CHANGELOG.md` and are
   **not** normative; they follow this RFC.
 
@@ -340,7 +344,7 @@ ignored under the unknown-key rule, so there is no framing incompatibility — o
 The split reframes what a graph vertex *is*: not a mailbox you `write` to (store and
 send fused), but a **value cell** you `assign` and a **fan-out point** you
 `propagate` — two operations the caller composes. `ON_CHANGE` was the runtime
-guessing the caller's intent from the data; the write sequence and the three
+guessing the caller's intent from the data; the pending mark and the three
 `delivery_mode` modes are the runtime **recording the caller's intent from the
 operations and the vertex's declared policy**. The first is value-coupled and
 nondeterministic at the layer boundary; the second is structural, value-agnostic, and
@@ -645,3 +649,37 @@ Vectors 1–6 live in `core/tests/op_resolve_test.cpp`
 - Reference implementation: `handlers_t::deliver_written` and `value_handlers_t`,
   `graph_t::handler_write_deliver`, the branch path's `graph_t::fan_out_slice`, and
   `graph_t::schema_protocol_part`; recorded in `core/CHANGELOG.md`.
+
+## Erratum (2026-11-08) — no per-vertex write sequence exists; the record of an `assign` is the pending mark and the `await` wake ([#2655](https://github.com/avatarsd-llc/libtracer/issues/2655))
+
+**What the text said.** §A, §B, §C, §E and §F said every vertex carries a **write sequence**, which
+`assign` advances. The 2026-09-30 erratum above narrowed it to an equality-only change counter
+whose one consumer was the local `await` predicate.
+
+**What was wrong.** The reference implementation deleted that counter (#2655, ruled under
+[#1621](https://github.com/avatarsd-llc/libtracer/issues/1621)). `await` was its only reader,
+and a blocking `await` is an armed waiter that a write unlinks. So the wake carries the
+readiness signal itself, and §B's pending mark already carried the selection signal. Nothing
+reads a sequence, so the spec described a field the code does not have.
+
+**The correction.** §B's first paragraph now reads:
+
+> An `assign` marks the vertex **pending** — it was assigned since a sweep last covered it —
+> and wakes any `await` waiter on it. Neither looks at the value's bytes, and no per-vertex
+> counter records the assign.
+
+The other sites were rewritten inline to match:
+
+- "advances the write sequence" now reads **marks pending** (selection) or **wakes `await`**
+  (readiness), whichever the sentence meant.
+- "write-sequence coalescing" and "write-sequence selection" now read **pending-mark**.
+- Rule 1's "one small counter per vertex" now reads **one pending mark per vertex**.
+
+§B's heading keeps its name so that links into it still resolve. Every rule §B states stands
+unchanged, because it was always delivered by the mark. `await` still waits for the next
+write, and that wait begins when the waiter is armed. Since #2655 the host arms the waiter
+before any other step of the call.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves.** The write sequence was never wire-observable, as the 2026-09-30 erratum
+already states. No frame, type code, error identity or conformance vector changes.
