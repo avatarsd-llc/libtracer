@@ -199,8 +199,8 @@ void udp_transport_t::on_ready(void* ctx, wait_source_t& self, std::uint8_t read
     // the buffer it is given and reports the truncated length, so a buffer of exactly the
     // cap would deliver an over-cap datagram as a short, corrupt frame. With a buffer of
     // cap+1, any datagram above the cap reads back as `n > cap` and is refused below.
-    // Unset, the cap is kDefaultMaxFrame, so a link holds a 1,473-byte segment at rest, not
-    // 64 KiB (#2132). A cap at kMaxDatagram makes cap+1 exceed both bounds, and no datagram
+    // Unset, the cap is kDefaultMaxFrame, so a link's segment is 1,473 bytes, not 64 KiB
+    // (#2132). A cap at kMaxDatagram makes cap+1 exceed both bounds, and no datagram
     // can reach 65,536 bytes, so the refusal is unreachable there.
     const std::size_t frame_cap = link.max_frame_;
     const std::size_t alloc_cap = std::min(rx_cap, frame_cap + 1);
@@ -210,9 +210,9 @@ void udp_transport_t::on_ready(void* ctx, wait_source_t& self, std::uint8_t read
     // The datagram adapter of frame ingress (ADR-0087 §1, #2142). A borrowed sink with a cap
     // inside kUdpStackScratchBytes receives on this thread's stack: nothing held at rest,
     // one recvfrom per datagram, no copy. Every other link receives into ONE held segment of
-    // `alloc_cap` from its own `memory.rx`, reused across receive timeouts and replaced once
-    // handed up, so an owning sink gets the datagram with no copy. The stack array also
-    // drains a datagram that has no segment to land in.
+    // `alloc_cap` from its own `memory.rx`, drawn on the first readable turn (none at rest),
+    // kept across a refusal and redrawn on the next turn once handed up, so an owning sink gets the
+    // datagram with no copy. The stack array also drains a datagram that has no segment to land in.
     std::array<std::byte, graph::kUdpStackScratchBytes + 1> stack;
     const bool fits_stack = span_cap <= graph::kUdpStackScratchBytes;
     view::segment_ptr_t& rx_seg = link.rx_seg_;

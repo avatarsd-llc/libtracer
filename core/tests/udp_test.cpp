@@ -781,8 +781,10 @@ class counting_rx_t final : public tr::mem::mem_backend_t {
 /**
  * @brief #2142 — a borrowed-span UDP link receives on its stack: nothing drawn at rest or per
  *        datagram, an oversize datagram refused whole and counted. In a build with no stack
- *        scratch (`kUdpStackScratchBytes` 0, the library default) the same link holds one
- *        segment from its `memory.rx` instead, and still never draws from `memory.state`.
+ *        scratch (`kUdpStackScratchBytes` 0, the library default) the same link receives into
+ *        a segment from its `memory.rx` instead, drawn on its first readable turn (#2147: the
+ *        wait module has no receive timeout to draw it ahead on), so at rest it too has drawn
+ *        nothing, and it never draws from `memory.state`.
  */
 void test_span_link_draws_nothing() {
     std::printf("UDP transport — a borrowed link receives on the stack (#2142):\n");
@@ -800,15 +802,17 @@ void test_span_link_draws_nothing() {
     tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
     check(a.ok() && b.ok(), "both UDP sockets bound");
     b.set_receiver(span_rx);
-    std::this_thread::sleep_for(150ms);  // past one receive timeout: the loop is at rest
-    check(rx.draws() == (kStack ? 0u : 1u) && state.draws() == 0,
-          "an idle borrowed link has drawn nothing (or one segment, with no stack scratch)");
+    std::this_thread::sleep_for(150ms);  // the link is attached and idle
+    check(rx.draws() == 0 && state.draws() == 0,
+          "an idle borrowed link has drawn nothing, with or without stack scratch");
 
     constexpr std::size_t kDef = tr::net::udp_transport_t::kDefaultMaxFrame;
     const std::vector<std::byte> exactly(kDef, std::byte{0x44});
     a.send(std::span<const std::byte>(exactly));
     check(wait_until([&] { return spans.load() == 1; }, 3s), "an at-cap datagram is delivered");
     check(last_len.load() == kDef, "whole");
+    check(rx.draws() == (kStack ? 0u : 1u) && state.draws() == 0,
+          "the first datagram drew nothing on the stack path, or one segment without it");
     const std::vector<std::byte> over(kDef + 1, std::byte{0x55});
     a.send(std::span<const std::byte>(over));
     check(wait_until([&] { return b.drop_stats().malformed_rx == 1; }, 3s),
