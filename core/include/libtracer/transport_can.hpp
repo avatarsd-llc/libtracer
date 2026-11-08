@@ -415,10 +415,11 @@ struct can_transport_test_door_t;
  * @brief A `transport_t` over Linux SocketCAN — header-elided, self-establishing.
  *
  * Wires the increment-1 framing to a live bus. **Egress** (@ref send): the frame
- * is address-shift-fragmented by @ref tr::net::can::can_frame_at into CAN data
- * fields, an in-band @ref tr::net::can::advertise_t manifest (carrying the slice
- * count and exact total length) is emitted on the control ID, then the lean
- * id-matched data frames follow — CAN-FD windows DLC-padded up to a legal size.
+ * is address-shift-fragmented into the CAN data fields @ref tr::net::can::can_frame_at
+ * defines, carved straight out of the caller's span (no payload copy), an in-band @ref
+ * tr::net::can::advertise_t manifest (carrying the slice count and exact total length) is emitted
+ * on the control ID, then the lean id-matched data frames follow — CAN-FD windows DLC-padded up to
+ * a legal size.
  * **Ingress** (the link's receive thread): advertise frames populate the dynamic
  * identity↔path map; data frames are reassembled by @ref
  * can_reassembly_t keyed by `(node, base-endpoint) + slice-index`,

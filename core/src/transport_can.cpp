@@ -420,17 +420,11 @@ void can_transport_t::send(std::span<const std::byte> frame) {
 void can_transport_t::send_impl(std::span<const std::byte> frame, std::uint16_t target) {
     if (frame.empty()) return;
 
-    // Own the bytes so the framing can carve zero-copy subviews out of them.
-    const auto payload = tr::view::over_bytes(frame);
-    if (!payload) {
-        drops_.count_dropped_tx();  // alloc failure => backpressure drop
-        return;
-    }
-    const std::size_t count = tr::net::can::can_frame_count(*payload, cfg_.mode);
-    if (count == 0) {
-        drops_.count_dropped_tx();
-        return;
-    }
+    // The slices are carved straight out of the caller's span (#2661). Every slice is written
+    // inside this call, so the bytes need no owner beyond the caller's: the payload copy this
+    // replaces was a draw from the process value pool, not from any store a deployer injects.
+    const std::size_t step = tr::net::can::can_max_data(cfg_.mode);
+    const std::size_t count = (frame.size() + step - 1) / step;
 
     // RESERVE FIRST, then advertise (#910). The manifest is a promise of `slice_count`
     // slices, and it used to be emitted before the loop that discovers the endpoint
@@ -474,8 +468,8 @@ void can_transport_t::send_impl(std::span<const std::byte> frame, std::uint16_t 
 
     const bool fd = cfg_.mode == tr::net::can::can_frame_mode_t::FD;
     for (std::size_t i = 0; i < count; ++i) {
-        const tr::view::view_t window = tr::net::can::can_frame_at(*payload, cfg_.mode, i);
-        const std::span<const std::byte> wb = window.bytes();
+        const std::span<const std::byte> wb =
+            frame.subspan(i * step, std::min(step, frame.size() - i * step));
         const auto slice_id = can::slice_can_id(base_fields, i);
         if (!slice_id) {
             // Unreachable by construction: alloc_base reserved [base, base+count) inside
