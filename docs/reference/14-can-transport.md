@@ -383,7 +383,8 @@ the receiver needs it:
 The steps are:
 
 1. The frame is split into the data-field windows `can_frame_count` / `can_frame_at`
-   define, carved straight out of the caller's bytes: a send copies no payload.
+   define, cut straight from the caller's bytes by one cursor: a gathered send (`send(iov)`)
+   may put a window across two of its spans, and either form copies no payload.
 2. An **advertise manifest** is emitted first on the node's **control ID**
    (`[version|node|0]` — the lowest endpoint, hence highest bus priority, so the
    manifest out-arbitrates the data it governs). It is sliced into **classic ≤8-byte

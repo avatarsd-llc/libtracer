@@ -416,7 +416,7 @@ struct can_transport_test_door_t;
  *
  * Wires the increment-1 framing to a live bus. **Egress** (@ref send): the frame
  * is address-shift-fragmented into the CAN data fields @ref tr::net::can::can_frame_at
- * defines, carved straight out of the caller's span (no payload copy), an in-band @ref
+ * defines, cut straight from the caller's span or spans (no payload copy, #2679), an in-band @ref
  * tr::net::can::advertise_t manifest (carrying the slice count and exact total length) is emitted
  * on the control ID, then the lean id-matched data frames follow — CAN-FD windows DLC-padded up to
  * a legal size.
@@ -498,6 +498,19 @@ class can_transport_t final : public transport_t, public bus_link_t {
      * @param frame A complete libtracer frame (a ROUTER-wrapped TLV's bytes).
      */
     void send(std::span<const std::byte> frame) override;
+
+    /**
+     * @brief Scatter-gather send (#2679): fragment the concatenation of @p iov exactly as the
+     *        span @ref send fragments one span, cutting each slice straight from the caller's
+     *        spans with no gather.
+     *
+     * A slice may draw its bytes from several spans; the wire is byte for byte the span
+     * send's. Nothing is allocated and no payload is copied beyond the CAN frame record's own
+     * fill, because every slice is written inside this call. Same thread-safety and drop
+     * contract as the span form.
+     * @param iov The spans to emit, in order, as a single libtracer frame.
+     */
+    void send(std::span<const std::span<const std::byte>> iov) override;
 
     /**
      * @brief Look up a learned `id ↔ path` binding by its base CAN ID (test/introspection hook).
@@ -694,6 +707,7 @@ class can_transport_t final : public transport_t, public bus_link_t {
     class peer_endpoint_t final : public transport_t {
        public:
         void send(std::span<const std::byte> frame) override;
+        void send(std::span<const std::span<const std::byte>> iov) override;
         // Ingress is the owning transport's (its peer-named slot); the inherited
         // receiver slot of this directed facade is never delivered to.
 
@@ -759,7 +773,13 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // Slices adv's 18-byte header and cfg_.path (in place, never copied — this node only
     // ever advertises its OWN path, so adv.path is left empty) into CLASSIC windows.
     void emit_advertise(const can::advertise_t& adv);  // requires tx_m_ held
-    void send_impl(std::span<const std::byte> frame, std::uint16_t target);
+    // Cuts `parts`, in order, into windows of at most `step` bytes, a window free to straddle
+    // a join, and writes window i on endpoint `fields.endpoint + i * stride` (#2679). The
+    // one cursor both the advertise (stride 0, the control id) and the data slices use.
+    void emit_windows(std::span<const std::span<const std::byte>> parts,
+                      const can::can_id_fields_t& fields, std::size_t stride, std::size_t step,
+                      bool fd);
+    void send_impl(std::span<const std::span<const std::byte>> iov, std::uint16_t target);
     void emit_hello();  // the join-time presence advertise (slice_count == 0)
 
     /** @brief The store every RX table below is drawn from (`cfg.reasm_src`, resolved). */

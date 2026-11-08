@@ -169,7 +169,7 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
     udp_transport_t(const udp_transport_t&) = delete;
     udp_transport_t& operator=(const udp_transport_t&) = delete;
 
-    void send(std::span<const std::byte> frame) override;                 // sendto(peer)
+    void send(std::span<const std::byte> frame) override;                 // a one-entry send(iov)
     void send(std::span<const std::span<const std::byte>> iov) override;  // sendmsg(iovec)
 
     /**
@@ -218,7 +218,7 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
      * ADR-0039 §4 / ADR-0042 §2), never an OOM. `malformed_rx`: datagrams over
      * @ref effective_max_frame, the peer's fault; nothing is torn down and the next datagram
      * is served. `dropped_tx`: no peer learned or configured yet, no socket, a refused gather
-     * store, or a `sendto`/`sendmsg` the socket refused or cut short (#2279). A shed datagram
+     * store, or a `sendmsg` the socket refused or cut short (#2279). A shed datagram
      * is never retried: the link carries no acks, and the next value supersedes it.
      */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {

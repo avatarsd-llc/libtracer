@@ -2,7 +2,7 @@
 
 Every stream kind in the tree — `tcp`, `ws`, `quic` — has to *invent* message boundaries,
 because a stream has none. UDP already has them, so `udp_transport_t` adds nothing: a `send` is
-one `sendto`, an inbound datagram is one frame, and there is no reassembler, no length prefix
+one `sendmsg`, an inbound datagram is one frame, and there is no reassembler, no length prefix
 and no partial-frame state anywhere in the kind.
 
 That single difference is what the whole page is about, and it has two consequences worth

@@ -38,6 +38,9 @@ subview over the same segment, never a memcpy. It is a pair of free functions, n
 is a pure function of the payload length, the mode and the index, so there is no
 table to hold and nothing to allocate. `can_frame_mode_t` selects the classic 8-byte or CAN-FD 64-byte data
 field, and `can_fd_dlc_round_up` handles CAN-FD's non-contiguous length ladder.
+The transport does not call the splitter on its send path: it cuts the same windows with one
+cursor over the caller's spans, so a window may straddle two of them (#2679). The splitter is
+the contiguous definition the tests hold that cut to.
 
 **The reassembler** (`tr::net::can_reassembly_t`) is the far side: `(origin,
 timestamp) + index` places each slice in one segment of the advertised total, drawn

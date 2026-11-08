@@ -21,16 +21,26 @@ void loopback_endpoint_t::release(frame_t* f) noexcept {
 }
 
 void loopback_endpoint_t::send(std::span<const std::byte> frame) {
+    const std::span<const std::byte> one[1] = {frame};
+    send(std::span<const std::span<const std::byte>>(one));
+}
+
+void loopback_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
     if (peer_ == nullptr) return;
+    std::size_t total = 0;
+    for (const std::span<const std::byte>& s : iov) total += s.size();
     // The block comes from the RECEIVING endpoint's source, which releases it after delivery.
+    // The spans are gathered straight into it (#2679): the base gather's block from this
+    // link's egress store, and the second copy out of it, are gone.
     mem::block_source_t& src = peer_->src_;
-    void* const p = src.try_alloc(sizeof(frame_t) + frame.size(), kFrameAlign);
+    void* const p = src.try_alloc(sizeof(frame_t) + total, kFrameAlign);
     if (p == nullptr) {
         drops_.count_dropped_tx();
         return;
     }
-    auto* const f = ::new (p) frame_t{nullptr, frame.size()};
-    std::copy(frame.begin(), frame.end(), reinterpret_cast<std::byte*>(f + 1));
+    auto* const f = ::new (p) frame_t{nullptr, total};
+    std::byte* out = reinterpret_cast<std::byte*>(f + 1);
+    for (const std::span<const std::byte>& s : iov) out = std::copy(s.begin(), s.end(), out);
     if (!peer_->enqueue(f)) {
         peer_->release(f);
         drops_.count_dropped_tx();

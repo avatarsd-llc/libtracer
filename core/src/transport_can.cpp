@@ -312,7 +312,12 @@ std::string_view can_transport_t::peer_name(peer_handle_t peer, std::span<char> 
 }
 
 void can_transport_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
-    owner_->send_impl(frame, node_.load(std::memory_order_relaxed));
+    const std::span<const std::byte> one[1] = {frame};
+    owner_->send_impl(one, node_.load(std::memory_order_relaxed));
+}
+
+void can_transport_t::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
+    owner_->send_impl(iov, node_.load(std::memory_order_relaxed));
 }
 
 std::optional<std::uint16_t> can_transport_t::alloc_base(std::size_t slice_count,
@@ -370,32 +375,52 @@ void can_transport_t::emit_advertise(const can::advertise_t& adv) {
         std::span<const std::byte>(header),
         std::as_bytes(std::span<const char>(cfg_.path.data(), cfg_.path.size()))};
 
-    const std::uint32_t control_id =
-        can::encode_can_id({cfg_.version, cfg_.node, kCanControlEndpoint});
-    std::size_t part = 0;  // which source the next byte comes from
-    std::size_t off = 0;   // read cursor within that source
-    while (part < 2) {
-        can_frame_data_t frame;
-        frame.id = control_id;
-        frame.fd = false;
+    emit_windows(parts, {cfg_.version, cfg_.node, kCanControlEndpoint}, 0,
+                 tr::net::can::kCanClassicMaxData, false);
+}
+
+void can_transport_t::emit_windows(std::span<const std::span<const std::byte>> parts,
+                                   const can::can_id_fields_t& fields, std::size_t stride,
+                                   std::size_t step, bool fd) {
+    // ONE cursor cuts both the advertise and a group's data slices (#2679). It walks the parts
+    // in order and fills each window from as many of them as it takes: a join between two
+    // parts is not a window boundary, so the wire is byte for byte what a contiguous cut gives
+    // (`can::can_frame_at`, the tests' oracle). The memcpy into the frame record is the wire
+    // fill, the medium's own; nothing else copies the payload, and nothing is allocated.
+    std::size_t part = 0;  // which part the next byte comes from
+    std::size_t off = 0;   // read cursor within that part
+    for (std::size_t i = 0;; ++i) {
+        can_frame_data_t out;
+        out.fd = fd;
         std::size_t n = 0;
-        // Fill one window from as many sources as it takes — the header/path join is not
-        // a frame boundary, so the wire is byte-for-byte what a contiguous encode gives.
-        while (n < tr::net::can::kCanClassicMaxData && part < 2) {
+        while (n < step && part < parts.size()) {
             if (off == parts[part].size()) {
                 ++part;
                 off = 0;
                 continue;
             }
-            const std::size_t take = std::min<std::size_t>(tr::net::can::kCanClassicMaxData - n,
-                                                           parts[part].size() - off);
-            std::memcpy(frame.data.data() + n, parts[part].data() + off, take);
+            const std::size_t take = std::min(step - n, parts[part].size() - off);
+            std::memcpy(out.data.data() + n, parts[part].data() + off, take);
             n += take;
             off += take;
         }
-        if (n == 0) break;  // the stream ended exactly on a window boundary
-        frame.len = static_cast<std::uint8_t>(n);
-        link_->write_raw(frame);
+        if (n == 0) return;  // the stream ended exactly on a window boundary
+        // Window i rides endpoint `fields.endpoint + i * stride`: stride 0 keeps the advertise
+        // on the control id, stride 1 walks the group's reserved run. Out of range is
+        // unreachable (alloc_base reserved the run before the manifest went out); it is kept
+        // as a hard, COUNTED stop, so a broken reservation reports the group lost, never
+        // half-delivered against a manifest that promised all of it.
+        const std::optional<std::uint32_t> id = can::slice_can_id(fields, i * stride);
+        if (!id) {
+            drops_.count_dropped_tx();
+            return;
+        }
+        out.id = *id;
+        // FD rounds the length up to a legal DLC. The pad bytes are already zero (data{} is
+        // value-initialized), and the peer trims to group_total_len, so they never reach the
+        // delivered frame.
+        out.len = static_cast<std::uint8_t>(fd ? tr::net::can::can_fd_dlc_round_up(n) : n);
+        link_->write_raw(out);
     }
 }
 
@@ -414,17 +439,26 @@ void can_transport_t::emit_hello() {
 }
 
 void can_transport_t::send(std::span<const std::byte> frame) {
-    send_impl(frame, can::kCanBroadcastNode);
+    const std::span<const std::byte> one[1] = {frame};
+    send_impl(one, can::kCanBroadcastNode);
 }
 
-void can_transport_t::send_impl(std::span<const std::byte> frame, std::uint16_t target) {
-    if (frame.empty()) return;
+void can_transport_t::send(std::span<const std::span<const std::byte>> iov) {
+    send_impl(iov, can::kCanBroadcastNode);
+}
 
-    // The slices are carved straight out of the caller's span (#2661). Every slice is written
-    // inside this call, so the bytes need no owner beyond the caller's: the payload copy this
-    // replaces was a draw from the process value pool, not from any store a deployer injects.
+void can_transport_t::send_impl(std::span<const std::span<const std::byte>> iov,
+                                std::uint16_t target) {
+    std::size_t total = 0;
+    for (const std::span<const std::byte>& s : iov) total += s.size();
+    if (total == 0) return;
+
+    // The slices are cut straight from the caller's spans (#2661, #2679). Every slice is
+    // written inside this call, so the bytes need no owner beyond the caller's: no gather, no
+    // owned copy, no draw from any store. A routed frame used to take the base gather (one
+    // block from the egress store) and then a value-pool copy, two payload copies per frame.
     const std::size_t step = tr::net::can::can_max_data(cfg_.mode);
-    const std::size_t count = (frame.size() + step - 1) / step;
+    const std::size_t count = (total + step - 1) / step;
 
     // RESERVE FIRST, then advertise (#910). The manifest is a promise of `slice_count`
     // slices, and it used to be emitted before the loop that discovers the endpoint
@@ -457,7 +491,7 @@ void can_transport_t::send_impl(std::span<const std::byte> frame, std::uint16_t 
     can::advertise_t adv;
     adv.can_id = can::encode_can_id(base_fields);
     adv.group = count > 1;
-    adv.group_total_len = static_cast<std::uint32_t>(frame.size());
+    adv.group_total_len = static_cast<std::uint32_t>(total);
     adv.slice_count = static_cast<std::uint16_t>(count);
     adv.target = target;
     // `adv.path` stays empty: emit_advertise walks cfg_.path in place. Copying it here
@@ -466,33 +500,7 @@ void can_transport_t::send_impl(std::span<const std::byte> frame, std::uint16_t 
     ++tx_in_flight_;  // this group's slice run stays reserved until its last slice is out
     lock.unlock();
 
-    const bool fd = cfg_.mode == tr::net::can::can_frame_mode_t::FD;
-    for (std::size_t i = 0; i < count; ++i) {
-        const std::span<const std::byte> wb =
-            frame.subspan(i * step, std::min(step, frame.size() - i * step));
-        const auto slice_id = can::slice_can_id(base_fields, i);
-        if (!slice_id) {
-            // Unreachable by construction: alloc_base reserved [base, base+count) inside
-            // the endpoint window before the manifest went out, so every index here is in
-            // range. Kept as a hard, COUNTED stop rather than the silent `break` it was —
-            // if the reservation invariant is ever broken the group is reported lost, not
-            // half-delivered against a manifest that promised all of it.
-            drops_.count_dropped_tx();
-            break;
-        }
-
-        can_frame_data_t out;
-        out.id = *slice_id;
-        out.fd = fd;
-        const std::size_t logical = wb.size();
-        const std::size_t on_wire =
-            fd ? tr::net::can::can_fd_dlc_round_up(logical) : logical;  // DLC pad (FD only)
-        out.len = static_cast<std::uint8_t>(on_wire);
-        std::memcpy(out.data.data(), wb.data(), logical);
-        // Pad bytes already zero (data{} is value-initialized); the peer trims to
-        // group_total_len so the padding never reaches the delivered frame.
-        link_->write_raw(out);
-    }
+    emit_windows(iov, base_fields, 1, step, cfg_.mode == tr::net::can::can_frame_mode_t::FD);
     lock.lock();
     --tx_in_flight_;
     tx_drained_.notify_all();  // a fence waiter re-tests its own predicate
