@@ -19,10 +19,8 @@
  * A slot type must provide, over the intrusive `value_t` of `%value.hpp` (RFC 0028 §5.1):
  *
  *   - `[[nodiscard]] bool store(value_t*)` — publish, sequentially consistent. The slot ADOPTS
- *     the one reference the caller passes and releases the displaced value's. The order
- *     matters: `vertex_t::store` relies on this sharing one total order with the `write_seq_`
- *     bump and the waiter count, which is what makes the waiterless publish (#555) unable to
- *     lose a wakeup. **`false` means nothing was published** and the previous value still
+ *     the one reference the caller passes and releases the displaced value's. **`false` means
+ *     nothing was published** and the previous value still
  *     stands — the reference stays the caller's, who must soft-fail (#477), never report the
  *     write as taken.
  *   - `void clear(std::memory_order)` — drop the published value. Cannot fail, and says so in
@@ -128,17 +126,6 @@ concept lkv_slot = requires(S s, value_t* v) {
 };
 
 /**
- * @brief Whether the slot policy @p S takes its sections on the guard @p G and offers the
- *        fused publish `store(v, in_section)` (#1715).
- *
- * The vertex fuses the write sequence's bump into the slot's section only when this holds and
- * the sequence's counter is the guarded binding; otherwise it bumps separately, as before.
- */
-template <class S, class G>
-concept publishes_under =
-    requires { typename S::guard_type; } && std::same_as<typename S::guard_type, G>;
-
-/**
  * @brief The slot for a single-writer build (RFC 0028 §5.5): one `value_t*`, exchanged and
  *        retained inside the guard @p G, which never spins.
  *
@@ -187,8 +174,6 @@ class basic_single_writer_slot_t {
    public:
     /** @brief This policy's only wait is its guard, so it spins exactly when the guard does. */
     static constexpr bool may_spin = G::may_spin;
-    /** @brief The guard the slot's sections take — what `publishes_under` reads (#1715). */
-    using guard_type = G;
 
     basic_single_writer_slot_t() = default;
     basic_single_writer_slot_t(const basic_single_writer_slot_t&) = delete;
@@ -199,9 +184,9 @@ class basic_single_writer_slot_t {
      *        after it, outside.
      *
      * No fence follows the guard. What `vertex_t::store` needs from the slot is that the value
-     * is visible to anyone who observes the next `write_seq_` bump, and the bump is a `seq_cst`
-     * read-modify-write sequenced after the guard's release, so it already carries the swap.
-     * The waiterless-publish argument (#555) is about `write_seq_` and the waiter count only.
+     * is visible to an awaiter the publish wakes, and the wake takes the stripe mutex after the
+     * guard's release, so it already carries the swap. The waiterless-publish argument (#555)
+     * is about the waiter count only.
      *
      * @param v The value to publish; the slot adopts the caller's reference. Null clears.
      * @return Always `true`. A swap allocates nothing, so there is no failure to report.
@@ -212,45 +197,6 @@ class basic_single_writer_slot_t {
             std::swap(v_, v);
         }
         value_t::release(v);  // `v` is now the displaced value, released here, unguarded
-        return true;
-    }
-
-    /**
-     * @brief Publish, and run @p in_section inside the SAME section as the swap (#1715).
-     *
-     * The fused publish of a core with no atomic read-modify-write: there the write sequence's
-     * bump is itself a section of `G` (`tr::rmw_counter_t`'s guarded binding), so publishing
-     * through @ref store and then bumping opened two sections back to back. Passing the bump
-     * in here (`rmw_counter_t::bump_in_section`) opens one. The caller must name this slot's
-     * address as the anchor of every OTHER bump of that counter, so that every bump still
-     * serializes on one guard.
-     *
-     * **Publication, restated for the fused form.** @ref store's note relies on the bump being
-     * a `seq_cst` RMW sequenced after the guard's release. Here the bump is a plain load and a
-     * `seq_cst` store, made inside the guard, after the swap. A reader that observes the new
-     * sequence value and then reads the slot still sees the swap: its `load()` takes the same
-     * guard, and its section cannot come first, because the reader's read of the sequence is
-     * sequenced before its section opens, while the store it read is sequenced after this
-     * section opened. A load cannot read a store that happens after it. So the reader's section
-     * follows this one, and the guard's release/acquire carries the swap to it. The writer's
-     * Dekker pair is unchanged: the bump is still a `seq_cst` store, sequenced before the
-     * `waiters` load the vertex makes after this returns.
-     *
-     * @param v          The value to publish; the slot adopts the caller's reference.
-     * @param in_section Called once, inside the guard, after the swap. Must not throw, block
-     *                   or allocate: it runs with interrupts masked on an RTOS chip.
-     * @return Always `true`, as @ref store.
-     */
-    template <class F>
-    [[nodiscard]] bool store(value_t* v, F&& in_section) noexcept {
-        static_assert(std::is_nothrow_invocable_v<F&>,
-                      "the fused section's callable runs inside the guard and must be noexcept");
-        {
-            const ::tr::guard_scope_t<G> g{this};
-            std::swap(v_, v);
-            in_section();
-        }
-        value_t::release(v);  // the displaced value, released after the section as in store()
         return true;
     }
 

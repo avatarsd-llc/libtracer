@@ -262,16 +262,22 @@ void test_none_vertex_relays() {
               g.write(v, make_value({0x04})).has_value() && g.read(v).has_value(),
           "back to LAST, the next write is readable again");
 
-    // A NONE TARGET: a delivery into it lands (the target's sequence moves) and keeps nothing.
+    // A NONE TARGET: a delivery into it lands (it wakes the target's awaiter) and keeps nothing.
     const path_t src("/relay/src");
     const path_t dst("/relay/dst");
     const vertex_handle_t s = g.register_vertex(src, role_t::STORED_VALUE);
     const vertex_handle_t d = g.register_vertex(dst, role_t::STORED_VALUE);
     check(g.set_policy(d, {.retention = retention_t::NONE}).has_value(), "a NONE target");
     check(g.subscribe(src, dst).has_value(), "wired src -> dst");
-    const tr::graph::write_seq_t dseq = vx(d)->current_seq();
+    // A one-shot waiter (ADR-0084) fires on the writer's thread, so the check needs no thread.
+    int fired = 0;
+    tr::graph::await_waiter_t w{
+        .fire = [](void* ctx, tr::graph::await_waiter_t&) noexcept { ++*static_cast<int*>(ctx); },
+        .ctx = &fired};
+    vx(d)->arm_waiter(w);
     check(g.write(s, make_value({0x05})).has_value(), "the source write lands");
-    check(vx(d)->current_seq() == dseq + 1, "the delivery reached the NONE target");
+    check(fired == 1, "the delivery reached the NONE target (its awaiter woke)");
+    if (fired == 0) (void)tr::graph::vertex_t::disarm_waiter(w);
     check(!g.read(d).has_value(), "... which retains nothing — read is NOT_FOUND");
     check(g.read(s).has_value(), "the source (LAST) still holds its own");
 

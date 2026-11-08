@@ -89,7 +89,7 @@ The stripe count is an ordinary config constant shared through one header
 ([ADR-0068 — build configuration is plain C++](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md);
 default 16, the sharing rationale at `vertex_stripe.hpp:kVertexLockStripes and kCacheLineBytes`). The stripe is selected by
 `vertex_stripe_of` (`vertex_stripe.hpp:vertex_stripe_of`) from the vertex address, hashed `(h >> 6) % kVertexLockStripes`
-(`vertex_stripe.hpp:return (h >> 6) % kVertexLockStripes`). The stripes guard the fan-out edge list, the STREAM ring, the write-sequence bump and
+(`vertex_stripe.hpp:return (h >> 6) % kVertexLockStripes`). The stripes guard the fan-out edge list, the STREAM ring, the await waiter list and
 the ACL state. `add_edge`, `clear_edge` and `set_acl` take one; **`snapshot_edges` (`vertex.hpp:vertex_t::snapshot_edges`) no
 longer does.** Delivery reads a published, immutable edge array under a bounded edge pin
 instead — the stripe mutex left the publish path and kept the control plane
@@ -136,7 +136,7 @@ On a priority-preemptive single core that spin is a livelock, not a slowdown.
 
 ### 2.4 What has no lock
 
-The write-sequence read, the subtree-listener counters (`own_subs_`, `listeners_above_`), the ACL
+The stripe's waiter-count read, the subtree-listener counters (`own_subs_`, `listeners_above_`), the ACL
 `OWN_ACES` bit, the branch/leaf fork bit, the cold-extension pointer `ext_`, and the publish
 itself when no waiter is parked
 ([#555](https://github.com/avatarsd-llc/libtracer/pull/555)).

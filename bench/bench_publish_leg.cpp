@@ -24,7 +24,7 @@
  * process, over the same value and the same vertex:
  *
  *   - `publish-assign` — @ref tr::graph::graph_t::assign. RFC-0008's STATE transition and
- *     nothing else: swap the LKV (lock-free), bump the write sequence, wake awaiters, mark the
+ *     nothing else: swap the LKV (lock-free), wake awaiters, mark the
  *     vertex for the next covering sweep. **Sends nothing.** This is the `vertex_t::store` leg
  *     the RFC's 53 ns names; `store()` itself is private to `graph_t`, and `assign` is the
  *     public verb that reaches it without fanning out.
@@ -123,7 +123,7 @@ enum class verb_t { ASSIGN, WRITE };
  * @brief Run one (verb, subscriber-count) arm and emit its RESULT row.
  *
  * A fresh `graph_t` per arm, so no arm inherits another's registry, edges or allocator state.
- * The non-vacuity check is the write sequence: an arm whose publishes were all declined would
+ * The non-vacuity check is the `published` count: an arm whose publishes were all declined would
  * otherwise report a very fast nothing.
  *
  * @param verb Which verb to time.

@@ -266,8 +266,9 @@ Normative rules:
 - **B.4** `retire` MUST be idempotent: retiring an already-retired vertex succeeds
   and delivers nothing.
 - **B.5** Retirement **delivers nothing and wakes nothing.** It MUST NOT deliver
-  along subscription edges, MUST NOT wake `await`, and MUST NOT bump the vertex's
-  write sequence. Retirement is not an `assign`: it publishes no value. A
+  along subscription edges and MUST NOT wake `await` (corrected 2026-11-08 by erratum,
+  below — this sentence also forbade bumping a write sequence, which no vertex carries).
+  Retirement is not an `assign`: it publishes no value. A
   subscriber learns of a retirement only by addressing the path and receiving
   `tr::path::not_found` (§C).
 
@@ -338,15 +339,12 @@ carries: as if `fill` had never run. It MUST clear, at retire time:
 - **the delivery-mode membership**, so the revived vertex does not inherit the
   retired one's sweep participation.
 
-**B.6.2** — Exactly one piece of per-vertex state MUST **survive**: the **write
-sequence** (`write_seq_`). It is a per-address change counter, compared for equality
-only; resetting it could let a waiter whose `await` began before the retire read a revived
-vertex's counter as equal to the value it sampled, hiding a real change (corrected
-2026-09-30 by erratum, below — this sentence first called it "monotonic per address" and cited
-readiness cursors that assume it never regresses; none exists). It is
-**not** wire-observable (it feeds only the local `await` predicate), so keeping it
-does not re-distinguish a retired path from a never-built one on the wire — §C.4's
-collapse is preserved. The vertex's allocation, its extension block, its name, and
+**B.6.2** — No change-tracking state needs to **survive** (corrected 2026-11-08 by erratum,
+below — this sentence first kept a per-vertex write sequence, which no vertex carries any
+more). A waiter whose `await` began before the retire stays armed on the address, so the
+first write after a revival wakes it: every write on the address, across retire and revival,
+is a change to any waiter, which is what keeping the sequence was for. Nothing here is
+wire-observable, so §C.4's collapse is preserved. The vertex's allocation, its extension block, its name, and
 its parent/child links also survive, by §B.1 / ADR-0057 (the block is emptied, never
 freed).
 
@@ -823,3 +821,27 @@ the same. The conformance vector `subscriber/no-target-refused` pins it.
 **Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
 wire surface moves**: no codepoint, error code or frame shape changes, and a conforming
 implementation of §D.1 already answers this record exactly as the corrected text says.
+
+## Erratum (2026-11-08) — §B.5 and §B.6.2 name a per-vertex write sequence that does not exist ([#2655](https://github.com/avatarsd-llc/libtracer/issues/2655))
+
+**What the text said.** §B.5 said retirement MUST NOT bump the vertex's write sequence. §B.6.2
+said exactly one piece of per-vertex state MUST survive retire: that write sequence, so that a
+waiter whose `await` began before the retire would still see a revival's writes as a change.
+
+**What was wrong.** The reference implementation deleted the write sequence (#2655, ruled
+under [#1621](https://github.com/avatarsd-llc/libtracer/issues/1621)). Its only reader was
+`await`. A blocking `await` is now an armed waiter, and a write wakes it by unlinking it.
+[RFC-0008](0008-vertex-operations-assign-propagate.md) §Erratum 2026-11-08 makes the same
+correction for §B there.
+
+**The correction.** §B.5 keeps both of its MUSTs (no delivery, no wake) and drops the clause
+about the sequence, which has nothing left to forbid. §B.6.2 now says that no
+change-tracking state needs to survive. A pre-retire waiter stays armed on the address, so the
+first write after a revival wakes it. That is the guarantee the surviving sequence existed to
+give, and it still holds. The rest of §B.6.2 is unchanged: the allocation, the extension block,
+the name and the links survive, and §C.4's collapse is preserved.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves.** The sequence was never wire-observable, and no frame, codepoint, error
+identity or conformance vector changes. What a waiter and a subscriber observe across retire and
+revival is exactly what the text promised before.

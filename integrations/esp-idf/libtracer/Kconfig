@@ -553,7 +553,7 @@ menu "libtracer"
         help
             Number of mutex/condvar pairs in the park table, where a task
             blocks until an atomic word changes (tr::park_wait, libtracer
-            #2507): a contended write-sequence bump, a teardown drain. Its
+            #2507): a contended egress writer role, a teardown drain. Its
             cost is STATIC RAM, reserved at link time: each pair holds its
             FreeRTOS mutex inline (#2454), 100 B a stripe on esp32c6, so 4
             stripes cost 400 B and 8 cost 800 B. Nothing comes from the heap.

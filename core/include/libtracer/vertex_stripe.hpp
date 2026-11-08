@@ -100,6 +100,9 @@ inline constexpr std::uint64_t kNoDeadline = std::numeric_limits<std::uint64_t>:
 struct await_deadline_t {
     const void* owner = nullptr;          /**< @brief The graph the await runs on. */
     std::uint64_t deadline = kNoDeadline; /**< @brief Ends the wait once `now` reaches it. */
+    /** @brief Set by `graph_t::expire_awaits`, under the stripe mutex, when the deadline (not
+     *         a write) ended the wait (#2655). */
+    bool expired = false;
 };
 
 /**
@@ -113,8 +116,8 @@ struct await_deadline_t {
  * swap), so a stripe serializes only control-plane verbs (ring trim, edge
  * mutation, ACL state, seq/notify) — cross-vertex contention is
  * wiring-frequency, not per-publish. `await` waits on the stripe's condvar
- * with a PER-VERTEX predicate (`write_seq_`), so a collision costs a spurious
- * wake + re-check, never a correctness change.
+ * with a PER-WAITER predicate (its own link is gone), so a collision costs a
+ * spurious wake + re-check, never a correctness change.
  */
 struct alignas(kStripeAlign) vertex_stripe_t {  // one cache line per stripe where a second
                                                 // core exists to false-share with (see

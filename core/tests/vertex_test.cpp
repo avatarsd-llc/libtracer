@@ -8,7 +8,7 @@
  *
  * Covers: the #867 / #1300 visibility guard (the map-lock mutators AND the storage funnel are
  * graph_t's, enforced by `static_assert` because no runtime test can observe access control),
- * the note_write/read_stored readiness cursor, wait_for_change wake/timeout, snapshot_edges
+ * the wake_waiters/read_stored readiness verbs, wait_for_change wake/timeout, snapshot_edges
  * under a concurrent add_edge storm (inline→heap crossover included), clear_edge, the edge slot
  * table, and set_acl/with_acl/with_aces.
  *
@@ -111,53 +111,42 @@ path_key_t key_of(std::initializer_list<std::uint8_t> bytes) {
 }
 
 /**
- * @brief The write-sequence arithmetic on a BARE vertex — the one property no graph seam can
- *        express, because `graph_t::await` snapshots the cursor internally.
+ * @brief The readiness verb on a BARE vertex: @ref wake_waiters publishes nothing.
  *
  * `store()` is `graph_t`'s alone since #1300, so what remains testable here is the readiness
- * half: `note_write()` is exactly "+1 per verb, publish nothing". The LKV facts this suite used
- * to assert on `store()` are restated through the handle in
- * `graph_test.cpp::test_assign_lkv_and_seq_bump`.
+ * half. The LKV facts this suite used to assert on `store()` are restated through the handle
+ * in `graph_test.cpp::test_assign_lkv_and_seq_bump`.
  */
-void test_seq_cursor_and_empty_lkv() {
-    std::printf("note_write / read_stored — the seq cursor moves, the LKV does not:\n");
+void test_wake_and_empty_lkv() {
+    std::printf("wake_waiters / read_stored — a wake publishes nothing:\n");
     vertex_t v{role_t::STORED_VALUE, key_of({0x01}), {}};
     check(v.read_stored() == nullptr, "a never-assigned vertex holds no LKV");
-    const tr::graph::write_seq_t seq0 = v.current_seq();
-    v.note_write();
-    check(v.current_seq() == seq0 + 1, "note_write bumps the write sequence exactly once");
-    check(v.read_stored() == nullptr, "a seq bump publishes nothing");
-    v.note_write();
-    v.note_write();
-    check(v.current_seq() == seq0 + 3, "three bumps land three apart — one per verb, no coalesce");
-    check(v.read_stored() == nullptr, "still nothing published after three bumps");
+    v.wake_waiters();
+    v.wake_waiters();
+    check(v.read_stored() == nullptr, "a waiterless wake publishes nothing");
 }
 
 void test_await_wake_and_timeout() {
-    std::printf("wait_for_change — wake on a write bump, timeout when idle:\n");
+    std::printf("wait_for_change — wake on a write, timeout when idle:\n");
     vertex_t v{role_t::STORED_VALUE, key_of({0x03}), {}};
     tr::graph::graph_t g;  // owns the waits' deadlines; its expire_awaits ends them
-    check(!tr::testing::wait_for_change_within(g, v, v.current_seq(), 20ms),
-          "no writer => timeout (returns false)");
+    check(!tr::testing::wait_for_change_within(g, v, 20ms), "no writer => timeout (returns false)");
 
-    const tr::graph::write_seq_t seq0 = v.current_seq();
+    // EDGE-triggered: the wait sees a write ordered after its arm, so the waker re-wakes until
+    // the waiter is out (#1418), with a backstop past the 2 s deadline.
     std::atomic<bool> woke{false};
+    std::atomic<bool> done{false};
     std::thread waiter([&] {
-        if (tr::testing::wait_for_change_within(g, v, seq0, 2s)) woke.store(true);
+        if (tr::testing::wait_for_change_within(g, v, 2s)) woke.store(true);
+        done.store(true, std::memory_order_release);
     });
-    // NOT the #1418 sleep-synchronization defect, and the contrast is the discriminator: `seq0`
-    // is captured ABOVE, on THIS thread, BEFORE the waiter is spawned. The predicate is
-    // `write_seq_ != seq0` against a value that predates the bump, so it is LEVEL-triggered —
-    // a waiter that arrives after `note_write()` still observes the change and returns at once
-    // (line 149 asserts exactly that). The defect needs the waiter to snapshot the sequence
-    // ITSELF, after the window, which is what `graph_t::await` does and this test does not.
-    // The sleep here only widens the blocked-waiter case; it is not load-bearing for the pass.
-    std::this_thread::sleep_for(20ms);
-    v.note_write();
+    const auto backstop = std::chrono::steady_clock::now() + 30s;
+    while (!done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < backstop) {
+        v.wake_waiters();
+        std::this_thread::sleep_for(2ms);
+    }
     waiter.join();
-    check(woke.load(), "a write bump wakes a blocked waiter (write_seq_ != seq0)");
-    check(tr::testing::wait_for_change_within(g, v, seq0, 0ns),
-          "a stale seq0 observes the change without blocking");
+    check(woke.load(), "a write's wake ends a blocked waiter (returns true)");
 }
 
 /**
@@ -348,7 +337,7 @@ void test_bookkeeping_counters() {
 }  // namespace
 
 int main() {
-    test_seq_cursor_and_empty_lkv();
+    test_wake_and_empty_lkv();
     test_await_wake_and_timeout();
     test_edges_snapshot_clear_latch();
     test_slot_write_checked_against_its_edge();

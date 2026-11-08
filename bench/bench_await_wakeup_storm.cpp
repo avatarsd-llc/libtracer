@@ -5,8 +5,8 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * `await` (graph.cpp) parks on a per-vertex condvar until the next write bumps the
- * vertex's write sequence; a `write` bumps it and `notify_all`s. On a many-core
+ * `await` (graph.cpp) parks on its stripe's condvar until the next write to the
+ * vertex unlinks its waiter; a `write` unlinks it and `notify_all`s. On a many-core
  * host with W subscribers all awaiting one hot vertex, each write triggers a wake
  * storm: notify_all plus W threads serially re-acquiring the vertex mutex to
  * re-check the predicate. This is the second half of the 128-core scaling

@@ -42,7 +42,7 @@ namespace detail {
  * @brief Whether this build counts segment references with one hardware RMW (`true`) or with a
  *        load and a store inside one section of `config_t::guard_t` (`false`, #1722).
  *
- * The same choice `tr::rmw_counter_t` makes for a vertex's write sequence: whether the target's
+ * The same choice `tr::rmw_counter_t` makes for its binding: whether the target's
  * 32-bit atomic is always lock-free (`amoadd.w` on rv32imac, `ldrex`/`strex` on Cortex-M3 and
  * up, `lock xadd` on x86-64). A Cortex-M0 or rv32imc core takes the guarded binding; a
  * single-threaded build makes that guard free by binding `tr::no_guard_t`. A host test drives

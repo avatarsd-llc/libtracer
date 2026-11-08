@@ -799,7 +799,7 @@ struct vertex_policy_t {
      * Legal pairings: `STORED_VALUE` `NONE`|`LAST`, `STREAM` `NONE`|`N`, `HANDLER` `NONE`. An
      * illegal one answers `SCHEMA_NOT_FOUND` from the verb that applies the policy.
      * - `NONE` on a `STORED_VALUE` makes it a pure relay: every write is delivered and
-     *   released, the write sequence still moves (so `await` wakes), `read` answers
+     *   released, `await` still wakes, `read` answers
      *   `NOT_FOUND`, and `assign` / `propagate` refuse with `SCHEMA_NOT_FOUND`. A direct write
      *   whose only subscribers are callbacks draws no block at all.
      * - `N` sets the ring depth (@ref depth); `NONE` on a `STREAM` empties and stops the ring.
@@ -1144,8 +1144,7 @@ class graph_t {
      * registration that revives the same address
      * inherits **nothing** of the retired owner — in particular the revived path inherits
      * its live ancestor's ACL policy, never the retired one's (the §Discussion-7 ruling:
-     * an ACL does not survive churn). `write_seq_` survives (forward-only per address,
-     * modulo 2^32).
+     * an ACL does not survive churn).
      *
      * Delivers nothing and wakes no `await` (§B.5). Idempotent (§B.4): retiring an
      * already-retired or unregistered vertex succeeds and does nothing. The root cannot be
@@ -1209,8 +1208,8 @@ class graph_t {
      *          in @ref await are invisible here — this counts subscription edges only, which
      *          ADR-0006 makes a field-write to `:subscribers[]` rather than one of its three
      *          verbs. A producer that skips its *delivery* on `false` is fine; one that also
-     *          skips the VALUE STORE starves every awaiter (no `write_seq_` bump to wake
-     *          them) and freezes the LKV for every reader.
+     *          skips the VALUE STORE starves every awaiter (no write to wake them) and
+     *          freezes the LKV for every reader.
      *
      * @warning **A skip here has no durability-latch backstop.** ADR-0049's latch belongs to
      *          @ref vertex_t::own_subs_ordered's fan-out skip, whose protocol is *store the
@@ -2073,7 +2072,7 @@ class graph_t {
      * @brief Assign a vertex's value — the STATE transition only, sends NOTHING (RFC-0008).
      *
      * One of the two irreducible operations `write` composes: swap v's last-known-value
-     * (atomic), append to the stream ring, bump the write sequence (waking await), and
+     * (atomic), append to the stream ring, wake await, and
      * mark v for the next covering @ref propagate sweep (unless v is EXPLICIT, or nobody
      * observes at/above it). WRITE-gated like @ref write; never gated by delivery_mode. A
      * branch POINT decomposes and assigns each descendant (no notify). Pair with
@@ -2191,8 +2190,8 @@ class graph_t {
      * awaited write landed); a handler exposing no `on_read` still answers `NOT_FOUND`, which
      * is the read contract's own degradation, not await's.
      *
-     * The BRANCH fork @ref read takes is deliberately not mirrored: await watches this
-     * vertex's own write sequence, so a branch vertex hands back its own last-known-value, not
+     * The BRANCH fork @ref read takes is deliberately not mirrored: await watches writes to
+     * this vertex itself, so a branch vertex hands back its own last-known-value, not
      * the composed subtree fold. The READ gate is checked BEFORE the wait, so a denied caller
      * cannot camp on the condition variable.
      *

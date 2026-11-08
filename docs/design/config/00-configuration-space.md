@@ -358,7 +358,7 @@ serve the page that instruction points at. The contract, stated here, is three o
 
 | operation | signature | rule |
 | --- | --- | --- |
-| publish | `[[nodiscard]] bool store(value_ptr_t, std::memory_order = seq_cst)` | Sequentially consistent by default: `vertex_t::store` relies on this sharing one total order with the `write_seq_` bump and the waiter count, which is what makes the waiterless publish unable to lose a wakeup. **`false` means nothing was published** and the previous value still stands — the caller soft-fails; it never reports the write as taken. A slot that reclaims lazily has to allocate to publish, which is why the return type exists at all. |
+| publish | `[[nodiscard]] bool store(value_ptr_t, std::memory_order = seq_cst)` | Sequentially consistent by default. **`false` means nothing was published** and the previous value still stands — the caller soft-fails; it never reports the write as taken. A slot that reclaims lazily has to allocate to publish, which is why the return type exists at all. |
 | drop | `void clear(std::memory_order)` | Cannot fail, and says so in the return type: a clear releases resources rather than acquiring any. Only `revert_to_placeholder` calls it, with `release`. |
 | read | `value_ptr_t load() const` | Returns an **owning** handle. |
 | spin | `static constexpr bool may_spin` | Mandatory. `true` if any operation can spin-wait on another thread. `vertex.hpp` refuses a policy without it, and refuses `true` where `kSpinWaitSafe` is `false` (#1618). |

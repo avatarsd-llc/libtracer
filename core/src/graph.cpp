@@ -2268,7 +2268,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, role_t role, view::rope_
     // view built on the stack — no allocation, nothing stored on the vertex.
     const write_ctx_t ctx{.subject = caller, .link = link, .session = {}};
     if (result_t<void> r = h.on_write(value, ctx); !r) return std::unexpected(r.error());
-    v->note_write();
+    v->wake_waiters();
     return value_ref_t{};  // handler consumed it — nothing stored
 }
 
@@ -2414,7 +2414,7 @@ result_t<value_ref_t> graph_t::publish_value(vertex_t* v, role_t role, value_ref
     // adopts the source's block, and a branch landing site.
     if (v->retains_none()) {
         if (!sp) return std::unexpected(status_t::BACKPRESSURE);  // the block was refused
-        v->note_write();
+        v->wake_waiters();
         return sp;
     }
     // The store's own role reading decides the ring arm (#2115), never a second load: a write
@@ -2610,7 +2610,7 @@ result_t<void> graph_t::relay_write(vertex_t* v, view::rope_t value, std::string
         if (!decided) return std::unexpected(decided.error());
         if (*decided) value = std::move(**decided);
     }
-    v->note_write();
+    v->wake_waiters();
     deliver_unstored(v, value, &graph_t::deliver_vertex, v->own_subs() + v->listeners_above());
     return {};
 }
@@ -2647,7 +2647,7 @@ result_t<void> graph_t::assign(vertex_handle_t vh, view::rope_t value, std::stri
     const role_t role = v->role();
     if (!retains(v, role)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     // The STATE half only (RFC-0008 §A): swap the last-known-value / append the stream
-    // ring / bump the write sequence (waking await), then mark v for the next covering
+    // ring / wake await, then mark v for the next covering
     // sweep. A branch POINT assigns each descendant the same way. Sends nothing.
     // An `assign` is an API call — no link carried it, so its admission sees a null link.
     if (is_branch_point(value, role))
@@ -3157,14 +3157,23 @@ result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, vie
 result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::uint64_t now, std::uint64_t deadline,
                                      std::string_view caller) {
     vertex_t* v = vh.get();
-    // await is the readiness form of a data READ — same gate, checked up front so a
-    // denied caller cannot camp on the condvar.
+    // ARM FIRST (#2655): the arm is where this await begins. Nothing before it reads the
+    // vertex, so a write ordered before it is exactly a write before the call, and every write
+    // after it unlinks the waiter, the gate below included (the subject seam is application
+    // code and may write). Disarmed on every exit, a throwing wait included.
+    await_deadline_t d{.owner = this, .deadline = deadline};
+    await_waiter_t w{.ctx = &d};
+    v->arm_waiter(w);
+    struct disarm_on_exit_t {
+        await_waiter_t& w;
+        ~disarm_on_exit_t() { (void)vertex_t::disarm_waiter(w); }
+    } const disarm{w};
+    // await is the readiness form of a data READ — same gate, and a denied caller never
+    // sleeps: it leaves before the wait, its waiter unlinked on the way out.
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
     if (deadline <= now) return std::unexpected(status_t::TIMEOUT);
-    const write_seq_t seq0 = v->current_seq();
-    await_deadline_t d{.owner = this, .deadline = deadline};
-    if (!v->wait_for_change(seq0, d)) return std::unexpected(status_t::TIMEOUT);
+    if (!vertex_t::wait_for_change(w)) return std::unexpected(status_t::TIMEOUT);
     return await_value(vh);
 }
 
@@ -3181,8 +3190,7 @@ std::uint64_t graph_t::expire_awaits(std::uint64_t now) noexcept {
         for (await_waiter_t** p = &st.armed; *p != nullptr;) {
             await_waiter_t* const w = *p;
             // Only a blocking waiter (no fire) carries a deadline; an armed one's ctx is its own.
-            const auto* const d =
-                w->fire == nullptr ? static_cast<const await_deadline_t*>(w->ctx) : nullptr;
+            auto* const d = w->fire == nullptr ? static_cast<await_deadline_t*>(w->ctx) : nullptr;
             const bool mine = d != nullptr && d->owner == this;
             if (!mine || d->deadline > now) {
                 if (mine) next = std::min(next, d->deadline);
@@ -3192,6 +3200,7 @@ std::uint64_t graph_t::expire_awaits(std::uint64_t now) noexcept {
             *p = w->next;
             w->armed = false;
             w->next = nullptr;
+            d->expired = true;  // the waiter reads it under st.m
             st.waiters.fetch_sub(1, std::memory_order_seq_cst);
             expired = true;
         }

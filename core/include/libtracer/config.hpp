@@ -346,12 +346,13 @@ struct default_config_t {
      * won after #380 §1 were invisible to the build and free to be spent again by anyone.
      * Pinned to the measurement, every byte reclaimed is kept by construction.
      *
-     * History, newest first: 88 unchanged by #1621 (the 32-bit write sequence frees 4 B that
-     * the member order's tail padding absorbs on a 64-bit host), 88 (RFC-0028 slice 3 — the LKV
-     * slot is one `value_t*` word, where the `std::shared_ptr<const rope_t>` it replaced was two;
-     * both `lkv_slot_t` bindings agree), 96 (measured across all three CI legs — `acl_full` OFF/ON
-     * and both `lkv_slot_t` bindings agree), 112 post-#380 §1, 144 post-packing, 168 post-§3, 160
-     * post-§2, 248 post-§1, 536 pre-split.
+     * History, newest first: 80 (#2655 — the write sequence is deleted: its 4 B and the 4 B of
+     * tail padding it left; every CI preset agrees), 88 unchanged by #1621 (the 32-bit write
+     * sequence frees 4 B that the member order's tail padding absorbs on a 64-bit host), 88
+     * (RFC-0028 slice 3 — the LKV slot is one `value_t*` word, where the `std::shared_ptr<const
+     * rope_t>` it replaced was two; both `lkv_slot_t` bindings agree), 96 (measured across all
+     * three CI legs — `acl_full` OFF/ON and both `lkv_slot_t` bindings agree), 112 post-#380 §1,
+     * 144 post-packing, 168 post-§3, 160 post-§2, 248 post-§1, 536 pre-split.
      *
      * It lives HERE, in the configuration, because it is a per-target budget — and it is
      * enforced in `%vertex.hpp` beside the type it constrains, so **every** build on **every**
@@ -363,14 +364,17 @@ struct default_config_t {
      * make a build pass. LOWERING one is the routine half: a change that shrinks `vertex_t`
      * lowers the number in the same commit, or the gain is handed back to the next author.
      */
-    static constexpr std::size_t kMaxVertexBytes64 = 88;
+    static constexpr std::size_t kMaxVertexBytes64 = 80;
 
     /**
      * @brief The RAM-diet RATCHET on `sizeof(vertex_t)`, 32-bit (MCU) targets.
      *
      * Pointer-halved, and pinned to the measurement on the same terms as
-     * @ref kMaxVertexBytes64 — measured 64 B on rv32 (`-Os -fno-exceptions -fno-rtti`,
-     * `rv32imac_zicsr_zifencei`/`ilp32`).
+     * @ref kMaxVertexBytes64 — measured 60 B on rv32 (`-Os -fno-exceptions -fno-rtti`,
+     * `rv32imac_zicsr_zifencei`/`ilp32`; `rv32imc` agrees).
+     *
+     * Lowered 64 -> 60 by #2655: the write sequence is deleted (await wakes by unlinking its
+     * waiter), taking its 4 B with it.
      *
      * Lowered 72 -> 64 by #1621 (RFC-0028 D6): `write_seq_` became a 32-bit atomic. The 64-bit
      * one was 8 B wide AND 8-aligned on rv32, so it cost 4 extra bytes plus 4 of alignment
@@ -386,7 +390,7 @@ struct default_config_t {
      * struct bytes on 32-bit but deletes a ~32 B heap block per named vertex — and on this
      * target the heap is what is actually scarce.
      */
-    static constexpr std::size_t kMaxVertexBytes32 = 64;
+    static constexpr std::size_t kMaxVertexBytes32 = 60;
 
     /**
      * @brief The copy-or-share hint a vertex that declares none answers (RFC-0022 Amendment 3,
@@ -577,8 +581,8 @@ struct default_config_t {
      * (`spin_sync_t` / `portmux_sync_t`), bound separately from this one. It must model
      * `tr::guard` (`%guard.hpp`): `lock()` / `unlock()`, a static `for_address(const void*)`
      * the slot takes, and the `is_isr_safe` / `is_nonblocking` / `may_spin` / `name` traits.
-     * It also serializes the write-sequence bump on a core with no atomic read-modify-write
-     * (`tr::rmw_counter_t`).
+     * It also serializes a `tr::rmw_counter_t` bump on a core with no atomic
+     * read-modify-write.
      *
      * Spelled `reader_guard_t` until #1703. A fragment that still defines that name is refused
      * at compile time (see the tripwire after @ref config_t), because a fragment whose binding
@@ -678,18 +682,6 @@ struct default_config_t {
      * @ref kSpinWaitSafe is `false`.
      */
     using lkv_slot_t = single_writer_slot_t;
-
-    /**
-     * @brief Force the guarded binding of every `%tr::graph::bound_rmw_counter_t` the library
-     *        owns — the write sequence — even where the
-     *        counter's width is natively lock-free (#1715, #1697).
-     *
-     * A test knob: it lets a host build exercise the path a target without a native atomic RMW
-     * takes, where the write-sequence bump runs under @ref guard_t and is fused into the LKV
-     * publish section. Production code leaves it `false`; the native binding is then selected
-     * exactly as before and its generated code is unchanged.
-     */
-    static constexpr bool kForceGuardedRmw = false;
 
     /**
      * @brief The target's selected RECLAMATION policy (ADR-0080) — WHEN the library may free
@@ -1389,8 +1381,6 @@ inline constexpr bool kFaultInjection = config_t::kFaultInjection;
 inline constexpr bool kCreationHooks = config_t::kCreationHooks;
 /** @brief @ref default_config_t::kSessionAdmission for this build. */
 inline constexpr bool kSessionAdmission = config_t::kSessionAdmission;
-/** @brief @ref default_config_t::kForceGuardedRmw for this build. */
-inline constexpr bool kForceGuardedRmw = config_t::kForceGuardedRmw;
 /** @brief @ref default_config_t::kUdpStackScratchBytes for this build. */
 inline constexpr std::size_t kUdpStackScratchBytes = config_t::kUdpStackScratchBytes;
 

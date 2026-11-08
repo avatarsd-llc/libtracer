@@ -71,7 +71,7 @@
  * link's `segment_ptr_t`), so a shared LKV's refcount traffic is part of the real cost and no
  * model arm can be substituted for it. Topologies:
  *
- *   hot1        T threads driving ONE vertex — one lock bit, one `write_seq_`. For the read
+ *   hot1        T threads driving ONE vertex — one lock bit, one LKV slot. For the read
  *               arm this is the shape that matters: T readers on ONE shared LKV.
  *   stripe1     T threads driving T DISTINCT vertices deliberately chosen to collide on a
  *               single `vertex_stripe_t`. After #555 a waiterless non-STREAM publish takes

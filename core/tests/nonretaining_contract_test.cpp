@@ -62,7 +62,7 @@ using tr::testing::make_value;
 /**
  * @brief Await @p v while a writer thread re-arms the write until the await is out.
  *
- * `await` is EDGE-triggered — it snapshots `write_seq_` on entry — so a single write racing the
+ * `await` is EDGE-triggered — it sees a write ordered after it arms — so a single write racing the
  * call is legitimately unobservable (#1418). Re-arming from the writer removes the race without
  * guessing at a sleep, under a deadline that exceeds the await timeout so a broken wake path
  * fails rather than hangs. Every re-arm writes the SAME byte, so the value assertion is exact.
@@ -158,7 +158,7 @@ void test_await_at_a_seamless_handler_is_still_not_found() {
  * @brief Vector 3 — REGRESSION PIN: a retaining vertex's AWAIT is unchanged.
  *
  * The stored arm keeps its `read_stored()` fast path; no handler dispatch was added to it. A
- * branch vertex is pinned too: `await` watches its OWN write sequence (RFC-0008 §A), so it
+ * branch vertex is pinned too: `await` watches writes to its OWN vertex (RFC-0008 §A), so it
  * hands back its own last-known-value, never the composed subtree fold `read` would serve.
  */
 void test_await_at_a_retaining_vertex_is_unchanged() {

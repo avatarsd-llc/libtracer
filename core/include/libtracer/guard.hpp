@@ -3,7 +3,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * guard — the one critical-section vocabulary (RFC-0028 §5.5, slice 10), freestanding. The LKV
- * slot, both memory-layer pools and the write-sequence bump all bind it.
+ * slot, both memory-layer pools and `tr::rmw_counter_t`'s guarded bump all bind it.
  */
 #pragma once
 
@@ -51,7 +51,7 @@ concept lockable = requires(L& l) {
  *
  * The build binds it once, as `tr::graph::config_t::guard_t`. It was spelled `reader_guard_t`
  * until #1703, a name that undersold it: the guard serializes writers, the pool and the
- * write-sequence bump, not only readers.
+ * guarded counter bump, not only readers.
  *
  * The traits are what a caller reasons with, in place of prose:
  * - `is_isr_safe` — the section may be entered from an interrupt;
@@ -147,7 +147,7 @@ struct rmw_counter_test_door_t;
  *
  * Both bindings give the bump, the load and the preset the ordering @p kOrder names. The
  * default is `seq_cst`, so a caller's Dekker pair (bump, then read a flag; set the flag, then
- * read the counter) holds on either: the write sequence relies on it. A diagnostic tally that
+ * read the counter) holds on either. A diagnostic tally that
  * orders nothing names `relaxed` (`core/STYLE.md` §Introspection, rule 5), so its native bump
  * is the plain AMO (`amoadd.w`, not `amoadd.w.aqrl`, on rv32imac; `ldadd`, not `ldaddal`, on
  * aarch64). The counter only ever moves by one and wraps at `T`'s width, so it is for
@@ -170,42 +170,14 @@ class rmw_counter_t {
     static constexpr bool is_native = kNative;
 
     /** @brief Move the counter on by one, at @p kOrder, wrapping at `T`'s width. */
-    void bump() noexcept { bump(this); }
-
-    /**
-     * @brief Move the counter on by one; the guarded binding takes the guard covering
-     *        @p anchor rather than the one covering the counter.
-     *
-     * For a counter whose bump is sometimes made inside a section another object already
-     * opened (@ref bump_in_section): every guarded bump of ONE counter must take the SAME
-     * guard, so the caller names that object's address here too. Two anchors on one counter
-     * are two locks, and the writers would no longer exclude each other. The native binding
-     * ignores @p anchor.
-     */
-    void bump(const void* anchor) noexcept {
+    void bump() noexcept {
         if constexpr (kNative) {
-            (void)anchor;
             value_.fetch_add(1, kOrder);
         } else {
             static_assert(guard<G>, "the guarded bump needs the build's guard (tr::guard)");
-            const guard_scope_t<G> section(anchor);
-            bump_in_section();
+            const guard_scope_t<G> section(this);
+            value_.store(static_cast<T>(value_.load(std::memory_order_relaxed) + 1u), kOrder);
         }
-    }
-
-    /**
-     * @brief The guarded bump's body, for a caller that ALREADY holds the guard every other
-     *        bump of this counter takes (#1715): a load and a @p kOrder store, no section.
-     *
-     * The precondition is the whole of its soundness: the load + store is atomic against other
-     * bumpers only because they all serialize on that one guard. The LKV slot's fused publish
-     * calls it from inside its own section, which covers the anchor the vertex names on its
-     * other bumps. Guarded binding only: a native counter has no section to share.
-     */
-    void bump_in_section() noexcept
-        requires(!kNative)
-    {
-        value_.store(static_cast<T>(value_.load(std::memory_order_relaxed) + 1u), kOrder);
     }
 
     /** @brief The current count, at @p kOrder. Lock-free on both bindings. */
