@@ -85,6 +85,30 @@ REQUIRED_MODULES = (
 FIXTURE = "core/tests/footprint/sentinel_node.cpp"
 DEFAULT_BUDGET = 16 * 1024  # 16 KiB — the ADR-0016 §3 / ADR-0047 §5 Cortex-M0 bound.
 
+# Per-transport rows (#2401). Each row that builds links its fixture (and any core units it
+# names) on top of the sentinel node, keeps the fixture's `lt_footprint_row` as a gc root, and
+# measures the flash it ADDS to the node: flash(node + row) - flash(node). The pin is that
+# delta as measured in the CI image (ghcr.io/avatarsd-llc/libtracer-ci, footprint-cortexm0.yml)
+# with PINNED_TOOLCHAIN; growth past it trips --mode like the budget does, and a different
+# toolchain skips the comparison (#1138). A transport that cannot be built on a bare-metal
+# Cortex-M0 says why instead of carrying a number.
+PINNED_TOOLCHAIN = "arm-none-eabi-g++ (15:13.2.rel1-2) 13.2.1 20231009"
+_NO_SOCKETS = ("not built: needs BSD sockets (newlib has none) and the graph runtime's "
+               "net plane, which needs an RTOS binding for config_t::sync_t")
+TRANSPORT_ROWS = (
+    # (row, fixture, extra core units, pinned flash delta, or the reason it is not built)
+    ("CAN framing + reassembly", "core/tests/footprint/row_can_framing.cpp", (), 1912, None),
+    ("CAN transport vertex", None, (), None,
+     "not built: can_transport_t is a net-plane vertex (needs an RTOS sync_t binding) and runs "
+     "its receive loop on a pthread"),
+    ("stream (TCP)", None, (), None, _NO_SOCKETS),
+    ("WebSocket", None, (), None, _NO_SOCKETS),
+    ("datagram (UDP)", None, (), None, _NO_SOCKETS),
+    ("Noise link", None, (), None,
+     "not built: header-only, needs a crypto backend (PSA or libsodium) the bare-metal "
+     "toolchain does not carry"),
+)
+
 
 def _fmt(n: int | None) -> str:
     """Human-friendly byte count for the markdown table."""
@@ -141,10 +165,13 @@ def _load_baseline(path: str) -> tuple[dict | None, str | None]:
 
 
 def _compile_and_link(
-    cxx: str, mcpu: str, root: pathlib.Path, workdir: pathlib.Path
+    cxx: str, mcpu: str, root: pathlib.Path, workdir: pathlib.Path,
+    extra: tuple[str, ...] = (), name: str = "sentinel"
 ) -> pathlib.Path:
-    """Compile the required modules + fixture and link the stripped image.
+    """Compile the required modules + fixture (+ @p extra units) and link the stripped image.
 
+    An object already in @p workdir is reused, so a transport row compiles only its own units.
+    A row's fixture defines `lt_footprint_row`, which the link keeps as a gc root.
     Raises RuntimeError with the compiler diagnostic on any failure.
     """
     include = root / "core" / "include"
@@ -179,17 +206,21 @@ def _compile_and_link(
     objects: list[str] = []
     units = [root / "core" / "src" / f"{m}.cpp" for m in REQUIRED_MODULES]
     units.append(root / FIXTURE)
+    units += [root / u for u in extra]
     for src in units:
         if not src.is_file():
             raise RuntimeError(f"source not found: {src}")
         obj = workdir / (src.stem + ".o")
+        objects.append(str(obj))
+        if obj.is_file():
+            continue
         res = _run([cxx, *cxx_flags, "-c", str(src), "-o", str(obj)], cwd=root)
         if res.returncode != 0:
             raise RuntimeError(f"compile failed for {src.name}:\n{res.stderr.strip()}")
-        objects.append(str(obj))
 
-    elf = workdir / "sentinel.elf"
-    res = _run([cxx, *link_flags, *objects, "-o", str(elf)], cwd=root)
+    elf = workdir / f"{name}.elf"
+    roots = ["-Wl,-u,lt_footprint_row"] if extra else []
+    res = _run([cxx, *link_flags, *roots, *objects, "-o", str(elf)], cwd=root)
     if res.returncode != 0:
         raise RuntimeError(f"link failed:\n{res.stderr.strip()}")
     return elf
@@ -283,6 +314,16 @@ def main() -> int:
             workdir = pathlib.Path(tmp)
             elf = _compile_and_link(cxx, args.mcpu, root, workdir)
             text, data, bss = _measure(size_tool, elf, root)
+            row_flash: dict[str, int] = {}
+            for row, fixture, units, _pin, _why in TRANSPORT_ROWS:
+                if fixture is None:
+                    continue
+                stem = pathlib.Path(fixture).stem
+                r_text, r_data, _ = _measure(
+                    size_tool,
+                    _compile_and_link(cxx, args.mcpu, root, workdir, (*units, fixture), stem),
+                    root)
+                row_flash[row] = (r_text + r_data) - (text + data)
             if args.archive_out:
                 _archive(args.ar, workdir, pathlib.Path(args.archive_out).resolve(), root)
     except RuntimeError as exc:
@@ -342,6 +383,38 @@ def main() -> int:
            else f"(**over by {_fmt(-headroom)}**)."),
         "",
     ]
+    # --- per-transport rows (#2401) ------------------------------------------
+    rows_pinned = toolchain == PINNED_TOOLCHAIN
+    rows_over: list[str] = []
+    rows_json: list[dict] = []
+    lines += [
+        "### Per-transport flash rows (added to the node above)",
+        "",
+        "| Transport | Flash added | Pin | Verdict |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row, _fixture, _units, pin, why in TRANSPORT_ROWS:
+        if why is not None:
+            lines.append(f"| {row} | {why} | n/a | not built |")
+            rows_json.append({"row": row, "built": False, "reason": why})
+            continue
+        got = row_flash[row]
+        if not rows_pinned:
+            row_verdict = "SKIP (toolchain differs from the pin's)"
+        elif got > pin:
+            row_verdict = "WARN" if args.mode == "warn" else "FAIL"
+            rows_over.append(f"{row}: {got:,} B > pin {pin:,} B")
+        else:
+            row_verdict = "PASS" if got == pin else f"PASS ({pin - got:,} B under: re-pin down)"
+        lines.append(f"| {row} | {_fmt(got)} | {_fmt(pin)} | {row_verdict} |")
+        rows_json.append({"row": row, "built": True, "flash_bytes": got, "pin_bytes": pin,
+                          "verdict": row_verdict})
+    lines += [
+        "",
+        f"Pins measured with `{PINNED_TOOLCHAIN}`"
+        + ("." if rows_pinned else f"; this run's toolchain differs, so no row is compared."),
+        "",
+    ]
     if drift_delta is not None:
         base_commit = (baseline.get("commit") or "unknown")[:12]
         drift_verdict = ("OK" if not drift_over
@@ -376,10 +449,23 @@ def main() -> int:
             "headroom_bytes": headroom,
             "mode": args.mode,
             "verdict": verdict,
+            "transport_rows": rows_json,
         }
         pathlib.Path(args.out_json).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     rc = 0
+
+    if not rows_pinned:
+        print(f"::notice::Cortex-M0 transport rows not compared: toolchain {toolchain!r} is not "
+              f"the pins' {PINNED_TOOLCHAIN!r} (#1138)")
+    elif rows_over:
+        grew = ("Cortex-M0 per-transport flash rows grew past their pins (#2401): "
+                + "; ".join(rows_over))
+        if args.mode == "fail":
+            print(f"::error::{grew}")
+            rc = 1
+        else:
+            print(f"::warning::{grew} (warn mode: not failing the job)")
 
     if drift_skip is not None:
         print(f"::notice::Cortex-M0 drift gate skipped: {drift_skip}")

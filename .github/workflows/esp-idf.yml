@@ -82,6 +82,11 @@ on:
 # threshold. (tools/esp_size_gate.py still fails the job if it cannot parse the
 # esp-idf-size output — a broken reporter must not look like a green report.)
 #
+# The one pinned part (#2401): the per-transport rows. tools/esp_size_gate.py sums each
+# transport's object files as linked in this image and fails the job on esp32c6 when one
+# grows past its pin (TRANSPORT_ROWS there), on the compiler the pins were measured with.
+# The component total above stays tracked.
+#
 # MEASURED provenance, kept as historical reference (PR #193 first run,
 # 2026-07-03, espressif/idf:release-v6.0, -Os): libtracer.a flash 78,825 B
 # (esp32c3) / 82,861 B (esp32c6); static RAM 16 B on both. Both figures have
@@ -418,14 +423,22 @@ jobs:
             python -m esp_idf_size --format json --archives "$MAP" > size_components.json
           python -m esp_idf_size --format json2 "$MAP" > size_summary.json ||
             python -m esp_idf_size --format json "$MAP" > size_summary.json
+          # Per object file, for the pinned per-transport rows (#2401).
+          python -m esp_idf_size --format json2 --files "$MAP" > size_files.json ||
+            python -m esp_idf_size --format json --files "$MAP" > size_files.json
 
       - name: Footprint report (step summary + component-size table)
         shell: bash
         working-directory: integrations/esp-idf/examples/full_node
         run: |
+          # The compiler this image built with labels the per-transport rows: their pins
+          # hold for that compiler on esp32c6 only (#2401, #1138).
+          CXX=$(sed -n 's/^set(CMAKE_CXX_COMPILER "\(.*\)")$/\1/p' build/CMakeFiles/*/CMakeCXXCompiler.cmake | head -n1)
           python3 "${GITHUB_WORKSPACE}/tools/esp_size_gate.py" \
             --components-json size_components.json \
             --summary-json size_summary.json \
+            --files-json size_files.json \
+            --toolchain "$("$CXX" --version | head -n1)" \
             --target "${{ matrix.target }}" \
             --out-json "footprint-${{ matrix.target }}.json"
 

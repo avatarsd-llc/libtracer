@@ -23,8 +23,19 @@ Accepts BOTH esp-idf-size output generations, so the workflow can fall back:
 A parse failure ALWAYS prints `::error::` and exits 1 — a silently broken
 reporter must not masquerade as a green report.
 
+**Per-transport rows (#2401) are the exception, and they ARE pinned.** With
+`--files-json` (the `esp-idf-size --files` output of the same map), each transport's
+object files are summed as they sit in the linked image, after `--gc-sections`, and
+compared on esp32c6 against the pins in TRANSPORT_ROWS. Growth past a pin is
+`::error::` and exit 1, so a transport cannot get fatter unseen; the component total
+above stays tracked. A pin holds only for the compiler it was measured with
+(PINNED_TOOLCHAIN, passed in as `--toolchain`): another compiler, or another target,
+reports the rows without comparing them (#1138). A transport the `full_node` image
+compiles but never links, or never compiles, says so instead of reading 0 B.
+
 Exit 0 = report published (and within any ceiling that was passed), 1 = broken
-input, or over a ceiling the caller opted into. Stdlib only.
+input, over a ceiling the caller opted into, or a transport row over its pin. Stdlib
+only.
 """
 from __future__ import annotations
 
@@ -35,6 +46,44 @@ import pathlib
 import re
 import sys
 from typing import Any
+
+
+# Per-transport rows (#2401): (row, object stems in libtracer.a, esp32c6 pin in flash bytes,
+# or the reason the full_node image carries no such row). Pins are the linked flash of those
+# objects in full_node @ esp32c6, measured in espressif/idf:release-v6.0 (esp-idf.yml's
+# full-node job) with PINNED_TOOLCHAIN. A row's bytes are what its own objects keep after
+# --gc-sections; code they share with the rest of the library (rope, frame, the graph) is
+# counted once, in the object that defines it.
+PINNED_TARGET = "esp32c6"
+PINNED_TOOLCHAIN = "riscv32-esp-elf-g++ (crosstool-NG esp-15.2.0_20251204) 15.2.0"
+TRANSPORT_ROWS = (
+    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2744, None),
+    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9108, None),
+    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 8994, None),
+    ("CAN (transport_can + TWAI link)", ("transport_can", "twai_link", "socketcan_link_stub"),
+     None, "compiled, not linked: full_node creates no CAN connection, so --gc-sections drops it"),
+    ("WebSocket (httpd server + client link)", ("httpd_ws_link", "esp_ws_client_link"),
+     None, "compiled, not linked: full_node creates no WebSocket connection"),
+    ("Noise link", (), None,
+     "not built: header-only, and full_node leaves LIBTRACER_NOISE_CRYPTO_PSA off"),
+)
+
+
+def transport_rows(files: dict[str, Any]) -> dict[str, int]:
+    """Return {row: linked flash bytes} summed over each row's objects in `--files` output.
+
+    Keys look like `esp-idf/libtracer/libtracer.a:transport_udp.cpp.obj`; an object absent
+    from the image (dropped by --gc-sections, or never compiled) adds nothing.
+    """
+    flash_by_stem: dict[str, int] = {}
+    for name, info in files.items():
+        m = re.search(r"libtracer\.a:([A-Za-z0-9_]+)\.cpp\.obj$", name)
+        if m:
+            flash_by_stem[m.group(1)] = component_sizes(info)[0]
+    if not flash_by_stem:
+        raise KeyError("no libtracer.a object in the --files output")
+    return {row: sum(flash_by_stem.get(st, 0) for st in stems)
+            for row, stems, _pin, _why in TRANSPORT_ROWS}
 
 
 def _fmt(n: int | None) -> str:
@@ -138,6 +187,10 @@ def main() -> int:
     ap.add_argument("--max-flash-bytes", type=int, default=None, help="opt-in ceiling")
     ap.add_argument("--max-static-ram-bytes", type=int, default=None, help="opt-in ceiling")
     ap.add_argument("--out-json", default=None, help="write the numbers as a JSON artifact")
+    ap.add_argument("--files-json", default=None,
+                    help="esp-idf-size --files JSON of the same map: enables the transport rows")
+    ap.add_argument("--toolchain", default="unknown",
+                    help="the compiler's --version first line; the rows compare only on a match")
     args = ap.parse_args()
 
     try:
@@ -146,6 +199,7 @@ def main() -> int:
         arch_name, arch_info = find_component(archives, args.component_pattern)
         flash, ram, breakdown = component_sizes(arch_info)
         total, used = app_totals(summary)
+        rows = transport_rows(_load_json(args.files_json)) if args.files_json else None
     except Exception as exc:  # noqa: BLE001 — tooling breakage must be visible, not a crash
         print(f"::error::footprint reporter could not parse esp-idf-size output: {exc}")
         return 1
@@ -182,6 +236,38 @@ def main() -> int:
         "</details>",
         "",
     ]
+    rows_compared = args.target == PINNED_TARGET and args.toolchain == PINNED_TOOLCHAIN
+    rows_over: list[str] = []
+    rows_json: list[dict[str, Any]] = []
+    if rows is not None:
+        lines += [
+            "### Per-transport flash rows (linked objects in this image)",
+            "",
+            f"| Transport | Flash | {PINNED_TARGET} pin | Verdict |",
+            "| --- | --- | --- | --- |",
+        ]
+        for row, _stems, pin, why in TRANSPORT_ROWS:
+            got = rows[row]
+            if why is not None:
+                # A row with no pin must stay out of the image; if it shows up, it needs one.
+                state = why if got == 0 else f"now linked ({_fmt(got)}): pin it"
+                lines.append(f"| {row} | {state} | n/a | not measured here |")
+                rows_json.append({"row": row, "linked": got != 0, "flash_bytes": got,
+                                  "reason": why})
+                if got:
+                    print(f"::warning::transport row {row!r} is linked now; give it a pin (#2401)")
+                continue
+            if not rows_compared:
+                verdict_row = "REPORTED (pins hold for esp32c6 + the pinned toolchain only)"
+            elif got > pin:
+                verdict_row = "FAIL"
+                rows_over.append(f"{row}: {got:,} B > pin {pin:,} B")
+            else:
+                verdict_row = "PASS" if got == pin else f"PASS ({pin - got:,} B under: re-pin down)"
+            lines.append(f"| {row} | {_fmt(got)} | {_fmt(pin)} | {verdict_row} |")
+            rows_json.append({"row": row, "linked": True, "flash_bytes": got, "pin_bytes": pin,
+                              "verdict": verdict_row})
+        lines += [f"Toolchain: `{args.toolchain}`; pins measured with `{PINNED_TOOLCHAIN}`.", ""]
     report = "\n".join(lines)
     print(report)
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -204,9 +290,15 @@ def main() -> int:
                 "max_static_ram_bytes": args.max_static_ram_bytes,
             },
             "verdict": verdict,
+            "toolchain": args.toolchain,
+            "transport_rows": rows_json,
         }
         pathlib.Path(args.out_json).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
+    if rows_over:
+        print(f"::error::libtracer per-transport flash rows grew past their {PINNED_TARGET} pins "
+              f"(#2401): " + "; ".join(rows_over))
+        return 1
     if flash_ok and ram_ok:
         return 0
     # Only reachable when the caller opted into a ceiling with an explicit flag.
