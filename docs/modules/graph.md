@@ -171,7 +171,8 @@ class graph_t {
 
     // owner-side declarations (RFC-0022 §3.C) — host API only, NO wire surface. ONE verb:
     // only the members the caller names move; an unset member keeps what the vertex holds.
-    result_t<void> set_policy(vertex_handle_t, vertex_policy_t);  // SCHEMA_NOT_FOUND if illegal
+    result_t<void> set_policy(vertex_handle_t, vertex_policy_t);  // SCHEMA_NOT_FOUND if illegal,
+                                                                  // NOT_FOUND if not registered
     retention_t   retention             (vertex_handle_t) const noexcept;
     result_t<std::size_t>   ring_reserved_bytes(vertex_handle_t) const;
     result_t<std::uint64_t> stream_gaps        (vertex_handle_t) const;

@@ -1698,7 +1698,11 @@ result_t<void> graph_t::set_policy(vertex_handle_t v, vertex_policy_t policy) {
 }
 
 result_t<void> graph_t::set_intent_document(vertex_handle_t v, std::string_view doc) {
+    // The unique map lock, the hold registration and retirement take (#2669): a vertex no longer
+    // registered is refused, so a document cannot outlive the retirement that cleared it and
+    // reach the next occupant at the address. Refused like `set_policy`.
     const std::unique_lock lock(map_mutex_);
+    if (v.get() == nullptr || !v.get()->registered()) return std::unexpected(status_t::NOT_FOUND);
     if (!store_intent_document(v.get(), doc)) return std::unexpected(status_t::BACKPRESSURE);
     return {};
 }
