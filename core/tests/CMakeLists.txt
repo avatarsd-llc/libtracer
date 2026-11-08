@@ -1634,6 +1634,40 @@ add_executable(await_wake_test await_wake_test.cpp)
 target_link_libraries(await_wake_test PRIVATE libtracer)
 libtracer_test_warnings(await_wake_test)
 add_test(NAME await_wake COMMAND await_wake_test)
+# #2669: set_policy refuses a vertex that is no longer registered.
+add_executable(retired_policy_test retired_policy_test.cpp)
+target_link_libraries(retired_policy_test PRIVATE libtracer)
+libtracer_test_warnings(retired_policy_test)
+add_test(NAME retired_policy COMMAND retired_policy_test)
+
+# #1621: the 32-bit write sequence — its width, the wrap, and await waking on every role.
+add_executable(write_seq_test write_seq_test.cpp)
+target_link_libraries(write_seq_test PRIVATE libtracer)
+libtracer_test_warnings(write_seq_test)
+add_test(NAME write_seq COMMAND write_seq_test)
+
+# #1715: the fused guarded publish. A second copy of the required core, built over
+# tests/guarded_seq (a section-counting tr::mutex_guard_t, kForceGuardedRmw = true), so the
+# write sequence is the guarded rmw_counter_t binding a core without atomic RMW compiles to.
+# One configuration per library: only the two tests below link it, never `libtracer`.
+add_library(libtracer_guarded_seq STATIC ${LIBTRACER_SOURCES_REQUIRED})
+target_include_directories(libtracer_guarded_seq BEFORE PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/guarded_seq)
+target_include_directories(libtracer_guarded_seq PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(libtracer_guarded_seq PUBLIC Threads::Threads)
+target_compile_features(libtracer_guarded_seq PUBLIC cxx_std_23)
+
+add_executable(fused_publish_test fused_publish_test.cpp)
+target_link_libraries(fused_publish_test PRIVATE libtracer_guarded_seq)
+libtracer_test_warnings(fused_publish_test)
+add_test(NAME fused_publish COMMAND fused_publish_test)
+
+# The #1621 write-sequence suite (width, wrap, await on every role) again, on the guarded binding.
+add_executable(write_seq_guarded_test write_seq_test.cpp)
+target_link_libraries(write_seq_guarded_test PRIVATE libtracer_guarded_seq)
+libtracer_test_warnings(write_seq_guarded_test)
+add_test(NAME write_seq_guarded COMMAND write_seq_guarded_test)
 
 # #1708: kInlineFanout. The same graph-API test at the host default (8, the test build's
 # libtracer) and at the ESP chip value (2, a second copy of the required core over
