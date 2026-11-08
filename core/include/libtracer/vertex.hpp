@@ -1724,7 +1724,7 @@ class vertex_t {
      * @brief Wake this vertex's awaiters after a write: the blocking ones, and the armed
      *        one-shot ones (ADR-0084), which fire on this thread.
      *
-     * Every write calls it once, after its effect: @ref store after the publish, and the
+     * Every write calls it once, after its effect: `%store()` after the publish, and the
      * graph after a Handler-role write or a write to a vertex that retains nothing. There is
      * no write sequence (#2655): a waiter wakes because a write unlinks it.
      *
