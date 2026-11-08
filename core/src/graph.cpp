@@ -1690,6 +1690,12 @@ result_t<void> graph_t::set_policy(vertex_handle_t v, vertex_policy_t policy) {
     return {};
 }
 
+result_t<void> graph_t::set_intent_document(vertex_handle_t v, std::string_view doc) {
+    if (!v.get()->set_intent_document(doc, *tables_))
+        return std::unexpected(status_t::BACKPRESSURE);
+    return {};
+}
+
 /**
  * @brief Apply a (legal) policy all-or-nothing (#1883), skipping every member that already
  *        holds — so a default policy on a fresh vertex touches nothing and allocates nothing.

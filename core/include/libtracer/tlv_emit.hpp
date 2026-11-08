@@ -235,6 +235,17 @@ inline void emit_name(std::vector<std::byte>& out, std::string_view name) {
                               reinterpret_cast<const std::byte*>(name.data()), name.size()));
 }
 
+/** @brief Append the key/value pair `NAME <name>` → `VALUE <value>` (core-array form), the
+ *         shape a `:schema` record's `access` and `doc` members take.
+ *  @retval false The source refused; @p out may then hold the `NAME` alone. */
+[[nodiscard]] inline bool emit_name_value(mem::bytes_t& out, std::string_view name,
+                                          std::string_view value) noexcept {
+    return emit_name(out, name) &&
+           emit_tlv(out, type_t::VALUE, opt_t{},
+                    std::span<const std::byte>(reinterpret_cast<const std::byte*>(value.data()),
+                                               value.size()));
+}
+
 /**
  * @brief Append a VALUE TLV of @p value, little-endian in @p width bytes (core-array form).
  *

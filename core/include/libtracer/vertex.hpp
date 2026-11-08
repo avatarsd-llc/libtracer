@@ -3086,6 +3086,38 @@ class vertex_t {
         return out;
     }
 
+    /**
+     * @brief Install, replace or clear (an empty @p doc) this vertex's intent document
+     *        (RFC-0010 Amendment 5): a borrowed view, never a copy.
+     *
+     * Installing draws the extension block and the app-field group when the vertex has
+     * neither; an empty group reads back as no table, so the `:schema` owner part stays absent.
+     * Clearing draws nothing.
+     * @return `false` iff the table source refused a block; the vertex is then unchanged.
+     */
+    [[nodiscard]] bool set_intent_document(std::string_view doc, tr::mem::block_source_t& tables) {
+        vertex_ext_t* const e =
+            doc.empty() ? ext_.load(std::memory_order_acquire) : stage_policy(false, true, tables);
+        if (e == nullptr) return doc.empty();
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        if (e->app != nullptr) e->app->doc = doc;
+        return true;
+    }
+
+    /**
+     * @brief Call @p f with the installed intent document, under the vertex mutex, so a
+     *        concurrent clear or replacement can never end the bytes' lifetime while @p f
+     *        reads them. With no document installed, @p f is not called.
+     * @return `true` when there is no document; otherwise what @p f returns.
+     */
+    template <class F>
+    [[nodiscard]] bool with_intent_document(F&& f) const {
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        if (e == nullptr) return true;
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        return e->app == nullptr || e->app->doc.empty() || f(e->app->doc);
+    }
+
     // -- owner-side storage declarations & propagation policy ----------------------------
 
     /**
