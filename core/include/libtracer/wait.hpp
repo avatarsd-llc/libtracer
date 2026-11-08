@@ -29,7 +29,27 @@
  * @ref tr::net::wait_module_t::run, and a link given that module through its config's `wait`
  * member spawns no thread. A link given none falls back to a thread of its own that drives a
  * private module holding only that link's sockets: the thread-per-link adapter, kept for
- * applications that do not drive a module.
+ * applications that do not drive a module. The config's `wait` stays a runtime pointer while
+ * some links still lack the node module; once every link has it, the fallback becomes a
+ * compile-time policy (ADR-0071 §Amendment, ruling 44).
+ *
+ * **Who pays for the table (slice 1).** The poll adapter's table of attached sources and its
+ * descriptor sets grow by one entry per peer the links attach, and that growth is drawn from
+ * the module's own source, the one the shared module was built with, not from the link the
+ * peer arrived on. Slice 3 MUST draw it from the receiving link's source instead (receiver
+ * pays).
+ *
+ * **Detach under a lock deadlocks (slice 1).** The driving thread holds the module's dispatch
+ * lock for a whole batch of callbacks, and an @ref tr::net::wait_module_t::attach or
+ * @ref tr::net::wait_module_t::detach from any other thread takes that lock, so it waits out
+ * the batch. If the caller holds a lock that one of the batch's callbacks takes (a sink's or
+ * the application's lock, reached from a delivery), the callback blocks on the caller and the
+ * caller on the callback: both threads stop for good. A link's teardown detaches, so stopping
+ * or destroying a link counts. The caller must not attach, detach, stop or destroy a link on
+ * a module while holding any lock a callback on that module can take, and must not do so from
+ * inside a callback of a second module whose own callbacks reach back into the first. From
+ * inside a callback on the same module both calls return at once and are safe. This must be
+ * designed out, or every caller audited, before slice 3 (ruling 44).
  *
  * **One slow sink delays every link on the module** (ADR-0087 §Consequences): delivery runs
  * inline on the driving thread. A callback that blocks is an application bug the module makes
@@ -102,16 +122,19 @@ struct wait_source_t {
  *
  * Thread safety: @ref attach, @ref detach, @ref want_write and @ref stop may be called from any
  * thread, and from inside a callback. A @ref detach from another thread waits out the callbacks
- * the driver is running, so once it returns the source's callback never runs again; it must
- * not be called holding a lock a callback takes. @ref run is called by one thread at a time.
+ * the driver is running, so once it returns the source's callback never runs again. An
+ * @ref attach or @ref detach from another thread must not be called holding a lock a callback
+ * takes: that deadlocks (see the file's "Detach under a lock deadlocks"). @ref run is called by
+ * one thread at a time.
  */
 class wait_module_t {
    public:
     /**
      * @brief Opens the wait and its wake. @ref ok reports whether both opened.
      * @param src Where the poll adapter draws its table of attached sources and its two
-     *            descriptor sets (one entry per source plus the wake, grown at attach). The
-     *            epoll adapter draws nothing. Must outlive the module.
+     *            descriptor sets (one entry per source plus the wake, grown at attach). Every
+     *            link's peers are paid from it in slice 1, not from the receiving link's
+     *            source. The epoll adapter draws nothing. Must outlive the module.
      */
     explicit wait_module_t(mem::block_source_t& src) noexcept;
     /** @brief Opens with the poll adapter's set drawn from the process net sub-pool. */
