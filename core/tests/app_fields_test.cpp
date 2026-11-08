@@ -415,7 +415,7 @@ void test_announce_flow() {
         check(g.ancestor_walks() == walks0, "the field write never walked ancestors");
     check(fails_with(tr::testing::await_within(g, temp, std::chrono::milliseconds(30)),
                      status_t::TIMEOUT),
-          "await did not wake on the field write (write seq untouched)");
+          "await did not wake on the field write (the field write must wake the waiter)");
 
     // The owner applies the change and announces with an ordinary data write (§C).
     check(g.write(temp, rope_t{make_value(value_tlv("announced"))}).has_value(),
