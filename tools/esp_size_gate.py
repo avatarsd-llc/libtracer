@@ -57,9 +57,9 @@ from typing import Any
 PINNED_TARGET = "esp32c6"
 PINNED_TOOLCHAIN = "riscv32-esp-elf-g++ (crosstool-NG esp-15.2.0_20251204) 15.2.0"
 TRANSPORT_ROWS = (
-    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2744, None),
-    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9108, None),
-    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 8994, None),
+    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2710, None),
+    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9216, None),
+    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 8896, None),
     ("CAN (transport_can + TWAI link)", ("transport_can", "twai_link", "socketcan_link_stub"),
      None, "compiled, not linked: full_node creates no CAN connection, so --gc-sections drops it"),
     ("WebSocket (httpd server + client link)", ("httpd_ws_link", "esp_ws_client_link"),
