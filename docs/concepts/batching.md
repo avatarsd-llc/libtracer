@@ -157,8 +157,8 @@ Not benched: no bench isolates batching yet; a compose-and-propagate row in
 | MID | none | same |
 | WIDE | none | same |
 
-Flash is not measured: the size gates measure the core without the batch functions, and a
-per-feature row in `tools/esp_size_gate.py` would measure them.
+Flash is not measured. The size gates pin one flash row per transport (see
+[Transports](transports.md)), but none for the batch functions.
 
 ## What the library does not do
 
