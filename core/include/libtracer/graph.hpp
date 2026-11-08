@@ -2156,7 +2156,10 @@ class graph_t {
      * source drains the ring, switching retention to `NONE` drops what is held, and
      * re-declaring an owning field table resets its values to the declared ones.
      *
-     * @return `SCHEMA_NOT_FOUND` when the policy's retention is illegal for @p v's role (a
+     * @return `NOT_FOUND` when @p v is no longer registered (retired, and not yet registered
+     *         again), checked under the map lock: nothing is applied, so the next
+     *         registration at its path inherits nothing from the call (#2669).
+     *         `SCHEMA_NOT_FOUND` when the policy's retention is illegal for @p v's role (a
      *         `HANDLER` asked to retain, a `STORED_VALUE` asked for a ring, a `STREAM` asked
      *         for `LAST`) — checked before anything is applied, so a refused policy changes
      *         nothing. `BACKPRESSURE` when the table source refused a block the policy needs;

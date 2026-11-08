@@ -1676,6 +1676,12 @@ retention_t graph_t::retention(vertex_handle_t v) const noexcept { return v.get(
 
 result_t<void> graph_t::set_policy(vertex_handle_t v, vertex_policy_t policy) {
     vertex_t* const vx = v.get();
+    // The unique map lock, the hold registration and retirement take (#2669): a vertex no longer
+    // registered is a placeholder whose members the next registration at its path names its
+    // unset ones with, so a policy landing there would reach that occupant. Refused like the
+    // other owner-side verbs. `apply_policy` runs under this hold at registration too.
+    const std::unique_lock lock(map_mutex_);
+    if (vx == nullptr || !vx->registered()) return std::unexpected(status_t::NOT_FOUND);
     // Only the members the caller names move (#2239): every other one is named with what the
     // vertex holds, which is legal by construction.
     policy.retention = policy.retention.value_or(vx->retention());
