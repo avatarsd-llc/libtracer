@@ -24,6 +24,11 @@
  *       `tr::mem::value_source()`. Every peak is still zero after the read, the listing's
  *       segment came from the graph's backend and its wrapper from the graph's value source:
  *       the arena minimum of a fully-injected node is 0 B.
+ * - (c) a folded `:children` read and a composed subtree read build each member's `NAME`
+ *       header-and-text from the graph's value backend (#2665): every peak is still zero.
+ *       Before #2665 the name text
+ *       was borrowed through the one-argument `view::borrow_const`, whose control block came
+ *       from `tr::mem::value_source()`.
  *
  * Every case also checks that its draw reached the injected root (a count of the blocks it
  * served), so a zero on the default root is not the zero of a path that never ran.
@@ -165,5 +170,36 @@ int main() {
     } else {
         std::printf("(b) skipped: this build closed the bus module (kBusLinks = false)\n");
     }
+
+    // (c) The folded reads' member names (#2665): the reads draw the graph's source, and the
+    // peaks show they cost the default root nothing.
+    std::printf("(c) folded reads frame member names from the graph's source:\n");
+    const auto fold_draws = [&](std::string_view parent, int children) {
+        (void)g.register_vertex(at(parent), role_t::STORED_VALUE);
+        for (int i = 0; i < children; ++i) {
+            std::string child(parent);
+            child += "/c";
+            child += static_cast<char>('0' + i);
+            (void)g.register_vertex(at(child), role_t::STORED_VALUE);
+        }
+        std::string field(parent);
+        field += ":children";
+        const std::size_t first = root.draws;
+        const auto listing = g.read(at(field));
+        check(listing.has_value() &&
+                  (*listing)->link_count() == 1 + static_cast<std::size_t>(children),
+              "the :children listing reads back as one link per member, plus the outer one");
+        return root.draws - first;
+    };
+    const std::size_t two = fold_draws("/f2", 2);
+    const std::size_t three = fold_draws("/f3", 3);
+    std::printf("  :children read: %zu draws with 2 members, %zu with 3\n", two, three);
+    check(two > 0 && three > two, "the :children reads drew the graph's source");
+    const std::size_t first = root.draws;
+    const auto sub = g.read(at("/f3"));  // a branch read is the composed subtree fold
+    check(sub.has_value() && (*sub)->link_count() == 4, "the composed read is one link per node");
+    std::printf("  composed read of 1 root + 3 named members: %zu draws\n", root.draws - first);
+    report_default_root();
+    check(default_root_peak() == 0, "and the folded reads took nothing from the default root");
     return tr::testing::summary("injected_scratch");
 }
