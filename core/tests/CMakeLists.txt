@@ -1635,6 +1635,12 @@ target_link_libraries(await_wake_test PRIVATE libtracer)
 libtracer_test_warnings(await_wake_test)
 add_test(NAME await_wake COMMAND await_wake_test)
 
+# #2669: set_policy refuses a vertex that is no longer registered.
+add_executable(retired_policy_test retired_policy_test.cpp)
+target_link_libraries(retired_policy_test PRIVATE libtracer)
+libtracer_test_warnings(retired_policy_test)
+add_test(NAME retired_policy COMMAND retired_policy_test)
+
 # #1708: kInlineFanout. The same graph-API test at the host default (8, the test build's
 # libtracer) and at the ESP chip value (2, a second copy of the required core over
 # tests/narrow_fanout): fan-out below, at and past the inline width all deliver, and the
