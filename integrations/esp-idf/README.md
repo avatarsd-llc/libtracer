@@ -123,7 +123,12 @@ These lines are the component's recommended IDF configuration for any node that 
 # instead of a message round trip to the tcpip task.
 CONFIG_LWIP_TCPIP_CORE_LOCKING=y
 CONFIG_LWIP_TCPIP_CORE_LOCKING_INPUT=y
+# Required, not just recommended (#2147): the wait module's poll adapter wakes through a
+# loopback datagram socket. IDF's default is y; the component refuses to configure without it.
+CONFIG_LWIP_NETIF_LOOPBACK=y
 ```
+
+**What the wait module needs (#2147).** On a chip the wait module's poll adapter needs `CONFIG_LWIP_NETIF_LOOPBACK=y`, and the component's CMake stops with an error when it is off. Each module also holds one doorbell socket, so the full node uses 4 of lwIP's default 10 sockets (`CONFIG_LWIP_MAX_SOCKETS`), up from 2; raise that limit if your node opens more links. The C6 cost is measured in a later hardware batch.
 
 **Why core locking.** IDF ships `CONFIG_LWIP_TCPIP_CORE_LOCKING=n`. With it off, every lwIP socket call from a task (`recv`, `send`, `sendto`) posts a message to `tcpip_thread` and blocks on a semaphore until that task has run it: 2 task switches, 1 mailbox post and 1 semaphore pair per call. With it on, the call takes the core mutex and runs in the calling task. `_INPUT` makes the netif input path (the Wi-Fi or Ethernet driver task) take the same mutex instead of posting each received packet to `tcpip_thread`. The counts below are estimates from reading the code paths, not silicon measurements:
 

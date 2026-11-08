@@ -190,7 +190,12 @@ struct ws_client_config_t {
     /** @brief The node's wait module (#2147): the link puts its sockets on it and owns no
      *         thread, and the application drives it (`wait_module_t::run`). Null: a thread of
      *         the link's own drives a private one, sized by `recv_stack`. Must outlive the
-     *         link. */
+     *         link.
+     *
+     *         PONG stall: the PONG this client answers a PING with stays a blocking write,
+     *         bounded by `liveness_window_ms`, until slice 2 of #2147. It runs on the thread
+     *         driving this module, so a server that stops reading stalls every other link on
+     *         the module for up to one window per PING. */
     wait_module_t* wait = nullptr;
     /** @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838): it
      *         bounds each egress write turn, and offers past a full lane whose turns moved
