@@ -2850,6 +2850,18 @@ target_compile_definitions(batch_test PRIVATE
 libtracer_test_warnings(batch_test)
 add_test(NAME batch COMMAND batch_test)
 
+# #2393 — the obvious caller of `batch_view_t::sample_time_ns` (test the optional view, then
+# dereference it behind the same short-circuit) compiles cleanly under -Werror. The gate is
+# the build: optimization is forced on because -Wmaybe-uninitialized only runs with it, so a
+# Debug configuration still exercises the warning. Not module-gated, like batch_test.
+add_executable(batch_caller_warnings_test batch_caller_warnings_test.cpp)
+target_link_libraries(batch_caller_warnings_test PRIVATE libtracer)
+libtracer_test_warnings(batch_caller_warnings_test)
+if(NOT MSVC)
+    target_compile_options(batch_caller_warnings_test PRIVATE -O2 -Werror)
+endif()
+add_test(NAME batch_caller_warnings COMMAND batch_caller_warnings_test)
+
 # RFC-0025 §4.7 (#1546) — the reference PLAYOUT helper (playout.hpp): the receiver-side
 # derivation of the one clock never transmitted. Pins what it derives (uniform times as
 # arithmetic over the descriptor's rate at 0 B/sample, non-uniform out of the packed i32 run,
