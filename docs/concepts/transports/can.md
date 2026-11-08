@@ -88,12 +88,17 @@ Not benched end to end: the bus needs a privileged `vcan0` the bench host lacks.
 
 | Target | Flash | RAM per link |
 | --- | --- | --- |
-| NARROW | not measured | in-flight receive budget, `config_t::kCanRxInflightBytes` (default two maximum messages) |
-| MID | not measured | same |
+| NARROW | framing and reassembly 1,912 B; the transport vertex does not build | in-flight receive budget, `config_t::kCanRxInflightBytes` (default two maximum messages) |
+| MID | not linked in the measured image | same |
 | WIDE | not measured | same; not pinned by `bench_conn_ram`, whose CAN arms need `vcan0` |
 
-A per-transport row in `tools/esp_size_gate.py` would measure flash on MID, and the CAN arms of
-`bench_conn_ram` on a host with `vcan0` would pin the RAM.
+The NARROW figure is the pinned `CAN framing + reassembly` row of `tools/cortexm0_footprint.py`:
+what `can_framing.hpp` and `can_reassembly.hpp` add to the Cortex-M0 required-modules node.
+`can_transport_t` itself is a net-plane vertex that runs its receive loop on a pthread, so it
+does not build on a bare-metal Cortex-M0. On MID, the `CAN (transport_can + TWAI link)` row of
+`tools/esp_size_gate.py` stays unpinned because the `full_node` image creates no CAN
+connection, so `--gc-sections` drops the code; the row warns if the code is ever linked. The CAN
+arms of `bench_conn_ram` on a host with `vcan0` would pin the RAM.
 
 ## What the library does not do
 

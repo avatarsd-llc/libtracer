@@ -103,13 +103,19 @@ page.
 
 | Target | Flash | RAM per link (measured on a host) |
 | --- | --- | --- |
-| NARROW | not measured | not measured |
-| MID | not measured | not measured |
+| NARROW | CAN framing and reassembly 1,912 B; no other transport builds | not measured |
+| MID | UDP 2,744 B; TCP 9,108 B; the socket endpoint they share 8,994 B; CAN and WebSocket not linked in the measured image | not measured |
 | WIDE | not measured | UDP 216 B; TCP server 600 B plus 290 B per connection; WebSocket server 600 B plus 434 B per connection |
 
-The WIDE figures are the `bench_conn_ram` pins in `bench/ram_census_pins.json`. The size gates
-measure the core without transports, so flash is not measured anywhere; a per-transport row in
-`tools/esp_size_gate.py` would measure it on MID, and in `tools/cortexm0_footprint.py` on NARROW.
+The flash figures are the pinned per-transport rows of the two size gates. Each gate fails when
+a row grows past its pin. MID is the `TRANSPORT_ROWS` table in `tools/esp_size_gate.py`: each
+transport's object files as linked into the ESP-IDF `full_node` image on an ESP32-C6. That image
+compiles CAN and the WebSocket links but never creates such a connection, so `--gc-sections`
+drops them and their rows say so. NARROW is the `TRANSPORT_ROWS` table in
+`tools/cortexm0_footprint.py`: the flash a row's code adds to the Cortex-M0 required-modules
+node. Only the portable half of CAN builds there. A transport vertex needs an RTOS binding for
+`config_t::sync_t`, and the socket transports also need BSD sockets, which a bare-metal
+toolchain lacks. The WIDE figures are the `bench_conn_ram` pins in `bench/ram_census_pins.json`.
 
 ## What the library does not do
 

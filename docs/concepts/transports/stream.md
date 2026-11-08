@@ -91,13 +91,16 @@ QUIC; a WebSocket arm in `bench_transports` would.
 
 | Target | Flash | RAM per link (host) |
 | --- | --- | --- |
-| NARROW | not measured | not measured |
-| MID | not measured | not measured |
+| NARROW | does not build | not measured |
+| MID | TCP 9,108 B, plus the 8,994 B socket endpoint shared with UDP; WebSocket not linked in the measured image | not measured |
 | WIDE | not measured | TCP server 600 B plus 290 B per connection; WebSocket server 600 B plus 434 B per connection |
 
-The WIDE figures are the `bench_conn_ram` pins. A receive also holds one frame-sized segment
-while a frame is being read, up to `max_frame`. A per-transport row in `tools/esp_size_gate.py`
-would measure flash on MID.
+The MID figures are the pinned `stream (TCP)` and `socket endpoint (shared by UDP and TCP)` rows
+of `tools/esp_size_gate.py`, linked into the ESP-IDF `full_node` image on an ESP32-C6. That image
+compiles the WebSocket links but never creates a WebSocket connection, so its row stays unpinned.
+On NARROW both transports need BSD sockets and an RTOS binding for `config_t::sync_t`, and the
+Cortex-M0 gate's row table says so. The WIDE figures are the `bench_conn_ram` pins. A receive
+also holds one frame-sized segment while a frame is being read, up to `max_frame`.
 
 ## What the library does not do
 

@@ -83,13 +83,15 @@ runs both. No figure from them is banked yet, so this page quotes none.
 
 | Target | Flash | RAM per link |
 | --- | --- | --- |
-| NARROW | not measured | not measured |
-| MID | not measured | not measured |
+| NARROW | does not build | not measured |
+| MID | 2,744 B, plus the 8,994 B socket endpoint shared with TCP | not measured |
 | WIDE | not measured | 216 B, nothing per peer |
 
-The WIDE figure is the `bench_conn_ram` pin; its rope-heap arm, which counts the receive
-segment, is 1,752 B. A per-transport row in `tools/esp_size_gate.py` would measure flash on
-MID.
+The MID figures are the pinned `datagram (UDP)` and `socket endpoint (shared by UDP and TCP)`
+rows of `tools/esp_size_gate.py`, linked into the ESP-IDF `full_node` image on an ESP32-C6.
+On NARROW the transport needs BSD sockets and an RTOS binding for `config_t::sync_t`, and the
+Cortex-M0 gate's row table says so. The WIDE figure is the `bench_conn_ram` pin; its rope-heap
+arm, which counts the receive segment, is 1,752 B.
 
 ## What the library does not do
 
