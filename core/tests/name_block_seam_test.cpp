@@ -16,13 +16,16 @@
  *       the name was carved, leave the name block where it was instead of filling chunks.
  * - (c) a runtime registration with a long name makes no global allocation, and the graph
  *       gives every block back at teardown.
- * - (d) every refusal a registration can meet, the name's draw included, is a BACKPRESSURE
- *       value that registers nothing and leaks nothing.
- * - (e) a reader that renders keys with no lock (`key_of`) and reads the slot memo
- *       (`vertex_slot`) while a writer keeps registering, and so keeps carving new chunks, sees
- *       every name whole. Run under ThreadSanitizer, this is the proof that a name is valid
- *       under the existing reclamation rules: the bytes are written before the vertex is linked
- *       and never again.
+ * - (d) every refusal a registration can meet is a BACKPRESSURE value that registers nothing
+ *       and leaks nothing, and that includes a refused name chunk: a name that needs a new
+ *       chunk the source refuses registers nothing, and the same name registers once the
+ *       source serves again.
+ * - (e) names stay put while chunks grow: a reader that renders keys with no lock (`key_of`)
+ *       and reads the slot memo (`vertex_slot`) while a writer keeps registering, and so keeps
+ *       carving new chunks, sees every name it was handed whole. The handles reach the reader
+ *       through the test's own release/acquire counter, so this checks that a later chunk never
+ *       moves or rewrites an earlier name; under ThreadSanitizer it also shows the name reads
+ *       race with nothing the writer does.
  */
 
 #include <atomic>
@@ -33,6 +36,7 @@
 #include <new>
 #include <optional>
 #include <span>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -160,7 +164,7 @@ void test_refused_creation_gives_the_name_back() {
         check(all_refused, "(a) every creation refused at the vertex draw is BACKPRESSURE");
         std::printf("  (a) 1000 refused creations: %ld more source block(s)\n", src.live_ - before);
         check(src.live_ - before <= 1,
-              "(a) the refused names went back: at most one new chunk, not one per 256 B");
+              "(a) the refused names went back: at most one new chunk, not one per 128 B");
         check(
             g.register_vertex_key(key_of("/net/tcp/conn-192-168-1-50-00001"), role_t::STORED_VALUE)
                 .has_value(),
@@ -218,9 +222,36 @@ void test_every_refusal_is_a_value() {
         check(src.live_ == 0, "(d) a refused registration leaks nothing");
     }
     check(registered_once, "(d) a large enough budget registers the vertex");
+
+    // The name chunk itself refused. A 64-character segment is a 65 B record, so the chunk the
+    // first one opened (after `/n`'s record) cannot hold a second, and the second needs a new
+    // chunk, a `kChunkBytes` draw. Nothing else this registration draws is that size: the
+    // vertex is smaller, `/n` keeps room in its first child array, and the index is mid-chunk.
+    malloc_source_t src;
+    {
+        graph_t g{src};
+        (void)g.register_vertex(*path_t::parse("/n"), role_t::STORED_VALUE);
+        const std::string a(64, 'a');
+        const std::string b(64, 'b');
+        (void)g.register_vertex(*path_t::parse("/n/" + a), role_t::STORED_VALUE);
+        const std::vector<std::byte> bkey = key_of(("/n/" + b).c_str());
+        const long before = src.live_;
+        src.refuse_bytes_ = 128;  // `graph_t::name_block_t::kChunkBytes`
+        const auto r = g.register_vertex_key(bkey, role_t::STORED_VALUE);
+        src.refuse_bytes_ = 0;
+        check(!r && r.error() == status_t::BACKPRESSURE,
+              "(d) a refused name chunk is BACKPRESSURE");
+        check(!g.find(bkey).has_value() && src.live_ == before,
+              "(d) and it registers nothing and holds nothing");
+        const auto again = g.register_vertex_key(bkey, role_t::STORED_VALUE);
+        check(again.has_value() && g.find(bkey).has_value(),
+              "(d) the same name registers once the source serves the chunk");
+        check(src.live_ - before == 2, "(d) the retry draws the vertex and one name chunk");
+    }
+    check(src.live_ == 0, "(d) the graph gives back every block, the new chunk included");
 }
 
-/** @brief (e): lock-free name readers against a writer that keeps carving chunks. */
+/** @brief (e): names stay put while a writer keeps carving chunks (lock-free readers). */
 void test_readers_see_whole_names() {
     constexpr std::size_t kNames = 3000;
     graph_t g{tr::mem::heap_source()};

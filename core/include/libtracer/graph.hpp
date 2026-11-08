@@ -4561,6 +4561,8 @@ class graph_t {
         [[nodiscard]] const std::byte* try_copy(std::span<const std::byte> rec) noexcept {
             const std::byte* const end =
                 head == nullptr ? nullptr : reinterpret_cast<std::byte*>(head) + head->bytes;
+            // A record that does not fit wastes the rest of the chunk. The waste is bounded:
+            // less than that one record per chunk, so under 256 B (a packed record's ceiling).
             if (head == nullptr || static_cast<std::size_t>(end - cur) < rec.size()) {
                 const std::size_t bytes = std::max(kChunkBytes, sizeof(chunk_t) + rec.size());
                 void* const blk = src->try_alloc(bytes, alignof(chunk_t));
