@@ -479,11 +479,11 @@ struct app_field_group_t {
      * @brief The owner's intent document (RFC-0010 Amendment 5, #2107): a BORROWED view of
      *        UTF-8 bytes in constant storage, empty when none is installed.
      *
-     * `:schema` serves it verbatim as `NAME "doc"` → `VALUE` at the `POINT` level, and the
-     * runtime never copies, parses or validates it. Many vertices may view the same bytes. The
-     * installer keeps them alive while they are installed; once a clear or a replacement
-     * returns, no read touches the old bytes again, because every read copies them under the
-     * vertex mutex that guards this member.
+     * `:schema` serves it verbatim as `NAME "doc"` → `VALUE` at the `POINT` level. The runtime
+     * holds no copy and never parses or validates it. Many vertices may view the same bytes.
+     * The installer keeps them alive while they are installed. Each `:schema` read copies the
+     * bytes into its reply under the vertex mutex that guards this member, so once a clear or
+     * a replacement returns, no read touches the old bytes again.
      */
     std::string_view doc;
 };

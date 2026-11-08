@@ -19,6 +19,7 @@
 #include <fstream>
 #include <iterator>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -261,6 +262,43 @@ void test_replace_and_clear_race_a_read() {
     check(torn.load() == 0, "no read saw a torn or mixed record");
 }
 
+/**
+ * @brief The borrowed bytes' lifetime against a racing `:schema` read: the owner installs a
+ *        mutable buffer, clears it, then overwrites it, while another thread reads.
+ *
+ * The contract is that once a clear returns, no read touches the old bytes. A read that copied
+ * them outside the vertex mutex would race the overwrite, which TSan reports; with the copy
+ * under the mutex the clear orders every earlier read before the write. Each read must also
+ * be one whole record: no document, or the buffer as it stood while installed.
+ */
+void test_clear_ends_the_borrow() {
+    std::printf("a clear ends the borrow: the owner may overwrite the bytes at once:\n");
+    graph_t g;
+    const vertex_handle_t v = g.register_vertex(path_t("/l"), role_t::STORED_VALUE);
+    std::string buf(kDocAlone);
+    std::string other(kDocAlone);
+    other[0] = 'C';
+    const bytes_t none = expected_schema("l", {}, {});
+    const bytes_t a = expected_schema("l", kDocAlone, {});
+    const bytes_t b = expected_schema("l", other, {});
+    std::atomic<bool> stop{false};
+    std::atomic<int> torn{0};
+    std::thread reader([&] {
+        while (!stop.load(std::memory_order_acquire)) {
+            const bytes_t got = read_bytes(g, "/l:schema");
+            if (got != none && got != a && got != b) torn.fetch_add(1);
+        }
+    });
+    for (int i = 0; i < 2000; ++i) {
+        (void)g.set_intent_document(v, buf);
+        g.clear_intent_document(v);
+        buf[0] = buf[0] == 'c' ? 'C' : 'c';  // the owner reuses its buffer once cleared
+    }
+    stop.store(true, std::memory_order_release);
+    reader.join();
+    check(torn.load() == 0, "every read is no document or the buffer as installed");
+}
+
 }  // namespace
 
 int main() {
@@ -269,5 +307,6 @@ int main() {
     test_shared_span();
     test_not_a_setting();
     test_replace_and_clear_race_a_read();
+    test_clear_ends_the_borrow();
     return tr::testing::summary("intent_document");
 }

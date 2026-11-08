@@ -2174,15 +2174,17 @@ class graph_t {
      * iff a field table is installed. It never appears in a `:settings` read, and no wire
      * operation installs, replaces or removes it.
      *
-     * The document is BORROWED, the same contract as a borrowed field table: the graph never
-     * copies, parses or validates it, and the caller keeps the bytes alive while they are
-     * installed, typically a constant in flash. Many vertices may install the same bytes. Once
-     * a clear or a replacement returns, no read touches the old bytes again. A local host
+     * The document is BORROWED, the same contract as a borrowed field table: the graph holds
+     * no copy and never parses or validates it, and the caller keeps the bytes alive while they
+     * are installed, typically a constant in flash. Many vertices may install the same bytes.
+     * Each `:schema` read copies the bytes into its reply under the vertex lock, so once a
+     * clear or a replacement returns, no read touches the old bytes again. A local host
      * call, so no ACL gate. A retirement clears it with the vertex's other declarations.
      *
-     * @return `BACKPRESSURE` when the table source refused the block that holds the view (a
-     *         vertex with no field table draws one on its first install); @p v is then
-     *         unchanged. A clear never fails.
+     * @return `BACKPRESSURE` when the document did not land: the table source refused the
+     *         block that holds the view (a vertex with no field table draws one on its first
+     *         install), or a concurrent retirement dropped that block mid-call. @p v then holds
+     *         no new document. A clear never fails.
      */
     [[nodiscard]] result_t<void> set_intent_document(vertex_handle_t v, std::string_view doc);
     /** @brief Remove @p v's intent document, if it has one: its `:schema` read is then the
