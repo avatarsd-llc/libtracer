@@ -3092,15 +3092,20 @@ class vertex_t {
      *
      * Installing draws the extension block and the app-field group when the vertex has
      * neither; an empty group reads back as no table, so the `:schema` owner part stays absent.
-     * Clearing draws nothing.
-     * @return `false` iff the table source refused a block; the vertex is then unchanged.
+     * Clearing draws nothing. No copy is held: each `:schema` read copies the bytes into its
+     * reply under the vertex mutex, so a clear that returns ends every read of the old bytes.
+     * @return `false` iff the document did not land: the table source refused a block, or a
+     *         concurrent retirement dropped the group. The vertex then holds no new document.
      */
     [[nodiscard]] bool set_intent_document(std::string_view doc, tr::mem::block_source_t& tables) {
         vertex_ext_t* const e =
             doc.empty() ? ext_.load(std::memory_order_acquire) : stage_policy(false, true, tables);
         if (e == nullptr) return doc.empty();
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        if (e->app != nullptr) e->app->doc = doc;
+        // A concurrent retirement may have dropped the group since it was staged: then the
+        // document did not land, and only a clear succeeds.
+        if (e->app == nullptr) return doc.empty();
+        e->app->doc = doc;
         return true;
     }
 

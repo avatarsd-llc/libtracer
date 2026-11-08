@@ -501,6 +501,24 @@ void test_app_field_store() {
     report(drive<vertex_handle_t>(setup, op, untouched), "app field write");
 }
 
+/** @brief An intent document's first install draws the extension block and the app-field
+ *         group (#2107): a refusal is BACKPRESSURE and leaves `:schema` as it was. */
+void test_intent_document() {
+    std::printf("set_intent_document — the extension block and the group:\n");
+    const auto setup = [](graph_t& g) {
+        return g.register_vertex(*path_t::parse("/d"), role_t::STORED_VALUE);
+    };
+    const auto op = [](graph_t& g, vertex_handle_t& v) {
+        return verdict(g.set_intent_document(v, "contract: \"urn:example:d\"\n"));
+    };
+    // The document is not installed: the schema read is the 13-byte doc-less record.
+    const auto untouched = [](graph_t& g, vertex_handle_t&) {
+        const auto r = g.read(*path_t::parse("/d:schema"));
+        return r && (*r)->rope().flatten().bytes().size() == 13;
+    };
+    report(drive<vertex_handle_t>(setup, op, untouched), "set_intent_document");
+}
+
 /** @brief The node identity record. */
 void test_identity() {
     std::printf("set_identity — the record copy:\n");
@@ -993,6 +1011,7 @@ int main() {
     test_retire();
     test_set_policy();
     test_app_field_store();
+    test_intent_document();
     test_identity();
     test_for_each_vertex();
     test_sweep();
