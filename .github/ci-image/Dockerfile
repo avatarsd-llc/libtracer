@@ -26,6 +26,11 @@
 # --no-install-recommends and the toolchain only Recommends them (transitively), yet
 # nano.specs / nosys.specs and the target's C++ headers come from them.
 #   g++-15 gcc-15 (ppa:ubuntu-toolchain-r/test)        build-test-gcc15
+#   /opt/mbedtls-src/mbedtls-3.6.5 (source, unbuilt)  build-test-noise (crypto=psa)
+# The mbedtls source is baked in because its run-time download was the flake surface too
+# (#2667): the GitHub release-asset URL answered 504 for every landing while github.com
+# stayed up. It is the tag archive plus the `framework` submodule at the commit the tag
+# records, each pinned by sha256, unbuilt: the job edits mbedtls_config.h before it builds.
 # g++-15 and gh are baked in because their run-time installs were the flake surface (#2627):
 # a PPA add died on `IncompleteRead`, an `apt-get install gh` hit its timeout, each one
 # failing a landing before any project code ran. The PPA is added only for that install
@@ -76,3 +81,20 @@ RUN for v in 18 19 20; do \
         echo '--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13' > "/usr/lib/llvm-$v/bin/$d.cfg"; \
       done; \
     done
+
+# mbedtls 3.6.5 source for the psa noise leg (#2667). The release tarball is the tag tree
+# plus the framework submodule; this assembles the same tree from two pinned archives.
+RUN set -e; d=/opt/mbedtls-src; v=3.6.5; fw=457996474728cb8e968ed21953b72f74d2f536b2; \
+    mkdir -p "$d"; cd "$d"; \
+    curl -fsSL --retry 5 --retry-all-errors -o tag.tar.gz \
+      "https://codeload.github.com/Mbed-TLS/mbedtls/tar.gz/refs/tags/mbedtls-$v"; \
+    echo "828ed5cde86688ff0c9de511cabd1598544006336759a75aa917cb2c58f1128f  tag.tar.gz" | sha256sum -c -; \
+    curl -fsSL --retry 5 --retry-all-errors -o fw.tar.gz \
+      "https://codeload.github.com/Mbed-TLS/mbedtls-framework/tar.gz/$fw"; \
+    echo "c15bcc24fc43bdf325b0e04fa63270daf6e9488167b94b46547d8134efa9c906  fw.tar.gz" | sha256sum -c -; \
+    tar -xzf tag.tar.gz; mv "mbedtls-mbedtls-$v" "mbedtls-$v"; \
+    rm -rf "mbedtls-$v/framework"; mkdir "mbedtls-$v/framework"; \
+    tar -xzf fw.tar.gz -C "mbedtls-$v/framework" --strip-components=1; \
+    rm tag.tar.gz fw.tar.gz; \
+    test -f "mbedtls-$v/framework/scripts/mbedtls_framework/__init__.py"; \
+    test -f "mbedtls-$v/include/mbedtls/mbedtls_config.h"
