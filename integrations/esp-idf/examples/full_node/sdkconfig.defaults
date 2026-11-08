@@ -59,3 +59,5 @@ CONFIG_LIBTRACER_SELF_HEAL_LINKS=y
 # options belong to the lwip component, so the app sets them; they are ignored on `linux`.
 CONFIG_LWIP_TCPIP_CORE_LOCKING=y
 CONFIG_LWIP_TCPIP_CORE_LOCKING_INPUT=y
+# The wait module's poll adapter wakes through a loopback datagram socket (#2147).
+CONFIG_LWIP_NETIF_LOOPBACK=y
