@@ -313,6 +313,8 @@ void transport_vertex_t::ctl_txn_t::unroute(mem::string_t name) { unroute_ = std
 
 void transport_vertex_t::ctl_txn_t::stop_engine(self_heal_link_t* engine) { stop_ = engine; }
 
+void transport_vertex_t::ctl_txn_t::born_engine(self_heal_link_t* engine) { born_ = engine; }
+
 void transport_vertex_t::ctl_txn_t::destroy_link(transport_ptr_t link, mem::bytes_t config) {
     destroy_ = std::move(link);
     destroy_config_ = std::move(config);
@@ -379,6 +381,13 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
         // routing-plane subscriber drives acquire_link/release_link straight back here.
         out = owner_.graph_.write(vertex,
                                   link_state_value(publish_state_, owner_.graph_.value_backend()));
+    }
+    // After the publish, whatever it answered: the engine's first report must follow the birth
+    // write (#2353), and a refused write must not strand the link undialable. The pointer holds
+    // because creation is an `OPERATION`, and every removal is too: `ops_m_` keeps one out
+    // until this transaction ends.
+    if constexpr (kSelfHealLinks) {
+        if (self_heal_link_t* const engine = std::exchange(born_, nullptr)) engine->born();
     }
     return out;
 }
@@ -1234,14 +1243,12 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     // The engine is the sole writer of this connection's later DIAL transitions (RFC-0014
     // §4): its publisher, installed here with the birth publish, writes the vertex VALUE
     // directly — deliberately NOT through set_link_state, whose ctl_m_ the engine's worker
-    // must never take (the teardown path joins that worker while HOLDING ctl_m_). An op
-    // cannot make the engine publish before this, since every op waits on the `ctl_m_` held
-    // here. A router send can: once `add_child` has run, a frame routed to this child kicks a
-    // DORMANT engine's worker with no `ctl_m_`, and a publish it makes before this install is
-    // lost. That early publish is superseded by the birth publish below, as before, so the
-    // vertex still reads DORMANT until the engine's next transition (#2353 tracks the race).
-    // remove_connection stops the engine before the vertex retires, so no publish lands on a
-    // retired vertex.
+    // must never take (the teardown path joins that worker while HOLDING ctl_m_). A frame
+    // routed to this child can reach the engine as soon as `add_child` has run, with no
+    // `ctl_m_`, so the engine starts no worker until phase 2 has written the birth state
+    // (`born_engine`, #2353): its first report then follows that write instead of being lost
+    // or overwritten. remove_connection stops the engine before the vertex retires, so no
+    // publish lands on a retired vertex.
     if (engine != nullptr) {
         if constexpr (kSelfHealLinks) {  // #1470 module gate — see `ctl_txn_t::discharge`
             graph::graph_t* const g = &graph_;
@@ -1251,6 +1258,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
             });
         }
         (void)set_link_state_locked(txn, qv, link_state_t::DORMANT);
+        txn.born_engine(engine);
     } else if (conn->owned)
         (void)set_link_state_locked(
             txn, qv,
