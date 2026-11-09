@@ -31,6 +31,7 @@ Two rules govern it:
 | Decide whether it fits at all | [Performance & conformance](performance.md) | [other doors](#other-doors) | any |
 | Build a device other vendors integrate with | [Interoperability](interoperability.md) | [other doors](#other-doors) | NARROW → WIDE |
 | Extend or embed the C++ core in a host application | [C++ API reference](modules/index.md) | [other doors](#other-doors) | MID → WIDE |
+| Understand the whole plane on one page, or see what a compatible device must implement | [The libtracer plane](plane.md) | [lane 3](#lane-3--implement-the-wire-protocol-myself) | any |
 | Understand the model before choosing any of the above | [Reference 00 — core overview](reference/00-overview.md) | the reference suite's own [reading paths](reference/README.md) | any |
 
 **Target scale** is the deployment the lane is written for, and that is the *only* thing
