@@ -38,7 +38,6 @@
 #include "libtracer/inline_fn.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
-#include "libtracer/static_thread.hpp"
 #include "libtracer/sync.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/wait.hpp"
@@ -355,13 +354,17 @@ class posix_endpoint_t {
 
    private:
     /** @brief The fallback thread's body: drive the private module. */
-    static void thread_entry(void* self);
+    static void thread_entry(void* fallback);
 
     wait_module_t* node_; /**< @brief The node's module, or null. */
     /** @brief The module waited on, published by @ref start. */
     std::atomic<wait_module_t*> wait_{nullptr};
-    mem::poly_ptr_t<wait_module_t> own_; /**< @brief The fallback's private module. */
-    static_thread_t thread_;             /**< @brief The fallback's thread. */
+    /** @brief The fallback's private module and its thread, defined in the source file. */
+    struct fallback_t;
+    /** @brief The fallback's state, drawn from the link's `link_memory_t::stack` in
+     *         @ref start; null on the node's module, which needs none of it. One pointer, so
+     *         a link on the node's module pays nothing for the fallback it does not use. */
+    fallback_t* fallback_ = nullptr;
 };
 
 /**
@@ -936,7 +939,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * — so the endpoint facade @ref peer_link hands out stays pointer-valid for the
      * server's lifetime. A derived server extends this with its own framing state
      * (a length-prefix framer, a WS reassembler + byte buffers) and owns the concrete
-     * @ref peer_endpoint facade object. See the class-level threading rule for who may
+     * endpoint facade object (@ref endpoint_of). Its inherited @ref wait_source_t::ctx is
+     * this server, set once when the slot is made, so a facade finds its server through its
+     * slot (@ref server_of). See the class-level threading rule for who may
      * touch what.
      */
     struct session_base_t : wait_source_t {
@@ -981,9 +986,6 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
          *         @ref handle is minted at. Bumped once per accept (never reused, never
          *         zero), so the counter survives the retire that clears @ref handle. */
         std::uint32_t gen_seq = 0;
-        /** @brief The directed facade @ref peer_link returns — the derived slot's own
-         *         member, registered here by @ref make_session. */
-        transport_t* peer_endpoint = nullptr;
         /** @brief This session's egress (ADR-0087 §2, #2144): its frames waiting per vertex,
          *         its writer role and its strikes. Closed while the slot is free; reset as the
          *         slot is recycled, so a stalled peer's frames and strikes are never inherited
@@ -1141,11 +1143,21 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
 
     /**
      * @brief Allocate one fresh slot of the derived server's session type, with its
-     *        @ref session_base_t::peer_endpoint facade wired to this server.
+     *        endpoint facade wired to the slot.
      *
      * Called under @ref peers_m_ when no free slot exists and the cap allows growth.
      */
     virtual mem::poly_ptr_t<session_base_t> make_session() = 0;
+
+    /** @brief The directed facade @ref peer_link returns for @p s : the derived slot's own
+     *         member. A virtual rather than a pointer in every slot, so a peer pays no bytes
+     *         for it. */
+    [[nodiscard]] virtual transport_t& endpoint_of(session_base_t& s) noexcept = 0;
+
+    /** @brief The server @p s belongs to: its wait context, set when the slot is made. */
+    [[nodiscard]] static slot_server_t& server_of(const session_base_t& s) noexcept {
+        return *static_cast<slot_server_t*>(static_cast<posix_endpoint_t*>(s.ctx));
+    }
 
     /**
      * @brief Per-accept setup: socket options and the slot's protocol buffers, run after
