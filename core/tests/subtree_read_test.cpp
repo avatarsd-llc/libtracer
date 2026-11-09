@@ -17,8 +17,8 @@
  * and the every-child-denied boundary that composes the root alone — RFC-0016 §B
  * erratum, #1030),
  * leaf/handler REGRESSION (byte-identical to the pre-composed-read behavior), the names-only
- * topology tree, and the ZERO-COPY link-structure accounting (owned headers + borrowed
- * names + refcount-cloned LKV links — never one flattened buffer).
+ * topology tree, and the ZERO-COPY link-structure accounting (owned header-and-name
+ * segments + refcount-cloned LKV links — never one flattened buffer).
  */
 
 #include <cstddef>
@@ -593,7 +593,7 @@ void test_hidden_child_absent_from_composed_read() {
 // --- 7. ZERO-COPY accounting --------------------------------------------------
 
 void test_zero_copy_link_structure() {
-    std::printf("ZERO-COPY — per-node owned header + borrowed name + cloned LKV links:\n");
+    std::printf("ZERO-COPY — per-node owned header-and-name + cloned LKV links:\n");
     graph_t g;
     vertex_handle_t z = g.register_vertex(path_t("/z"), role_t::STORED_VALUE);
     vertex_handle_t c1 = g.register_vertex(path_t("/z/c1"), role_t::STORED_VALUE);
@@ -606,9 +606,10 @@ void test_zero_copy_link_structure() {
     const auto r = g.read(z);
     check(r.has_value(), "snapshot read of /z succeeds");
     if (!r) return;
-    // Root: header + 1 LKV link. c1: header + borrowed name + 1 LKV link. c2 (value-less):
-    // header + borrowed name. NEVER one flattened buffer.
-    check((*r)->link_count() == 7, "7 links: (hdr+lkv) + (hdr+name+lkv) + (hdr+name)");
+    // Root: header + 1 LKV link. c1: header-and-name + 1 LKV link. c2 (value-less): its
+    // header-and-name (#2665: the name text rides the header segment). NEVER one flattened
+    // buffer.
+    check((*r)->link_count() == 5, "5 links: (hdr+lkv) + (hdr/name+lkv) + (hdr/name)");
     // The LKV links are refcount CLONES of the stored segments — the same bytes a leaf
     // read serves, at the same addresses (no byte copy anywhere).
     const auto leaf = g.read(c1);

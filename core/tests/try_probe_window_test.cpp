@@ -418,13 +418,14 @@ void test_reply_iov_on_the_seam() {
 
     // The COMPOSED-ROOT reply, which is why this table has no fixed bound. A branch read
     // folds every registered descendant's landed LKV into one reply rope, so the peer that
-    // picks the root picks the link count: six children here already assemble a
-    // TWENTY-link reply. A fixed-size stack array — the shape #1570 was first proposed with
-    // — would have to be at least this wide, and the next child would overflow it; the only
-    // honest answers are a growable table or a dropped reply, and this asserts the first.
+    // picks the root picks the link count: eight children here already assemble an
+    // EIGHTEEN-link reply (each child is its header-and-name link plus its LKV link, #2665). A
+    // fixed-size stack array — the shape #1570 was first proposed with — would have to be at least
+    // this wide, and the next child would overflow it; the only honest answers are a growable table
+    // or a dropped reply, and this asserts the first.
     const auto branch = path_t::parse("/plant");
     (void)g.register_vertex(*branch, role_t::STORED_VALUE);
-    for (const char* c : {"a", "b", "c", "d", "e", "f"}) {
+    for (const char* c : {"a", "b", "c", "d", "e", "f", "g", "h"}) {
         const auto child = path_t::parse(std::string("/plant/") + c);
         const auto cv = g.register_vertex(*child, role_t::STORED_VALUE);
         tr::view::rope_t cval;
@@ -437,12 +438,12 @@ void test_reply_iov_on_the_seam() {
 
     // MEASURED. The exact width is incidental — what is load-bearing is that it is far past
     // any small fixed array, and that the seam is asked for exactly this one block.
-    constexpr std::size_t kComposedLinks = 20;
+    constexpr std::size_t kComposedLinks = 18;
     static_assert(kComposedLinks > tr::net::kMaxInlineIov,
                   "the composed reply must spill past the inline table into the source");
     rx.watch(reply_iov_bytes(kComposedLinks), kIovAlign, false);
     read_branch();
-    check(rx.served() == 1, "a 20-link composed-root reply draws ONE table of exactly that width");
+    check(rx.served() == 1, "an 18-link composed-root reply draws ONE table of exactly that width");
     check(link.take() == 1, "the composed-root reply goes out whole");
 
     // And it degrades the same way: refused, not truncated and not aborted.

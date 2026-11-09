@@ -146,16 +146,15 @@ constexpr std::size_t kShortHeaderBytes = 4;
 
 /**
  * @brief The header draw for a node that ALSO carries its own leading `NAME` TLV: the POINT
- *        header plus that `NAME` header, in ONE segment.
+ *        header plus that whole `NAME` TLV, in ONE segment.
  *
  * Since RFC-0018 a vertex-map key record is packed (`[u8 len][bytes]`) rather than a `NAME`
- * TLV, so the `:children` / composed-read member's `NAME` framing is EMITTED instead of
- * borrowed from the key. It shares the POINT header's segment on purpose — that is what keeps
- * the folds at the same LINK count they had before, which is what these instruments' reserve
- * arithmetic and the transports' iovec-spill budget are stated against. The draw is one
- * header wider; the draw COUNT is unchanged.
+ * TLV, so the `:children` / composed-read member's `NAME` framing is EMITTED. Since #2665 the
+ * name text is copied in after it rather than borrowed as a second segment (whose control
+ * block came from the process pool), so a named node is one draw and one link. Every name
+ * in this fixture is one byte long.
  */
-constexpr std::size_t kNamedHeaderBytes = kShortHeaderBytes + 4;
+constexpr std::size_t kNamedHeaderBytes = kShortHeaderBytes + 4 + 1;
 
 /**
  * @brief The one BLOCK a folded header's segment costs at the injected source, for each of

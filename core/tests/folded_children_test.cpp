@@ -103,14 +103,15 @@ void assert_parent(graph_t& g, std::string_view parent) {
     const view_t fv = (*folded)->flatten();
     check(same_bytes(mv, fv), "folded.flatten() is byte-identical to materialized read_children");
 
-    // Genuine scatter-gather: outer POINT header link + one link per member. The child
+    // Genuine scatter-gather: outer POINT header link + one link per member (#2665: the name
+    // text rides the member's header segment). The child
     // count is taken from the materialized bytes (the oracle), so this holds regardless
     // of how many children are registered vs. placeholder.
     const long n_children = walk_point_children((*materialized)->rope());
     check(n_children >= 0, "materialized listing walks as a POINT of POINT children");
     if (n_children >= 0)
-        check((*folded)->link_count() == 2 * static_cast<std::size_t>(n_children) + 1,
-              "folded rope is 2N+1 links (outer header + per-child header + borrowed name)");
+        check((*folded)->link_count() == static_cast<std::size_t>(n_children) + 1,
+              "folded rope is N+1 links (outer header + one header-and-name per child)");
 
     // The lazy cursor walks the FOLDED ROPE itself (not a flattened copy) to the same shape.
     const long n_folded = walk_point_children((*folded)->rope());

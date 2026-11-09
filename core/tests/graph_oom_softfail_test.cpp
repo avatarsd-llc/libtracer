@@ -874,9 +874,9 @@ void test_composed_read_reply_backpressure() {
         (void)g.register_vertex(path_t(name), role_t::STORED_VALUE);
         (void)g.write(path_t(name), make_value({static_cast<std::uint8_t>(i)}));
     }
-    // The fold: root (POINT header + own LKV = 2 links) + each child (POINT header + borrowed
-    // NAME + LKV = 3 links); the reply prepends ONE FWD head link.
-    const std::size_t fold_links = 2u + 3u * kChildren;
+    // The fold: root (POINT header + own LKV = 2 links) + each child (POINT header with its
+    // NAME TLV + LKV = 2 links); the reply prepends ONE FWD head link.
+    const std::size_t fold_links = 2u + 2u * kChildren;
     const std::size_t reply_links = 1u + fold_links;
     const auto fwd = b_fwd(fwd_op_t::READ, b_path({"r"}), b_path({"reply-ep"}));
 

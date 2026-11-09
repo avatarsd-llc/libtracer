@@ -27,7 +27,6 @@
 #include "libtracer/frame.hpp"
 #include "libtracer/init_fault.hpp"
 #include "libtracer/key_view.hpp"
-#include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_slab_pool.hpp"
 #include "libtracer/packed_path.hpp"
@@ -3901,8 +3900,8 @@ namespace {
  *
  * The node's `NAME` header and segment text when it is @p named (null at a composed-read root
  * or a `:children` listing's outer POINT, whose identity is the addressed vertex — RFC-0016
- * §A), plus @p lkv's TLV verbatim when it carries one. The links are the owned header segment,
- * the borrowed name text and the stored TLV's links, which is exactly what
+ * §A), plus @p lkv's TLV verbatim when it carries one. The links are the one owned header
+ * segment (which carries the name text too) and the stored TLV's links, which is exactly what
  * @ref append_folded_node appends — so a caller that reserves from this sum never reallocates.
  */
 struct folded_own_t {
@@ -3916,7 +3915,6 @@ struct folded_own_t {
     folded_own_t o;
     if (named != nullptr) {
         o.len += kNameHeaderBytes + child_segment(*named).size();
-        o.links += 1;
     }
     if (lkv != nullptr) {
         o.len += lkv->total_length();
@@ -3927,10 +3925,10 @@ struct folded_own_t {
 
 /**
  * @brief Append one folded node's own links to @p out: its POINT header for a @p body_len body
- *        — IMMEDIATELY FOLLOWED, when it is @p named, by the `NAME` header of its segment text,
- *        in ONE exactly-sized OWNED segment — then that segment text BORROWED in place, then
- *        @p lkv's links refcount-cloned. False ⇒ a seam refused (the caller answers
- *        `BACKPRESSURE` by value; nothing here throws).
+ *        — IMMEDIATELY FOLLOWED, when it is @p named, by the `NAME` TLV of its segment text
+ *        (header and text), in ONE exactly-sized OWNED segment — then @p lkv's links
+ *        refcount-cloned. False ⇒ a seam refused (the caller answers `BACKPRESSURE` by value;
+ *        nothing here throws).
  *
  * The ONE member emitter of the three folds — `:children` (@ref
  * graph_t::read_children_folded), the composed read (@ref graph_t::read_subtree_folded) and the
@@ -3941,13 +3939,13 @@ struct folded_own_t {
  * path (the op_resolve_walk assemble pattern). The node's sub-branches are the caller's; it
  * passes their link count as @p then, so the one reservation here covers its join too.
  *
- * Two headers in one segment, deliberately. Before RFC-0018 the folds emitted a POINT header
- * and then BORROWED the node's key record, because that record already WAS a `NAME` TLV. A
- * packed key record is `[u8 len][bytes]`, so the `NAME` framing has to be written — and writing
- * it into the same segment as the POINT header keeps every fold at exactly the link count it
- * had before, which is what their link-table reservations are sized against and what keeps a
- * wide `:children` listing off the transports' iovec spill. The named vertex is pinned and
- * insert-only and its `name_` is immutable once linked, so the borrowed text outlives the rope.
+ * The name text is COPIED into the header segment, not borrowed (#2665). A borrow wraps the
+ * text in a second segment whose control block the one-argument `view::borrow_const` draws
+ * from the process value pool, not from @p backend, so on a graph over an injected source it
+ * drew from the wrong source. The text is one packed key segment (at most 255 bytes), so the
+ * copy costs less than the second draw it removes: a named node is ONE draw and ONE link, not
+ * two of each, which also keeps a wide `:children` listing further off the transports' iovec
+ * spill.
  *
  * @p backend is the graph's ADR-0060 `value_backend_` at every call site (#831). These are
  * PAYLOAD framing bytes — the length field wraps the stored TLV and the name records below it —
@@ -3967,8 +3965,9 @@ struct folded_own_t {
     const std::size_t len_bytes = ll ? 4u : 2u;
     const std::span<const std::byte> seg =
         named != nullptr ? child_segment(*named) : std::span<const std::byte>{};
-    view::segment_ptr_t hseg = view::segment_alloc(
-        backend, folded_hdr_len(body_len) + (named != nullptr ? kNameHeaderBytes : 0u));
+    const std::size_t width =
+        folded_hdr_len(body_len) + (named != nullptr ? kNameHeaderBytes : 0u) + seg.size();
+    view::segment_ptr_t hseg = view::segment_alloc(backend, width);
     if (!hseg) return false;  // the seam refused — a null segment_ptr_t IS the refusal
     std::byte* p = hseg->bytes.data();
     *p++ = static_cast<std::byte>(std::to_underlying(type_t::POINT));
@@ -3976,20 +3975,17 @@ struct folded_own_t {
     detail::store_le(std::span<std::byte>(p, len_bytes), static_cast<std::uint32_t>(body_len),
                      len_bytes);
     p += len_bytes;
-    view::segment_ptr_t nseg;  // the borrowed segment text — named nodes only
     if (named != nullptr) {
         *p++ = static_cast<std::byte>(std::to_underlying(type_t::NAME));
         *p++ = std::byte{0};
         detail::store_le(std::span<std::byte>(p, 2), static_cast<std::uint32_t>(seg.size()), 2);
-        nseg = view::borrow_const(seg);
-        if (!nseg) return false;
+        std::copy(seg.begin(), seg.end(), p + 2);  // the name text rides the same segment
     }
     // Reserve every link this node adds, plus the @p then links its caller joins after it,
     // before the first append: `out` spills into the graph's table source (#2288), which may
     // refuse, and `append` and `concat` have no failure channel.
     if (!out.try_reserve(folded_own(named, lkv).links + then)) return false;
-    out.append(view::view_t::over(std::move(hseg)));            // owned POINT (+ NAME) headers
-    if (nseg) out.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
+    out.append(view::view_t::over(std::move(hseg)));  // owned POINT header (+ NAME TLV)
     if (lkv != nullptr) {  // the stored TLV verbatim — links cloned, refcount bump
         for (const view::view_t& l : lkv->links()) out.append(l);
     }
@@ -4010,12 +4006,10 @@ result_t<value_ref_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     }
     // The folded projection of read_children: instead of concatenating every member into
     // one buffer and copying the whole listing (twice — into `out`, then into a segment),
-    // gather each POINT{NAME} member as TWO scatter-gather links — the emitted
-    // POINT-plus-NAME header, then the child's own segment TEXT borrowed IN PLACE (zero
-    // copy). Under RFC-0018 the borrowed run is the key record minus its length byte, and
-    // the `NAME` framing rides the owned header segment, so the member is still two links.
-    // The child vertex is pinned and insert-only and its `name_` is immutable once linked,
-    // so the borrowed bytes outlive this rope. flatten() is byte-identical to
+    // gather each POINT{NAME} member as ONE scatter-gather link: the emitted POINT header
+    // followed by the child's `NAME` TLV, its segment text copied in (#2665: one draw from
+    // the graph's backend, where borrowing the text cost a second, from the process pool).
+    // flatten() is byte-identical to
     // read_children: same headers (opt.ll auto-widened at the same 0xFFFF boundary)
     // followed by the same name bytes, in the same child order.
     //
@@ -4045,7 +4039,7 @@ result_t<value_ref_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     if (oom || !append_folded_node(out, hdr_backend, members_len, nullptr, nullptr))
         return std::unexpected(status_t::BACKPRESSURE);
     // The member count is already in hand, so take the join as ONE sized growth instead of
-    // the geometric push_back ladder (a wide listing is 2 links per child). `concat` does not
+    // the geometric push_back ladder (a wide listing is 1 link per child). `concat` does not
     // reserve for us — that guard belongs to the caller that knows the count, not to every
     // 1-link delivery clone (#1022). The reservation is a refusal, not a hint: the chain
     // draws from the graph's table source, which may answer no (#2288), and `concat` has no
@@ -4172,11 +4166,10 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
 
     // Pass 3 — emit, in array (= pre-order = wire) order, through the one member emitter the
     // three folds share (append_folded_node, which carries the seam and lifetime arguments).
-    // Per node: an OWNED header link (the POINT header, plus the NAME header below the root —
+    // Per node: an OWNED header link (the POINT header, plus the NAME TLV below the root —
     // the root's identity is the addressed vertex, RFC-0016 §A; its own stored TLV leads the
-    // root body), the BORROWED name text below the root, then the stored TLV's links
-    // refcount-CLONED (no byte copy). Zero flatten anywhere; a view allocation failure is the
-    // audited BACKPRESSURE pattern.
+    // root body), then the stored TLV's links refcount-CLONED (no byte copy). Zero flatten
+    // anywhere; a view allocation failure is the audited BACKPRESSURE pattern.
     for (const snap_node_t& n : nodes) {
         if (!append_folded_node(out, hdr_backend, n.body_len, n.named, n.lkv.get()))
             return std::unexpected(status_t::BACKPRESSURE);

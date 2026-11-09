@@ -443,7 +443,9 @@ void test_rope_tier_refusal_is_answered() {
     std::printf("the rope-tier terminus answers its refusal arms too:\n");
     graph_t g;
     (void)g.register_vertex(*path_t::parse("/sensor"), role_t::STORED_VALUE);
-    for (const char* c : {"a", "b", "c", "d", "e", "f"}) {
+    // Eight children: each is two links (header-and-name, LKV), so the reply is 18 links,
+    // past kMaxInlineIov.
+    for (const char* c : {"a", "b", "c", "d", "e", "f", "g", "h"}) {
         const auto cv =
             g.register_vertex(*path_t::parse(std::string("/sensor/") + c), role_t::STORED_VALUE);
         const std::array<std::byte, 4> body{};

@@ -2386,9 +2386,9 @@ class graph_t {
      * graph shapes. The value is valid while the graph (and its insert-only, pointer-stable
      * vertices) outlive it. The synthesized-listing case (ADR-0044) has nothing to gather
      * and crosses as a single-link value. The composed value is one block from the global
-     * heap (`value_ref_t::composed`), whose refusal is `BACKPRESSURE`. Each member's NAME bytes are
-     * borrowed IN PLACE (zero copy, @ref view::borrow_const) over the pinned child vertex — only
-     * the tiny POINT headers are emitted — so the listing is never copied whole.
+     * heap (`value_ref_t::composed`), whose refusal is `BACKPRESSURE`. Each member is ONE link: its
+     * POINT header and `NAME` TLV in one segment drawn from the graph's value backend (#2665),
+     * so the listing is never copied whole.
      */
     [[nodiscard]] result_t<value_ref_t> read_children_folded(vertex_handle_t v) const;
 
