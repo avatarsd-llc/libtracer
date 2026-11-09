@@ -36,7 +36,7 @@ A conforming **TLV** SHALL fit in the header layout of [01-data-format.md](01-da
 | ---- | ---- | ---- |
 | **P0 — in-process** | required modules only, zero transports | unit tests, in-process pub/sub, the API substrate other layers compose against |
 | **P1 — single-transport leaf** | required + 1 transport | RC car over UART, sensor over CAN, ESP32 over Wi-Fi |
-| **P2 — forwarder** | required + ≥2 transports | gateway between buses (CAN ↔ IP), edge router |
+| **P2 — forwarder** | required + ≥2 links, of one transport kind or several | gateway between buses (CAN ↔ IP), edge router |
 | **P3 — full** | P2 + discovery + executor + security | production deployment |
 
 Higher profiles are strict supersets. A conformance test suite exercises P0 mandatorily; P1+ are exercised against the available transport modules.

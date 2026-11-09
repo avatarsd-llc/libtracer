@@ -1,8 +1,10 @@
 # One seam, every wire technology (transport plane)
 
-`tr::net::transport_t` is the entire contract a transport kind has to satisfy. Three calls —
-the scatter-gather `send(iov)`, its one-span case `send(span)`, and `set_receiver` /
-`set_rope_receiver` — and no fourth.
+`tr::net::transport_t` is the contract a transport kind has to satisfy. One call is required
+today, the one-span `send(span)`. The scatter-gather `send(iov)` and the retained send are
+overridable and have default bodies, and frames come back through `set_receiver` /
+`set_rope_receiver`. The remaining members (`drop_stats`, `start_receiving` and the like) have
+defaults too.
 
 There is no `send_read`, no `send_reply`, and no TLV type anywhere in it. That absence is the
 design: the router owns addressing (the `dst` source route), the codec owns structure, and a
@@ -20,12 +22,14 @@ The example writes a complete kind in about twenty lines, then drives the shippe
   not a protocol property
   ([ADR-0013](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0013-v1-scope-boundaries.md)) —
   two conforming nodes need not share it, only the wire.
-- **The iovec overload is the one a kind implements.** The router sends every forward and reply
-  through it, so a rope's `to_iovec()` reaches the kind as its spans. A kind that cannot
-  `writev` joins them into memory it already owns, as the example's kind does; the bytes on the
-  wire are one record either way. The span `send` is its one-span case, and
+- **The span `send` is the pure virtual; the iovec overload is the one worth overriding.** The
+  router sends forwards through `send(iov)`, while some short answers, such as a refusal or a
+  bare `ERROR`, go through the span `send`. The base `send(iov)` gathers the spans into a
+  temporary and calls the span `send`, dropping and counting a gather it cannot complete. A kind
+  with `writev` overrides it to avoid that copy, and one without can join the spans into memory
+  it already owns, as the example's kind does; the bytes on the wire are one record either way.
   [ADR-0089](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0089-scatter-gather-is-the-one-required-transport-send.md)
-  moves it into the base.
+  makes `send(iov)` the required call and moves the span `send` into the base.
 - **Declaring one `send` hides the others.** Ordinary C++ name hiding, and a kind that omits
   `using transport_t::send;` silently loses the retained send it meant to inherit. The example
   carries the line and says why.
