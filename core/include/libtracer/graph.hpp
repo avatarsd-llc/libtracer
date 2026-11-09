@@ -2187,12 +2187,17 @@ class graph_t {
      * The view is held off the vertex, in one graph-side node per vertex address that ever
      * installed a document, so a vertex without one pays no byte for the feature.
      *
-     * @return `BACKPRESSURE` when the table source refused that node on the address's first
-     *         install; @p v is then unchanged. A clear never fails.
+     * @return `NOT_FOUND` when @p v is no longer registered (retired, and not yet registered
+     *         again), checked under the map lock: nothing is installed, so the next
+     *         registration at its address serves no document from the call (#2669). The
+     *         retirement already cleared the document, so a clear has nothing left to do.
+     *         `BACKPRESSURE` when the table source refused that node on the address's first
+     *         install; @p v is then unchanged. A clear on a registered vertex never fails.
      */
     [[nodiscard]] result_t<void> set_intent_document(vertex_handle_t v, std::string_view doc);
     /** @brief Remove @p v's intent document, if it has one: its `:schema` read is then the
-     *         record it was before any install. Never fails, and allocates nothing. */
+     *         record it was before any install. Allocates nothing; on a retired @p v it does
+     *         nothing, the retirement having cleared the document already. */
     void clear_intent_document(vertex_handle_t v) { (void)set_intent_document(v, {}); }
     /** @brief Bytes @p v's receiver ring currently holds RESERVED against its source — the
      *         byte bound's observable. `SCHEMA_NOT_FOUND` on a non-STREAM role, matching

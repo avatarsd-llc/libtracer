@@ -226,6 +226,46 @@ void test_retire_drops_the_document() {
           "the next occupant serves today's record, with no document");
 }
 
+/** @brief An install through a retired vertex's handle is refused, and the next occupant at
+ *         the address serves no document (#2669). */
+void test_stale_handle_install_refused() {
+    std::printf("an install through a retired vertex's handle is refused:\n");
+    graph_t g;
+    const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    check(g.retire(v).has_value(), "the vertex retires");
+    const tr::graph::result_t<void> r = g.set_intent_document(v, kDocAlone);
+    check(!r.has_value() && r.error() == status_t::NOT_FOUND,
+          "set_intent_document through the stale handle answers NOT_FOUND");
+    (void)g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    check(read_bytes(g, "/x:schema") == expected_schema("x", {}, {}),
+          "the next occupant serves today's record, with no document");
+}
+
+/** @brief An install racing a retire and revive never reaches the next occupant (#2669). */
+void test_install_racing_a_retire() {
+    std::printf("an install racing a retire and revive:\n");
+    graph_t g;
+    const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    std::atomic<bool> stop{false};
+    std::thread installer([&] {
+        while (!stop.load(std::memory_order_relaxed)) (void)g.set_intent_document(v, kDocAlone);
+    });
+    // Retire and revive, then retire once more and stop the installer only then: every install
+    // it makes after that last retire lands on the retired vertex, which the revive below
+    // must not inherit.
+    for (int i = 0; i < 2000; ++i) {
+        (void)g.retire(v);
+        (void)g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    }
+    (void)g.retire(v);
+    for (int i = 0; i < 1000; ++i) std::this_thread::yield();
+    stop.store(true, std::memory_order_relaxed);
+    installer.join();
+    (void)g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    check(read_bytes(g, "/x:schema") == expected_schema("x", {}, {}),
+          "the occupant after the last retire serves no document");
+}
+
 /** @brief The document is schema, not a value: no `:settings` read carries it. */
 void test_not_a_setting() {
     std::printf("the document is not a setting:\n");
@@ -318,6 +358,8 @@ int main() {
     test_conformance_vectors();
     test_shared_span();
     test_retire_drops_the_document();
+    test_stale_handle_install_refused();
+    test_install_racing_a_retire();
     test_not_a_setting();
     test_replace_and_clear_race_a_read();
     test_clear_ends_the_borrow();
