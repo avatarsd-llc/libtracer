@@ -77,7 +77,9 @@ TRANSPORT_ROWS = (
 # rows full_node pins stay pinned on full_node only; here they are reported.
 FOOTPRINT_IMAGE = "transport_footprint"
 FOOTPRINT_PINS = {
-    "CAN (transport_can + TWAI link)": 14248,
+    # 14,248 B at this PR's first base; +20 B from #2704 (CAN egress sends through the native
+    # gather path), which landed first. Measured on the serial run at 119d76e6.
+    "CAN (transport_can + TWAI link)": 14268,
     "WebSocket (httpd server + client link)": 33387,
 }
 
