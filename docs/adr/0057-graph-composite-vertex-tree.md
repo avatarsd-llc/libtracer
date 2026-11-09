@@ -91,8 +91,12 @@ graph's table source, and keeps the length and the #1486 slot memo in one word. 
 is what makes that sound without any reclamation: no vertex is erased, a retire re-virginizes in
 place and keeps the name, and a name is set once before the vertex is linked, so the block only
 grows and is released with the graph. The bytes are the same canonical record as before, so this is
-storage, not a second naming scheme (#1681). It cut `sizeof(vertex_t)` by 16 B on rv32 (64 → 48)
-and on x86-64 (88 → 72); resolution and listing read the name through one more dependent load.
+storage, not a second naming scheme (#1681). It cut `sizeof(vertex_t)` by 16 B on rv32 (60 → 44)
+and by 8 B on x86-64 (80 → 72). So that resolution does not pay the extra dependent load on every
+probe, each entry of the parent's sorted child list carries a pointer-wide prefix of the child's
+record beside the child pointer, so an entry grows 4 → 8 B on rv32 and 8 → 16 B on x86-64.
+The prefix is monotone in the record order, so the list keeps its order and its binary search, and
+a tie reads the child's length, and its name bytes only past the prefix.
 
 ## Considered options
 

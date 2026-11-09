@@ -44,6 +44,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -1260,7 +1261,10 @@ class vertex_t {
      * The list block is lazily allocated on the FIRST child (#380 §1): a leaf — the
      * common MCU vertex — keeps `children_` null and pays exactly one pointer. The
      * list stays sorted by name record, so a wide composite resolves a child in
-     * O(log children). The `vertex_t` itself never moves (only owning pointers do).
+     * O(log children); each entry carries the child's `%name_prefix` beside its pointer,
+     * which is the whole of the sync this insert-only list needs: a name is written once,
+     * before the link, and never renamed. The `vertex_t` itself never moves (only owning
+     * pointers do).
      * The list and @p child must both come from @p src (`graph_t::table_source`, #1778):
      * on success the list OWNS @p child and returns its block to that source when this
      * vertex is destroyed.
@@ -1273,13 +1277,11 @@ class vertex_t {
             children_ = tr::mem::make_in<children_t>(src, src);
             if (children_ == nullptr) return nullptr;
         }
-        tr::mem::block_array_t<vertex_t*>& sorted = children_->sorted;
-        vertex_t* const* const pos =
-            std::lower_bound(sorted.begin(), sorted.end(), child->name(),
-                             [](const vertex_t* c, std::span<const std::byte> n) {
-                                 return std::ranges::lexicographical_compare(c->name(), n);
-                             });
-        if (sorted.emplace_at(static_cast<std::size_t>(pos - sorted.begin()), child) == nullptr)
+        const name_prefix_t prefix = name_prefix(child->name());
+        const child_entry_t* const pos = children_->lower_bound(child->name(), prefix);
+        const child_entry_t entry{.child = child, .prefix = prefix};
+        if (children_->sorted.emplace_at(static_cast<std::size_t>(pos - children_->sorted.begin()),
+                                         entry) == nullptr)
             return nullptr;
         child->parent_ = this;
         return child;
@@ -1293,15 +1295,10 @@ class vertex_t {
      */
     [[nodiscard]] vertex_t* child_by_record(std::span<const std::byte> record) const noexcept {
         if (children_ == nullptr) return nullptr;
-        const tr::mem::block_array_t<vertex_t*>& sorted = children_->sorted;
-        const auto it =
-            std::lower_bound(sorted.begin(), sorted.end(), record,
-                             [](const vertex_t* c, std::span<const std::byte> r) {
-                                 return std::ranges::lexicographical_compare(c->name(), r);
-                             });
-        if (it == sorted.end()) return nullptr;
-        const bool matches = std::ranges::equal((*it)->name(), record);
-        return matches ? *it : nullptr;
+        const name_prefix_t prefix = name_prefix(record);
+        const child_entry_t* const it = children_->lower_bound(record, prefix);
+        if (it == children_->sorted.end() || it->prefix != prefix) return nullptr;
+        return tie_order(it->child->name(), record) == 0 ? it->child : nullptr;
     }
 
     /**
@@ -1313,7 +1310,7 @@ class vertex_t {
     template <typename F>
     void for_each_child(F&& f) const {
         if (children_ == nullptr) return;
-        for (vertex_t* c : children_->sorted) f(*c);
+        for (const child_entry_t& e : children_->sorted) f(*e.child);
     }
 
     /**
@@ -3856,6 +3853,59 @@ class vertex_t {
     // deferred; see ADR-0057 lifetime).
     vertex_t* parent_ = nullptr;
 
+    /**
+     * @brief A child's name prefix: the first `sizeof(name_prefix_t)` record bytes, big-endian,
+     *        zero-padded past a shorter record (#2672, ruling 49).
+     *
+     * Pointer-wide: 4 B on a 32-bit target, 8 B on a 64-bit host, where an entry is 16 B either
+     * way, since a 4 B prefix would leave the other four as padding. A packed
+     * record `[u8 len][bytes]` of up to three segment bytes on 32-bit (seven on 64-bit) is
+     * then told apart by its prefix alone.
+     */
+    using name_prefix_t = std::uintptr_t;
+
+    /**
+     * @brief `%name_prefix_t` of @p record.
+     *
+     * Monotone in the record order: for any byte strings `a <= b` lexicographically gives
+     * `name_prefix(a) <= name_prefix(b)`, because a big-endian load compares as the leading
+     * bytes do and a zero pad sorts a proper prefix first. So unequal prefixes decide a
+     * comparison, and only equal ones need the records themselves.
+     *
+     */
+    [[nodiscard]] static name_prefix_t name_prefix(std::span<const std::byte> record) noexcept {
+        name_prefix_t p = 0;
+        const std::size_t n = std::min(record.size(), sizeof(name_prefix_t));
+        for (std::size_t i = 0; i < n; ++i)
+            p |= std::to_integer<name_prefix_t>(record[i]) << (8 * (sizeof(name_prefix_t) - 1 - i));
+        return p;
+    }
+
+    /**
+     * @brief The order of two records whose prefixes are equal: negative, zero or positive.
+     *
+     * Length first, then the bytes past the prefix, in one `memcmp`. A well-framed record's
+     * first byte is its length, so a tie there already means equal lengths; the length test is
+     * for a ragged record, which a raw key can carry: its length byte overruns it, and
+     * `{9, a..g}` ties with the well-framed `{9, a..i}` on a 64-bit prefix. Zero means the two
+     * records are the same bytes, since equal prefixes and equal lengths cover the head. On
+     * well-framed records this is exactly the record order; only ragged ties sort by length.
+     */
+    [[nodiscard]] static int tie_order(std::span<const std::byte> a,
+                                       std::span<const std::byte> b) noexcept {
+        if (a.size() != b.size()) return a.size() < b.size() ? -1 : 1;
+        if (a.size() <= sizeof(name_prefix_t)) return 0;
+        return std::memcmp(a.data() + sizeof(name_prefix_t), b.data() + sizeof(name_prefix_t),
+                           a.size() - sizeof(name_prefix_t));
+    }
+
+    /** @brief One child-list entry: the owned child and its `%name_prefix`, kept beside the
+     *         pointer so a lookup compares in the array (#2672, ruling 49). */
+    struct child_entry_t {
+        vertex_t* child;      /**< @brief The owned child. */
+        name_prefix_t prefix; /**< @brief `name_prefix(child->name())`, set once at insert. */
+    };
+
     /** @brief The lazily-allocated child list (null for every leaf): the owned children,
      *         sorted by their canonical NAME record bytes. */
     struct children_t {
@@ -3863,11 +3913,30 @@ class vertex_t {
         explicit children_t(tr::mem::block_source_t& src) noexcept : sorted(src) {}
         /** @brief Destroy every child and return its block to the list's source. */
         ~children_t() {
-            for (vertex_t* c : sorted) tr::mem::drop_in(sorted.source(), c);
+            for (const child_entry_t& e : sorted) tr::mem::drop_in(sorted.source(), e.child);
         }
         children_t(const children_t&) = delete;            /**< @brief Owns its children. */
         children_t& operator=(const children_t&) = delete; /**< @brief Owns its children. */
-        tr::mem::block_array_t<vertex_t*> sorted; /**< @brief Sorted owned children (#1778). */
+
+        /**
+         * @brief The first entry whose child's record is not less than @p record (end if none):
+         *        the one binary search insert, lookup and sibling ascent share.
+         *
+         * A probe compares the in-array prefixes first, so a search over distinct prefixes
+         * touches no child at all (#2672, ruling 49). A tie reads the child's length, and its
+         * name bytes only past the prefix (`%tie_order`), so a hit on a short name never loads
+         * the out-of-line record.
+         */
+        [[nodiscard]] const child_entry_t* lower_bound(std::span<const std::byte> record,
+                                                       name_prefix_t p) const noexcept {
+            return std::lower_bound(sorted.begin(), sorted.end(), record,
+                                    [p](const child_entry_t& e, std::span<const std::byte> r) {
+                                        if (e.prefix != p) return e.prefix < p;
+                                        return tie_order(e.child->name(), r) < 0;
+                                    });
+        }
+
+        tr::mem::block_array_t<child_entry_t> sorted; /**< @brief Sorted owned children (#1778). */
     };
     /** @brief The child list, or null for a leaf; drawn from, and freed to, the source its
      *         own `sorted` array names (`graph_t::table_source`). */
@@ -3877,7 +3946,7 @@ class vertex_t {
      * for_each_descendant). */
     [[nodiscard]] vertex_t* first_child() const noexcept {
         if (children_ == nullptr || children_->sorted.empty()) return nullptr;
-        return children_->sorted.front();
+        return children_->sorted.front().child;
     }
 
     /**
@@ -3895,15 +3964,12 @@ class vertex_t {
      */
     [[nodiscard]] vertex_t* next_sibling_of(const vertex_t& c) const noexcept {
         if (children_ == nullptr) return nullptr;
-        const tr::mem::block_array_t<vertex_t*>& sorted = children_->sorted;
-        auto it = std::lower_bound(sorted.begin(), sorted.end(), c.name(),
-                                   [](const vertex_t* e, std::span<const std::byte> n) {
-                                       return std::ranges::lexicographical_compare(e->name(), n);
-                                   });
-        while (it != sorted.end() && *it != &c) ++it;
-        if (it == sorted.end()) return nullptr;  // not our child — caller error, walk stops
+        const child_entry_t* it = children_->lower_bound(c.name(), name_prefix(c.name()));
+        const child_entry_t* const end = children_->sorted.end();
+        while (it != end && it->child != &c) ++it;
+        if (it == end) return nullptr;  // not our child — caller error, walk stops
         ++it;
-        return it == sorted.end() ? nullptr : *it;
+        return it == end ? nullptr : it->child;
     }
 };
 
