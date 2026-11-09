@@ -183,6 +183,35 @@ void reports_what_to_size_against() {
 }
 
 /**
+ * @brief A shape drawn on every frame climbs to the front of the class table (#2709).
+ *
+ * The table is searched front to back, and a shape claimed last used to stay last: a
+ * borrowed segment's control block, first released after every wiring-time shape, scanned
+ * the whole table on each draw and return. Transposition moves a hit one slot forward, so the
+ * hot shape reaches slot 0 and keeps its own blocks: the swap carries each free list with its
+ * shape.
+ */
+void hot_shape_climbs_to_the_front() {
+    std::printf("\nself-organizing class table (#2709):\n");
+    fixture_t<2048, 8> f;
+
+    // Claim four wiring-time shapes first, then the hot one, in release order.
+    for (const std::size_t bytes : {16U, 24U, 48U, 64U, 40U}) {
+        f.src.release(f.src.try_alloc(bytes, 8), bytes, 8);
+    }
+    check(f.classes[4].bytes == 40, "the shape released last is claimed last");
+
+    void* const hot = f.src.try_alloc(40, 8);
+    f.src.release(hot, 40, 8);
+    for (int i = 0; i < 8; ++i) f.src.release(f.src.try_alloc(40, 8), 40, 8);
+    check(f.classes[0].bytes == 40, "a shape drawn every frame reaches the first slot");
+    check(f.src.try_alloc(40, 8) == hot, "and its free list moved with it");
+    void* const cold = f.src.try_alloc(16, 8);
+    check(cold != nullptr && cold != hot, "a displaced shape still serves its own blocks");
+    check(f.src.classes_used() == 5, "reordering claims no slot");
+}
+
+/**
  * @brief PRIMARY EXHAUSTION IS COUNTED — the number that did not exist before #1503.
  *
  * `try_alloc → nullptr` was uncounted at every source in the tree, so a host holding a
@@ -290,6 +319,7 @@ int main() {
     class_table_overflow_is_safe();
     foreign_pointer_is_ignored();
     reports_what_to_size_against();
+    hot_shape_climbs_to_the_front();
     primary_exhaustion_is_counted();
     base_seam_default_is_all_zero();
     hosted_sync_policy_works();
