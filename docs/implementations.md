@@ -14,7 +14,7 @@ See the [capability matrix](capability-matrix.md) for what each core, port and b
 
 ## How to register
 
-1. Implement the libtracer spec (see [the protocol specification](spec/index.md)).
+1. Implement the libtracer spec (see [the protocol specification](spec/index.md), and [the libtracer plane](plane.md) for what a compatible device must implement).
 2. Run the conformance vectors at [tests/conformance/](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/) and pass them.
 3. Open a PR adding a row to the table above, describing your implementation, the spec versions it targets, and a link to your repo.
 4. Maintainers will review and merge. Listing is editorial — we may decline implementations that are abandoned, do not pass conformance, or misuse the trademark (see [TRADEMARKS.md](https://github.com/avatarsd-llc/libtracer/blob/main/.github/TRADEMARKS.md)).

@@ -122,6 +122,8 @@ include_patterns = [
     # getting-started.md so a parallel doc car adding its own entry conflicts on one
     # line at most.
     "docs/start-here.md",
+    # One public description of the whole protocol and node model (#2728).
+    "docs/plane.md",
     "docs/spec/rfcs/**",
     "docs/adr-rfc-index.md",
 ]

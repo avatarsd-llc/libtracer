@@ -49,6 +49,14 @@ Reproducible numbers vs Eclipse Zenoh, a live auto-generated test report
 across every subsystem, and the 16KB zero-heap forward gate.
 :::
 
+:::{grid-item-card} The whole plane on one page
+:link: docs/plane
+:link-type: doc
+
+The graph, the three operations, forwarding, ACLs, transports, backpressure, and exactly
+what a device must implement to be compatible.
+:::
+
 :::{grid-item-card} Build a node
 :link: docs/getting-started
 :link-type: doc
@@ -171,4 +179,5 @@ Context glossary <CONTEXT>
 :maxdepth: 1
 
 Route by intent <docs/start-here>
+The libtracer plane <docs/plane>
 ```
