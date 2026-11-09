@@ -858,6 +858,10 @@ class transport_vertex_t {
         /** @brief Collect `self_heal_link_t::stop()` on @p engine — JOINS its worker. */
         void stop_engine(self_heal_link_t* engine);
 
+        /** @brief Collect `self_heal_link_t::born()` on @p engine: it runs after the publish,
+         *         so its worker cannot report a state the birth write would overwrite (#2353). */
+        void born_engine(self_heal_link_t* engine);
+
         /** @brief Collect the destruction of @p link — JOINS its receive thread — and then of
          *         @p config, the connection's config copy the link's settings view. */
         void destroy_link(transport_ptr_t link, mem::bytes_t config);
@@ -872,7 +876,7 @@ class transport_vertex_t {
         /**
          * @brief Phase 2: drop `ctl_m_`, then run the collected work in teardown order —
          *        un-route, stop the engine, retire the vertex, shut the socket down and
-         *        park it, publish.
+         *        park it, publish, let a new engine's worker run.
          *
          * `ops_m_`, if this is an `OPERATION`, is NOT dropped here: it is the destructor's,
          * so the whole mutation stays one serialized step.
@@ -895,6 +899,7 @@ class transport_vertex_t {
         std::unique_lock<tr::mutex_t> lock_;        /**< @brief `ctl_m_`; dropped by phase 2. */
         mem::string_t unroute_{mem::null_source()}; /**< @brief Empty = no un-route. */
         self_heal_link_t* stop_ = nullptr;          /**< @brief Null = no engine to stop. */
+        self_heal_link_t* born_ = nullptr;          /**< @brief Null = no engine to release. */
         transport_ptr_t destroy_;                   /**< @brief Null = nothing to destroy. */
         /** @brief The destroyed connection's config bytes; released after `destroy_`. */
         mem::bytes_t destroy_config_{mem::null_source()};

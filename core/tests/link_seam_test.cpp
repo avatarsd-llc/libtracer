@@ -603,6 +603,7 @@ class self_heal_rig_t final : public link_rig_t {
                   return p;
               },
               tr::net::conn_settings_t{}, {}, true, tr::mem::heap_source()) {
+        link_.born();
         link_.acquire();
         (void)eventually([&] { return link_.state() == tr::net::link_state_t::UP; }, kWait);
     }
