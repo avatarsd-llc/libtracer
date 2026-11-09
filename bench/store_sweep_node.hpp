@@ -78,6 +78,7 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_source_pmr.hpp"
 #include "libtracer/mem_source_sync.hpp"
@@ -521,11 +522,13 @@ class node_t {
      * `vertex_t::store` mints the LKV control block and the rope wrapper through `mr_`
      * (`core/src/graph.cpp`'s `store_value`), which since #873 phase 1 is the graph's own
      * adapter over the injected source. The value is a BORROWED view over the lane's own
-     * stable buffer, so the value backend contributes nothing here and this leg's draw is the
-     * control block alone.
+     * stable buffer, so the value backend contributes nothing here: this leg's draws are the
+     * value's control block and the borrowed segment's, both from the graph's value source
+     * (#2660). A refused borrow is BACKPRESSURE, and the leg then does not write.
      */
     void step_write(lane_t& l) {
-        (void)g_->write(*l.leaf, tr::view::view_t::over(tr::view::borrow_const(l.value)));
+        tr::view::segment_ptr_t seg = tr::view::borrow_const(l.value, *borrowed_);
+        if (seg) (void)g_->write(*l.leaf, tr::view::view_t::over(std::move(seg)));
     }
 
     /**
@@ -688,6 +691,7 @@ class node_t {
      * `new_delete_resource()`. Same composition, one knob instead of two. */
     void build_graph() {
         g_ = std::make_unique<graph_t>(*ctl_src_);
+        borrowed_.emplace(g_->value_source(), tr::mem::mem_space_t::HOST);
         // `link_src` and the DEFAULT `rx` both take the net-plane store, per ADR-0079's
         // composition table. NARROW has no node-wide net store — every child overrides `rx`
         // through `add_child` — so its link state takes the GRAPH store rather than the heap:
@@ -760,8 +764,11 @@ class node_t {
     tr::mem::block_source_t* rx_src_ = nullptr;  /**< @brief Resolved router `rx`; null=per-lane. */
     tr::mem::block_source_t* egr_src_ = nullptr; /**< @brief Resolved egress; null=per-lane. */
     tr::mem::block_source_t* plane_fallback_ = nullptr; /**< @brief Node-wide wiring fallback. */
-    std::unique_ptr<graph_t> g_;                        /**< @brief The graph under test. */
-    std::unique_ptr<fwd_router_t> router_;              /**< @brief The FWD router under test. */
+    /** @brief The write leg's borrow seam, over the graph's value source (#2660). Declared
+     *         before the graph, so it outlives the values the vertex tree still holds. */
+    std::optional<tr::mem::borrowed_backend_t> borrowed_;
+    std::unique_ptr<graph_t> g_;                 /**< @brief The graph under test. */
+    std::unique_ptr<fwd_router_t> router_;       /**< @brief The FWD router under test. */
     std::vector<std::unique_ptr<lane_t>> lanes_; /**< @brief Stable addresses: the router holds
                                                       pointers into these. */
 };
