@@ -127,6 +127,14 @@ inline constexpr arm_t kArms[] = {arm_t::H_BASELINE, arm_t::WIDE, arm_t::MID, ar
 }
 
 /**
+ * @brief Whether a NARROW node's graph store may be reached from more than one thread (#2709).
+ */
+enum class graph_store_use_t {
+    SHARED,     /**< @brief More than one thread may draw: the store takes `sync_mutex_t`. */
+    ONE_THREAD, /**< @brief One calling thread only: a NARROW store takes `tr::no_guard_t`. */
+};
+
+/**
  * @brief Receive-thread counts the fan-out arm sweeps.
  *
  * Fixed rather than clamped to `hardware_concurrency`, exactly as `bench_rx_source_topology`
@@ -390,6 +398,9 @@ struct stores_t {
     std::unique_ptr<tr::mem::pool_source_t<tr::mem::sync_mutex_t>> wide;
     /** @brief The graph-plane store, shared by `ctl` and the `mr` adapter in MID and NARROW. */
     std::unique_ptr<tr::mem::pool_source_t<tr::mem::sync_mutex_t>> graph;
+    /** @brief NARROW's graph-plane store on a one-thread node (#2709), in place of @ref graph:
+     *         a single-threaded node has no lock to pay. WIDE's store stays locked on purpose. */
+    std::unique_ptr<tr::mem::pool_source_t<tr::no_guard_t>> graph_one_thread;
     /** @brief MID's net-plane store, shared by every child's rx and every link's egress. */
     std::unique_ptr<tr::mem::pool_source_t<tr::mem::sync_mutex_t>> net;
     /** @brief NARROW's per-child rx stores — one thread each, so `tr::no_guard_t`. */
@@ -427,6 +438,7 @@ struct stores_t {
         };
         add("wide", wide, wide_slab.size());
         add("graph", graph, graph_slab.size());
+        add("graph", graph_one_thread, graph_slab.size());
         add("net", net, net_slab.size());
         for (std::size_t i = 0; i < lane_rx.size(); ++i) {
             add("lane-rx", lane_rx[i], lane_rx_slab[i].size());
@@ -470,10 +482,13 @@ class node_t {
      *        bounded arm would report the largest escape on the page, which is exactly
      *        backwards. Null in every other caller.
      * @param ctx Opaque context handed back to @p after_stores.
+     * @param graph_use Who reaches a NARROW node's graph store. `ONE_THREAD` is only for the
+     *        single-lane, single-caller `latency` mode: the `throughput` mode runs NARROW with
+     *        up to 24 threads over this one store and stays `SHARED`.
      */
     node_t(arm_t arm, std::size_t lanes, bool count_channels, void (*after_stores)(void*) = nullptr,
-           void* ctx = nullptr)
-        : arm_(arm), lanes_n_(lanes) {
+           void* ctx = nullptr, graph_store_use_t graph_use = graph_store_use_t::SHARED)
+        : arm_(arm), lanes_n_(lanes), graph_use_(graph_use) {
         build_stores(count_channels);
         if (after_stores != nullptr) after_stores(ctx);
         build_graph();
@@ -618,8 +633,13 @@ class node_t {
         } else if (arm_ == arm_t::MID || arm_ == arm_t::NARROW) {
             st_.graph_slab.resize(budget_t::kGraph);
             st_.graph_cls.resize(budget_t::kSharedClasses);
-            st_.graph = std::make_unique<tr::mem::pool_source_t<tr::mem::sync_mutex_t>>(
-                st_.graph_slab, st_.graph_cls);
+            if (arm_ == arm_t::NARROW && graph_use_ == graph_store_use_t::ONE_THREAD) {
+                st_.graph_one_thread = std::make_unique<tr::mem::pool_source_t<tr::no_guard_t>>(
+                    st_.graph_slab, st_.graph_cls);
+            } else {
+                st_.graph = std::make_unique<tr::mem::pool_source_t<tr::mem::sync_mutex_t>>(
+                    st_.graph_slab, st_.graph_cls);
+            }
         }
         if (arm_ == arm_t::MID) {
             st_.net_slab.resize(budget_t::net_shared(T));
@@ -662,7 +682,9 @@ class node_t {
                 rx_src_ = egr_src_ = st_.net.get();
                 break;
             case arm_t::NARROW:
-                ctl_src_ = st_.graph.get();
+                ctl_src_ = graph_use_ == graph_store_use_t::ONE_THREAD
+                               ? static_cast<tr::mem::block_source_t*>(st_.graph_one_thread.get())
+                               : st_.graph.get();
                 rx_src_ = egr_src_ = nullptr;  // per-lane; see build_lanes
                 break;
         }
@@ -758,9 +780,10 @@ class node_t {
         for (auto& l : lanes_) step_full(*l);
     }
 
-    arm_t arm_;           /**< @brief The composition under test. */
-    std::size_t lanes_n_; /**< @brief Lane (and receive-thread) count. */
-    stores_t st_;         /**< @brief Declared FIRST so it outlives the graph. */
+    arm_t arm_;                   /**< @brief The composition under test. */
+    std::size_t lanes_n_;         /**< @brief Lane (and receive-thread) count. */
+    stores_t st_;                 /**< @brief Declared FIRST so it outlives the graph. */
+    graph_store_use_t graph_use_; /**< @brief Who reaches a NARROW node's graph store (#2709). */
     tr::mem::block_source_t* ctl_src_ = nullptr; /**< @brief Resolved graph `ctl` channel. */
     tr::mem::block_source_t* rx_src_ = nullptr;  /**< @brief Resolved router `rx`; null=per-lane. */
     tr::mem::block_source_t* egr_src_ = nullptr; /**< @brief Resolved egress; null=per-lane. */
