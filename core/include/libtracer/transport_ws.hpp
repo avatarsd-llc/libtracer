@@ -384,14 +384,13 @@ class ws_server_transport_t final : public stream_server_base_t {
 
         /** @brief The owning server's snapshot (#932): a directed facade counts into the
          *         link's own counters, so it reports them rather than a fabricated zero. */
-        [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-            return owner_ == nullptr ? transport_drop_stats_t{} : owner_->drop_stats();
-        }
+        [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override;
 
        private:
         friend class ws_server_transport_t;
-        ws_server_transport_t* owner_ = nullptr; /**< @brief The owning server. */
-        session_t* slot_ = nullptr;              /**< @brief The peer slot this sends to. */
+        /** @brief The peer slot this sends to. The owning server is the slot's wait context
+         *         (@ref slot_server_t::server_of), so the facade holds no pointer to it. */
+        session_t* slot_ = nullptr;
     };
 
     /** @brief The one send body: frame @p parts as one BINARY message, then to every open
@@ -407,6 +406,9 @@ class ws_server_transport_t final : public stream_server_base_t {
     /** @brief One fresh slot with its handshake buffer, frame-ingress state, reassembler and
      *         facade. */
     mem::poly_ptr_t<session_base_t> make_session() override;
+
+    /** @brief The slot's directed facade, its own `endpoint` member. */
+    transport_t& endpoint_of(session_base_t& s) noexcept override;
 
     /** @brief Per-accept setup: clear the slot's handshake and frame buffers. Returns
      *         false — a WS session only carries frames PAST its `101`, which

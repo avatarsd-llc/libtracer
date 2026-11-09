@@ -23,6 +23,8 @@
 #include <utility>
 
 #include "libtracer/iov_table.hpp"
+#include "libtracer/mem_source.hpp"
+#include "libtracer/static_thread.hpp"
 
 namespace tr::net {
 
@@ -202,10 +204,26 @@ write_fault_stats_t write_fault_stats() noexcept {
             .last_errno = g_last_malformed_errno.load(std::memory_order_relaxed)};
 }
 
-posix_endpoint_t::~posix_endpoint_t() { stop_and_join(); }
+/**
+ * @brief The fallback adapter's state: the private module and the one thread that drives it,
+ *        in one block drawn from the link's stack plane. It records that plane, so the link
+ *        holds only the pointer.
+ */
+struct posix_endpoint_t::fallback_t {
+    /** @brief Opens the private module, its poll-adapter tables drawn from @p s . */
+    explicit fallback_t(mem::block_source_t& s) noexcept : src(&s), module(s) {}
+    mem::block_source_t* src; /**< @brief Where this block (and the thread's stack) came from. */
+    wait_module_t module;     /**< @brief The private module. */
+    static_thread_t thread;   /**< @brief Its driver. */
+};
 
-void posix_endpoint_t::thread_entry(void* self) {
-    static_cast<posix_endpoint_t*>(self)->own_->run();
+posix_endpoint_t::~posix_endpoint_t() {
+    stop_and_join();
+    if (fallback_ != nullptr) mem::drop_in(*fallback_->src, fallback_);
+}
+
+void posix_endpoint_t::thread_entry(void* fallback) {
+    static_cast<fallback_t*>(fallback)->module.run();
 }
 
 bool posix_endpoint_t::start(std::size_t stack_size, mem::block_source_t& src) {
@@ -215,19 +233,20 @@ bool posix_endpoint_t::start(std::size_t stack_size, mem::block_source_t& src) {
     }
     // The fallback adapter: a private module, whose poll-adapter tables come from the same
     // stack plane, and one thread of the link's own to drive it.
-    own_ = mem::make_poly<wait_module_t>(src, src);
-    if (!own_ || !own_->ok()) return false;
-    wait_.store(own_.get(), std::memory_order_release);
-    if (thread_.start(&posix_endpoint_t::thread_entry, this, stack_size, "tr_wait", src))
+    fallback_ = mem::make_in<fallback_t>(src, src);
+    if (fallback_ == nullptr || !fallback_->module.ok()) return false;
+    wait_.store(&fallback_->module, std::memory_order_release);
+    if (fallback_->thread.start(&posix_endpoint_t::thread_entry, fallback_, stack_size, "tr_wait",
+                                src))
         return true;
     wait_.store(nullptr, std::memory_order_release);
     return false;
 }
 
 void posix_endpoint_t::stop_driver() {
-    if (!own_) return;
-    own_->stop();
-    thread_.join();
+    if (fallback_ == nullptr) return;
+    fallback_->module.stop();
+    fallback_->thread.join();
 }
 
 void posix_endpoint_t::stop_and_join() {
@@ -597,7 +616,7 @@ transport_t* slot_server_t::peer_link(std::string_view peer) {
     const std::lock_guard lock(peers_m_);
     for (const mem::poly_ptr_t<session_base_t>& s : slots_)
         if (s->open.load(std::memory_order_relaxed) && s->name_view() == peer)
-            return s->peer_endpoint;
+            return &endpoint_of(*s);
     return nullptr;
 }
 
@@ -608,8 +627,8 @@ transport_t* slot_server_t::peer_link_of(peer_handle_t peer) {
     if (!peer.valid()) return nullptr;
     const std::lock_guard lock(peers_m_);
     if (peer.index >= slots_.size()) return nullptr;
-    const session_base_t& s = *slots_[peer.index];
-    return s.open.load(std::memory_order_relaxed) && s.handle == peer ? s.peer_endpoint : nullptr;
+    session_base_t& s = *slots_[peer.index];
+    return s.open.load(std::memory_order_relaxed) && s.handle == peer ? &endpoint_of(s) : nullptr;
 }
 
 bool slot_server_t::close_peer(std::string_view peer) {
@@ -729,6 +748,10 @@ void slot_server_t::accept_peer() {
             }
             slot = slots_.back().get();
             idx = slots_.size() - 1;
+            // Its wait callback and context, the same for every tenancy of the slot: the
+            // context every callback casts back, and the server its facade reaches.
+            slot->fire = &slot_server_t::on_session;
+            slot->ctx = static_cast<posix_endpoint_t*>(this);
             // Link the slot at the HEAD of the broadcast's chain (#2263): this thread is its
             // only writer, and the release makes a walker that loads the slot see it
             // constructed. Its egress is still closed, so it takes nothing yet.
@@ -766,8 +789,6 @@ void slot_server_t::accept_peer() {
     // claimed until the egress opens — a release a claim's acquire pairs with — so no sender
     // can see the slot half-published, and none waits on the accept to finish.
     // Release: the liveness check's acquire of the fd then sees the flags stored above (#2198).
-    slot->fire = &slot_server_t::on_session;
-    slot->ctx = static_cast<posix_endpoint_t*>(this);  // the context every callback casts back
     slot->write.store(false, std::memory_order_relaxed);
     slot->fd.store(fd, std::memory_order_release);
     // On the wait before it opens, so a first frame the socket holds can arm writability. A

@@ -230,10 +230,16 @@ mem::poly_ptr_t<slot_server_t::session_base_t> ws_server_transport_t::make_sessi
     mem::poly_ptr_t<session_t> slot =
         mem::make_poly<session_t>(slots_.source(), slots_.source(), *backend_);
     if (!slot) return nullptr;
-    slot->endpoint.owner_ = this;
     slot->endpoint.slot_ = slot.get();
-    slot->peer_endpoint = &slot->endpoint;
     return slot;
+}
+
+transport_t& ws_server_transport_t::endpoint_of(session_base_t& s) noexcept {
+    return static_cast<session_t&>(s).endpoint;
+}
+
+transport_drop_stats_t ws_server_transport_t::peer_endpoint_t::drop_stats() const noexcept {
+    return slot_ == nullptr ? transport_drop_stats_t{} : server_of(*slot_).drop_stats();
 }
 
 bool ws_server_transport_t::on_accept(session_base_t& base, int fd) {
@@ -297,7 +303,7 @@ void ws_server_transport_t::send_retained(session_base_t* to,
         if (to == nullptr)
             transport_t::send(head, value, lane);
         else
-            to->peer_endpoint->transport_t::send(head, value, lane);
+            static_cast<session_t*>(to)->endpoint.transport_t::send(head, value, lane);
         return;
     }
     send_record(to, std::span<const std::span<const std::byte>>(parts.data(), n), &value, lane);
@@ -341,13 +347,16 @@ void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::byte> fra
 }
 
 void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
-    if (owner_ != nullptr && slot_ != nullptr) owner_->send_record(slot_, iov, nullptr, {});
+    if (slot_ != nullptr)
+        static_cast<ws_server_transport_t&>(server_of(*slot_)).send_record(slot_, iov, nullptr, {});
 }
 
 void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::span<const std::byte>> head,
                                                   const graph::value_t& value,
                                                   const graph::delivery_lane_t& lane) {
-    if (owner_ != nullptr && slot_ != nullptr) owner_->send_retained(slot_, head, value, lane);
+    if (slot_ != nullptr)
+        static_cast<ws_server_transport_t&>(server_of(*slot_))
+            .send_retained(slot_, head, value, lane);
 }
 
 void ws_server_transport_t::on_readable(session_base_t& base, int fd) {
