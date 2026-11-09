@@ -70,7 +70,7 @@ A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 /                                      — the root vertex (rarely addressed directly)
 ```
 
-> ⚠️ **The module-namespaced line is grammar, not a reachable field.** `:settings.<module>.<field>` parses and is the resolving form should module fields land, but no module-namespaced field is implemented: the runtime resolves only the reserved `app` subkey below `settings` and answers `tr::schema::not_found` for every other second step, on read and on write, caller-independently ([02-graph-model.md](02-graph-model.md) §module field namespacing).
+> ⚠️ **The module-namespaced line is grammar, not a reachable field.** `:settings.<module>.<field>` parses and is the resolving form should module fields land, but no module-namespaced field is implemented: the runtime resolves only the reserved `app` subkey below `settings` and answers `tr::schema::not_found` for every other second step, on read and on write, caller-independently ([02-graph-model.md §Module-namespaced extension fields](02-graph-model.md#module-namespaced-extension-fields)).
 
 ### Index forms
 

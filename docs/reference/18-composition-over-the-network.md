@@ -256,7 +256,7 @@ router never sees it.
 NARROW / MID / WIDE below name the ends of the spectrum
 [12 — Deployment profiles](12-deployment-profiles.md) enumerates as rungs: **NARROW** is a
 constrained single-transport leaf (rung 1, profile P1, header-elided framing), **MID** is a
-forwarder holding ≥ 2 transports (rung 2, P2), **WIDE** is a full host (rungs 4–5, P3).
+forwarder holding ≥ 2 links (rung 2, P2), **WIDE** is a full host (rungs 4–5, P3).
 
 - **Address cost is settled for NARROW and open for MID/WIDE.** On a header-elided transport
   there is no room for a route at all — the CAN ID *is* the path, the `identity↔path` map is

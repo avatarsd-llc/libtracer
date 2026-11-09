@@ -1041,7 +1041,7 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 - Unknown NAMEs MUST be either (a) ignored if module-namespaced and the module is not loaded, or (b) rejected with `ERROR{tr::schema::not_found}` if in the core namespace.
 - Type mismatches (e.g., a u32 where u8 expected) MUST return `ERROR{tr::schema::type_mismatch}`.
 
-> ⚠️ **Conformance gap — arm (a) is unimplemented in the reference core.** It does not distinguish a module-namespaced NAME from a core one: every second step below `settings` other than the reserved `app` is *rejected* with `tr::schema::not_found`, not ignored, and there is no module registry keyed on a settings sub-name. The rule above is the requirement and is unchanged; the reference implementation currently meets only arm (b). See [02-graph-model.md](02-graph-model.md) §module field namespacing.
+> ⚠️ **Conformance gap — arm (a) is unimplemented in the reference core.** It does not distinguish a module-namespaced NAME from a core one: every second step below `settings` other than the reserved `app` is *rejected* with `tr::schema::not_found`, not ignored, and there is no module registry keyed on a settings sub-name. The rule above is the requirement and is unchanged; the reference implementation currently meets only arm (b). See [02-graph-model.md §Module-namespaced extension fields](02-graph-model.md#module-namespaced-extension-fields).
 
 ### The core knob namespace is empty
 

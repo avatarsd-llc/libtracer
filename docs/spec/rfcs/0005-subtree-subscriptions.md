@@ -167,7 +167,7 @@ Example — one frame updates two leaves and the parent observes the whole branc
 ```{mermaid}
 sequenceDiagram
     accTitle: Decomposing a written subtree
-    accDescr: A producer writes a POINT tree to /s holding values for /s/t and the not-yet-existing /s/u. /s admits it, stores the VALUE-a slice at /s/t and creates /s/u to store VALUE-b without copying, then /s/t's subscriber gets its slice and /s's subscriber gets the written branch as-is.
+    accDescr: A producer writes a POINT tree to /s holding values for /s/t and the not-yet-existing /s/u. /s admits it, stores the VALUE-a slice at /s/t and creates /s/u to store VALUE-b without copying, then /s/t's subscriber gets its slice and /s's subscriber gets the written branch as-is, with the same frame bubbling to any ancestor subscriber.
     autonumber
     participant P as Producer
     participant S as /s (subscriber here)
