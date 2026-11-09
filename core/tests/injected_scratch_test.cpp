@@ -34,6 +34,10 @@
  *       and every peak is still zero. Before #2660 the only borrow drew it from
  *       `tr::mem::value_source()`. A source that refuses the control block answers a null
  *       segment, so the caller answers BACKPRESSURE and the vertex keeps its value.
+ * - (e) the same through the writable `borrow` (#2665): a `borrow` write through the graph's
+ *       `borrowed_backend_t` draws its control block from the injected root, every peak is
+ *       still zero, and a refusing source answers a null segment. Before #2665 the writable
+ *       borrow had no seam and drew from `tr::mem::value_source()`.
  *
  * Every case also checks that its draw reached the injected root (a count of the blocks it
  * served), so a zero on the default root is not the zero of a path that never ran.
@@ -240,6 +244,35 @@ int main() {
         const auto kept = g.read(v);
         check(kept.has_value() && (*kept)->link_count() == 1 &&
                   (*kept)->only().bytes().data() == kFour,
+              "and the vertex keeps its value");
+    }
+
+    // (e) A writable borrow written to a vertex: its control block is the graph's draw too.
+    std::printf("(e) a borrow write draws its control block from the graph's source:\n");
+    {
+        // Static: the vertex still holds these bytes when the graph tears down.
+        static std::byte live[3] = {std::byte{5}, std::byte{6}, std::byte{7}};
+        const auto v = g.register_vertex(at("/c/w"), role_t::STORED_VALUE);
+        before = root.draws;
+        tr::view::segment_ptr_t seg = tr::view::borrow(std::span(live), borrowed);
+        check(seg && seg->backend == &borrowed, "the borrow is a segment of the graph's backend");
+        check(root.draws == before + 1, "its control block is one draw from the graph's source");
+        check(g.write(v, tr::view::view_t::over(std::move(seg))).has_value(), "the write lands");
+        const auto stored = g.read(v);
+        check(stored.has_value() && (*stored)->link_count() == 1 &&
+                  (*stored)->only().owner->backend == &borrowed &&
+                  (*stored)->only().bytes().data() == live,
+              "the vertex holds the borrowed bytes in place");
+        report_default_root();
+        check(default_root_peak() == 0, "and the borrow took nothing from the default root");
+
+        tr::mem::borrowed_backend_t refusing(tr::mem::null_source(), tr::mem::mem_space_t::HOST);
+        std::byte other[2] = {std::byte{9}, std::byte{9}};
+        check(!tr::view::borrow(std::span(other), refusing),
+              "a refused control block is a null segment");
+        const auto kept = g.read(v);
+        check(kept.has_value() && (*kept)->link_count() == 1 &&
+                  (*kept)->only().bytes().data() == live,
               "and the vertex keeps its value");
     }
     return tr::testing::summary("injected_scratch");
