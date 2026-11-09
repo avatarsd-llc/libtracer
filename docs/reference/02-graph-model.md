@@ -744,15 +744,15 @@ There is **no stated ordering between a registration and a concurrent operation 
 
 ### Module-namespaced extension fields
 
-A transport module MAY add module-namespaced settings, e.g. `:settings.transport_tcp.send_buf_kb`. Rules:
+The grammar reserves a module-namespaced form below `settings`, e.g. `:settings.transport_tcp.send_buf_kb`. **That form is grammar, not a reachable field:** [03-addressing.md §Examples](03-addressing.md#examples) (normative annex, the module-namespaced line and its note) states what the runtime answers for it, and that clause governs here. Nothing below makes a module field readable, writable or schema-visible.
 
-- Module fields MUST live under their own module name (here, `transport_tcp`).
+The naming rules the grammar reserves, should module fields land:
+
+- A module's sub-name MUST be its own module name (here, `transport_tcp`).
 - The name `app` inside vertex `SETTINGS` is **reserved for the application** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §A.1): no module or future protocol knob may claim it. The application is one more namespace owner under the same nesting shape; `app` is its name.
 - Module names MUST match the module's directory in `libtracer/modules/` for the reference implementation; cross-implementation module-name uniqueness is a registry concern.
-- Module fields MUST appear in the vertex's `:schema` output if they apply to that vertex.
-- Reading a module field on a vertex where that module is not active returns `ERROR{tr::schema::not_found}`.
 
-The namespace is **vertex-level**: `:settings.<module>.<field>` is the resolving form should module fields land. ⚠️ **No module-namespaced field is implemented.** The runtime resolves exactly one subkey below `settings` — the reserved `app` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §A) — and answers `tr::schema::not_found` for every other second step, on read and on write alike, caller-independently; the `:schema` machinery the rules above describe therefore has nothing to report, since the synthesized core part is empty by construction (§the `:settings` read above). A *per-subscriber* module setting has no wire surface either, because `:subscribers` is addressed whole (§The payload-discriminating `:subscribers[N]` write).
+The namespace is **vertex-level**: `:settings.<module>.<field>` is the resolving form should module fields land. Making a module field reachable (its `:schema` entry, its answer on a vertex where the module is not active) is an amendment to annex 03, not a rule this page can state. A *per-subscriber* module setting has no wire surface either, because `:subscribers` is addressed whole (§The payload-discriminating `:subscribers[N]` write).
 
 ### Limits the protocol does not impose
 
