@@ -276,6 +276,8 @@ The write path MUST stay near-free when nobody listens: an implementation mainta
 
 ```{mermaid}
 flowchart BT
+    accTitle: A write bubbling up to subtree subscribers
+    accDescr: A write to /a/b/c fans out to its own subscribers, then bubbles the written TLV as-is to /a/b and its subscriber S2, then to /a and its remote subscriber S1. The walk ends where no subscriber sits higher, and with no subscribers it never starts.
     C["/a/b/c ← write(VALUE)"] -- "fan_out: own subscribers" --> C
     C -- "bubble: written TLV as-is" --> B["/a/b (subscriber S2)"]
     B -- "bubble: written TLV as-is" --> A["/a (subscriber S1, remote via FWD)"]
@@ -292,6 +294,8 @@ The producer fan-out, end to end — the subscribe binds a remote subscriber, it
 
 ```{mermaid}
 sequenceDiagram
+    accTitle: A remote subscribe, its latch, and later deliveries
+    accDescr: A consumer subscribes by writing a SUBSCRIBER into the producer vertex's subscribers field; the producer admits it and keeps the return route and inbound link. If durability was requested the current value is delivered first as a latch, then the subscribe is acknowledged, and each later write fans out to the consumer as a WRITE with an empty src.
     autonumber
     participant Cons as Consumer
     participant Prod as Producer node
@@ -623,6 +627,8 @@ Every conforming PATH TLV is byte-equivalent to the following structure. A corre
 
 ```mermaid
 flowchart LR
+  accTitle: PATH TLV layout
+  accDescr: A PATH TLV is an outer header of type 0x06, an option byte with no payload-length flag, and a two-byte little-endian length. Its payload is a run of packed segment records, segment 1 through segment K, each a size byte followed by the segment's bytes.
   subgraph Outer["PATH TLV outer"]
     direction LR
     T["type<br/>= 0x06"]
@@ -777,6 +783,8 @@ A write whose payload TLV is a POINT is a **branch write** ([RFC-0005](https://g
 
 ```{mermaid}
 sequenceDiagram
+    accTitle: Decomposing a written subtree
+    accDescr: A producer writes a POINT tree to /s holding values for /s/t and /s/u. /s admits the write and stores each value slice at its child without copying, then /s/t's subscribers get the VALUE-a slice and /s's subscribers and ancestors get the written POINT as-is.
     autonumber
     participant P as Producer
     participant S as /s
@@ -1320,6 +1328,8 @@ A single-hop `FWD` request → reply round-trip (the consumer reaches a terminus
 
 ```{mermaid}
 sequenceDiagram
+    accTitle: A READ answered by a REPLY
+    accDescr: A consumer sends a FWD READ for /sensor/temp; the node resolves it to the local vertex and gets a zero-copy refcount clone of the stored value. The node answers with a FWD REPLY carrying the value, and WRITE, AWAIT and subscribe use the same shape, with an error returning an ERROR status.
     autonumber
     participant C as Consumer (client)
     participant N as Node (resolver)
@@ -1335,6 +1345,8 @@ At the terminus — the one place a node reads the whole FWD tree — the frame 
 
 ```{mermaid}
 flowchart LR
+    accTitle: How an inbound FWD frame is resolved
+    accDescr: An inbound FWD frame is decoded into a span arena of flat pre-order nodes, then resolved. Resolution looks the vertex up with the frame's own PATH body as the key, stores a write with one copy, and emits the reply head into one exactly-sized segment with the payload roped in without copying.
     F["inbound FWD frame<br/>(bytes)"] --> D["decode into a span arena"]
     D --> A["flat pre-order span-nodes"]
     A --> R["resolve"]
@@ -1353,6 +1365,8 @@ Across hops, `FWD` is **source-routed and stateless**: each forwarder strips the
 
 ```{mermaid}
 sequenceDiagram
+    accTitle: A request forwarded over two hops
+    accDescr: A consumer sends a FWD to forwarder A addressed A, B, temp. A strips its own segment, prepends the inbound link to src, and forwards to producer B, which is the terminus and replies along the src route back through A to the consumer.
     autonumber
     participant C as Consumer
     participant A as Forwarder A
