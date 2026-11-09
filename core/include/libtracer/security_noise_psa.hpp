@@ -24,11 +24,11 @@
  *    a rekey, the handshake cipher and the ephemeral key) plus the image's other PSA users,
  *    and `MBEDTLS_PSA_STATIC_KEY_SLOT_BUFFER_SIZE` at least the largest key any of them
  *    imports (Noise's are 32 B). A Noise-only image needs 8 slots of 32 B: 360 B of `.bss` on
- *    an ESP32-C6, and the CI psa leg's configuration. Left unsized, mbedTLS sizes 32 slots
- *    for the largest key type enabled: 76,616 B at ESP-IDF's defaults (an RSA-4096 key pair).
- *    ESP-IDF has no option for any of these; the Kconfig help of
- *    `CONFIG_LIBTRACER_NOISE_CRYPTO_PSA` shows the header an app passes. A NARROW image that
- *    needs PSA for nothing else is better served by libsodium, which has no table at all.
+ *    an ESP32-C6. Left unsized, mbedTLS sizes 32 slots for the largest key type enabled:
+ *    76,616 B at ESP-IDF's defaults (an RSA-4096 key pair). ESP-IDF has no option for any of
+ *    these; the Kconfig help of `CONFIG_LIBTRACER_NOISE_CRYPTO_PSA` shows the header an app
+ *    passes. A NARROW image that needs PSA for nothing else is better served by libsodium,
+ *    which has no table at all.
  *  - **ChaCha20-Poly1305.** It is off by default in ESP-IDF: enable `CONFIG_MBEDTLS_CHACHA20_C`
  *    and `CONFIG_MBEDTLS_CHACHAPOLY_C`.
  *
