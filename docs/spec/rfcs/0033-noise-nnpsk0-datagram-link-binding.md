@@ -1178,17 +1178,26 @@ otherwise.
 - **The unit is the message, not the frame.** RFC 6455 §5.4 lets a sender or an intermediary split
   a message into continuation frames. A receiver MUST reassemble and apply every §5.3 rule to the
   whole message. A sender SHOULD send each message as one frame.
-- **Refuse, never truncate.** A receiver MUST drop a message above `max_frame + 25` bytes and count
-  it in `malformed_rx`. A fragmented message states no total length, so the receiver MUST apply the
-  bound to the running total and MUST NOT buffer past it.
+- **Refuse, never truncate.** A receiver MUST drop a message above its current bound and count it
+  once in `malformed_rx`. A fragmented message states no total length, so the receiver MUST apply
+  the bound to the running total and MUST NOT buffer past it. The rest of that message is discarded
+  through its FIN frame, and the connection is not closed. A browser cannot see a message before it
+  is complete and cannot set a size limit, so a browser peer applies the bound on delivery instead.
+- **The bound depends on proof.** Until a first message on the connection has passed the PSK and
+  counter checks (A2.8), a responder's bound is **58 bytes**, the only valid size of a message at
+  that point (§5.3: 1 type + 32 `e.pub` + 9 payload + 16 tag). After the proof, the bound is
+  `max_frame + 25` for the rest of the connection. An initiator's bound is `max_frame + 25` throughout.
 - **The size bound.** The WebSocket length field does not bound a message, so the Noise limit does
   (§5.3): a frame is at most 65519 bytes, and `max_frame` MUST NOT exceed that on this carrier. The
   path-MTU advice of §5.3 does not apply, because TCP segments the bytes. A plain WebSocket link can
   carry a larger frame, and moving such a link to Noise lowers its bound.
 - **Text messages.** A data message of opcode `0x1` is dropped and counted in `malformed_rx`, even
   when its bytes would parse.
-- **Compression.** `permessage-deflate` MUST NOT be negotiated. Browsers offer it by default, and
-  the server declines by leaving it out of its response. Ciphertext does not compress.
+- **Compression.** A Noise endpoint MUST NOT accept `permessage-deflate`: a server leaves it out of
+  its response. An initiator or dial-out client MUST close the connection if the negotiated
+  extensions are not empty (`WebSocket.extensions` in a browser). Browsers offer the extension by
+  default, and neither endpoint controls a hop it is not on. Ciphertext does not compress, and an
+  inflate context costs memory per connection.
 - **Masking** follows RFC 6455 and is opaque to the binding. It is not a security property here.
 - **Control frames and RFC 6455 errors.** Ping, Pong and Close carry no Noise message and are not
   authenticated. A violation of RFC 6455 itself is handled by the WebSocket layer as on a plain link.
@@ -1205,10 +1214,18 @@ mask from a client.
 - Whether a link uses Noise is **configuration on each side**. It is never negotiated. §5.1's rule
   holds: a Noise link MUST NOT fall back to the plain carrier.
 - **(open: Q5)** The client offers the subprotocol `tracer-noise-v1` in `Sec-WebSocket-Protocol`,
-  which the browser `WebSocket` constructor can set, and the server selects it. A Noise link MUST
+  which the browser `WebSocket` constructor can set, and the server selects it. A browser fails the
+  connection if a subprotocol it offered is not selected, so the echo is required. A Noise link MUST
   close a connection on which the subprotocol was not agreed, and MUST NOT serve it. A plain link
   does not select this subprotocol. The header is not authenticated. It routes a connection to the
   right link and adds no protection.
+- **What the echo discloses.** A server MUST select the subprotocol for every upgrade it accepts for
+  a Noise link, before and regardless of any Noise message. The echo tells whoever completes an
+  upgrade that the endpoint serves this binding and its version. It discloses nothing about a PSK,
+  about whether any first message passed, or about whether a session exists. So on this carrier
+  §5.9's silence protects the **verdict on a Noise message**, and not the existence of the
+  responder. A deployment that needs the endpoint's nature unannounced on a shared path can omit the
+  subprotocol and route by URL path instead, which it owns.
 - A secured profile can require this binding for a link at compile time, so that the plain path for
   that link is not built.
 - Once the upgrade completes, every data message on a Noise link is a §5.3 datagram. The in-band
@@ -1218,18 +1235,30 @@ mask from a client.
 
 ### A2.4 Roles and the connection
 
-**Normative.**
+**Normative.** One WebSocket connection carries one Noise link and one peer. The §5.4 **peer
+address** rules do not apply: a connection has no source address, and a responder answers on the
+connection the first message arrived on. Roles never swap (§5.4). An initiator sends its first
+message as its first data message after the upgrade.
 
-- **(open: Q8)** The WebSocket client is the initiator and the server is the responder, unless the
-  link's configuration names the Noise role. A node that dials out to an intermediary and waits
-  there for a peer is a WebSocket client and a Noise responder, so it names its role. How an
-  intermediary pairs two connections is outside this binding. Roles still never swap (§5.4).
-- One WebSocket connection carries one Noise link and one peer. A server's accepted connections are
-  separate links, each with its own sessions. This is the listener that §15 Q3 left to a later
-  amendment, and A2.8 applies the terms §15 Q3 set for it.
-- The §5.4 **peer address** rules do not apply: a WebSocket connection has no source address. A
-  responder answers on the connection the first message arrived on.
-- The initiator sends its first message as its first data message after the upgrade.
+**(open: Q8)** The Noise role comes from the link's connection role, as §4 says, and a WebSocket
+client is normally a DIAL link. A node that dials out to an intermediary and waits there for a peer
+is configured as a **LISTEN link whose carrier is an outbound connection** (a dial-out responder).
+How an intermediary pairs two connections is outside this binding.
+
+| Socket | Noise role | Reports (§5.10, RFC-0014) | Who opens the connection |
+| --- | --- | --- | --- |
+| client | initiator (DIAL) | The DIAL rows. `dialing` covers the upgrade and the handshake, and a completed upgrade alone never reports `up`. | A demand or a standing binding, as on any DIAL link. |
+| server | responder (accepted connection) | The listener keeps the LISTEN rows. The accepted connection has no state of its own (below). | The peer. |
+| client | responder (dial-out) | `listening` while the upgraded connection is open; `bind-failed` while it is not. It never reports `up` (§15 Q4). | The link, when built and after every close: at once on the close event, then at a retry deadline on the application's `now` if the open failed. An operation never starts it, and with no session an operation fails at once (§5.1). |
+| server | initiator | Not defined. A link MUST refuse to be built this way. | |
+
+**An accepted connection** is a synthesized child of the listener's connection vertex, as any
+accepted peer is ([reference/19](../../reference/19-transports-are-vertices.md) §Pitfalls). It has
+no connection vertex of its own. This is the listener that §15 Q3 left to a later amendment; A2.8
+applies the terms §15 Q3 set for it.
+
+**An endpoint** is the set of connections that one configuration binds to one PSK reference: all
+the connections of a listener, or the successive connections of one dial-out responder.
 
 ### A2.5 Ordering and reliability: what changes from UDP, and what does not
 
@@ -1253,8 +1282,9 @@ messages. The binding therefore treats ordering as the common case and never as 
   It applies within one connection only.
 - **A connection that ends an attempt.** If an attempt reaches its attempt deadline with no session
   on the connection, the initiator MUST close the connection. A new attempt uses a new connection,
-  a fresh ephemeral key and a new counter. An attempt with no `now` resolves when the handshake
-  completes or the connection closes, so unlike UDP (§5.7) it needs no retransmission to finish.
+  a fresh ephemeral key and a new counter. A message dropped silently on a path through an
+  intermediary is recovered only by this deadline. An application that passes no `now` has no such
+  recovery, and its attempt waits until the connection closes.
 - **Liveness.** A Pong proves that the next hop is alive, and a browser cannot send a Ping at all.
   An initiator that wants peer liveness MAY send an empty transport message, which the responder
   answers (§5.4 responder step 7), on a deadline taken from the application's `now`. Nothing here
@@ -1269,21 +1299,24 @@ A session is scoped to the WebSocket connection that carried its handshake. **(o
 - A session MUST NOT be used on any other connection. A reconnect is always a new handshake, with a
   fresh ephemeral key and a new counter.
 - When the connection closes for any reason, each side discards every session and any handshake in
-  flight on it. This is the §5.10 case of a current session discarded with no replacement: the link
-  goes down, its tenancy is kept, and the connection vertex's generation advances. A Close frame is
-  not authenticated, and it is read only as the fact that the carrier ended.
+  flight on it. A Close frame is not authenticated, and it is read only as the fact that the
+  carrier ended.
+- **Where the boundary lands.** On a link with its own connection vertex (a DIAL link or a dial-out
+  responder), a close is the §5.10 case of a current session discarded with no replacement: the link
+  goes down, its tenancy is kept, and that vertex's generation advances. On an accepted connection
+  the boundary ends that child only, as the close of a plain accepted connection does. It MUST NOT
+  advance the generation of the listener's vertex, so one peer's close does not touch another's.
 - Discarding a current session with no replacement (`reject_after`, or the nonce limit) MUST close
   the connection. So a connection never outlives its last session, and it carries one unbroken
   chain of sessions from its first handshake. A rekey is not affected.
 - A new connection starts with no session on either side, so both `fresh` bits are set and the
   boundary rule of §5.10 holds unchanged. A reconnect can therefore advance the generation once at
   the close and once when the new session becomes current. Both advances are correct.
-- The states of §5.10 keep their meaning. A DIAL link is `dialing` through the upgrade and the
-  handshake, and a completed upgrade alone never reports `up`.
 
 The session-boundary behaviour this relies on is [#2074](https://github.com/avatarsd-llc/libtracer/issues/2074)'s
-([#2733](https://github.com/avatarsd-llc/libtracer/pull/2733)). This amendment adds a trigger and no
-new mechanism.
+([#2733](https://github.com/avatarsd-llc/libtracer/pull/2733), rekey, deadlines and boundaries). The
+generation advance itself is wired by [#2735](https://github.com/avatarsd-llc/libtracer/issues/2735).
+This amendment adds a trigger and no new mechanism.
 
 ### A2.7 Rekey
 
@@ -1297,28 +1330,80 @@ rekey are binary messages like any others.
 - A rekey attempt that reaches its attempt deadline ends without closing the connection, because
   the current session is still good. The next attempt uses a fresh ephemeral key and a new counter.
 
-### A2.8 Resources: the listener
+### A2.8 Resources and admission (NNpsk0 only)
 
-**Normative.** A WebSocket server admits peers. The terms below replace §5.8's "drawn when the
-link is built" and §5.4's "one mark per link" on this carrier. The rest of §5.8 applies.
+**Normative for NNpsk0.** This section depends on what NNpsk0's first message proves, and it does
+not apply to any other pattern (A2.11). A WebSocket server admits peers. The terms below replace
+§5.8's "drawn when the link is built" and §5.4's "one mark per link" on this carrier. The rest of
+§5.8 applies.
 
-- **The mark is scoped to the PSK, not to the connection.** A responder keeps one mark per PSK
-  across all the connections of an endpoint, and advances it atomically. A connection-scoped mark
-  would admit a recorded first message on every new connection. **(open: Q7)**
+**Order of admission.** A first message passes the §5.4 responder steps in order: retransmit, PSK
+proof, flags and counter. The mark rises at the counter check, as §5.4 says. Only then are the
+connection's slots drawn, and the draw comes before the ephemeral key and the Diffie-Hellman.
+
 - **No Noise state before the proof.** A connection's session and handshake slots MUST be drawn from
-  the connection's own source only after the first message passes the PSK and counter checks. When
-  the source is exhausted, the responder refuses the newcomer and does not evict an existing session.
-- **What a connection costs before the proof is what a plain WebSocket connection costs:** the
-  server's admission limit and receive buffer. The binding adds no bytes to it, other than the mark
-  per PSK.
+  the connection's own source only at that point. Before it, a connection costs what a plain
+  WebSocket connection costs (the server's admission limit), reassembles at most 58 bytes (A2.2),
+  and adds no bytes of Noise state beyond the mark per PSK.
+- **Exhaustion refuses the newcomer.** When the source is exhausted, the responder sends no second
+  message and closes the connection, with the status it uses for any other close. It does not evict
+  an existing session. The mark has already risen, so the initiator's next attempt uses a new
+  counter, as every attempt does. This answer goes only to a sender that passed the PSK check.
+
+**Connection lifetime.** An accepted connection is **live** while it holds a current session or an
+unexpired pending session. An accepted connection that is not live MUST be closed, at the first of:
+
+| Event | Driven by |
+| --- | --- |
+| No first message passed the checks by `first_message` | the application's `now` |
+| A pending session expired (§5.7) and no current session exists | the application's `now` |
+| The newcomer was refused (above) | the event |
+| The current session was discarded with no replacement (A2.6) | the event |
+
+- **`first_message`** is a new responder deadline, in the units of `now` (§5.7), and is kind-private
+  config, not a wire byte. It counts from the `now` the link last received when the connection was
+  accepted. A link that has received none takes the first one it gets.
+- On an accepted connection, neither `first_message` nor the pending expiry may be 0. A value of 0
+  (never due, §5.7) is for a dial-out responder only, which waits at an intermediary for a peer.
+- **No timers.** Deadlines run only on `now`, and the link reports its next one. An application that
+  never passes `now` has only the event-driven closes, so its connections stay until their peers
+  leave. They remain bounded by the server's admission limit, which refuses newcomers. A listener
+  reachable beyond its own administrative domain SHOULD pass `now`.
 - **Failure stays silent. (open: Q6)** §5.9 applies: a failed first message is dropped and counted,
-  and is answered by nothing, including a Close frame. The connection stays open until the deadline
-  below.
-- **A new responder deadline, `first_message`**, measured from the upgrade on the application's
-  `now` (§5.7). When `now` passes it and no first message has passed the checks, the responder
-  closes the connection, with the same status it uses for any other close. A value of 0 is never
-  due, which suits a node that waits at an intermediary. Without `now`, such a connection stays until
-  its peer leaves. This deadline is kind-private config and is not a wire byte.
+  and is answered by nothing, including a Close frame. The connection stays open until
+  `first_message`. Its close uses the same status as any other.
+
+**The counter mark. (open: Q7, Q10)**
+
+- A responder keeps one mark per PSK across the connections of an endpoint (A2.4), and advances it
+  atomically. It SHOULD persist it (§5.4). NNpsk0 has nothing else to scope it to.
+- A PSK SHOULD have **one live initiator**. Two initiators on one PSK share one counter space: the
+  one whose counter is lower has its first handshakes and rekeys refused, counted in
+  `noise_handshake_replayed`, for as long as the other keeps raising the mark. A refused rekey ends
+  at `reject_after`, which closes the connection (A2.6). Many peers on one node call for the
+  patterns of #1993.
+- A PSK SHOULD NOT be shared between a WebSocket endpoint and a UDP link (§5.2): the two hold
+  separate marks.
+
+**An initiator whose counter restarted** is refused silently and cannot tell why. The recovery is
+one of these operator actions, and the responder's `noise_handshake_replayed` is the signal for it:
+
+1. **Replace the PSK** (preferred). The mark resets (§5.4), and every first message made under the
+   old PSK stops passing the PSK check, so this recovery leaves nothing behind.
+2. **Clear the mark** through the §5.4 seam. The mark returns to 0, so a first message recorded
+   earlier under this PSK passes the counter check again, each at most once and in increasing
+   counter order, until the live initiator's next attempt raises the mark past it. Such a message
+   earns a pending session that cannot be confirmed without the PSK, and costs one Diffie-Hellman
+   and one connection slot until the pending expiry. The operator SHOULD have the initiator connect
+   immediately after a clear, and its counter SHOULD be at or above any earlier one.
+3. **Wait**, when the initiator's source is a clock that will pass the mark.
+
+**A far-future counter.** A counter above the mark is accepted however large it is: the binding has
+no clock to compare it with, and a first message with one passes only if its sender holds the PSK.
+Once accepted, the mark holds that value, and an initiator with an ordinary counter is refused until
+action 1 or 2. **This limit stands on NNpsk0:** the responder cannot bound a counter, and a clear
+cannot distinguish earlier first messages from current ones. Replacing the PSK is the one recovery
+that closes both.
 
 ### A2.9 Browser constraints
 
@@ -1328,7 +1413,7 @@ The browser `WebSocket` API fixes what an initiator can do. These rules are the 
 | --- | --- |
 | No UDP; WebSocket only | This carrier. |
 | No request headers, except the subprotocol | The subprotocol is the only upgrade-time signal (A2.3). |
-| No Ping, no fragmentation control, whole messages only | Liveness is an empty transport message (A2.5). A browser's messages arrive whole at its own API. |
+| No Ping, no fragmentation control, whole messages only, no receive size limit | Liveness is an empty transport message (A2.5). A browser applies the size bound on delivery (A2.2). |
 | An `https` page can only open `wss` | TLS on that hop is allowed and is **not relied on** (A2.10). |
 | `send` does not block and does not report loss | A sender watches `bufferedAmount` and counts a refused frame in `dropped_tx`. Nothing is queued by the binding (§5.8). |
 | Web Crypto has no ChaCha20-Poly1305, and not every browser offers X25519 in it | An implementation can use a WebAssembly build. The §5.2 clause "constant time where the host library offers it" applies to whichever library it uses. |
@@ -1337,9 +1422,11 @@ The browser `WebSocket` API fixes what an initiator can do. These rules are the 
 
 - Ephemeral keys MUST come from `crypto.getRandomValues` or an equivalent cryptographic source (§5.2).
 - The initiator counter (§5.4) MUST strictly increase across attempts under one PSK. A browser
-  SHOULD use the wall clock in nanoseconds, or the persisted value plus one if that is larger, so
-  that a clock step backwards cannot repeat a counter. A private window has no persisted value and
-  relies on the wall clock.
+  SHOULD use the larger of the wall clock in nanoseconds and the persisted value plus one. The u64
+  needs `BigInt`, and `Date.now()` resolves only to the millisecond, so tabs that share a PSK MUST
+  coordinate through the persisted value. Only persistence protects against a clock stepping back:
+  a private window has none, so after such a step its first messages are refused until the clock
+  passes the mark or the operator acts (A2.8).
 - `now` is the application's own value. `performance.now()` suits it. A throttled background tab
   only delays a deadline.
 
@@ -1355,18 +1442,21 @@ The browser `WebSocket` API fixes what an initiator can do. These rules are the 
   intermediary, which is not a Tracer node. A frame forwarded onward by the far node leaves this
   session there.
 - **The PSK** is still one per link pair (§6.4). A browser holds the PSK that the application gives
-  it, and each browser that shares one shares its counter space (A2.8). Many browsers on one node
-  call for the identity patterns of #1993. **(open: Q1)**
+  it, and A2.8 states what sharing one means. **(open: Q1)**
 
 ### A2.11 Identity patterns
 
 [#2296](https://github.com/avatarsd-llc/libtracer/issues/2296) rules that this carrier uses the
-same handshake, pattern and identity as the rest of the binding, including XX and IK from #1993.
-This amendment is independent of the pattern: A2.2–A2.8 name no pattern, and §7's attachment rules
-apply to it unchanged. Only NNpsk0 is specified today, so only NNpsk0 is conforming on this carrier
-until #1993 lands. The credential in the handshake payload, and the verifier policy, are #1993's.
-A new pattern's handshake sizes are bounded by the same rules, and A2.8's mark scoping is revisited
-for any pattern whose first message carries no counter before public-key work.
+same handshake, pattern and identity as the rest of the binding, including XX and IK from #1993, and
+describes the text as an amendment to the #1993 RFC. Maintainer ruling 62 of 2026-11-09 placed it as
+an amendment to this RFC, first. Because #1993 is not yet specified, this text differs from the
+issue in one respect: **only NNpsk0 is conforming on this carrier until #1993 lands. (open: Q1)**
+
+A2.2–A2.7 do not depend on the pattern, and §7's attachment rules apply to them unchanged. A2.8 does
+depend on it. XX's first message has no PSK and no tag, and IK and KK reach their tag only after
+public-key work (§7). #1993 MUST therefore supply its own admission order, its slot-draw point, its
+pre-proof reassembly bound and its counter scope for this carrier. The credential in the handshake
+payload and the verifier policy are also #1993's.
 
 ### A2.12 Conformance, slices and normative pages
 
@@ -1379,7 +1469,10 @@ library gates them as it did for §15 Q6.
 | `ws-handshake-transcript` | Appendix A inputs and a fixed masking key per client frame | every WebSocket frame byte for byte, with Appendix A's datagrams as the payloads |
 | `ws-fragmented` | the same transcript, each message split into continuation frames at given offsets | identical reassembled datagrams and session keys |
 | `ws-text-opcode` | a valid first message sent as opcode `0x1` | refused, `malformed_rx` |
-| `ws-oversize-fragments` | fragments whose running total passes `max_frame + 25` | refused at the crossing fragment, `malformed_rx` |
+| `ws-oversize-fragments` | after proof, fragments whose running total passes `max_frame + 25` | refused at the crossing fragment, counted once, later fragments discarded through FIN |
+| `ws-oversize-single` | after proof, one unfragmented message above `max_frame + 25` | refused, `malformed_rx`, connection open |
+| `ws-preproof-bound` | before proof, a message of 59 bytes, whole and fragmented | refused at byte 59, `malformed_rx` |
+| `ws-ping-between-continuations` | a Ping between the continuation frames of a first message | identical reassembled datagram |
 
 **Behaviour tests (§12.3 style, over an in-memory WebSocket pair with a test intermediary).**
 
@@ -1393,7 +1486,20 @@ library gates them as it did for §15 Q6.
 - A connection close fires the session boundary before any frame of the next session.
 - A first message that fails the tag check sends nothing, and the connection closes only at
   `first_message`.
-- A link configured for Noise does not serve a connection with no agreed subprotocol.
+- A link configured for Noise does not serve a connection with no agreed subprotocol, and a server
+  selects the subprotocol before any Noise message.
+- No slot is drawn before the PSK and counter checks. Exhaustion closes the newcomer and evicts no one.
+- Deflate is declined, and an initiator closes on non-empty extensions.
+- Discarding a session with no replacement closes the connection.
+- An attempt deadline closes a first handshake's connection, and does not close a rekey's.
+- An accepted connection is closed when a pending session expires with no current session.
+- `max_frame` above 65519 is refused when the link is built.
+- A named Noise role: a dial-out responder reports `listening`, re-opens after a close, and never
+  starts an attempt. A server initiator is refused when the link is built.
+- `first_message` of 0 is never due on a dial-out responder and is refused on an accepted connection.
+- Two connections racing one PSK's mark: exactly one counter wins.
+- One accepted connection closing does not advance the generation of the listener's vertex.
+- After a mark clear, a recorded first message earns only an unconfirmable pending session.
 
 **Slices.**
 
@@ -1412,30 +1518,29 @@ after the PSK proof. The mark is 8 B per PSK instead of per link.
 
 Each one carries a recommendation. None is settled until ruled.
 
-1. **Land before #1993?** Recommend yes. The text is independent of the pattern (A2.11), and
-   #2296's other work can start. Until #1993 lands the carrier is NNpsk0 only, which fits one
-   browser per PSK.
+1. **Lift "Blocked by #1993" for this text?** Recommend yes for A2.2–A2.7 and an NNpsk0-only A2.8.
+   XX and IK on this carrier stay blocked by #1993.
 2. **Keep the type byte and the 8-byte nonce, or drop to a pure Noise message?** Recommend keep. This
    reads "no extra framing" as nothing added around the §5.3 datagram. Dropping them saves 9 B per
    frame, but needs a second receive path and second vectors, and gives up the window that the
    intermediary case needs.
 3. **Scope a session to one connection?** Recommend yes (A2.6). Surviving a reconnect needs state
-   that outlives the connection, and saves only a handshake that a reconnect makes cheap by
-   comparison.
-4. **Confirm that "no retransmission at this layer" covers §5.4's handshake retries?** Recommend
-   yes (A2.5). The retries exist to recover from datagram loss, which a connection reports by closing.
-5. **The subprotocol token `tracer-noise-v1`?** Recommend it. The alternative is a URL path, which
-   the deployment owns and the binding cannot test.
+   that outlives the connection.
+4. **Confirm that "no retransmission at this layer" covers §5.4's handshake retries?** Recommend yes
+   (A2.5). The cost is that a silent drop on a relay path is recovered only by the attempt deadline.
+5. **The subprotocol token `tracer-noise-v1`, with its echo?** Recommend yes. The echo announces the
+   binding at the upgrade, and A2.3 states what it does and does not disclose. The alternative is
+   routing by URL path alone, which the binding cannot test.
 6. **Silent until `first_message`, or close at once on a failed first message?** Recommend silent, as
-   §5.9 says. Closing at once frees the connection sooner, but answers a failed attempt in clear.
-7. **Mark per PSK across connections?** Recommend yes (A2.8). This limits a PSK to one initiator's
-   counter space in practice.
-8. **Noise role named by configuration when it differs from the socket role?** Recommend yes
-   (A2.4). Without it, a node behind NAT that dials out to an intermediary cannot be a responder.
-9. **Same prologue as UDP?** Recommend yes, as "same handshake" says, with the §6.4 rule read as: a
-   PSK is not shared between a UDP link and a WebSocket endpoint. A carrier-specific prologue would
-   make that a cryptographic guarantee, at the cost of Appendix A's vectors no longer applying as
-   they stand.
+   §5.9 says.
+7. **Mark per PSK across connections, with one live initiator per PSK?** Recommend yes (A2.8).
+8. **A dial-out responder as a LISTEN link over an outbound connection?** Recommend yes (A2.4). It
+   needs no new state and keeps §15 Q4.
+9. **Same prologue as UDP?** Recommend yes, with A2.8's SHOULD NOT. A carrier-specific prologue would
+   enforce that, but Appendix A's vectors would no longer apply as they stand.
+10. **Accept the limit of the mark on NNpsk0 (A2.8)?** Recommend yes, with PSK replacement as the
+    documented recovery. A clear reopens earlier first messages, and a far-future counter cannot be
+    bounded without a clock. A fuller answer belongs to a pattern with a live challenge.
 
 ## Appendix A — Test vectors
 
