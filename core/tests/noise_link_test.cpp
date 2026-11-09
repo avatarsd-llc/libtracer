@@ -114,6 +114,17 @@ static std::atomic<std::size_t> g_allocations{0};
 #endif
 /** @} */
 
+/** @brief A nonce limit is unreachable by sending, so a test moves the send nonce there. */
+namespace tr::net {
+struct noise_link_test_door_t {
+    /** @brief Set the send nonce of @p l's current session to @p n. */
+    template <class L>
+    static void set_send_nonce(L& l, std::uint64_t n) {
+        l.current_->send_nonce = n;
+    }
+};
+}  // namespace tr::net
+
 namespace {
 
 namespace noise = tr::net::noise;
@@ -655,6 +666,225 @@ void refusals() {
           "  an empty frame is refused at send: an empty plaintext is the protocol's (§3)");
 }
 
+/** @brief The link-down notifier as a counter. */
+void count_down(void* ctx) { ++*static_cast<int*>(ctx); }
+
+/** @brief Bring pair @p n up: a handshake and one request and reply. */
+void bring_up(mem_pair_t& n) {
+    n.sink_b.then = [&n](std::span<const std::byte> f) { n.b.send(f); };
+    n.a.dial();
+    n.settle();
+    n.a.send(std::span<const std::byte>(value_frame("ping")));
+    n.settle();
+    n.sink_b.then = nullptr;
+}
+
+/** @brief A rekey overlaps the two sessions: no frame in flight on either side is lost. */
+void rekey_under_traffic() {
+    std::printf("a rekey under traffic loses no frame (reference/23 §6):\n");
+    noise_config_t cfg = mem_config();
+    cfg.previous_expiry = 100;
+    mem_pair_t n(cfg, cfg);
+    bring_up(n);
+    check(n.a.state() == link_state_t::UP, "  (setup: the link is up)");
+    int downs_a = 0;
+    int downs_b = 0;
+    (void)n.a.set_down_notifier(&count_down, &downs_a);
+    (void)n.b.set_down_notifier(&count_down, &downs_b);
+    const std::size_t a_base = n.sink_a.frames.size();
+    const std::size_t b_base = n.sink_b.frames.size();
+    const std::size_t old_type_at = n.wire.log.size();
+
+    n.a.send(std::span<const std::byte>(value_frame("f0")));
+    n.a.rekey();
+    n.a.send(std::span<const std::byte>(value_frame("f1")));
+    check(n.a.state() == link_state_t::UP, "  a rekey does not pass through dialing");
+    n.b.carrier().pump();  // f0, the first message, f1: the old session is still current
+    n.a.carrier().pump();  // the second message: the empty confirmation goes out at once
+    n.a.send(std::span<const std::byte>(value_frame("f2")));  // still the old session (§4 step 6)
+    n.b.send(std::span<const std::byte>(value_frame("r0")));  // and the responder's, too
+    n.b.carrier().pump();                                     // confirms; f2 lands on previous
+    auto& to_a = n.wire.inbox[0];
+    check(to_a.size() == 2, "  the old-key reply and the acknowledgement are in flight");
+    std::swap(to_a[0], to_a[1]);  // the acknowledgement overtakes the old-key reply
+    n.a.carrier().pump();
+    check(n.a.state() == link_state_t::UP, "  the acknowledgement makes the new session current");
+    n.a.send(std::span<const std::byte>(value_frame("f3")));
+    const auto new_type = type_of(n.wire, n.wire.log.size() - 1);
+    n.b.send(std::span<const std::byte>(value_frame("r1")));
+    n.settle();
+    check(n.sink_b.frames.size() == b_base + 4 && n.sink_a.frames.size() == a_base + 2,
+          "  every frame sent on either session is delivered");
+    check(new_type != type_of(n.wire, old_type_at), "  the new session sends in the other phase");
+    check(n.a.count(counter_t::STALE) == 0 && n.b.count(counter_t::STALE) == 0 &&
+              n.a.count(counter_t::REPLAYED) == 0 && n.b.count(counter_t::REPLAYED) == 0,
+          "  nothing was stale or replayed");
+    check(downs_a == 0 && downs_b == 0, "  a routine rekey is no session boundary");
+
+    const auto old_session = n.wire.log[old_type_at].bytes;
+    (void)n.b.sweep(1, 0);
+    check(n.b.sweep(101, 0) == 0, "  the previous session expires on the application's now");
+    n.b.carrier().inject(old_session, kAddrA);
+    check(n.b.count(counter_t::STALE) == 1, "  ... and a message in its phase is then stale");
+}
+
+/** @brief `rekey_after` starts a rekey; `reject_after` discards the session; both on `now`. */
+void session_deadlines() {
+    std::printf("session deadlines run on the application's now:\n");
+    noise_config_t cfg = mem_config();
+    cfg.rekey_after = 50;
+    cfg.reject_after = 200;
+    mem_pair_t n(cfg, noise_config_t{mem_config()});
+    bring_up(n);
+    int downs = 0;
+    (void)n.a.set_down_notifier(&count_down, &downs);
+    check(n.a.sweep(1, 0) == 51, "  a session's age counts from the first sweep that sees it");
+    const std::size_t sent = n.wire.log.size();
+    const auto old_phase = n.wire.log[3].bytes;  // B's reply, under the first session
+    check(n.wire.log[3].from == 1, "  (setup: a message from B under the first session)");
+    (void)n.a.sweep(51, 0);
+    check(n.wire.log.size() == sent + 1 && type_of(n.wire, sent) == 0x01,
+          "  rekey_after starts a handshake");
+    n.settle();
+    check(n.a.state() == link_state_t::UP && n.a.count(counter_t::EXPIRED) == 0 && downs == 0,
+          "  it completes with the link up");
+    check(n.a.sweep(60, 0) == 110, "  the new session's age starts over");
+    n.wire.drop = [](const datagram_t&) { return true; };
+    (void)n.a.sweep(110, 0);
+    (void)n.a.sweep(260, 0);
+    check(n.a.count(counter_t::EXPIRED) == 1, "  reject_after discards the session, counted");
+    check(downs == 1, "  and the link goes down: a session boundary");
+    n.a.carrier().inject(old_phase, kAddrB);
+    check(n.a.count(counter_t::STALE) == 1,
+          "  a session past its limit takes the previous with it");
+    check(n.a.state() == link_state_t::RECONNECTING && !n.a.link_up(),
+          "  the attempt still in flight is now reconnecting, with no send admitted");
+}
+
+/** @brief The nonce limits: 2^60 starts a rekey; at 2^62 nothing is sealed or opened. */
+void nonce_limits() {
+    std::printf("the nonce limits (reference/23 §5):\n");
+    mem_pair_t n;
+    bring_up(n);
+    int downs = 0;
+    (void)n.a.set_down_notifier(&count_down, &downs);
+    const auto transport = n.wire.log[2].bytes;
+
+    tr::net::noise_link_test_door_t::set_send_nonce(n.a, noise::kRekeyNonce);
+    n.a.send(std::span<const std::byte>(value_frame("late")));
+    check(type_of(n.wire, n.wire.log.size() - 2) == 0x01, "  a send nonce of 2^60 starts a rekey");
+    n.settle();
+    check(n.a.state() == link_state_t::UP && downs == 0, "  which completes with the link up");
+
+    auto ceiling = transport;
+    ceiling[8] = std::byte{0x40};  // the nonce's top byte: 2^62
+    const std::uint64_t malformed = n.b.drop_stats().malformed_rx;
+    const std::uint64_t failed = n.b.count(counter_t::DECRYPT_FAILED);
+    n.b.carrier().inject(ceiling, kAddrA);
+    check(n.b.drop_stats().malformed_rx == malformed + 1 &&
+              n.b.count(counter_t::DECRYPT_FAILED) == failed,
+          "  a received nonce of 2^62 is malformed, and is never decrypted");
+
+    tr::net::noise_link_test_door_t::set_send_nonce(n.a, noise::kNonceLimit);
+    const std::size_t sent = n.wire.log.size();
+    const std::uint64_t dropped = n.a.drop_stats().dropped_tx;
+    n.a.send(std::span<const std::byte>(value_frame("spent")));
+    check(n.wire.log.size() == sent && n.a.drop_stats().dropped_tx == dropped + 1,
+          "  a send at 2^62 is dropped, counted, and nothing leaves");
+    check(n.a.count(counter_t::EXPIRED) == 1 && !n.a.link_up() && downs == 1,
+          "  the session is spent: discarded, counted, and the link goes down");
+}
+
+/** @brief A responder that lost its session answers in the same phase: the initiator drops
+ *         its current session and the new one carries frames at once. */
+void responder_lost_the_session() {
+    std::printf("a responder that lost the session answers in the same phase (reference/23 §4):\n");
+    mem_pair_t n;
+    bring_up(n);
+    int downs = 0;
+    (void)n.a.set_down_notifier(&count_down, &downs);
+    test_host_t restarted_host;
+    mem_link_t restarted(conn_role_t::LISTEN, restarted_host, mem_config(), n.wire, 1);
+    sink_t restarted_sink;
+    restarted_sink.then = [&](std::span<const std::byte> f) { restarted.send(f); };
+    restarted.set_receiver(restarted_sink);
+
+    n.a.rekey();
+    restarted.carrier().pump();
+    const std::size_t sent = n.wire.log.size();
+    n.a.carrier().pump();
+    check(n.wire.log.size() == sent,
+          "  no empty confirmation: the next frame can confirm (step 5)");
+    check(n.a.state() == link_state_t::RECONNECTING && n.a.link_up(),
+          "  the session is lost: reconnecting, with a send admitted on the new one");
+    check(n.a.count(counter_t::EXPIRED) == 0 && downs == 0,
+          "  not an expiry, and no boundary until the new session is acknowledged");
+    n.a.send(std::span<const std::byte>(value_frame("again")));
+    check(type_of(n.wire, n.wire.log.size() - 1) == 0x04,
+          "  the frame goes out on the new session");
+    restarted.carrier().pump();
+    n.a.carrier().pump();
+    check(n.a.state() == link_state_t::UP && restarted_sink.frames.size() == 1,
+          "  the frame confirms it and the reply acknowledges it");
+    check(downs == 1, "  the responder started fresh: one boundary");
+}
+
+/** @brief The generation rule: only a session whose peer started fresh is a boundary. */
+void generation_rule() {
+    std::printf("only a confirmed session from a fresh peer is a boundary (reference/23 §10):\n");
+    mem_pair_t n;
+    int downs_a = 0;
+    int downs_b = 0;
+    (void)n.a.set_down_notifier(&count_down, &downs_a);
+    (void)n.b.set_down_notifier(&count_down, &downs_b);
+    bring_up(n);
+    check(downs_a == 1 && downs_b == 1, "  the first session is from a fresh peer, on both sides");
+    n.a.rekey();
+    n.settle();
+    check(n.a.state() == link_state_t::UP && downs_a == 1 && downs_b == 1,
+          "  a routine rekey advances nothing");
+
+    std::vector<std::byte> second_session;
+    for (const datagram_t& d : n.wire.log)
+        if (d.from == 0 && std::to_integer<std::uint8_t>(d.bytes[0]) == 0x05)
+            second_session = d.bytes;
+    check(!second_session.empty(), "  (setup: a message under the rekeyed session)");
+
+    int downs_at_delivery = -1;
+    n.sink_b.then = [&](std::span<const std::byte>) { downs_at_delivery = downs_b; };
+    test_host_t rebooted_host;
+    rebooted_host.counter = 1000;
+    mem_link_t rebooted(conn_role_t::DIAL, rebooted_host, mem_config(), n.wire, 0);
+    rebooted.dial();
+    n.b.carrier().pump();
+    check(downs_b == 1, "  a first message alone is no boundary: the session is only pending");
+    rebooted.carrier().pump();
+    rebooted.send(std::span<const std::byte>(value_frame("back")));
+    n.b.carrier().pump();
+    check(downs_b == 2 && n.sink_b.frames.size() == 2,
+          "  a confirmed session whose initiator started fresh is a boundary");
+    check(downs_at_delivery == 2, "  ... that fires before the session's first frame is delivered");
+    n.sink_b.then = nullptr;
+    const std::uint64_t stale = n.b.count(counter_t::STALE);
+    n.b.carrier().inject(second_session, kAddrA);
+    check(n.b.count(counter_t::STALE) == stale + 1,
+          "  the session a fresh peer's session replaces is discarded, not kept to receive");
+
+    test_host_t other_host;
+    other_host.counter = 2000;
+    mem_link_t other(conn_role_t::DIAL, other_host, mem_config(), n.wire, 0);
+    test_host_t third_host;
+    third_host.counter = 3000;
+    mem_link_t third(conn_role_t::DIAL, third_host, mem_config(), n.wire, 0);
+    other.dial();
+    n.b.carrier().pump();
+    third.dial();
+    n.b.carrier().pump();
+    check(n.b.count(counter_t::PENDING_SUPERSEDED) == 1,
+          "  a newer first message supersedes a pending session, counted apart from expiry");
+    check(n.b.count(counter_t::PENDING_EXPIRED) == 0, "  ... and is not an expiry");
+}
+
 /** @brief A frame above `max_frame` is refused at send, whole, and counted. */
 void oversize_refused() {
     std::printf("a frame above max_frame is refused at send:\n");
@@ -915,6 +1145,11 @@ int main() {
     pending_expiry();
     refusals();
     oversize_refused();
+    rekey_under_traffic();
+    session_deadlines();
+    nonce_limits();
+    responder_lost_the_session();
+    generation_rule();
     state_from_the_links_own_source();
     two_nodes_over_udp();
     wrong_key_over_udp();
