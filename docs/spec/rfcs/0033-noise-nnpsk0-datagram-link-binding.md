@@ -1224,8 +1224,7 @@ mask from a client.
   upgrade that the endpoint serves this binding and its version. It discloses nothing about a PSK,
   about whether any first message passed, or about whether a session exists. So on this carrier
   §5.9's silence protects the **verdict on a Noise message**, and not the existence of the
-  responder. A deployment that needs the endpoint's nature unannounced on a shared path can omit the
-  subprotocol and route by URL path instead, which it owns.
+  responder.
 - A secured profile can require this binding for a link at compile time, so that the plain path for
   that link is not built.
 - Once the upgrade completes, every data message on a Noise link is a §5.3 datagram. The in-band
@@ -1249,7 +1248,7 @@ How an intermediary pairs two connections is outside this binding.
 | --- | --- | --- | --- |
 | client | initiator (DIAL) | The DIAL rows. `dialing` covers the upgrade and the handshake, and a completed upgrade alone never reports `up`. | A demand or a standing binding, as on any DIAL link. |
 | server | responder (accepted connection) | The listener keeps the LISTEN rows. The accepted connection has no state of its own (below). | The peer. |
-| client | responder (dial-out) | `listening` while the upgraded connection is open; `bind-failed` while it is not. It never reports `up` (§15 Q4). | The link, when built and after every close: at once on the close event, then at a retry deadline on the application's `now` if the open failed. An operation never starts it, and with no session an operation fails at once (§5.1). |
+| client | responder (dial-out) | `listening` while the upgraded connection is open; `bind-failed` while it is not. It never reports `up` (§15 Q4). | The link, when built. After a close or a failed open, it re-opens only when the application's `now` passes a retry deadline, so with no `now` it does not re-open. An operation never starts it, and with no session an operation fails at once (§5.1). |
 | server | initiator | Not defined. A link MUST refuse to be built this way. | |
 
 **An accepted connection** is a synthesized child of the listener's connection vertex, as any
@@ -1309,9 +1308,11 @@ A session is scoped to the WebSocket connection that carried its handshake. **(o
 - Discarding a current session with no replacement (`reject_after`, or the nonce limit) MUST close
   the connection. So a connection never outlives its last session, and it carries one unbroken
   chain of sessions from its first handshake. A rekey is not affected.
-- A new connection starts with no session on either side, so both `fresh` bits are set and the
-  boundary rule of §5.10 holds unchanged. A reconnect can therefore advance the generation once at
-  the close and once when the new session becomes current. Both advances are correct.
+- A new connection starts with no session on either side, so both `fresh` bits are set. On a link
+  with its own connection vertex, the boundary rule of §5.10 holds unchanged, and a reconnect can
+  advance the generation once at the close and once when the new session becomes current. Both
+  advances are correct. On an accepted connection the `fresh` trigger, like the close, advances
+  nothing: a new peer MUST NOT advance the generation of the listener's vertex.
 
 The session-boundary behaviour this relies on is [#2074](https://github.com/avatarsd-llc/libtracer/issues/2074)'s
 ([#2733](https://github.com/avatarsd-llc/libtracer/pull/2733), rekey, deadlines and boundaries). The
@@ -1385,25 +1386,25 @@ unexpired pending session. An accepted connection that is not live MUST be close
 - A PSK SHOULD NOT be shared between a WebSocket endpoint and a UDP link (§5.2): the two hold
   separate marks.
 
-**An initiator whose counter restarted** is refused silently and cannot tell why. The recovery is
-one of these operator actions, and the responder's `noise_handshake_replayed` is the signal for it:
+**An initiator whose counter went lower** is refused silently and cannot tell why. The responder's
+`noise_handshake_replayed` is the signal for the operator.
 
-1. **Replace the PSK** (preferred). The mark resets (§5.4), and every first message made under the
-   old PSK stops passing the PSK check, so this recovery leaves nothing behind.
-2. **Clear the mark** through the §5.4 seam. The mark returns to 0, so a first message recorded
-   earlier under this PSK passes the counter check again, each at most once and in increasing
-   counter order, until the live initiator's next attempt raises the mark past it. Such a message
-   earns a pending session that cannot be confirmed without the PSK, and costs one Diffie-Hellman
-   and one connection slot until the pending expiry. The operator SHOULD have the initiator connect
-   immediately after a clear, and its counter SHOULD be at or above any earlier one.
-3. **Wait**, when the initiator's source is a clock that will pass the mark.
+- **Replacing the PSK is the only recovery for that initiator.** The mark resets (§5.4), and every
+  first message made under the old PSK stops passing the PSK check, so nothing is left behind.
+- **Clearing the mark is not a recovery for that case.** It helps only an initiator whose new counter
+  is at or above every counter used earlier under this PSK. After a clear the mark is 0, so a first
+  message recorded earlier passes the counter check again, each at most once and in increasing
+  counter order. One with a higher counter raises the mark above a lower-counter initiator, which is
+  then refused again. Such a message earns a pending session that cannot be confirmed without the
+  PSK, and costs one Diffie-Hellman and one connection slot until the pending expiry. When a clear
+  does apply, the initiator SHOULD connect immediately after it.
+- An initiator whose source is a clock is admitted again without action once the clock passes the mark.
 
 **A far-future counter.** A counter above the mark is accepted however large it is: the binding has
 no clock to compare it with, and a first message with one passes only if its sender holds the PSK.
 Once accepted, the mark holds that value, and an initiator with an ordinary counter is refused until
-action 1 or 2. **This limit stands on NNpsk0:** the responder cannot bound a counter, and a clear
-cannot distinguish earlier first messages from current ones. Replacing the PSK is the one recovery
-that closes both.
+the PSK is replaced. **This limit stands on NNpsk0:** the responder cannot bound a counter, and a
+clear cannot distinguish earlier first messages from current ones.
 
 ### A2.9 Browser constraints
 
@@ -1539,8 +1540,8 @@ Each one carries a recommendation. None is settled until ruled.
 9. **Same prologue as UDP?** Recommend yes, with A2.8's SHOULD NOT. A carrier-specific prologue would
    enforce that, but Appendix A's vectors would no longer apply as they stand.
 10. **Accept the limit of the mark on NNpsk0 (A2.8)?** Recommend yes, with PSK replacement as the
-    documented recovery. A clear reopens earlier first messages, and a far-future counter cannot be
-    bounded without a clock. A fuller answer belongs to a pattern with a live challenge.
+    only recovery for an initiator whose counter went lower. A clear lets earlier first messages pass
+    the counter check again, and a far-future counter cannot be bounded without a clock. A fuller answer belongs to a pattern with a live challenge.
 
 ## Appendix A — Test vectors
 
