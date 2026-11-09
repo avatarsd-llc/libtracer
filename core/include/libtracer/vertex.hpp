@@ -1277,6 +1277,14 @@ class vertex_t {
             children_ = tr::mem::make_in<children_t>(src, src);
             if (children_ == nullptr) return nullptr;
         }
+        // The list grows by a quarter, from 4, not by the array's default doubling: an entry is
+        // a pointer and a prefix (ruling 49), so doubling's up-to-half slack costs a wide parent
+        // up to one more entry per child, and a parent holds most of a node's vertices. Growth
+        // stays geometric, so an insert is still amortized O(1) copies on top of its shift.
+        const std::size_t n = children_->sorted.size();
+        if (n == children_->sorted.capacity() &&
+            !children_->sorted.reserve(n + std::max<std::size_t>(n / 4, 4)))
+            return nullptr;
         const name_prefix_t prefix = name_prefix(child->name());
         const child_entry_t* const pos = children_->lower_bound(child->name(), prefix);
         const child_entry_t entry{.child = child, .prefix = prefix};
