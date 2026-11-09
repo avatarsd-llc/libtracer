@@ -15,7 +15,8 @@
  * pool, the MCU arena, or the platform heap only on the heap-rooted build (#2090). A graph built
  * over an injected source draws its control blocks from that source instead, through a
  * `borrowed_backend_t` the deployer builds over `graph_t::value_source()` and hands to the
- * seam-taking `view::borrow_const` overload (ADR-0079 Decision 4, #2660). A truly zero-allocation
+ * seam-taking `view::borrow` / `view::borrow_const` overloads (ADR-0079 Decision 4, #2660,
+ * #2665). A truly zero-allocation
  * static descriptor — the permanent MMIO segment whose refcount is never released — is the
  * deferred mem_mmio backend.
  */
@@ -116,13 +117,33 @@ namespace detail {
 namespace tr::view {
 
 /**
- * @brief Wrap writable caller-owned @p bytes in a segment without owning them.
+ * @brief The seam-taking `%borrow`: wrap writable caller-owned @p bytes in a segment without
+ *        owning them, the control block drawn from @p backend's source.
+ *
+ * The writable twin of the seam-taking `%borrow_const`: a graph over an injected source is
+ * written through it, with @p backend built over that graph's @c value_source (ADR-0079
+ * Decision 4, #2665). A refusal is a null segment, the same by-value BACKPRESSURE channel as
+ * `%borrow_const`: the caller answers BACKPRESSURE and does not write, so the vertex keeps its
+ * value.
+ *
+ * @param bytes   The caller-owned bytes; they must outlive every view over the segment.
+ * @param backend Where the control block comes from; it must outlive the segment.
+ * @retval nullptr The backend's source refused the control block (BACKPRESSURE).
+ */
+[[nodiscard]] inline segment_ptr_t borrow(std::span<std::byte> bytes,
+                                          mem::borrowed_backend_t& backend) {
+    return segment_ptr_t::adopt(backend.wrap(bytes));
+}
+
+/**
+ * @brief Wrap writable caller-owned @p bytes in a segment without owning them, the control
+ *        block drawn from the default value source (@ref mem::value_source).
  *
  * An L1 handle producer (docs/adr/0016 §2). The caller guarantees the bytes
  * outlive every view that holds them.
  */
 [[nodiscard]] inline segment_ptr_t borrow(std::span<std::byte> bytes) {
-    return segment_ptr_t::adopt(mem::detail::borrowed_backend().wrap(bytes));
+    return borrow(bytes, mem::detail::borrowed_backend());
 }
 
 /**

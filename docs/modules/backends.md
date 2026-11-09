@@ -480,10 +480,11 @@ classDiagram
   so a borrow over a stack buffer or a scratch frame becomes a dangling read the moment
   that storage goes away. Durable storage of a value wants an owning backend.
 - **A borrow on an injected-source graph names that graph's source.** The single-argument
-  `view::borrow_const` draws its control block from the default value source. A graph built
-  over an injected source is written through the seam-taking overload instead, with a
+  `view::borrow` and `view::borrow_const` draw their control block from the default value
+  source. A graph built over an injected source is written through their seam-taking overloads
+  instead, with a
   `mem::borrowed_backend_t` built over `graph_t::value_source()`, so the control block is
-  charged to the store the deployer sized (#2660). A refused control block is a null segment:
+  charged to the store the deployer sized (#2660, #2665). A refused control block is a null segment:
   answer BACKPRESSURE and do not write.
 - **`bump_source_t` is scope-lifetime only.** Blocks carved from its buffer are never
   individually reclaimed, so a bump source wired as a long-lived seam fills
