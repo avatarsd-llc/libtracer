@@ -11,11 +11,11 @@
  *
  * `tr::net::transport_t` is the whole contract a kind has to satisfy (ADR-0013):
  *
- *  - `send(std::span<const std::byte>)` — emit one complete frame. Mandatory.
- *  - `send(std::span<const std::span<const std::byte>>)` — emit the SAME frame from
- *    scattered spans, as one record. Optional: the base gathers into one buffer drawn
- *    from the link's egress source, so a kind that has a real writev implements it and
- *    a kind that does not simply inherits the copy.
+ *  - `send(std::span<const std::span<const std::byte>>)` — emit one frame from scattered
+ *    spans, as one record. The router sends through it, so a kind implements it: with a
+ *    real writev, or by joining the spans into memory the kind already owns (ADR-0089).
+ *  - `send(std::span<const std::byte>)` — the same frame as one span. Overridden today;
+ *    ADR-0089 makes it a one-span gather in the base, so a kind will write only the above.
  *  - `set_receiver` / `set_rope_receiver` — where inbound frames land. Both may fire on
  *    the kind's own receive thread, and both must be installed BEFORE frames flow.
  *
@@ -57,9 +57,9 @@ void check(bool& ok, bool cond, const char* what) {
  * @brief A complete transport kind, in the smallest form the seam admits: it keeps
  *        every frame handed to it and can hand one back.
  *
- * Only the mandatory `send(span)` is overridden. The scatter-gather overload is
- * deliberately NOT implemented, so the second half of this example can show what the base
- * does about that — which is the reason the seam has two overloads instead of one.
+ * The scatter-gather `send(iov)` joins the spans into the kind's own record, which is all a
+ * kind without writev does; the span `send` keeps the one-span case until the base takes it
+ * over (ADR-0089).
  */
 class memo_link_t final : public tr::net::transport_t {
    public:
@@ -67,15 +67,21 @@ class memo_link_t final : public tr::net::transport_t {
     std::vector<std::vector<std::byte>> sent;
 
     /**
-     * @brief Keep the base's scatter-gather overload visible.
+     * @brief Keep the base's retained `send(head, value, lane)` overload visible.
      *
-     * Declaring one `send` HIDES the other — ordinary C++ name hiding, and a kind that omits
-     * this line silently loses the iovec entry point it meant to inherit.
+     * Declaring one `send` HIDES the others — ordinary C++ name hiding, and a kind that omits
+     * this line silently loses the retained entry point it meant to inherit.
      */
     using tr::net::transport_t::send;
 
     void send(std::span<const std::byte> frame) override {
         sent.emplace_back(frame.begin(), frame.end());
+    }
+
+    /** @brief Emit one frame from scattered spans: join them into this kind's own record. */
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::vector<std::byte>& f = sent.emplace_back();
+        for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
     }
 
     /** @brief Deliver @p frame inbound, exactly as a receive thread would. */
@@ -137,11 +143,10 @@ int main() {
     link.send(f1);
     check(ok, link.sent.size() == 1 && link.sent[0] == f1, "send(span) emitted the frame verbatim");
 
-    // 2. The scatter-gather overload this kind did NOT implement. The base concatenates the
-    // spans into ONE block from the link's egress source and calls the span overload — so a
-    // rope's `to_iovec()` reaches every kind, whether or not the kind can writev. What a kind
-    // gains by overriding it is the elision of exactly this copy, never a different contract:
-    // the bytes on the wire are the same one record either way.
+    // 2. The scatter-gather overload, the one the router uses: a rope's `to_iovec()` reaches
+    // the kind as its spans, and the kind emits them as ONE record. This kind cannot writev,
+    // so it joins them into its own storage; a kind that can writes them straight out. The
+    // bytes on the wire are the same one record either way.
     const auto head = frame_of(3, 0x20);
     const auto tail = frame_of(4, 0x30);
     const std::span<const std::byte> parts[] = {head, tail};
@@ -149,7 +154,7 @@ int main() {
     std::vector<std::byte> joined = head;
     joined.insert(joined.end(), tail.begin(), tail.end());
     check(ok, link.sent.size() == 2 && link.sent[1] == joined,
-          "send(iov) arrived as ONE frame — the base gathered it for a kind that cannot");
+          "send(iov) arrived as ONE frame — the kind joined the spans itself");
 
     // 3. Ingress. The sink is installed before anything is delivered, because that ordering is
     // the contract: a kind whose receive thread starts in its constructor is already draining

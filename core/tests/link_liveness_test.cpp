@@ -75,6 +75,7 @@ struct fake_sock_t final : tr::net::transport_t {
 
     /** @brief Record the frame; the wire itself is not under test. */
     void send(std::span<const std::byte>) override { sent.fetch_add(1); }
+    void send(std::span<const std::span<const std::byte>>) override { sent.fetch_add(1); }
 
     /** @brief The remote hangup: fire the down-notifier (a protected base seam). */
     void die() { notify_down(); }
@@ -968,6 +969,12 @@ struct gated_sock_t final : tr::net::transport_t {
     gated_sock_t& operator=(const gated_sock_t&) = delete;
 
     void send(std::span<const std::byte>) override {
+        std::unique_lock l(m);
+        entered = true;
+        cv.notify_all();
+        cv.wait(l, [&] { return open; });
+    }
+    void send(std::span<const std::span<const std::byte>>) override {
         std::unique_lock l(m);
         entered = true;
         cv.notify_all();

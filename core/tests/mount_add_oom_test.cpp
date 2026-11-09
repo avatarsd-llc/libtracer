@@ -66,6 +66,7 @@ using tr::testing::check;
 struct counting_link_t : tr::net::transport_t {
     std::size_t sent = 0; /**< @brief Frames handed to this endpoint. */
     void send(std::span<const std::byte>) override { ++sent; }
+    void send(std::span<const std::span<const std::byte>>) override { ++sent; }
     /** @brief True ⇔ some inbound sink has been installed on this link. */
     [[nodiscard]] bool wired() const noexcept { return rx_.has_any(); }
 };

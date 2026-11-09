@@ -113,6 +113,7 @@ struct fake_sock_t final : tr::net::transport_t {
 
     /** @brief The wire is not under test — a frame is accepted and dropped. */
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
 
     /** @brief The remote hangup: fire the down-notifier (a protected base seam). */
     void die() { notify_down(); }

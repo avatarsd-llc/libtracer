@@ -57,6 +57,7 @@ using tr::testing::check;
 class null_link_t : public tr::net::transport_t {
    public:
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
 };
 
 /** @brief The child the test registers and removes. */

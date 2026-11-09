@@ -208,6 +208,10 @@ class span_sink_t final : public tr::net::transport_t {
     void send(std::span<const std::byte> frame) override {
         sent.emplace_back(frame.begin(), frame.end());
     }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::vector<std::byte>& f = sent.emplace_back();
+        for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
+    }
     std::vector<std::vector<std::byte>> sent;
 };
 

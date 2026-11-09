@@ -96,6 +96,10 @@ struct owned_link_t final : tr::net::transport_t, tr::net::bus_link_t {
         p.reached.fetch_add(1);
         p.hold_inside();
     }
+    void send(std::span<const std::span<const std::byte>>) override {
+        p.reached.fetch_add(1);
+        p.hold_inside();
+    }
     [[nodiscard]] tr::net::bus_link_t* bus() override { return this; }
     void enumerate_peers(const peer_visitor_t& visit) const override {
         p.reached.fetch_add(1);
@@ -120,6 +124,10 @@ struct p2p_link_t final : tr::net::transport_t {
     ~p2p_link_t() { p.closed.store(true); }
     void shut_down() override { p.shut.store(true); }
     void send(std::span<const std::byte>) override {
+        p.hold_inside();
+        p.reached.fetch_add(1);
+    }
+    void send(std::span<const std::span<const std::byte>>) override {
         p.hold_inside();
         p.reached.fetch_add(1);
     }

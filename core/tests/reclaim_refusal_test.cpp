@@ -178,6 +178,7 @@ void test_retire_refusal() {
 class p2p_link_t : public tr::net::transport_t {
    public:
     void send(std::span<const std::byte> frame) override { (void)frame; }
+    void send(std::span<const std::span<const std::byte>>) override {}
 };
 
 /** @brief A bus-capable link: its connection vertex bears an `on_children` seam whose
@@ -185,6 +186,7 @@ class p2p_link_t : public tr::net::transport_t {
 class bus_capable_link_t final : public tr::net::transport_t, public tr::net::bus_link_t {
    public:
     void send(std::span<const std::byte> frame) override { (void)frame; }
+    void send(std::span<const std::span<const std::byte>>) override {}
     [[nodiscard]] tr::net::bus_link_t* bus() override { return this; }
     void enumerate_peers(const peer_visitor_t& visit) const override { visit("p0"); }
     [[nodiscard]] tr::net::transport_t* peer_link(std::string_view peer) override {

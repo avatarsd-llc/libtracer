@@ -206,6 +206,15 @@ class fixed_link_t : public transport_t {
         len = std::min(frame.size(), last.size());
         std::memcpy(last.data(), frame.data(), len);
     }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        ++count;
+        len = 0;
+        for (const std::span<const std::byte>& s : iov) {
+            const std::size_t n = std::min(s.size(), last.size() - len);
+            std::memcpy(last.data() + len, s.data(), n);
+            len += n;
+        }
+    }
     [[nodiscard]] bool delivers_ropes() const override { return ropes_; }
     /** @brief Push a rope up as a receive (the rope-tier ingress). */
     void inject(tr::view::rope_t frame) { (void)rx_.deliver_rope(std::move(frame)); }
@@ -574,6 +583,7 @@ void test_empty_src_refusal_is_not_answered() {
 struct p2p_link_t : transport_t {
     std::size_t received = 0; /**< @brief Frames this endpoint was handed. */
     void send(std::span<const std::byte>) override { ++received; }
+    void send(std::span<const std::span<const std::byte>>) override { ++received; }
 };
 
 /**
@@ -583,6 +593,7 @@ struct p2p_link_t : transport_t {
 struct bus_link_impl_t : transport_t, tr::net::bus_link_t {
     std::size_t broadcasts = 0; /**< @brief Frames sent at the bus endpoint itself. */
     void send(std::span<const std::byte>) override { ++broadcasts; }
+    void send(std::span<const std::span<const std::byte>>) override { ++broadcasts; }
     tr::net::bus_link_t* bus() override { return this; }
     transport_t* peer_link(std::string_view) override { return nullptr; }
     void enumerate_peers(const tr::net::bus_link_t::peer_visitor_t&) const override {}

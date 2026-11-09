@@ -127,6 +127,7 @@ struct fake_can_t final : tr::net::transport_t {
 
     /** @brief The wire is not under test. */
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
 
     /** @brief Record the app's numbers and answer the due time the test set. */
     std::uint64_t sweep(std::uint64_t now, std::uint64_t deadline) override {
@@ -168,6 +169,7 @@ struct count_carrier_t final : tr::net::transport_t {
     explicit count_carrier_t(std::vector<std::vector<std::byte>>* into) : log(into) {}
     /** @brief Unused by the Noise link, which always addresses its sends. */
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
     /** @brief Keep one datagram. */
     void send_to(std::uint64_t, std::span<const std::span<const std::byte>> iov) {
         std::vector<std::byte> d;
@@ -338,6 +340,7 @@ struct remover_t final : tr::net::transport_t {
     bool alive_after_collect = false;          /**< @brief What @p victim_alive read mid-walk. */
     /** @brief The wire is not under test. */
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
     /** @brief Remove the victim and collect, inside the door's walk. */
     std::uint64_t sweep(std::uint64_t, std::uint64_t) override {
         if (net != nullptr && net->remove_connection("net/door-fake/victim").has_value()) {
@@ -358,6 +361,7 @@ struct victim_t final : tr::net::transport_t {
     victim_t& operator=(const victim_t&) = delete;
     /** @brief The wire is not under test. */
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
     /** @brief Count the call. */
     std::uint64_t sweep(std::uint64_t, std::uint64_t) override {
         ++*sweeps;

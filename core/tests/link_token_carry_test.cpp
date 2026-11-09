@@ -181,6 +181,11 @@ class census_bus_t : public transport_t, public bus_link_t {
             ++sent_;
             (void)frame;
         }
+        /** @brief Count one gathered outbound frame to this peer. */
+        void send(std::span<const std::span<const std::byte>>) override {
+            const std::lock_guard lock(m_);
+            ++sent_;
+        }
         /** @brief The recorded send count. */
         std::size_t count() {
             const std::lock_guard lock(m_);
@@ -194,6 +199,7 @@ class census_bus_t : public transport_t, public bus_link_t {
 
     /** @brief Undirected sends are not part of this facet's contract; drop. */
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
     /** @brief Expose the bus facet, like every multi-peer link. */
     bus_link_t* bus() override { return this; }
     /** @brief Visit the peers that ever spoke (a live-traffic census). */
@@ -557,6 +563,7 @@ class tenancy_bus_t : public transport_t, public bus_link_t {
    public:
     /** @brief Undirected sends are not part of this facet's contract; drop. */
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
     /** @brief Expose the bus facet. */
     bus_link_t* bus() override { return this; }
     /** @brief Visit the current tenancy, if any. */
@@ -595,6 +602,7 @@ class tenancy_bus_t : public transport_t, public bus_link_t {
     class ep_t : public transport_t {
        public:
         void send(std::span<const std::byte>) override {}
+        void send(std::span<const std::span<const std::byte>>) override {}
     };
     ep_t ep_;               /**< @brief Slot 0's endpoint. */
     std::uint32_t gen_ = 0; /**< @brief The current tenancy's generation; 0 = none. */
@@ -679,6 +687,7 @@ void test_a_flat_child_carries_its_token() {
     class flat_link_t : public transport_t {
        public:
         void send(std::span<const std::byte>) override {}
+        void send(std::span<const std::span<const std::byte>>) override {}
         /** @brief Poke one inbound frame into the router-installed receiver. */
         void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
         /** @brief Simulate the transport observing its one connection dead. */

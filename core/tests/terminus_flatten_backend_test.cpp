@@ -283,6 +283,10 @@ class rec_link_t : public transport_t {
     void send(std::span<const std::byte> frame) override {
         sent.emplace_back(frame.begin(), frame.end());
     }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::vector<std::byte>& f = sent.emplace_back();
+        for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
+    }
     [[nodiscard]] bool delivers_ropes() const override { return ropes_; }
     void inject(tr::view::rope_t frame) { (void)rx_.deliver_rope(std::move(frame)); }
     std::vector<std::vector<std::byte>> sent;

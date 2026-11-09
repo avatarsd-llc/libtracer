@@ -184,7 +184,8 @@ tr::view::rope_t rope_of(std::span<const std::byte> bytes, std::size_t links) {
 /** @brief The inbound link: hands the frame up as the rope it already is (ADR-0053 §5). */
 class rope_in_t : public transport_t {
    public:
-    void send(std::span<const std::byte>) override {}  // inbound-only
+    void send(std::span<const std::byte>) override {}                   // inbound-only
+    void send(std::span<const std::span<const std::byte>>) override {}  // inbound-only
     [[nodiscard]] bool delivers_ropes() const override { return true; }
     void inject(tr::view::rope_t frame) { (void)rx_.deliver_rope(std::move(frame)); }
 };

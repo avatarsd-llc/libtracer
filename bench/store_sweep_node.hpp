@@ -330,6 +330,7 @@ class rope_in_t : public transport_t {
    public:
     /** @brief Inbound-only; nothing is ever sent on this link. */
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
     /** @brief Rope delivery, so the forward hop gathers rather than flattening. */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
     /** @brief Push one frame up as if the wire had just produced it. */

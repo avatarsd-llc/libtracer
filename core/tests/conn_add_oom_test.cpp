@@ -107,6 +107,7 @@ struct fake_link_t : tr::net::transport_t {
     fake_link_t(const fake_link_t&) = delete;
     fake_link_t& operator=(const fake_link_t&) = delete;
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
 };
 
 /**

@@ -85,6 +85,9 @@ class record_link_t : public transport_t {
    public:
     explicit record_link_t(bool ropes = false) : ropes_(ropes) {}
     void send(std::span<const std::byte>) override { calls_at_send.push_back(O::calls); }
+    void send(std::span<const std::span<const std::byte>>) override {
+        calls_at_send.push_back(O::calls);
+    }
     [[nodiscard]] bool delivers_ropes() const override { return ropes_; }
     /** @brief Push @p frame up the span-tier receiver, borrowed. */
     void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }

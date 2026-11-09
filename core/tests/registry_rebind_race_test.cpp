@@ -68,6 +68,10 @@ class fake_link_t : public transport_t {
     void send(std::span<const std::byte> frame) override {
         sent_.emplace_back(frame.begin(), frame.end());
     }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::vector<std::byte>& f = sent_.emplace_back();
+        for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
+    }
     std::vector<std::vector<std::byte>>& sent() { return sent_; }
 
    private:

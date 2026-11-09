@@ -74,6 +74,7 @@ class refuse_nth_source_t final : public tr::mem::block_source_t {
 /** @brief A link that says whether a receiver was wired onto it. */
 struct wired_link_t : tr::net::transport_t {
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
     /** @brief True ⇔ some inbound sink has been installed on this link. */
     [[nodiscard]] bool wired() const noexcept { return rx_.has_any(); }
 };
@@ -82,6 +83,7 @@ struct wired_link_t : tr::net::transport_t {
  *         peer-named receiver was wired. */
 struct fake_bus_t final : tr::net::transport_t, tr::net::bus_link_t {
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
     tr::net::bus_link_t* bus() override { return this; }
     tr::net::transport_t* peer_link(std::string_view) override { return nullptr; }
     void enumerate_peers(const tr::net::bus_link_t::peer_visitor_t&) const override {}

@@ -240,6 +240,10 @@ class mem_carrier_t final : public tr::net::transport_t {
         const std::span<const std::byte> one[1] = {frame};
         send_to(peer_address(), one);
     }
+    /** @brief Unused by the Noise link, which always addresses its sends. */
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        send_to(peer_address(), iov);
+    }
     /** @brief Log and queue one datagram. */
     void send_to(std::uint64_t to, std::span<const std::span<const std::byte>> iov) {
         datagram_t d{.from = side_, .to = to, .bytes = {}};
