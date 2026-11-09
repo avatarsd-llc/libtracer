@@ -65,6 +65,9 @@ liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/001
 
 ---
 
+For one page that covers the whole protocol, and exactly what a device must implement, see
+[the libtracer plane](plane.md).
+
 ## Vendor obligations
 
 There is no conformance stamp. There are three obligations, and they are cheap.

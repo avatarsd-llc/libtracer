@@ -125,10 +125,10 @@ none — and remains a conforming node that any forwarder routes and any peer re
 | **`:schema` descriptors** (RFC-0010) | unassisted integration by a stranger's reader | integrators need your datasheet |
 | **Remote-writable actuators** | third parties drive your hardware through the apply seam | device is observe-only |
 | **`:subscribers[]` fan-out** | push delivery, subtree subscriptions, lazy sources | peers poll with `read` |
-| **`:acl` (ALLOW-only MCU subset)** | device-local authorization: who may read/write/subscribe/create | open device (fine on a trusted bus) |
+| **`:acl` (ALLOW-only MCU subset)** | device-local authorization: who may read and who may write | open device (fine on a trusted bus) |
 | **In-band creation** (a `SPEC` write — to a creator endpoint for connections, to `:children[]` for your own registered types) | orchestrators instantiate your connections and controllers at run time, bounded by your own catalog | fixed function; wiring baked at build |
 | **Vertex retirement** | a dynamic child can be withdrawn: its address answers `PATH_NOT_FOUND`, its subscriber edges are evicted, and a later revive inherits nothing of the old owner | the tree only grows; a withdrawn child stays addressable and keeps delivering |
-| **Opt-in creation** | a parent you choose creates the missing child a write names, through your own creation hook and under its CREATE ACL (compile-time `kCreationHooks`, off by default; without it every write to an unresolved address is `PATH_NOT_FOUND`) | static tree only |
+| **Opt-in creation** | a parent you choose creates the missing child a write names, through your own creation hook and under its WRITE ACL (compile-time `kCreationHooks`, off by default; without it every write to an unresolved address is `PATH_NOT_FOUND`) | static tree only |
 | **Multiple transports + FWD** | the device becomes a forwarder — one address space across CAN + IP | leaf node on one link |
 | **Header-elided framing** (e.g. CAN) | zero protocol overhead on constrained buses; the TLV header never hits the wire | full-TLV frames everywhere |
 | **Address-shift slicing** | payloads beyond one frame, grouped by `(origin, ts)` | payloads bounded by transport frame |
@@ -214,8 +214,8 @@ The irreducible floor — the required modules of conformance profile P0:
    and `0x20`–`0x7F` the long-term core registry — so a new core code may appear
    anywhere in `0x0F`–`0x7F` within v1
    ([reference 05 — protocol TLVs](../reference/05-protocol-tlvs.md)).
-5. **FWD hop logic — only if ≥ 2 transports are loaded.** A single-transport leaf
-   never forwards.
+5. **FWD hop logic — only with two or more connection vertices.** A device with one
+   connection never forwards.
 
 ## What a custom device MUST NOT do
 
@@ -229,7 +229,7 @@ silently forks the protocol:
 | **Emitting protocol errors from application logic** | the error boundary is closed ([ADR-0010 — the protocol error namespace is closed](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0010-closed-protocol-error-boundary.md)): app failures are ordinary *data*, self-described by your schema. `tr::*` identities are for the stack only |
 | **A per-frame version bit** | v1 carries none, ever; incompatibility is versioned at discovery (`_libtracer-v2._tcp`), not per frame |
 | **Wire-level fragmentation / reassembly metadata** | the wire format has none by design; large payloads address-shift across `ep[0..N]` |
-| **Interpreting payload values in dispatch** | delivery policy may compare *bytes* (on-change), never interpret them; numeric filtering is an application filter-vertex |
+| **Interpreting payload values in dispatch** | the protocol has no value-based delivery filter; numeric filtering is an application filter-vertex |
 | **Inventing new wire verbs** | there is no `connect`/`subscribe`/`create` primitive to extend — every control action is a field-write or a creator-endpoint write. SDK sugar is fine; wire verbs are not |
 | **Relaying deliveries past the target** | chained auto-relay is forbidden (RFC-0007); re-emission is your application logic, explicitly |
 
