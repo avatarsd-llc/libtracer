@@ -176,7 +176,10 @@ void emit_chan(const char* arm, std::size_t threads, const char* channel,
 
 /** @brief Time every leg of one arm, single-threaded, and emit its four rows. */
 [[nodiscard]] bool run_latency_arm(int round, const char* tag, arm_t arm) {
-    node_t n(arm, /*lanes=*/1, /*count_channels=*/false);
+    // One lane, this one thread: NARROW's graph store takes no lock here (#2709). WIDE keeps
+    // its lock because a WIDE store is the shared-store shape; that difference is deliberate.
+    node_t n(arm, /*lanes=*/1, /*count_channels=*/false, nullptr, nullptr,
+             bench_store::graph_store_use_t::ONE_THREAD);
     bench_store::lane_t& l = n.lane(0);
 
     for (const leg_t leg : kLegs) {
