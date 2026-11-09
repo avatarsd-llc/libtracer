@@ -61,6 +61,13 @@ void self_heal_link_t::set_liveness_publisher(liveness_publish_fn_t fn) {
     publish_ = fn;
 }
 
+void self_heal_link_t::born() {
+    const std::lock_guard l(m_);
+    born_ = true;
+    // A demand that came before the birth write was answered and recorded; it dials now.
+    if (attempt_due_) ensure_worker_locked();
+}
+
 void self_heal_link_t::sock_ref_t::reset() noexcept {
     sock_t* const s = s_;
     s_ = nullptr;
@@ -247,7 +254,7 @@ void self_heal_link_t::worker_entry(void* self) {
 }
 
 void self_heal_link_t::ensure_worker_locked() {
-    if (stop_ || worker_started_) return;
+    if (stop_ || !born_ || worker_started_) return;
     // The #1470 stack knob (0 = the platform default; every host build). On ESP-IDF the
     // stack is drawn with its control block from the engine's thread-stack store (#2288,
     // `link_memory_t::stack`, default `mem::stack_source()`), never from `src_`, the sockets'
