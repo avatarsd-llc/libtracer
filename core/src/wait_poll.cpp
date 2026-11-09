@@ -98,9 +98,10 @@ bool wait_module_t::attach(wait_source_t& s) noexcept {
     locked([&] {
         // Grow the spare set to the table plus the newcomer and the doorbell, then the table: a
         // refusal of either refuses the newcomer, and nobody attached is evicted.
-        done = !s.attached && state_->set[state_->live ^ 1U].reserve(sources_.size() + 2) &&
+        done = !s.attached.load(std::memory_order_relaxed) &&
+               state_->set[state_->live ^ 1U].reserve(sources_.size() + 2) &&
                sources_.push_back(&s);
-        s.attached = s.attached || done;
+        if (done) s.attached.store(true, std::memory_order_relaxed);
         gen_.fetch_add(1, std::memory_order_acq_rel);
     });
     ring();
@@ -109,11 +110,11 @@ bool wait_module_t::attach(wait_source_t& s) noexcept {
 
 void wait_module_t::detach(wait_source_t& s) noexcept {
     locked([&] {
-        if (!s.attached) return;
+        if (!s.attached.load(std::memory_order_relaxed)) return;
         std::size_t i = 0;
         while (sources_[i] != &s) ++i;
         sources_.erase_at(i);
-        s.attached = false;
+        s.attached.store(false, std::memory_order_relaxed);
         gen_.fetch_add(1, std::memory_order_acq_rel);
     });
     ring();
@@ -124,9 +125,9 @@ void wait_module_t::want_write(wait_source_t& s, bool on) noexcept {
 }
 
 void wait_module_t::run() noexcept {
-    driver_.store(detail::this_thread_id(), std::memory_order_release);
+    driver_.store(detail::this_thread_id());  // seq_cst: see wait_module_t::locked
     std::unique_lock lock(m_);
-    while (!stopping_.load(std::memory_order_acquire)) {
+    while (!stopping_.load()) {
         // Rebuild under the lock: the doorbell, then every source in table order. The spare
         // was grown by the last attach to hold the whole table, so when the live set is too
         // small the spare is swapped in, and every push below fits.
@@ -156,11 +157,11 @@ void wait_module_t::run() noexcept {
                                       ready_of(set[i].revents));
     }
     lock.unlock();
-    driver_.store(detail::unowned_thread_id(), std::memory_order_release);
+    driver_.store(detail::unowned_thread_id());
 }
 
 void wait_module_t::stop() noexcept {
-    stopping_.store(true, std::memory_order_release);
+    stopping_.store(true);
     ring();
 }
 
