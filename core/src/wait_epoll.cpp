@@ -99,18 +99,18 @@ bool wait_module_t::attach(wait_source_t& s) noexcept {
     // under its control-plane lock) therefore never waits on a callback that takes that lock.
     // The flag is set before the registration: once the kernel holds the source, a callback
     // may detach it, and that detach must find it attached.
-    if (s.attached) return false;
-    s.attached = true;
+    if (s.attached.load(std::memory_order_relaxed)) return false;
+    s.attached.store(true, std::memory_order_relaxed);
     if (register_interest(fd_[0], EPOLL_CTL_ADD, s) == 0) return true;
-    s.attached = false;
+    s.attached.store(false, std::memory_order_relaxed);
     return false;
 }
 
 void wait_module_t::detach(wait_source_t& s) noexcept {
     locked([&] {
-        if (!s.attached) return;
+        if (!s.attached.load(std::memory_order_relaxed)) return;
         ::epoll_ctl(fd_[0], EPOLL_CTL_DEL, s.fd.load(std::memory_order_relaxed), nullptr);
-        s.attached = false;
+        s.attached.store(false, std::memory_order_relaxed);
         gen_.fetch_add(1, std::memory_order_acq_rel);
     });
 }
@@ -124,9 +124,9 @@ void wait_module_t::want_write(wait_source_t& s, bool on) noexcept {
 }
 
 void wait_module_t::run() noexcept {
-    driver_.store(detail::this_thread_id(), std::memory_order_release);
+    driver_.store(detail::this_thread_id());  // seq_cst: see wait_module_t::locked
     std::array<epoll_event, kBatch> ev;
-    while (!stopping_.load(std::memory_order_acquire)) {
+    while (!stopping_.load()) {
         const std::uint32_t seen = gen_.load(std::memory_order_acquire);
         const int n = ::epoll_wait(fd_[0], ev.data(), kBatch, -1);
         const std::lock_guard lock(m_);
@@ -137,11 +137,11 @@ void wait_module_t::run() noexcept {
             if (s != nullptr) s->fire(s->ctx, *s, ready_of(ev[static_cast<std::size_t>(i)].events));
         }
     }
-    driver_.store(detail::unowned_thread_id(), std::memory_order_release);
+    driver_.store(detail::unowned_thread_id());
 }
 
 void wait_module_t::stop() noexcept {
-    stopping_.store(true, std::memory_order_release);
+    stopping_.store(true);
     ring();
 }
 

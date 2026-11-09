@@ -120,8 +120,11 @@ struct wait_source_t {
     std::atomic<bool> write{false};
     /** @brief True while attached. Set by @ref wait_module_t::attach before it registers the
      *         socket (with no lock on the epoll adapter: a callback reads it only once the kernel
-     *         reports the socket); cleared only under the module's dispatch lock. */
-    bool attached = false;
+     *         reports the socket); cleared only under the module's dispatch lock. Atomic
+     *         (relaxed) because the epoll adapter's attach reads and sets it with no lock while
+     *         a detach may clear it under one; every other ordering comes from the lock or the
+     *         kernel's registration. */
+    std::atomic<bool> attached{false};
 };
 
 /**
@@ -201,8 +204,13 @@ class wait_module_t {
      *         @ref run (a stopped module dispatches nothing again). */
     template <class Op>
     void locked(Op&& op) noexcept {
-        const bool stopped = stopping_.load(std::memory_order_acquire);
-        const detail::thread_id_t driver = driver_.load(std::memory_order_acquire);
+        // Sequentially consistent, as are run()'s and stop()'s stores and run()'s stop check:
+        // the driver stores its id then reads the stop, and this reads the stop then the id.
+        // With acquire and release alone both could read the other's old value, so a caller
+        // would see "stopped, no driver" and skip the lock while a driver that missed the stop
+        // still dispatches.
+        const bool stopped = stopping_.load();
+        const detail::thread_id_t driver = driver_.load();
         if (driver == detail::this_thread_id() ||
             (stopped && driver == detail::unowned_thread_id())) {
             op();
