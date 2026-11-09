@@ -143,9 +143,9 @@ The PSA backend needs three things from the mbedTLS build:
   | `MBEDTLS_PSA_KEY_SLOT_COUNT` | 6 per Noise link (two sessions of two keys during a rekey, the handshake cipher, the ephemeral key), plus the peak of the image's other PSA users |
   | `MBEDTLS_PSA_STATIC_KEY_SLOT_BUFFER_SIZE` | the largest key any of them imports; Noise's keys are all 32 B |
 
-  A Noise-only image needs 8 slots of 32 B: 360 B of `.bss` on an ESP32-C6, and the
-  configuration the CI psa leg tests (8 is the fewest the two suites pass with, holding both
-  ends of a session in one process). Rough figures for a mixed image at 16 slots: about 2 KB
+  A Noise-only image needs 8 slots of 32 B: 360 B of `.bss` on an ESP32-C6. The CI psa leg
+  tests 14 slots, the fewest the suites pass with: its process holds both ends of a session,
+  each at 6 during a rekey, and extra peers. Rough figures for a mixed image at 16 slots: about 2 KB
   with TLS that verifies only ECDSA P-256 or X25519 peers, about 5 KB with RSA-2048 server
   certificates, about 20 KB if the image holds its own RSA-2048 private key. Left unsized,
   mbedTLS sizes 32 slots for the largest key type enabled: 76,616 B at ESP-IDF's defaults,
