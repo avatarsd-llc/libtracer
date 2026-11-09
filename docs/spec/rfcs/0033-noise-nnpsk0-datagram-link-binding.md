@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0033 |
 | **Title** | A minimal Noise link binding: NNpsk0 over a datagram carrier |
-| **Status** | **accepted** (2026-10-10; proposed 2026-10-09). The maintainer approved the direction on 2026-10-09 (issue [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063)) and ruled **"all rec"** on every §15 question on 2026-10-10. Q7 was ruled as (a) together with (b), with three refinements, which §5.4 carries. The comment window was waived by default and not invoked. **The binding's normative text lives in [reference/23](../../reference/23-noise-link-binding.md)** (slice S1, [#2071](https://github.com/avatarsd-llc/libtracer/issues/2071)), which `docs/spec/v1.md` §3 incorporates as an annex for a link that uses the binding (§10.1). Where that page and this record disagree, the page wins. **Amendment 1 (2026-10-10, ruled)** moves §6.8's two MUST clauses (constant-time primitives; no ephemeral key reuse, in either role) into §5.2, so that they bind an implementation ([#2084](https://github.com/avatarsd-llc/libtracer/issues/2084)). **Erratum (2026-10-10)**: Appendix A.4 no longer says the generator prints all of A.3. **Erratum (2026-10-11)**: Appendix A.3 now shows the responder's empty acknowledgement at n = 0 and `pang` at n = 1, as §5.4 step 7 requires. |
+| **Status** | **accepted** (2026-10-10; proposed 2026-10-09). The maintainer approved the direction on 2026-10-09 (issue [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063)) and ruled **"all rec"** on every §15 question on 2026-10-10. Q7 was ruled as (a) together with (b), with three refinements, which §5.4 carries. The comment window was waived by default and not invoked. **The binding's normative text lives in [reference/23](../../reference/23-noise-link-binding.md)** (slice S1, [#2071](https://github.com/avatarsd-llc/libtracer/issues/2071)), which `docs/spec/v1.md` §3 incorporates as an annex for a link that uses the binding (§10.1). Where that page and this record disagree, the page wins. **Amendment 1 (2026-10-10, ruled)** moves §6.8's two MUST clauses (constant-time primitives; no ephemeral key reuse, in either role) into §5.2, so that they bind an implementation ([#2084](https://github.com/avatarsd-llc/libtracer/issues/2084)). **Erratum (2026-10-10)**: Appendix A.4 no longer says the generator prints all of A.3. **Erratum (2026-10-11)**: Appendix A.3 now shows the responder's empty acknowledgement at n = 0 and `pang` at n = 1, as §5.4 step 7 requires. **Amendment 2 (proposed 2026-11-09, not accepted)** would add a WebSocket carrier for browser peers, leaving the UDP wire unchanged ([#2296](https://github.com/avatarsd-llc/libtracer/issues/2296)). |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-10-09 |
 | **Comment window** | Waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"). Invoke it explicitly if outside input is wanted. At drafting, `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |
@@ -1136,6 +1136,306 @@ regenerated. [reference/23](../../reference/23-noise-link-binding.md) Appendix A
 conformance case `tests/conformance/vectors/v1/noise/nnpsk0-appendix-a` carry the same fix.
 
 ---
+
+## Amendment 2 (proposed 2026-11-09) — the binding over a WebSocket carrier
+
+**Status: proposed; not accepted.** This text binds nothing until the maintainer approves it
+([#2296](https://github.com/avatarsd-llc/libtracer/issues/2296)). Questions the maintainer has not
+ruled are marked **(open)** and are collected in A2.13.
+
+**Instrument.** Amendment, not erratum. It adds an optional carrier with MUST clauses that a peer
+can observe, which GOVERNANCE.md reserves for an amendment. The comment window is **waived by
+default** under [GOVERNANCE.md](../../../.github/GOVERNANCE.md)'s solo-maintainer clause and is not
+invoked. Approval is still required.
+
+**No existing wire byte moves.** The UDP binding is unchanged: no datagram layout, type code,
+payload, counter, deadline meaning, `:stats` noun or conformance vector changes, and Appendix A
+stands. A plain WebSocket link is unchanged too, and a build that does not select this carrier pays
+nothing for it.
+
+### A2.1 What this adds
+
+A browser cannot open a UDP socket, so it cannot use the binding as RFC-0033 scoped it. It can open
+a WebSocket. This amendment lets a browser reach a node through an intermediary that it does not
+trust, such as a cloud forwarder. The intermediary carries ciphertext and holds no key. A page
+served locally by the node keeps using the plain WebSocket link.
+
+A WebSocket **message** preserves its boundaries, which is the one property [reference/23](../../reference/23-noise-link-binding.md)
+asks of a carrier. So this is the same binding over a second carrier, and not a stream binding
+(§2.3): the datagram of §5.3 travels unchanged as the content of one message.
+
+**Normative.** A Noise link whose carrier is a WebSocket connection MUST follow every clause of the
+binding (§5.1–§5.11 and Amendment 1, as carried by reference/23), except where A2.2–A2.9 say
+otherwise.
+
+### A2.2 Framing
+
+**Normative.**
+
+- **One datagram, one binary message.** One WebSocket data message of opcode `0x2` (binary) carries
+  exactly one §5.3 datagram, type byte first. Nothing is added before or after it. The type codes,
+  layouts and sizes of §5.3 apply unchanged, and no type code is added.
+- **The unit is the message, not the frame.** RFC 6455 §5.4 lets a sender or an intermediary split
+  a message into continuation frames. A receiver MUST reassemble and apply every §5.3 rule to the
+  whole message. A sender SHOULD send each message as one frame.
+- **Refuse, never truncate.** A receiver MUST drop a message above `max_frame + 25` bytes and count
+  it in `malformed_rx`. A fragmented message states no total length, so the receiver MUST apply the
+  bound to the running total and MUST NOT buffer past it.
+- **The size bound.** The WebSocket length field does not bound a message, so the Noise limit does
+  (§5.3): a frame is at most 65519 bytes, and `max_frame` MUST NOT exceed that on this carrier. The
+  path-MTU advice of §5.3 does not apply, because TCP segments the bytes. A plain WebSocket link can
+  carry a larger frame, and moving such a link to Noise lowers its bound.
+- **Text messages.** A data message of opcode `0x1` is dropped and counted in `malformed_rx`, even
+  when its bytes would parse.
+- **Compression.** `permessage-deflate` MUST NOT be negotiated. Browsers offer it by default, and
+  the server declines by leaving it out of its response. Ciphertext does not compress.
+- **Masking** follows RFC 6455 and is opaque to the binding. It is not a security property here.
+- **Control frames and RFC 6455 errors.** Ping, Pong and Close carry no Noise message and are not
+  authenticated. A violation of RFC 6455 itself is handled by the WebSocket layer as on a plain link.
+
+The frame header adds to the 25 bytes of §8.1. A first message from a client is 2 + 4 + 58 = 64
+bytes, beginning `82 BA`, then the four masking bytes. A second message from a server is
+2 + 50 = 52 bytes, beginning `82 32`. A transport message adds 2 to 10 bytes of header, plus 4 of
+mask from a client.
+
+### A2.3 Telling a Noise link from a plain one
+
+**Normative.**
+
+- Whether a link uses Noise is **configuration on each side**. It is never negotiated. §5.1's rule
+  holds: a Noise link MUST NOT fall back to the plain carrier.
+- **(open: Q5)** The client offers the subprotocol `tracer-noise-v1` in `Sec-WebSocket-Protocol`,
+  which the browser `WebSocket` constructor can set, and the server selects it. A Noise link MUST
+  close a connection on which the subprotocol was not agreed, and MUST NOT serve it. A plain link
+  does not select this subprotocol. The header is not authenticated. It routes a connection to the
+  right link and adds no protection.
+- A secured profile can require this binding for a link at compile time, so that the plain path for
+  that link is not built.
+- Once the upgrade completes, every data message on a Noise link is a §5.3 datagram. The in-band
+  credential frame of [reference/16](../../reference/16-websocket-session-auth.md) is not used on
+  such a link. A check at the upgrade (a token or a cookie) can still apply, but it binds only the
+  hop that sees it, so it says nothing about the far end of a path through an intermediary.
+
+### A2.4 Roles and the connection
+
+**Normative.**
+
+- **(open: Q8)** The WebSocket client is the initiator and the server is the responder, unless the
+  link's configuration names the Noise role. A node that dials out to an intermediary and waits
+  there for a peer is a WebSocket client and a Noise responder, so it names its role. How an
+  intermediary pairs two connections is outside this binding. Roles still never swap (§5.4).
+- One WebSocket connection carries one Noise link and one peer. A server's accepted connections are
+  separate links, each with its own sessions. This is the listener that §15 Q3 left to a later
+  amendment, and A2.8 applies the terms §15 Q3 set for it.
+- The §5.4 **peer address** rules do not apply: a WebSocket connection has no source address. A
+  responder answers on the connection the first message arrived on.
+- The initiator sends its first message as its first data message after the upgrade.
+
+### A2.5 Ordering and reliability: what changes from UDP, and what does not
+
+TCP orders and retransmits **between adjacent hops only**. Across an intermediary, the ends get no
+authenticated ordering or delivery guarantee: an intermediary can drop, duplicate or reorder
+messages. The binding therefore treats ordering as the common case and never as a guarantee.
+
+**Normative.**
+
+- **The nonce stays explicit and the replay window stays.** §5.5 applies byte for byte, with the
+  same check order and `W` at least 64. A receiver MUST NOT tighten it to strict in-order delivery,
+  because concurrent senders draw nonces and write them as separate steps. A nonce gap is not a
+  failure, and a sender that sealed a frame and then dropped it at the carrier leaves one.
+- **(open: Q4) No retransmission at this layer.** On this carrier, an initiator MUST NOT retransmit
+  a first message and MUST NOT resend an empty confirmation (§5.4 initiator steps 2 and 7). The
+  retry deadline of §5.7 is never armed. Each attempt sends its first message once. No frame is
+  acknowledged or retransmitted.
+- **The confirmation and acknowledgement stay.** They establish the session (§5.4) and are not
+  per-frame acknowledgements. The responder's answer to an empty transport message also stays.
+- **The responder's retransmit check stays**, because an intermediary can duplicate a first message.
+  It applies within one connection only.
+- **A connection that ends an attempt.** If an attempt reaches its attempt deadline with no session
+  on the connection, the initiator MUST close the connection. A new attempt uses a new connection,
+  a fresh ephemeral key and a new counter. An attempt with no `now` resolves when the handshake
+  completes or the connection closes, so unlike UDP (§5.7) it needs no retransmission to finish.
+- **Liveness.** A Pong proves that the next hop is alive, and a browser cannot send a Ping at all.
+  An initiator that wants peer liveness MAY send an empty transport message, which the responder
+  answers (§5.4 responder step 7), on a deadline taken from the application's `now`. Nothing here
+  adds a message or a timer.
+
+### A2.6 Session boundaries
+
+A session is scoped to the WebSocket connection that carried its handshake. **(open: Q3)**
+
+**Normative.**
+
+- A session MUST NOT be used on any other connection. A reconnect is always a new handshake, with a
+  fresh ephemeral key and a new counter.
+- When the connection closes for any reason, each side discards every session and any handshake in
+  flight on it. This is the §5.10 case of a current session discarded with no replacement: the link
+  goes down, its tenancy is kept, and the connection vertex's generation advances. A Close frame is
+  not authenticated, and it is read only as the fact that the carrier ended.
+- Discarding a current session with no replacement (`reject_after`, or the nonce limit) MUST close
+  the connection. So a connection never outlives its last session, and it carries one unbroken
+  chain of sessions from its first handshake. A rekey is not affected.
+- A new connection starts with no session on either side, so both `fresh` bits are set and the
+  boundary rule of §5.10 holds unchanged. A reconnect can therefore advance the generation once at
+  the close and once when the new session becomes current. Both advances are correct.
+- The states of §5.10 keep their meaning. A DIAL link is `dialing` through the upgrade and the
+  handshake, and a completed upgrade alone never reports `up`.
+
+The session-boundary behaviour this relies on is [#2074](https://github.com/avatarsd-llc/libtracer/issues/2074)'s
+([#2733](https://github.com/avatarsd-llc/libtracer/pull/2733)). This amendment adds a trigger and no
+new mechanism.
+
+### A2.7 Rekey
+
+**Normative.** §5.6 applies unchanged, in-band on the same connection: the handshake messages of a
+rekey are binary messages like any others.
+
+- The old session keeps sending until the acknowledgement, as §5.4 initiator step 6 says. Those
+  frames can reach the responder **after** the confirmation has made the new session current, even
+  on an ordered path. A build without a previous session therefore still loses them, counted in
+  `noise_stale`, exactly as on UDP. An ordered carrier does not make the previous session redundant.
+- A rekey attempt that reaches its attempt deadline ends without closing the connection, because
+  the current session is still good. The next attempt uses a fresh ephemeral key and a new counter.
+
+### A2.8 Resources: the listener
+
+**Normative.** A WebSocket server admits peers. The terms below replace §5.8's "drawn when the
+link is built" and §5.4's "one mark per link" on this carrier. The rest of §5.8 applies.
+
+- **The mark is scoped to the PSK, not to the connection.** A responder keeps one mark per PSK
+  across all the connections of an endpoint, and advances it atomically. A connection-scoped mark
+  would admit a recorded first message on every new connection. **(open: Q7)**
+- **No Noise state before the proof.** A connection's session and handshake slots MUST be drawn from
+  the connection's own source only after the first message passes the PSK and counter checks. When
+  the source is exhausted, the responder refuses the newcomer and does not evict an existing session.
+- **What a connection costs before the proof is what a plain WebSocket connection costs:** the
+  server's admission limit and receive buffer. The binding adds no bytes to it, other than the mark
+  per PSK.
+- **Failure stays silent. (open: Q6)** §5.9 applies: a failed first message is dropped and counted,
+  and is answered by nothing, including a Close frame. The connection stays open until the deadline
+  below.
+- **A new responder deadline, `first_message`**, measured from the upgrade on the application's
+  `now` (§5.7). When `now` passes it and no first message has passed the checks, the responder
+  closes the connection, with the same status it uses for any other close. A value of 0 is never
+  due, which suits a node that waits at an intermediary. Without `now`, such a connection stays until
+  its peer leaves. This deadline is kind-private config and is not a wire byte.
+
+### A2.9 Browser constraints
+
+The browser `WebSocket` API fixes what an initiator can do. These rules are the binding's response.
+
+| Constraint | Consequence |
+| --- | --- |
+| No UDP; WebSocket only | This carrier. |
+| No request headers, except the subprotocol | The subprotocol is the only upgrade-time signal (A2.3). |
+| No Ping, no fragmentation control, whole messages only | Liveness is an empty transport message (A2.5). A browser's messages arrive whole at its own API. |
+| An `https` page can only open `wss` | TLS on that hop is allowed and is **not relied on** (A2.10). |
+| `send` does not block and does not report loss | A sender watches `bufferedAmount` and counts a refused frame in `dropped_tx`. Nothing is queued by the binding (§5.8). |
+| Web Crypto has no ChaCha20-Poly1305, and not every browser offers X25519 in it | An implementation can use a WebAssembly build. The §5.2 clause "constant time where the host library offers it" applies to whichever library it uses. |
+
+**Normative.**
+
+- Ephemeral keys MUST come from `crypto.getRandomValues` or an equivalent cryptographic source (§5.2).
+- The initiator counter (§5.4) MUST strictly increase across attempts under one PSK. A browser
+  SHOULD use the wall clock in nanoseconds, or the persisted value plus one if that is larger, so
+  that a clock step backwards cannot repeat a counter. A private window has no persisted value and
+  relies on the wall clock.
+- `now` is the application's own value. `performance.now()` suits it. A throttled background tab
+  only delays a deadline.
+
+### A2.10 Security considerations (informative)
+
+- **What the intermediary sees.** Noise ciphertext, the two message types, nonces, sizes and timing.
+  It cannot read a frame or forge one. It can withhold traffic or close a connection, as any path can.
+- **TLS** on any hop is optional defence for that hop. The end-to-end claim does not depend on it.
+- **The page is inside the trust boundary.** Script that runs the binding sees the keys. The
+  end-to-end claim holds only when the page comes from an origin the user trusts for that key, and
+  not from the intermediary being relied on not to read the traffic.
+- **The binding remains per hop in Tracer's sense** (§5.1). The Noise hop here spans the
+  intermediary, which is not a Tracer node. A frame forwarded onward by the far node leaves this
+  session there.
+- **The PSK** is still one per link pair (§6.4). A browser holds the PSK that the application gives
+  it, and each browser that shares one shares its counter space (A2.8). Many browsers on one node
+  call for the identity patterns of #1993. **(open: Q1)**
+
+### A2.11 Identity patterns
+
+[#2296](https://github.com/avatarsd-llc/libtracer/issues/2296) rules that this carrier uses the
+same handshake, pattern and identity as the rest of the binding, including XX and IK from #1993.
+This amendment is independent of the pattern: A2.2–A2.8 name no pattern, and §7's attachment rules
+apply to it unchanged. Only NNpsk0 is specified today, so only NNpsk0 is conforming on this carrier
+until #1993 lands. The credential in the handshake payload, and the verifier policy, are #1993's.
+A new pattern's handshake sizes are bounded by the same rules, and A2.8's mark scoping is revisited
+for any pattern whose first message carries no counter before public-key work.
+
+### A2.12 Conformance, slices and normative pages
+
+**Conformance vectors (`noise/` category, §12.2).** A conforming WebSocket-carrier Noise link MUST
+reproduce the following. The Noise bytes of every case are Appendix A's, so a third-party Noise
+library gates them as it did for §15 Q6.
+
+| Case | Inputs | Expected |
+| --- | --- | --- |
+| `ws-handshake-transcript` | Appendix A inputs and a fixed masking key per client frame | every WebSocket frame byte for byte, with Appendix A's datagrams as the payloads |
+| `ws-fragmented` | the same transcript, each message split into continuation frames at given offsets | identical reassembled datagrams and session keys |
+| `ws-text-opcode` | a valid first message sent as opcode `0x1` | refused, `malformed_rx` |
+| `ws-oversize-fragments` | fragments whose running total passes `max_frame + 25` | refused at the crossing fragment, `malformed_rx` |
+
+**Behaviour tests (§12.3 style, over an in-memory WebSocket pair with a test intermediary).**
+
+- A first message recorded on one connection and replayed on another is refused and counted in
+  `noise_handshake_replayed`.
+- A transport message from an earlier connection is refused on a new one.
+- A message duplicated or reordered inside the window is handled as §5.5 says. One outside it is
+  counted in `noise_replayed`.
+- No first message is retransmitted when `now` passes a retry interval.
+- A rekey with frames in flight delivers old-phase frames that arrive after the confirmation.
+- A connection close fires the session boundary before any frame of the next session.
+- A first message that fails the tag check sends nothing, and the connection closes only at
+  `first_message`.
+- A link configured for Noise does not serve a connection with no agreed subprotocol.
+
+**Slices.**
+
+| Slice | Contents | Gate |
+| --- | --- | --- |
+| S0 | This amendment and its approval. | maintainer approval |
+| S1 (follow-up) | reference/23 gains the carrier as a section; the `v1.md` §3 summary and changelog; `docs/spec/index.md`; `Carrier` in reference/23 §Terms; §What this page does not fix. As ruled at §15 Q1, the page carries the normative text and this record stays the change record. | docs build |
+| S2 | Host server and client behind the transport-factory seam, compile-time optional, 0 B when not built. | full matrix; the vectors above |
+| S3 | ESP-IDF server side, with RAM per connection measured against §8.2 and the target's budget. | size gates; on-silicon handshake |
+
+**Cost.** Per frame, 25 B as in §8.1, plus the WebSocket header the plain link already pays. Per
+authenticated connection, the about 390 B of §8.2 (about 300 B with no previous session), drawn
+after the PSK proof. The mark is 8 B per PSK instead of per link.
+
+### A2.13 Questions for the maintainer
+
+Each one carries a recommendation. None is settled until ruled.
+
+1. **Land before #1993?** Recommend yes. The text is independent of the pattern (A2.11), and
+   #2296's other work can start. Until #1993 lands the carrier is NNpsk0 only, which fits one
+   browser per PSK.
+2. **Keep the type byte and the 8-byte nonce, or drop to a pure Noise message?** Recommend keep. This
+   reads "no extra framing" as nothing added around the §5.3 datagram. Dropping them saves 9 B per
+   frame, but needs a second receive path and second vectors, and gives up the window that the
+   intermediary case needs.
+3. **Scope a session to one connection?** Recommend yes (A2.6). Surviving a reconnect needs state
+   that outlives the connection, and saves only a handshake that a reconnect makes cheap by
+   comparison.
+4. **Confirm that "no retransmission at this layer" covers §5.4's handshake retries?** Recommend
+   yes (A2.5). The retries exist to recover from datagram loss, which a connection reports by closing.
+5. **The subprotocol token `tracer-noise-v1`?** Recommend it. The alternative is a URL path, which
+   the deployment owns and the binding cannot test.
+6. **Silent until `first_message`, or close at once on a failed first message?** Recommend silent, as
+   §5.9 says. Closing at once frees the connection sooner, but answers a failed attempt in clear.
+7. **Mark per PSK across connections?** Recommend yes (A2.8). This limits a PSK to one initiator's
+   counter space in practice.
+8. **Noise role named by configuration when it differs from the socket role?** Recommend yes
+   (A2.4). Without it, a node behind NAT that dials out to an intermediary cannot be a responder.
+9. **Same prologue as UDP?** Recommend yes, as "same handshake" says, with the §6.4 rule read as: a
+   PSK is not shared between a UDP link and a WebSocket endpoint. A carrier-specific prologue would
+   make that a cryptographic guarantee, at the cost of Appendix A's vectors no longer applying as
+   they stand.
 
 ## Appendix A — Test vectors
 
