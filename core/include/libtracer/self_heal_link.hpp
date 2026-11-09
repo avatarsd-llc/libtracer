@@ -169,6 +169,16 @@ class self_heal_link_t final : public transport_t {
     void set_liveness_publisher(liveness_publish_fn_t fn);
 
     /**
+     * @brief The owner has written the connection's birth state: the worker may run (#2353).
+     *
+     * A new engine starts no worker, so nothing it reports can be lost before the owner's
+     * `DORMANT` birth write or overwritten by it. A demand that arrives first (a frame routed
+     * to the just-wired link, a binding) is still answered at once and still recorded; it
+     * dials from here. Call it once, after @ref set_liveness_publisher.
+     */
+    void born();
+
+    /**
      * @brief A STANDING binding takes its hold (RFC-0014 §4: a routed subscription or
      *        `await` that needs the peer reachable).
      *
@@ -384,7 +394,7 @@ class self_heal_link_t final : public transport_t {
     const bool inner_ropes_;                      /**< @brief The kind's delivery capability. */
     mem::block_source_t& src_;      /**< @brief Where each socket and its record come from. */
     mem::block_source_t& stack_;    /**< @brief Where the worker's stack comes from (#2288). */
-    liveness_publish_fn_t publish_; /**< @brief Set once, before router wiring. */
+    liveness_publish_fn_t publish_; /**< @brief Set once, before @ref born. */
 
     link_state_t state_ = link_state_t::DORMANT; /**< @brief The machine (DIAL subset). */
     std::uint32_t refs_ = 0;                     /**< @brief Standing bindings (§4). */
@@ -400,6 +410,8 @@ class self_heal_link_t final : public transport_t {
     bool publish_pending_ = false;               /**< @brief A non-worker thread changed `state_`;
                                                              the worker owes the publish. */
     bool stop_ = false;                          /**< @brief Terminal; set by @ref stop. */
+    bool born_ = false;                          /**< @brief @ref born has run: the worker may
+                                                             start (#2353). */
 
     sock_ref_t inner_;          /**< @brief The live socket (UP only). */
     sock_t* corpses_ = nullptr; /**< @brief Dead sockets awaiting reap — an intrusive list

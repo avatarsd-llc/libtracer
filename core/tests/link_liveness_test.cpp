@@ -25,6 +25,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <iterator>
 #include <memory>
@@ -229,6 +230,82 @@ void test_engine_creation_is_dormant() {
     const auto wb = node.write(path_t("/net/fake-client/conn"), bad.view());
     check(!wb.has_value() && wb.error() == status_t::TYPE_MISMATCH,
           "a DIAL SPEC without addr/port refuses TYPE_MISMATCH at the write");
+}
+
+/**
+ * @brief A pass-through source that runs a hook once, on the draw of the birth write's value.
+ *
+ * The hook runs in creation's phase 2, after the link is routable and before the birth state
+ * is written: the window #2353 is about, held open without a sleep. `learn` records what a
+ * liveness value's segment draws, so the test names no allocator layout.
+ */
+class birth_window_source_t final : public tr::mem::block_source_t {
+   public:
+    birth_window_source_t() noexcept : block_source_t("birth_window") {}
+
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (learning_) learned_ = bytes;
+        if (armed_ && bytes == learned_ && armed_.exchange(false)) hook_();
+        return tr::mem::heap_source().try_alloc(bytes, align);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, bytes, align);
+    }
+
+    /** @brief Record the size a 5-byte liveness value's segment draws from this source. */
+    void learn(tr::mem::mem_backend_t& backend) {
+        learning_ = true;
+        (void)tr::view::segment_alloc(backend, 5);
+        learning_ = false;
+    }
+    /** @brief Run @p hook on the next draw of the learned size. */
+    void arm(std::function<void()> hook) {
+        hook_ = std::move(hook);
+        armed_ = true;
+    }
+
+   private:
+    bool learning_ = false;
+    std::size_t learned_ = 0;
+    std::atomic<bool> armed_{false};
+    std::function<void()> hook_;
+};
+
+void test_send_before_birth_write_is_not_hidden() {
+    std::printf("#2353: a send before the birth write does not hide the first state change:\n");
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
+    birth_window_source_t src;
+    graph_t node(src);
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_fake_engine_module(net, script);
+    const script_guard_t guard{script};  // bounded teardown even on a failing test
+    script.script(true);
+    src.learn(node.value_backend());
+
+    bool routable = false;
+    src.arm([&] {
+        tr::net::transport_t* const link = tr::testing::link_of(net, "net/fake-client/a");
+        routable = link != nullptr;
+        if (!routable) return;
+        const std::byte frame[1] = {std::byte{0x00}};
+        link->send(frame);
+        // Give a worker the send started every chance to report before the birth write: its
+        // UP is then the write the birth state would overwrite.
+        {
+            std::unique_lock l(script.m);
+            if (!script.cv.wait_for(l, 300ms, [&] { return script.attempts >= 1; })) return;
+        }
+        (void)await_state(node, "/net/fake-client/a", link_state_t::UP);
+    });
+    const auto w = node.write(path_t("/net/fake-client/conn"), fake_spec("a", 1));
+    check(w.has_value(), "the connection is created");
+    check(routable, "the send ran inside the window, on the routable link");
+    check(dropped_tx(net, "net/fake-client/a") == 1, "the early send is a counted drop");
+    check(await_state(node, "/net/fake-client/a", link_state_t::UP),
+          "the vertex leaves DORMANT and reads UP once the link is up");
+    const std::lock_guard l(script.m);
+    check(script.attempts == 1, "the early send kicked exactly one dial");
 }
 
 void test_op_autowakes_and_dials() {
@@ -1024,6 +1101,7 @@ void test_socket_ref_outlives_engine() {
         engine->set_liveness_publisher([&up, &fired](link_state_t s) {
             if (s == link_state_t::UP && !fired.exchange(true)) up.set_value();
         });
+        engine->born();
         engine->acquire();  // a standing binding: the worker dials and reaches UP
         check(up.get_future().wait_for(10s) == std::future_status::ready, "the engine reached UP");
 
@@ -1060,6 +1138,7 @@ int main() {
                                     "in this build");
     std::printf("== RFC-0014 §4 S5: the link-liveness engine (#492) ==\n");
     test_engine_creation_is_dormant();
+    test_send_before_birth_write_is_not_hidden();
     test_op_autowakes_and_dials();
     test_lone_oneshot_failure_redormants();
     test_loss_at_refcount_zero_redormants();
