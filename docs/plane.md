@@ -78,7 +78,9 @@ Depth: [Reference 02](reference/02-graph-model.md),
 
 ## 2. The operations: read, write, await
 
-There are three operations, on a vertex or on any field of it.
+There are three operations. `read` and `write` work on a vertex or on any field it offers. `await`
+works on a vertex only: an `await` with a `:field` selector answers `tr::schema::not_found`, even on
+a field that reads and writes normally, because a field write wakes no one.
 
 | Operation | Effect | Wire form |
 | --- | --- | --- |
@@ -251,7 +253,8 @@ It costs a 58-byte first message, a 50-byte second message and 25 bytes per fram
 never sends a frame in clear and never falls back to the plain carrier. Protection is per hop, not
 end to end.
 
-The reference implementation ships Noise over UDP. **Noise over WebSocket is planned**
+The reference implementation ships Noise on a host, over UDP. It does not run on ESP-IDF yet
+([#2064](https://github.com/avatarsd-llc/libtracer/issues/2064)). **Noise over WebSocket is planned**
 ([#2296](https://github.com/avatarsd-llc/libtracer/issues/2296),
 [#2297](https://github.com/avatarsd-llc/libtracer/issues/2297)).
 
@@ -273,6 +276,9 @@ The application batches, and the library does not. To batch, the application:
    base and either framed `VALUE` children or one packed block of `n × width` bytes;
 2. swaps it in as the vertex's value;
 3. pushes it with `propagate`, or with the FOLD emission that sends one branch write for a subtree.
+
+A `0x80` record is for a standalone push only, because a branch-write node admits no `0x80` child.
+A folded batch has the same layout in the swept node's single structured `VALUE` (`opt.PL=1`).
 
 The batch is a plain value, so the graph does not know it is one. There is no flush timer, rate
 cap or batch window in the library. The `batch_count` and `batch_window_ns` subscription keys are
@@ -325,7 +331,8 @@ A minimal device is one connection and a few vertices. It must:
 6. decode `FWD` and `FIELD`, reading the opcode as `op & 0x3F` and sending bits 6 and 7 as zero;
 7. answer `read`, `write` and `await` on its own vertices, with `REPLY` and the registered errors;
 8. honour an empty `src` as unacknowledged;
-9. answer `tr::schema::not_found` for any `:field` it does not offer;
+9. answer `tr::schema::not_found` for any `:field` it does not offer, and for every `await` with a
+   `:field` selector, including on fields it does offer;
 10. stop a delivery at its target, never relaying it onward;
 11. give its application a path handle for each repeated address, usable without allocating or
     parsing on the hot path.
@@ -359,6 +366,7 @@ behaviour with no wire bytes has no vector and belongs in your own test suite.
 | Replies and errors | [§Error registry](reference/05-protocol-tlvs.md#error-registry-trconcepterror) | `errors/*`, `fwd/fwd-reply-error`, `fwd/reply-error-bare-ignored` |
 | Unacknowledged write | [annex 05 §Reserved range](reference/05-protocol-tlvs.md#reserved-range-0x0f--0x1f) | missing: [#2731](https://github.com/avatarsd-llc/libtracer/issues/2731) |
 | Unoffered field | [annex 03 §Field-path resolution](reference/03-addressing.md#field-path-resolution) | `settings/removed-knob`, `settings/delivery-mode-not-found` |
+| `await` with a `:field` refused | [annex 05 §`:stats`](reference/05-protocol-tlvs.md#the-seam-census-record--stats) | missing: [#2731](https://github.com/avatarsd-llc/libtracer/issues/2731) |
 | Path handles | [v1 §3.1](spec/v1.md#31-static-path-handle-conformance) | `path/path-sensor-temp` for the bytes; no wire bytes for the API |
 | Delivery stops at the target | [annex 05 §`0x04`](reference/05-protocol-tlvs.md#0x04--subscriber) | no wire bytes |
 
@@ -398,7 +406,7 @@ its required modules. A port supplies:
 | Links | a `transport_t`: send one frame's bytes, deliver inbound frames to a sink |
 | Time | a `now` from your clock, passed to every deadline seam. The library reads no clock. |
 | Concurrency | atomics, plus a guard policy chosen at compile time when more than one thread touches the graph |
-| Noise (optional) | a crypto backend: OpenSSL, libsodium or PSA |
+| Noise (optional, hosts only today) | a crypto backend: OpenSSL, libsodium or PSA |
 
 Packaged ports exist for ESP-IDF and PlatformIO. See the
 [capability matrix](capability-matrix.md) for the current status of each port and core, and the

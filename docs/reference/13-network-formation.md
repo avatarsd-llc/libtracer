@@ -28,7 +28,7 @@ from the same operations.
 None of the following is a fixed role or a privileged node — they are **hats any peer
 wears transiently**. The same peer is a producer on one edge and a consumer on
 another; "orchestrating" means *a peer holding the rights to issue formation writes*;
-"forwarding" means *a peer that has ≥2 transports*. The network has **no central
+"forwarding" means *a peer that has two or more connection vertices*. The network has **no central
 authority**.
 
 | Hat | What it means (transient) |
@@ -399,10 +399,10 @@ The default that pairs with consumer-initiated subscription is **the consumer di
 the producer pushes** (SSE / server-streaming shape) — it also lets a constrained leaf
 dial *out* through NAT. Direction is fixed by the module the connection was created
 under, so it is chosen per connection: a constrained producer with many consumers, or
-NAT on both sides, is served by dialing out to **any peer that has ≥2 transports** (a
+NAT on both sides, is served by dialing out to **any peer that has two or more connection vertices** (a
 forwarding hop, not a "router" role).
 
-**Any node with ≥2 transports forwards** — forwarding is a required capability the
+**Any node with two or more connection vertices forwards** — forwarding is a required capability the
 moment a node has two wires ([07 — Host embedding](07-host-embedding.md)). There is no
 privileged router node, so the network **folds arbitrarily** — elided-CAN leaf →
 full-TLV QUIC backbone → another fold — with the forwarder stateless and uniform across
