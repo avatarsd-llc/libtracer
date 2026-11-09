@@ -50,7 +50,7 @@ ones its carrier would carry without it (reference/23 §1). It owns its carrier,
 | parameter | what | |
 | --- | --- | --- |
 | `B` | the crypto backend | `default_crypto_t` |
-| `Host` | the application's seams (`noise::link_host`) | `resolve_psk(ref, key)`, the key store; `ephemeral(key)`, a fresh random private key per call; `next_counter()`, strictly increasing across attempts |
+| `Host` | the application's seams (`noise::link_host`) | `resolve_psk(ref, key)`, the key store; `ephemeral(key)`, a fresh random private key per call; `next_counter()`, strictly increasing across attempts; optionally `restore_mark` and `persist_mark` (`noise::mark_store`, below) |
 | `Carrier` | the datagram link underneath (`noise::datagram_carrier`) | `send_to(address, iov)`, `inbound_source()`, `peer_address()` |
 
 The PSK is named by reference (`noise_config_t::psk_ref`) and resolved once, when the link is
@@ -106,8 +106,27 @@ replacement, or a session whose peer started fresh becoming current) fires the l
 before any frame of the new session is delivered; a routine rekey fires nothing. A session past
 its limit takes the previous one with it, and so does a fresh peer's session.
 
-Persisting the counter and the mark is [#2075](https://github.com/avatarsd-llc/libtracer/issues/2075), and ESP-IDF is
-[#2076](https://github.com/avatarsd-llc/libtracer/issues/2076).
+**The counter and the mark across reboots.** Both survive a reboot only through the
+application (reference/23 §4). The initiator's `next_counter()` is a wall clock or a monotonic
+counter that survives reboots; a node with neither returns `noise::boot_counter_t::next()`, a
+persisted boot counter (one write per boot) as the high half and an attempt counter in RAM as the
+low half. The responder's mark stays in RAM unless the host is a `noise::mark_store`, which is a
+compile-time choice: a host that also has `restore_mark(ref)` and `persist_mark(ref, mark)` gets
+the mark restored when a LISTEN link is built and persisted each time it changes. That is one
+write per accepted first message, made after the PSK tag verified and before the answer, so a
+peer without the PSK causes none. A host without them pays nothing. Such a link keeps its
+`psk_ref`, so the string must outlive it.
+
+| the application wants to | it calls | the mark |
+| --- | --- | --- |
+| admit a replacement initiator whose counter restarted | `clear_mark()` | 0, persisted; recorded first messages pass the counter check once more each |
+| replace the PSK | `replace_psk(ref)` | 0, persisted under the new name; first messages under the old PSK fail the PSK check |
+
+With the mark in RAM only, a responder reboot lets each recorded first message through at most
+once, in increasing counter order; with it persisted, none. Sessions, and a handshake in flight,
+keep the keys they began with across `replace_psk`.
+
+ESP-IDF is [#2076](https://github.com/avatarsd-llc/libtracer/issues/2076).
 
 ## Choosing a backend
 
@@ -290,6 +309,15 @@ reproduce it too, as the RFC's §15 Q6 ruling requires: `noiseprotocol` (Python)
 
 ```{doxygenconcept} tr::net::noise::datagram_carrier
 :project: libtracer
+```
+
+```{doxygenconcept} tr::net::noise::mark_store
+:project: libtracer
+```
+
+```{doxygenstruct} tr::net::noise::boot_counter_t
+:project: libtracer
+:members:
 ```
 
 ```{doxygenenum} tr::net::noise::counter_t

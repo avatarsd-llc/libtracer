@@ -57,9 +57,18 @@
  *
  * @section noise_link_scope What this slice leaves out
  *
- * Persisting the counter and the mark is #2075. A link that reaches its attempt deadline
- * returns to `DORMANT` until the next demand, as an unheld link does (reference/23 §7). One
- * peer per link (§8).
+ * A link that reaches its attempt deadline returns to `DORMANT` until the next demand, as an
+ * unheld link does (reference/23 §7). One peer per link (§8).
+ *
+ * @section noise_link_mark The counter and the mark across reboots
+ *
+ * Both survive a reboot only through the application (reference/23 §4). The initiator's
+ * `next_counter()` is a wall clock or a monotonic counter that survives reboots, or else a
+ * @ref tr::net::noise::boot_counter_t over a boot counter the application persists. The
+ * responder's mark lives in RAM unless `Host` is a @ref tr::net::noise::mark_store, a
+ * compile-time choice: the link then restores the mark when it is built and persists it at
+ * each change. @ref tr::net::noise_link_t::clear_mark clears it, and
+ * @ref tr::net::noise_link_t::replace_psk resets it to 0 with the new key.
  *
  * @section noise_link_rekey Rekey and the session boundary
  *
@@ -85,6 +94,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include "libtracer/grammar.hpp"
@@ -119,6 +129,49 @@ concept link_host = requires(H& h, std::string_view ref, key32_t& key) {
     { h.resolve_psk(ref, key) } -> std::same_as<bool>;
     { h.ephemeral(key) } -> std::same_as<bool>;
     { h.next_counter() } -> std::same_as<std::uint64_t>;
+};
+
+/**
+ * @brief A host that keeps a responder's mark across reboots (reference/23 §4): two more
+ *        seams, detected at compile time. A host without them keeps the mark in RAM only.
+ *
+ *  - `restore_mark(ref)` answers the mark last persisted for the PSK named `ref`, 0 when none.
+ *    Called once, when a LISTEN link is built.
+ *  - `persist_mark(ref, mark)` stores it. Called each time the mark changes: once per accepted
+ *    first message (after its PSK tag verified, before the answer is sent, so a peer without the
+ *    PSK causes no write), and with 0 on @ref tr::net::noise_link_t::clear_mark and
+ *    @ref tr::net::noise_link_t::replace_psk.
+ *
+ * Both are called under the link's lock. A link of such a host keeps its `psk_ref` view, so
+ * the string must outlive the link. A key store that replaces a key while no link holds it
+ * clears that key's persisted mark too: the mark is only meaningful under the PSK it was
+ * accepted with.
+ */
+template <class H>
+concept mark_store = requires(H& h, std::string_view ref, std::uint64_t mark) {
+    { h.restore_mark(ref) } -> std::same_as<std::uint64_t>;
+    h.persist_mark(ref, mark);
+};
+
+/**
+ * @brief An initiator counter for a node with no clock that survives its reboots
+ *        (reference/23 §4): a persisted boot counter as the high half and an attempt counter
+ *        in RAM as the low half.
+ *
+ * The application raises @ref boot and persists it once per boot, before the first attempt
+ * (one write per boot), and returns @ref next from its `next_counter()`. Counters then rise
+ * across reboots under one PSK without a write per attempt.
+ */
+struct boot_counter_t {
+    std::uint32_t boot = 0;    /**< @brief This boot's number, persisted by the application. */
+    std::uint32_t attempt = 0; /**< @brief The attempts made this boot. */
+
+    /** @brief The next counter, `boot << 32 | attempt`; 0, which every mark refuses, once this
+     *         boot's 2^32 - 1 attempts are spent. */
+    [[nodiscard]] constexpr std::uint64_t next() noexcept {
+        if (attempt == UINT32_MAX) return 0;
+        return (std::uint64_t{boot} << 32) | ++attempt;
+    }
 };
 
 /**
@@ -241,7 +294,8 @@ struct session_t {
  */
 struct noise_config_t {
     /** @brief The PSK's key-store name, resolved through `Host::resolve_psk` while the link is
-     *         built; borrowed for the constructor only. The key itself is never config. */
+     *         built; borrowed for the constructor only, unless `Host` is a
+     *         @ref tr::net::noise::mark_store. The key itself is never config. */
     std::string_view psk_ref{};
     /** @brief The largest Tracer frame (the universal `max_frame` key): 0 means the carrier's
      *         datagram bound less 25. The link's datagram bound is `max_frame + 25`; over IPv4 a
@@ -288,6 +342,14 @@ struct noise_link_test_door_t;
  */
 template <noise::crypto_backend B, noise::link_host Host, noise::datagram_carrier Carrier>
 class noise_link_t final : public transport_t {
+    static_assert(noise::mark_store<Host> ||
+                      !(
+                          requires(Host& h, std::string_view r) { h.restore_mark(r); } ||
+                          requires(Host& h, std::string_view r, std::uint64_t m) {
+                              h.persist_mark(r, m);
+                          }),
+                  "a host that restores or persists the mark must do both (noise::mark_store)");
+
    public:
     /**
      * @brief Build the link: draw its state from `config.memory.state`, resolve its PSK and
@@ -331,6 +393,10 @@ class noise_link_t final : public transport_t {
         }
         current_ = &st_->slots[0];
         next_ = &st_->slots[1];
+        if constexpr (noise::mark_store<Host>) {
+            ref_ = config.psk_ref;
+            if (role_ == conn_role_t::LISTEN) mark_ = host_.restore_mark(ref_);
+        }
         carrier_->set_receiver(&on_carrier, this);
     }
 
@@ -408,6 +474,43 @@ class noise_link_t final : public transport_t {
     }
 
     /**
+     * @brief Responder: clear the mark to 0 (reference/23 §4), persisting it through a
+     *        @ref tr::net::noise::mark_store host. A no-op on DIAL.
+     *
+     * This admits an initiator that restarted its counter, such as a replacement for one that
+     * lost it. It also lets every first message recorded under this PSK through the counter
+     * check again, each at most once and in increasing counter order. An initiator whose
+     * counter is below one used earlier under this PSK is recovered by @ref replace_psk.
+     */
+    void clear_mark() {
+        const std::lock_guard lock(mu_);
+        set_mark(0);
+    }
+
+    /**
+     * @brief Replace the link's PSK with the key named @p ref, and on LISTEN reset the mark
+     *        to 0 (reference/23 §4: a counter is only meaningful under its PSK).
+     *
+     * The next first message is written or checked under the new key. Sessions, and a
+     * handshake in flight, keep the keys they began with. False, with nothing changed, when
+     * the link is inert or the key store has no such key.
+     * @param ref Borrowed for the call only, unless `Host` is a @ref tr::net::noise::mark_store.
+     */
+    bool replace_psk(std::string_view ref) {
+        const std::lock_guard lock(mu_);
+        if (st_ == nullptr) return false;
+        noise::key32_t psk{};
+        noise::symmetric_state_t<B> keyed{};
+        const bool resolved = host_.resolve_psk(ref, psk) && noise::psk_state(psk, keyed);
+        noise::wipe(psk);
+        if (!resolved) return false;
+        st_->keyed = keyed;
+        if constexpr (noise::mark_store<Host>) ref_ = ref;
+        set_mark(0);
+        return true;
+    }
+
+    /**
      * @brief Run every deadline that @p now has passed, and answer the next (reference/23 §7).
      *
      * Retransmits a first message, sends an empty confirmation on a session still
@@ -479,6 +582,9 @@ class noise_link_t final : public transport_t {
    private:
     /** @brief What a transport datagram adds to its frame: type, nonce and tag. */
     static constexpr std::size_t kOverhead = noise::kTransportOverhead;
+
+    /** @brief The PSK name member's type when `Host` keeps no mark: nothing. */
+    struct no_ref_t {};
 
     /** @brief Where the handshake slot stands. */
     enum class stage_t : std::uint8_t {
@@ -571,7 +677,7 @@ class noise_link_t final : public transport_t {
         const auto payload = hs.read_first(datagram);
         if (!payload) return refuse(payload.error());
         if (payload->counter <= mark_) return bump(noise::counter_t::HANDSHAKE_REPLAYED);
-        mark_ = payload->counter;  // whether or not this handshake completes (§4 step 3)
+        set_mark(payload->counter);  // whether or not this handshake completes (§4 step 3)
         answer(hs, datagram, source, (payload->flags & 1U) != 0);
     }
 
@@ -885,6 +991,13 @@ class noise_link_t final : public transport_t {
     /** @brief Whether the armed deadline @p t has passed. */
     [[nodiscard]] bool due(std::uint64_t t) const noexcept { return t != 0 && now_ >= t; }
 
+    /** @brief Responder: set the mark and persist it through a mark store; the lock is held. */
+    void set_mark(std::uint64_t m) {
+        if (role_ != conn_role_t::LISTEN) return;
+        mark_ = m;
+        if constexpr (noise::mark_store<Host>) host_.persist_mark(ref_, m);
+    }
+
     /** @brief Step counter @p c; the lock is held. */
     void bump(noise::counter_t c) noexcept { ++counts_[std::size_t(c)]; }
 
@@ -935,11 +1048,14 @@ class noise_link_t final : public transport_t {
     noise::session_t<B>* current_ = nullptr; /**< @brief The current session's slot. */
     noise::session_t<B>* next_ = nullptr;    /**< @brief The unacknowledged or pending slot. */
     stage_t stage_ = stage_t::IDLE;          /**< @brief The handshake slot's stage. */
-    bool peer_fresh_ = false;       /**< @brief The handshake's peer started with no session. */
-    bool lost_ = false;             /**< @brief DIAL: a session was lost, none replaced it yet. */
-    bool boundary_ = false;         /**< @brief A session boundary awaits its notifier. */
-    bool dated_ = false;            /**< @brief `born_` holds the current session's first sweep. */
-    std::uint64_t mark_ = 0;        /**< @brief Responder: the highest counter accepted (§4). */
+    bool peer_fresh_ = false; /**< @brief The handshake's peer started with no session. */
+    bool lost_ = false;       /**< @brief DIAL: a session was lost, none replaced it yet. */
+    bool boundary_ = false;   /**< @brief A session boundary awaits its notifier. */
+    bool dated_ = false;      /**< @brief `born_` holds the current session's first sweep. */
+    std::uint64_t mark_ = 0;  /**< @brief Responder: the highest counter accepted (§4). */
+    /** @brief The PSK's key-store name, kept only for a mark store's seams. */
+    [[no_unique_address]] std::conditional_t<noise::mark_store<Host>, std::string_view, no_ref_t>
+        ref_{};
     std::uint64_t peer_ = 0;        /**< @brief Initiator: the configured peer. */
     std::uint64_t now_ = 0;         /**< @brief The last `now` @ref sweep was given. */
     std::uint64_t retry_step_ = 0;  /**< @brief The current retry interval. */

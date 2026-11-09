@@ -17,12 +17,15 @@
  *   - retransmission, the attempt deadline and the pending expiry run only on the
  *     application's `now`;
  *   - the session state is one block from the link's own `memory.state`;
- *   - the `noise_*` nouns are readable as `:stats.link.<child>`.
+ *   - the `noise_*` nouns are readable as `:stats.link.<child>`;
+ *   - the mark survives a responder reboot only through a mark store, and a replaced
+ *     initiator is admitted after the mark is cleared or the PSK replaced (#2075).
  *
  * The allocation rows count every `malloc` family call in the process (glibc only, and not
  * under a sanitizer, which owns `malloc` itself); elsewhere they are skipped, not passed.
  */
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -1134,6 +1137,202 @@ void wrong_key_over_udp() {
           "  the initiator received nothing at all");
 }
 
+/** @brief A host that persists the responder's mark to @ref disk (#2075). */
+struct store_host_t : test_host_t {
+    std::uint64_t* disk = nullptr; /**< @brief The persisted mark: outlives any one link. */
+    std::size_t writes = 0;        /**< @brief How many times the mark was persisted. */
+    std::string ref{};             /**< @brief The PSK reference of the last call. */
+
+    /** @brief The mark last persisted. */
+    std::uint64_t restore_mark(std::string_view r) {
+        ref = r;
+        return *disk;
+    }
+    /** @brief Persist the mark. */
+    void persist_mark(std::string_view r, std::uint64_t m) {
+        ref = r;
+        *disk = m;
+        ++writes;
+    }
+};
+static_assert(noise::mark_store<store_host_t> && !noise::mark_store<test_host_t>);
+
+/** @brief A Noise link whose responder persists its mark. */
+using store_link_t = tr::net::noise_link_t<noise::default_crypto_t, store_host_t, mem_carrier_t>;
+
+static_assert(noise::boot_counter_t{.boot = 2}.next() == (std::uint64_t{2} << 32 | 1));
+static_assert(noise::boot_counter_t{.boot = 2, .attempt = UINT32_MAX}.next() == 0,
+              "a boot that spent its attempts hands out 0, which every mark refuses");
+
+/** @brief A first message with counter @p counter under @p psk, as an initiator on side 0 of
+ *         @p w writes it; taken off the wire, not delivered. */
+std::vector<std::byte> first_message(mem_wire_t& w, std::uint64_t counter,
+                                     const key32_t& psk = kPsk) {
+    test_host_t h;
+    h.psk = psk;
+    h.counter_fixed = counter;
+    mem_link_t a(conn_role_t::DIAL, h, mem_config(), w, 0);
+    a.dial();
+    std::vector<std::byte> out = w.inbox[1].back().bytes;
+    w.inbox[1].clear();
+    return out;
+}
+
+/** @brief How many datagrams side 1 (the responder) has sent on @p w. */
+std::size_t answers(const mem_wire_t& w) {
+    return std::size_t(
+        std::count_if(w.log.begin(), w.log.end(), [](const datagram_t& d) { return d.from == 1; }));
+}
+
+/**
+ * @brief A responder reboot (reference/23 §4, §12.5): with the mark in RAM only, each recorded
+ *        first message is admitted at most once; with the mark persisted, none is.
+ */
+void mark_across_a_responder_reboot() {
+    std::printf("the mark across a responder reboot:\n");
+    mem_wire_t w;
+    std::vector<std::vector<std::byte>> recorded;
+    for (std::uint64_t c = 1; c <= 3; ++c) recorded.push_back(first_message(w, c));
+    const auto replay_all = [&recorded](auto& link) {
+        for (const auto& r : recorded) link.carrier().inject(r, kAddrA);
+    };
+    {
+        test_host_t h;
+        mem_link_t live(conn_role_t::LISTEN, h, mem_config(), w, 1);
+        replay_all(live);
+        check(answers(w) == 3, "  (live: three attempts are answered, the mark is 3)");
+    }
+    std::size_t before = answers(w);
+    {
+        test_host_t h;
+        mem_link_t rebooted(conn_role_t::LISTEN, h, mem_config(), w, 1);
+        replay_all(rebooted);
+        replay_all(rebooted);
+        // The newest one is still behind the pending session, so its copy is a retransmit,
+        // answered with the stored second message: no second handshake (§4 step 1).
+        check(answers(w) - before == 4 && rebooted.count(counter_t::RETRANSMITS) == 1 &&
+                  rebooted.count(counter_t::HANDSHAKE_REPLAYED) == 2,
+              "  mark in RAM: after a reboot each recorded first message is admitted once");
+    }
+    std::uint64_t disk = 0;
+    {
+        store_host_t h;
+        h.disk = &disk;
+        store_link_t live(conn_role_t::LISTEN, h, mem_config(), w, 1);
+        check(h.ref == "link-psk", "  a mark store is asked for the mark of the link's PSK");
+        replay_all(live);
+        check(disk == 3 && h.writes == 3, "  persisted at each rise: one write per first message");
+        key32_t wrong = kPsk;
+        wrong[0] ^= std::byte{1};
+        live.carrier().inject(first_message(w, 9, wrong), kAddrA);
+        live.carrier().inject(recorded[0], kAddrA);
+        check(h.writes == 3, "  a wrong PSK or a replay writes nothing");
+    }
+    before = answers(w);
+    {
+        store_host_t h;
+        h.disk = &disk;
+        store_link_t rebooted(conn_role_t::LISTEN, h, mem_config(), w, 1);
+        replay_all(rebooted);
+        check(answers(w) == before && rebooted.count(counter_t::HANDSHAKE_REPLAYED) == 3 &&
+                  h.writes == 0,
+              "  mark persisted: after a reboot no recorded first message is admitted");
+    }
+}
+
+/**
+ * @brief A replaced initiator that shares the PSK and restarted its counter: refused, then
+ *        admitted once the mark is cleared or the PSK replaced. One that counts boots needs
+ *        neither (reference/23 §4).
+ */
+void replaced_initiator_is_admitted() {
+    std::printf("a replaced initiator is not locked out:\n");
+    std::uint64_t disk = 0;
+    mem_wire_t w;
+    store_host_t hb;
+    hb.disk = &disk;
+    store_link_t b(conn_role_t::LISTEN, hb, mem_config(), w, 1);
+    sink_t sb;
+    sb.then = [&b](std::span<const std::byte> f) { b.send(f); };
+    b.set_receiver(sb);
+    const auto settle = [&](mem_link_t& a) {
+        while (b.carrier().pump() + a.carrier().pump() != 0) {
+        }
+    };
+    const auto request = [&](mem_link_t& a) {
+        a.send(std::span<const std::byte>(value_frame("ping")));
+        settle(a);
+        return a.state() == link_state_t::UP;
+    };
+    const auto fresh_start = [&w] {
+        w.inbox[0].clear();
+        w.inbox[1].clear();
+    };
+    {
+        test_host_t ha;
+        ha.counter = 1000;
+        mem_link_t a(conn_role_t::DIAL, ha, mem_config(), w, 0);
+        a.dial();
+        settle(a);
+        check(request(a) && disk == 1001, "  (the old initiator was up at counter 1001)");
+    }
+    const std::vector<std::byte> old_first = w.log[0].bytes;
+    fresh_start();
+    {
+        test_host_t ha;
+        mem_link_t a(conn_role_t::DIAL, ha, mem_config(), w, 0);
+        (void)a.sweep(0, 0);
+        a.dial();
+        settle(a);
+        check(b.count(counter_t::HANDSHAKE_REPLAYED) == 1 && !a.link_up(),
+              "  its replacement restarts at counter 1 and is refused");
+        b.clear_mark();
+        check(disk == 0, "  clear_mark persists 0");
+        (void)a.sweep(10, 0);  // the retransmitted first message, counter 1
+        settle(a);
+        check(request(a), "  after the clear, the replacement's next first message is admitted");
+    }
+    fresh_start();
+    const key32_t next_psk =
+        key("a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf");
+    hb.psk = next_psk;
+    hb.name = "next-psk";
+    check(b.replace_psk("next-psk") && disk == 0 && hb.ref == "next-psk",
+          "  replace_psk resets the mark to 0, persisted under the new PSK's name");
+    check(!b.replace_psk("no-such-psk") && hb.ref == "next-psk",
+          "  an unknown PSK changes nothing");
+    {
+        test_host_t ha;
+        ha.psk = next_psk;
+        ha.name = "next-psk";
+        noise_config_t ca = mem_config();
+        ca.psk_ref = "next-psk";
+        mem_link_t a(conn_role_t::DIAL, ha, ca, w, 0);
+        a.dial();
+        settle(a);
+        check(request(a) && disk == 1,
+              "  a new initiator at counter 1 under the new PSK is admitted");
+        const std::size_t failed = b.count(counter_t::HANDSHAKE_FAILED);
+        b.carrier().inject(old_first, kAddrA);
+        check(b.count(counter_t::HANDSHAKE_FAILED) == failed + 1,
+              "  and a first message recorded under the old PSK fails the PSK check");
+    }
+    for (std::uint32_t boot = 1; boot <= 2; ++boot) {
+        fresh_start();
+        test_host_t ha;
+        ha.psk = next_psk;
+        ha.name = "next-psk";
+        noise::boot_counter_t bc{.boot = boot};
+        ha.counter_fixed = bc.next();
+        noise_config_t ca = mem_config();
+        ca.psk_ref = "next-psk";
+        mem_link_t a(conn_role_t::DIAL, ha, ca, w, 0);
+        a.dial();
+        settle(a);
+        check(request(a), boot == 1 ? "  an initiator that counts boots is admitted"
+                                    : "  ... and again after its reboot, with no action");
+    }
+}
 }  // namespace
 
 int main() {
@@ -1151,6 +1350,8 @@ int main() {
     responder_lost_the_session();
     generation_rule();
     state_from_the_links_own_source();
+    mark_across_a_responder_reboot();
+    replaced_initiator_is_admitted();
     two_nodes_over_udp();
     wrong_key_over_udp();
     return tr::testing::summary("noise_link");
