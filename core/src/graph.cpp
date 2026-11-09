@@ -183,14 +183,14 @@ class remote_frame_t {
  * @brief One vertex's own path SEGMENT text — its packed key record minus the length byte.
  *
  * The seam RFC-0018 opened, in one place. A vertex-map key record used to BE a `NAME` TLV, so
- * every `:children` / composed-read member borrowed `name().bytes()` verbatim as its POINT
+ * every `:children` / composed-read member borrowed `name()` verbatim as its POINT
  * body. A packed record is `[u8 len][text]` and those members are POINT composites, not
  * `PATH` bodies — the RFC removes `NAME` from `PATH` bodies only — so the text is what the
  * member carries and the `NAME` framing is emitted around it. Empty for the root, whose
  * record is empty.
  */
 [[nodiscard]] std::span<const std::byte> child_segment(const vertex_t& v) noexcept {
-    const std::span<const std::byte> rec = v.name().bytes();
+    const std::span<const std::byte> rec = v.name();
     return rec.empty() ? rec : rec.subspan(1);
 }
 
@@ -559,7 +559,7 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
     // registrable address, so no bound path ever names slot 0 — it is in the vector because
     // leaving a hole there would make "slot i is the i-th vertex_t allocated" false.
     vertex_slots_.push_back(root());
-    note_owner_slot(*root());
+    root()->slot_memo_ = 0;
     // The one built-in creation-catalog type (#82, ADR-0017): `stored_value` makes a
     // plain last-writer-wins vertex at the composed child key. Its optional SPEC
     // `config` SETTINGS is ignored for now (a stored-value has no instantiation params
@@ -619,7 +619,7 @@ result_t<vertex_handle_t> graph_t::register_vertex_key(std::span<const std::byte
                                                        handlers_t handlers, vertex_policy_t policy,
                                                        std::span<const std::byte> schema_catalog) {
     // The key is BORROWED for the call (#1781): the descent below never retains the argument —
-    // every record it keeps is copied into the vertex's own `path_key_t` — so a caller holding
+    // every record it keeps is copied into the graph's name block (#2672) — so a caller holding
     // a `std::vector`, a core array or a frame's bytes passes them as they are (#1139).
     return register_vertex_key_span(key, role, handlers, schema_catalog, std::move(policy));
 }
@@ -660,31 +660,12 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
             }
             // A placeholder is a plain STORED_VALUE with no handlers, so `adopt_identity`'s
             // early return fires and it allocates NO extension block. Every failable step —
-            // the index slot, the vertex, its parent's child entry — runs before anything is
-            // linked in, so a refused creation (#1778) leaves the tree and the index as they
-            // were. Placeholders made by EARLIER levels of this descent stay: they are
+            // the name, the index slot, the vertex, its parent's child entry — runs before
+            // anything is linked in, so a refused creation (#1778) leaves the tree and the index
+            // as they were. Placeholders made by EARLIER levels of this descent stay: they are
             // invisible, and the next registration down this path reuses them.
-            vertex_t* const fresh = make_placeholder(record);
-            if (fresh == nullptr) return std::unexpected(status_t::BACKPRESSURE);
-            // Subtree-subscription init (RFC-0005): a vertex born under a subscribed
-            // ancestor starts with the ancestor-listener count already summed — O(1) from
-            // the parent's maintained counters (under the same unique lock the
-            // note_subscriber_* walks exclude, so the sum and a concurrent subscribe walk
-            // never double-count); the write path's is-anyone-listening check stays a
-            // single relaxed load.
-            fresh->init_listeners_above(node->listeners_above() + node->own_subs());
-            child = node->add_child(fresh, *tables_);
-            if (child == nullptr) {
-                mem::drop_in(*tables_, fresh);
-                return std::unexpected(status_t::BACKPRESSURE);
-            }
-            // One slot per vertex_t ALLOCATION (RFC-0024 §6.4), appended under the same
-            // unique map-lock hold that linked it in, so slot order is allocation order.
-            // Placeholders take a slot too: they are ordinary vertex_t objects that a later
-            // registration fills IN PLACE, so skipping them here would hand the same object
-            // two different slots depending on which side of its fill() the mint happened.
-            vertex_slots_.push_back(child);
-            note_owner_slot(*child);
+            child = make_placeholder(*node, record);
+            if (child == nullptr) return std::unexpected(status_t::BACKPRESSURE);
         }
         node = child;
         i = e;
@@ -979,14 +960,8 @@ result_t<vertex_handle_t> graph_t::register_session_anchor(std::string_view id) 
         // for `max_peers` distinct ids, so anchors are bounded by the accept policy and not
         // by how often clients reconnect (ADR-0044 §Amendment's measurement).
         // Failable steps first, as in the registration descent (#1778).
-        vertex_t* const fresh = make_placeholder(mem::as_span(rec));
-        node = fresh != nullptr ? anchor_root()->add_child(fresh, *tables_) : nullptr;
-        if (node == nullptr) {
-            mem::drop_in(*tables_, fresh);
-            return std::unexpected(status_t::BACKPRESSURE);
-        }
-        vertex_slots_.push_back(node);
-        note_owner_slot(*node);
+        node = make_placeholder(*anchor_root(), mem::as_span(rec));
+        if (node == nullptr) return std::unexpected(status_t::BACKPRESSURE);
     }
     // Live already ⇒ the caller is telling us about a session that never left. Refuse rather
     // than re-fill: a second fill() would NOT bump the generation (only retirement does), so
@@ -1018,7 +993,7 @@ std::optional<graph_t::session_anchor_route_t> graph_t::session_anchor_route(
     // `session_anchor_id`). Both `:` and `/` are characters `path::valid_segment` forbids,
     // so the leading-`:` test alone separates every anchor from every addressable vertex —
     // no parent walk, no lock (the key record is immutable for the vertex's life).
-    const std::span<const std::byte> rec = v->name().bytes();
+    const std::span<const std::byte> rec = v->name();
     if (rec.size() <= 1) return std::nullopt;  // length byte + at least ":m/p"
     const std::string_view id{reinterpret_cast<const char*>(rec.data()) + 1, rec.size() - 1};
     if (id.size() < 4 || id.front() != ':') return std::nullopt;
@@ -1038,25 +1013,40 @@ std::size_t graph_t::session_anchor_slots() const noexcept {
     return n;
 }
 
-vertex_t* graph_t::make_placeholder(std::span<const std::byte> record) noexcept {
-    // The name first, from the same injected source (#1991): a record past the key's inline
-    // bytes was the one global-heap block a registration took. A placeholder has no handlers,
-    // so `adopt_identity` allocates no extension block.
-    result_t<path_key_t> name = path_key_t::try_make(record, *tables_);
-    return name && vertex_slots_.reserve_next()
-               ? mem::make_in<vertex_t>(*tables_, role_t::STORED_VALUE, std::move(*name),
-                                        handlers_t{}, *tables_)
-               : nullptr;
-}
-
-void graph_t::note_owner_slot(vertex_t& v) noexcept {
-    // The caller has just appended v, under the unique map lock, so the entry is the last
-    // one and the index is final. A u32 is the element field's own width (RFC-0024 §6.4);
-    // a graph that somehow held more slots than that could not mint for them anyway, and
-    // the memo is re-validated on read, so a truncated stamp degrades to the scan.
-    const std::size_t index = vertex_slots_.size() - 1;
-    if (index >= path_key_t::kNoOwnerSlot) return;
-    v.name_.owner_slot_ = static_cast<std::uint32_t>(index);
+vertex_t* graph_t::make_placeholder(vertex_t& parent, std::span<const std::byte> record) noexcept {
+    // The name first, from the same injected source (#1991, #2672). A placeholder has no
+    // handlers, so `adopt_identity` allocates no extension block.
+    const std::byte* const name = names_.try_copy(record);
+    vertex_t* const fresh =
+        name != nullptr && vertex_slots_.reserve_next()
+            ? mem::make_in<vertex_t>(*tables_, role_t::STORED_VALUE, std::span{name, record.size()},
+                                     handlers_t{}, *tables_)
+            : nullptr;
+    if (fresh != nullptr) {
+        // The slot this vertex is about to take, stamped BEFORE the link publishes it, so no
+        // reader sees the word written. A graph past the memo's 23 bits leaves the rest to
+        // `vertex_slot`'s scan.
+        if (vertex_slots_.size() < vertex_t::kNoSlotMemo)
+            fresh->slot_memo_ = static_cast<std::uint32_t>(vertex_slots_.size());
+        // Subtree-subscription init (RFC-0005): a vertex born under a subscribed ancestor
+        // starts with the ancestor-listener count already summed — O(1) from the parent's
+        // maintained counters (under the same unique lock the note_subscriber_* walks exclude,
+        // so the sum and a concurrent subscribe walk never double-count); the write path's
+        // is-anyone-listening check stays a single relaxed load.
+        fresh->init_listeners_above(parent.listeners_above() + parent.own_subs());
+        if (parent.add_child(fresh, *tables_) != nullptr) {
+            // One slot per vertex_t ALLOCATION (RFC-0024 §6.4), appended under the same
+            // unique map-lock hold that linked it in, so slot order is allocation order.
+            // Placeholders take a slot too: they are ordinary vertex_t objects that a later
+            // registration fills IN PLACE, so skipping them here would hand the same object
+            // two different slots depending on which side of its fill() the mint happened.
+            vertex_slots_.push_back(fresh);
+            return fresh;
+        }
+        mem::drop_in(*tables_, fresh);
+    }
+    if (name != nullptr) names_.give_back(name, record.size());
+    return nullptr;
 }
 
 std::optional<vertex_slot_t> graph_t::vertex_slot(vertex_handle_t vh) const noexcept {
@@ -1086,8 +1076,8 @@ std::optional<vertex_slot_t> graph_t::vertex_slot(vertex_handle_t vh) const noex
     // 10^3 resident vertices and 410 us at 10^6 (#1485/#1496) — held, all of it, under the
     // shared map lock that every reader queues behind. Route formation over M bindings was
     // O(M x N) for it; at M = N = 10^6 that is ~200 s of pure scan.
-    const std::uint32_t memo = v->name_.owner_slot_;
-    if (memo != path_key_t::kNoOwnerSlot && memo < vertex_slots_.size() && vertex_slots_[memo] == v)
+    const std::uint32_t memo = v->slot_memo_;
+    if (memo != vertex_t::kNoSlotMemo && memo < vertex_slots_.size() && vertex_slots_[memo] == v)
         return vertex_slot_t{.index = memo, .generation = gen};
     for (std::size_t i = 0; i < vertex_slots_.size(); ++i) {
         if (vertex_slots_[i] == v)
@@ -1656,7 +1646,7 @@ bool graph_t::try_build_key(const vertex_t* v, mem::bytes_t& out) noexcept {
     if (!out.resize_for_overwrite(total)) return false;
     std::size_t w = total;
     for (const vertex_t* n = v; n->parent() != nullptr; n = n->parent()) {
-        const std::span<const std::byte> rec = n->name().bytes();
+        const std::span<const std::byte> rec = n->name();
         w -= rec.size();
         std::memcpy(out.data() + w, rec.data(), rec.size());
     }
@@ -2755,7 +2745,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     // vertex (the written tree is rooted AT `v`); a mismatch is an addressing error, not a
     // shape error, and it outranks the value-free no-op below.
     if (!std::ranges::equal(a[wire::tlv_arena_t::first_child(0)].body,
-                            key_view_t{v->name().bytes()}.last_segment()))
+                            key_view_t{v->name()}.last_segment()))
         return std::unexpected(status_t::INVALID_PATH);
     if (!*parsed) return {};  // a value-free branch is a no-op write
     // Tag the root ONCE: it lands at `v` itself (already WRITE-gated by write_impl), and its

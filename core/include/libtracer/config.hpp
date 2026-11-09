@@ -346,7 +346,9 @@ struct default_config_t {
      * won after #380 §1 were invisible to the build and free to be spent again by anyone.
      * Pinned to the measurement, every byte reclaimed is kept by construction.
      *
-     * History, newest first: 80 (#2655 — the write sequence is deleted: its 4 B and the 4 B of
+     * History, newest first: 72 (#2672 — the 24 B inline name key became an 8 B pointer into the
+     * graph's name block plus one word packing its length and the slot memo: 12 B saved, 8 B
+     * of it after alignment), 80 (#2655 — the write sequence is deleted: its 4 B and the 4 B of
      * tail padding it left; every CI preset agrees), 88 unchanged by #1621 (the 32-bit write
      * sequence frees 4 B that the member order's tail padding absorbs on a 64-bit host), 88
      * (RFC-0028 slice 3 — the LKV slot is one `value_t*` word, where the `std::shared_ptr<const
@@ -364,14 +366,18 @@ struct default_config_t {
      * make a build pass. LOWERING one is the routine half: a change that shrinks `vertex_t`
      * lowers the number in the same commit, or the gain is handed back to the next author.
      */
-    static constexpr std::size_t kMaxVertexBytes64 = 80;
+    static constexpr std::size_t kMaxVertexBytes64 = 72;
 
     /**
      * @brief The RAM-diet RATCHET on `sizeof(vertex_t)`, 32-bit (MCU) targets.
      *
      * Pointer-halved, and pinned to the measurement on the same terms as
-     * @ref kMaxVertexBytes64 — measured 60 B on rv32 (`-Os -fno-exceptions -fno-rtti`,
+     * @ref kMaxVertexBytes64 — measured 44 B on rv32 (`-Os -fno-exceptions -fno-rtti`,
      * `rv32imac_zicsr_zifencei`/`ilp32`; `rv32imc` agrees).
+     *
+     * Lowered 60 -> 44 by #2672: the 24 B inline name key (16 B buffer, length, slot memo)
+     * became a 4 B pointer into the graph's name block plus one word holding the length and
+     * the slot memo.
      *
      * Lowered 64 -> 60 by #2655: the write sequence is deleted (await wakes by unlinking its
      * waiter), taking its 4 B with it.
@@ -390,7 +396,7 @@ struct default_config_t {
      * struct bytes on 32-bit but deletes a ~32 B heap block per named vertex — and on this
      * target the heap is what is actually scarce.
      */
-    static constexpr std::size_t kMaxVertexBytes32 = 60;
+    static constexpr std::size_t kMaxVertexBytes32 = 44;
 
     /**
      * @brief The copy-or-share hint a vertex that declares none answers (RFC-0022 Amendment 3,
