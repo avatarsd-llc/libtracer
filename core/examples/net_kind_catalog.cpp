@@ -88,6 +88,7 @@ class demo_link_t final : public tr::net::transport_t {
         (void)frame;
         ++sent;
     }
+    void send(std::span<const std::span<const std::byte>>) override { ++sent; }
 };
 
 }  // namespace

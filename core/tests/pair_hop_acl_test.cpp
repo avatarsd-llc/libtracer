@@ -136,6 +136,7 @@ bytes_t b_write(std::span<const std::byte> dst) {
 struct recorder_t : tr::net::transport_t {
     std::size_t n = 0; /**< @brief Frames sent through this link. */
     void send(std::span<const std::byte>) override { ++n; }
+    void send(std::span<const std::span<const std::byte>>) override { ++n; }
 };
 
 /**
@@ -145,6 +146,7 @@ struct recorder_t : tr::net::transport_t {
 struct fake_bus_t final : tr::net::transport_t, tr::net::bus_link_t {
     /** @brief Undirected sends are not part of this facet's contract; drop. */
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
     tr::net::bus_link_t* bus() override { return this; }
     void enumerate_peers(const peer_visitor_t& visit) const override {
         for (const std::string& name : names_) visit(name);

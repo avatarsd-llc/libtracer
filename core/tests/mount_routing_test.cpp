@@ -326,6 +326,10 @@ void test_short_dst_is_not_forwardable() {
 struct recording_link_t : tr::net::transport_t {
     std::vector<std::vector<std::byte>> sent;
     void send(std::span<const std::byte> f) override { sent.emplace_back(f.begin(), f.end()); }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::vector<std::byte>& f = sent.emplace_back();
+        for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
+    }
 };
 
 /**

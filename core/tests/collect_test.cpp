@@ -231,6 +231,7 @@ void test_park_is_keyed_on_handler_presence_not_role() {
 class p2p_link_t : public tr::net::transport_t {
    public:
     void send(std::span<const std::byte> frame) override { (void)frame; }
+    void send(std::span<const std::span<const std::byte>>) override {}
 };
 
 /**
@@ -243,6 +244,7 @@ class p2p_link_t : public tr::net::transport_t {
 class bus_capable_link_t : public tr::net::transport_t, public bus_link_t {
    public:
     void send(std::span<const std::byte> frame) override { (void)frame; }
+    void send(std::span<const std::span<const std::byte>>) override {}
     [[nodiscard]] bus_link_t* bus() override { return this; }
 
     void enumerate_peers(const peer_visitor_t& visit) const override { visit("p0"); }

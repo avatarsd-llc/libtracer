@@ -205,6 +205,12 @@ class fake_link_t : public transport_t {
         const std::lock_guard lock(m_);
         sent_.emplace_back(frame.begin(), frame.end());
     }
+    /** @brief Record one outbound frame, gathered. */
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        const std::lock_guard lock(m_);
+        std::vector<std::byte>& f = sent_.emplace_back();
+        for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
+    }
     /** @brief Poke one inbound frame into the router-installed receiver. */
     void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
     /** @brief Simulate the transport observing its one connection dead. */
@@ -241,6 +247,12 @@ class fake_bus_t : public transport_t, public bus_link_t {
             const std::lock_guard lock(m_);
             sent_.emplace_back(frame.begin(), frame.end());
         }
+        /** @brief Record one outbound frame to this peer, gathered. */
+        void send(std::span<const std::span<const std::byte>> iov) override {
+            const std::lock_guard lock(m_);
+            std::vector<std::byte>& f = sent_.emplace_back();
+            for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
+        }
         /** @brief The recorded send count. */
         std::size_t count() {
             const std::lock_guard lock(m_);
@@ -259,6 +271,7 @@ class fake_bus_t : public transport_t, public bus_link_t {
 
     /** @brief Undirected sends are not part of this facet's contract; drop. */
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
     /** @brief Expose the bus facet, like every multi-peer link. */
     bus_link_t* bus() override { return this; }
     /** @brief Visit the peers that ever appeared (test-static census). */
@@ -346,6 +359,14 @@ class pipe_link_t : public transport_t {
         ++sent_;
         log_.emplace_back(frame.begin(), frame.end());
         if (peer_ != nullptr) peer_->inject(frame);
+    }
+    /** @brief Count, record and forward one gathered outbound frame into the twin node. */
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::vector<std::byte> f;
+        for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
+        ++sent_;
+        log_.push_back(f);
+        if (peer_ != nullptr) peer_->inject(f);
     }
     /** @brief The recorded outbound frames (test oracle). */
     [[nodiscard]] const std::vector<std::vector<std::byte>>& log() const { return log_; }

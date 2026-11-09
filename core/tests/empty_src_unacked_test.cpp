@@ -412,6 +412,7 @@ class counting_bus_t : public transport_t, public tr::net::bus_link_t {
    public:
     /** @brief Undirected sends are not part of this test; drop. */
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
     /** @brief Expose the bus facet. */
     tr::net::bus_link_t* bus() override { return this; }
     /** @brief The one session. */

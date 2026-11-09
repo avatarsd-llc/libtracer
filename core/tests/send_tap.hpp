@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <span>
 #include <utility>
+#include <vector>
 
 #include "libtracer/rope.hpp"
 #include "libtracer/transport.hpp"
@@ -61,6 +62,12 @@ class send_tap_t final : public net::transport_t {
     void send(std::span<const std::byte> frame) override {
         obs_(frame);
         inner_.send(frame);
+    }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::vector<std::byte> f;
+        for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
+        obs_(std::span<const std::byte>(f));
+        inner_.send(iov);
     }
     [[nodiscard]] bool delivers_ropes() const override { return inner_.delivers_ropes(); }
     [[nodiscard]] bool start_receiving() override { return inner_.start_receiving(); }

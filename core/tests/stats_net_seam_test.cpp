@@ -71,6 +71,7 @@ std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view c
 class counting_link_t : public transport_t {
    public:
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
     [[nodiscard]] tr::net::transport_drop_stats_t drop_stats() const noexcept override {
         return counters;
     }

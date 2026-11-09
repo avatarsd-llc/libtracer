@@ -76,6 +76,7 @@ class arming_source_t final : public tr::mem::block_source_t {
 struct p2p_link_t : transport_t {
     std::size_t received = 0; /**< @brief Frames this endpoint was handed. */
     void send(std::span<const std::byte>) override { ++received; }
+    void send(std::span<const std::span<const std::byte>>) override { ++received; }
 };
 
 /** @brief A multi-peer (bus) link with a fixed name→endpoint table (`fwd_flatten_backend_test`). */
@@ -83,6 +84,7 @@ struct bus_link_impl_t : transport_t, tr::net::bus_link_t {
     std::vector<std::pair<std::string, p2p_link_t*>> peers; /**< @brief name → endpoint. */
     std::size_t broadcasts = 0; /**< @brief Frames sent at the bus endpoint itself. */
     void send(std::span<const std::byte>) override { ++broadcasts; }
+    void send(std::span<const std::span<const std::byte>>) override { ++broadcasts; }
     tr::net::bus_link_t* bus() override { return this; }
     transport_t* peer_link(std::string_view name) override {
         for (auto& [n, l] : peers) {
@@ -107,6 +109,10 @@ class rec_link_t : public transport_t {
     explicit rec_link_t(bool ropes = false) : ropes_(ropes) {}
     void send(std::span<const std::byte> frame) override {
         sent.emplace_back(frame.begin(), frame.end());
+    }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::vector<std::byte>& f = sent.emplace_back();
+        for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
     }
     [[nodiscard]] bool delivers_ropes() const override { return ropes_; }
     /** @brief Deliver @p frame upward: as a multi-link rope on a rope link, else borrowed. */

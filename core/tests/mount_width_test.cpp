@@ -64,6 +64,10 @@ using tr::testing::check;
 struct recording_link_t : tr::net::transport_t {
     std::vector<std::vector<std::byte>> sent; /**< @brief Frames handed to this endpoint. */
     void send(std::span<const std::byte> f) override { sent.emplace_back(f.begin(), f.end()); }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::vector<std::byte>& f = sent.emplace_back();
+        for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
+    }
 };
 
 /** @brief A `FWD{WRITE, dst, src, payload}` frame over the given segment lists. */

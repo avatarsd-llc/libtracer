@@ -129,6 +129,7 @@ class parking_source_t final : public tr::mem::block_source_t {
 struct link_t : tr::net::transport_t {
     std::atomic<std::size_t> n{0}; /**< @brief Frames sent through this link. */
     void send(std::span<const std::byte>) override { n.fetch_add(1); }
+    void send(std::span<const std::span<const std::byte>>) override { n.fetch_add(1); }
     /** @brief Deliver @p frame as one this link received. */
     void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
 };

@@ -1,7 +1,7 @@
 # One seam, every wire technology (transport plane)
 
 `tr::net::transport_t` is the entire contract a transport kind has to satisfy. Three calls —
-`send(span)`, the optional scatter-gather `send(iov)`, and `set_receiver` /
+the scatter-gather `send(iov)`, its one-span case `send(span)`, and `set_receiver` /
 `set_rope_receiver` — and no fourth.
 
 There is no `send_read`, no `send_reply`, and no TLV type anywhere in it. That absence is the
@@ -20,12 +20,14 @@ The example writes a complete kind in about twenty lines, then drives the shippe
   not a protocol property
   ([ADR-0013](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0013-v1-scope-boundaries.md)) —
   two conforming nodes need not share it, only the wire.
-- **The iovec overload is optional, and the base pays for the kinds that skip it.** A kind that
-  cannot `writev` inherits a gather into one block drawn from the link's egress source, so a
-  rope's `to_iovec()` reaches every kind. Overriding it elides that copy — never changes the
-  contract; the bytes on the wire are one record either way.
-- **Declaring one `send` hides the other.** Ordinary C++ name hiding, and a kind that omits
-  `using transport_t::send;` silently loses the entry point it meant to inherit. The example
+- **The iovec overload is the one a kind implements.** The router sends every forward and reply
+  through it, so a rope's `to_iovec()` reaches the kind as its spans. A kind that cannot
+  `writev` joins them into memory it already owns, as the example's kind does; the bytes on the
+  wire are one record either way. The span `send` is its one-span case, and
+  [ADR-0089](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0089-scatter-gather-is-the-one-required-transport-send.md)
+  moves it into the base.
+- **Declaring one `send` hides the others.** Ordinary C++ name hiding, and a kind that omits
+  `using transport_t::send;` silently loses the retained send it meant to inherit. The example
   carries the line and says why.
 - **The sink goes in before frames flow, and that is not advice.** A kind whose receive thread
   starts in its own constructor is draining the wire while the owner is still wiring; a frame

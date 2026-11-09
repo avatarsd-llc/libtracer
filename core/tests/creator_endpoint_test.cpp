@@ -75,6 +75,7 @@ std::vector<std::byte> allow(std::initializer_list<std::pair<std::string_view, a
 /** @brief A socket that does nothing — creation under test, never traffic. */
 struct dead_sock_t final : tr::net::transport_t {
     void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
 };
 
 /** @brief Register a one-kind DIAL module whose factory always succeeds. */

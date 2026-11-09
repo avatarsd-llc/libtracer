@@ -59,6 +59,10 @@ class sink_link_t : public tr::net::transport_t {
     void send(std::span<const std::byte> frame) override {
         sent_.emplace_back(frame.begin(), frame.end());
     }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::vector<std::byte>& f = sent_.emplace_back();
+        for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
+    }
 
     /** @brief Number of frames this link was asked to carry. */
     [[nodiscard]] std::size_t sends() const noexcept { return sent_.size(); }

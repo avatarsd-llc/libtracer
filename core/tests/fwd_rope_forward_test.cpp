@@ -134,6 +134,10 @@ class fake_link_t : public transport_t {
     void send(std::span<const std::byte> frame) override {
         sent_.emplace_back(frame.begin(), frame.end());
     }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::vector<std::byte>& f = sent_.emplace_back();
+        for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
+    }
     void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
     std::vector<std::vector<std::byte>>& sent() { return sent_; }
 
@@ -150,6 +154,10 @@ class fake_rope_link_t : public transport_t {
     /** @brief Records every send, because a rope link is not always inbound-only. */
     void send(std::span<const std::byte> frame) override {
         sent_.emplace_back(frame.begin(), frame.end());
+    }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::vector<std::byte>& f = sent_.emplace_back();
+        for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
     }
     [[nodiscard]] bool delivers_ropes() const override { return true; }
     void inject(tr::view::rope_t frame) { (void)rx_.deliver_rope(std::move(frame)); }

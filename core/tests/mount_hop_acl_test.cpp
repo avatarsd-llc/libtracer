@@ -146,6 +146,7 @@ bytes_t b_value_u8(std::uint8_t v) {
 struct recorder_t : tr::net::transport_t {
     std::atomic<std::size_t> n{0};
     void send(std::span<const std::byte>) override { ++n; }
+    void send(std::span<const std::span<const std::byte>>) override { ++n; }
 };
 
 /** @brief A real TCP client session with a counting receiver. */
