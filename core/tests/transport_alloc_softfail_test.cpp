@@ -34,7 +34,10 @@
  *   - udp `send(iov)`;
  *   - can `can_transport_t::send` — its advertise and its payload (A1, #2661 — both
  *     allocations are DELETED, not guarded, so the cases are a zero-allocation census on the
- *     transport and a send under refusing stores, not a drop leg);
+ *     transport and a send under refusing stores, not a drop leg), and its native gather
+ *     (#2679): the iov and retained forms draw nothing either, and their wire is held to the
+ *     contiguous `can_frame_at` cut at span joins mid-slice and on slice edges;
+ *   - loopback `send(iov)` (#2679): one block per frame, the receiver's, never the egress store;
  *   - the oversized / non-final control frame fails the connection instead of being echoed;
  *   - #1780: the transports' own growth sites on the allocation seam — the ws server's
  *     session and handshake store, a factory's link object, the CAN reassembler and the CAN
@@ -103,6 +106,7 @@
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/iov_table.hpp"
+#include "libtracer/loopback.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_slab_pool.hpp"
 #include "libtracer/mem_source.hpp"
@@ -110,6 +114,7 @@
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
+#include "libtracer/value.hpp"
 #include "libtracer/view.hpp"
 #include "libtracer/ws.hpp"
 #include "route_frame_builder.hpp"  // host-only frame builders (#1779)
@@ -1423,6 +1428,222 @@ void test_can_send_under_refusing_stores() {
           "  ...and the slices carry the payload byte for byte");
 }
 
+/** @brief The bytes `0x01, 0x02, ...` (wrapping), so a misplaced window shows. */
+std::vector<std::byte> numbered(std::size_t n) {
+    std::vector<std::byte> out(n);
+    for (std::size_t i = 0; i < n; ++i) out[i] = std::byte(static_cast<std::uint8_t>(i + 1));
+    return out;
+}
+
+/** @brief @p payload cut into consecutive spans of the given @p widths (the last takes the rest).
+ */
+std::vector<std::span<const std::byte>> cut_at(std::span<const std::byte> payload,
+                                               std::span<const std::size_t> widths) {
+    std::vector<std::span<const std::byte>> out;
+    std::size_t off = 0;
+    for (const std::size_t w : widths) {
+        out.push_back(payload.subspan(off, w));
+        off += w;
+    }
+    out.push_back(payload.subspan(off));
+    return out;
+}
+
+/**
+ * @brief #2679: a CAN gather send emits, window for window, the contiguous cut that
+ *        `can_frame_at` defines, whatever the span joins are.
+ *
+ * `can_frame_at` is the oracle (ADR-0089 Q3): the transport no longer calls it, so the tests
+ * hold the cursor to it. Each cut puts the joins somewhere else: none, on every slice edge,
+ * mid-slice (with an empty span among them), and one byte per span, so a slice draws from up to
+ * a whole window's worth of spans. Both modes run; in FD a window is DLC-padded with zeros.
+ */
+void test_can_gather_send_matches_the_oracle() {
+    std::printf("can send(iov) — the wire is the can_frame_at cut at any span joins (#2679):\n");
+    for (const can::can_frame_mode_t mode :
+         {can::can_frame_mode_t::CLASSIC, can::can_frame_mode_t::FD}) {
+        const std::size_t step = can::can_max_data(mode);
+        const std::vector<std::byte> payload = numbered(5 * step + 3);  // 6 windows, short tail
+        const auto owned = tr::view::over_bytes(payload);
+        check(owned.has_value(), "the oracle's view was taken");
+        if (!owned) return;
+        const std::size_t windows = can::can_frame_count(*owned, mode);
+
+        const std::size_t edges[] = {step, 2 * step, step};
+        const std::size_t mid[] = {3, step - 1, 0, step + 5, 1};
+        const std::vector<std::size_t> bytewise(payload.size() - 1, 1);
+        const std::span<const std::size_t> cuts[] = {{},
+                                                     std::span<const std::size_t>(edges),
+                                                     std::span<const std::size_t>(mid),
+                                                     std::span<const std::size_t>(bytewise)};
+        const char* const names[] = {"one span", "joins on slice edges", "joins mid-slice",
+                                     "one byte per span"};
+        for (std::size_t c = 0; c < std::size(cuts); ++c) {
+            auto link = tr::mem::make_poly<recording_link_t>(tr::mem::net_source());
+            recording_link_t* raw = link.get();
+            tr::net::transport_can_config_t cfg;
+            cfg.node = 11;
+            cfg.path = "node11";
+            cfg.mode = mode;
+            tr::net::can_transport_t can_tx(std::move(link), cfg);
+            const std::size_t hello = raw->count();
+            const auto iov = cut_at(payload, cuts[c]);
+            static_cast<tr::net::transport_t&>(can_tx).send(
+                std::span<const std::span<const std::byte>>(iov));  // as the router calls it
+
+            const std::vector<tr::net::can_frame_data_t> wire = raw->frames();
+            std::vector<std::byte> control;
+            std::vector<tr::net::can_frame_data_t> data;
+            for (std::size_t f = hello; f < wire.size(); ++f) {
+                const auto fields = can::decode_can_id(wire[f].id);
+                if (fields && fields->endpoint == tr::net::kCanControlEndpoint) {
+                    control.insert(control.end(), wire[f].data.begin(),
+                                   wire[f].data.begin() + wire[f].len);
+                } else {
+                    data.push_back(wire[f]);
+                }
+            }
+            bool same = data.size() == windows;
+            for (std::size_t i = 0; same && i < windows; ++i) {
+                const tr::view::view_t w = can::can_frame_at(*owned, mode, i);
+                const std::size_t on_wire = mode == can::can_frame_mode_t::FD
+                                                ? can::can_fd_dlc_round_up(w.length)
+                                                : w.length;
+                same = data[i].len == on_wire &&
+                       std::memcmp(data[i].data.data(), w.bytes().data(), w.length) == 0 &&
+                       std::all_of(data[i].data.begin() + w.length, data[i].data.begin() + on_wire,
+                                   [](std::byte b) { return b == std::byte{0}; });
+            }
+            const auto adv = can::decode_advertise(control);
+            const bool manifest = adv && adv->first.group_total_len == payload.size() &&
+                                  adv->first.slice_count == windows;
+            char label[128];
+            std::snprintf(label, sizeof(label), "  %s, %s: every window equals the oracle's",
+                          mode == can::can_frame_mode_t::FD ? "FD" : "CLASSIC", names[c]);
+            check(same && manifest, label);
+            check(can_tx.drop_stats().dropped_tx == 0, "    ...and nothing is dropped");
+        }
+    }
+}
+
+/**
+ * @brief #2679: the CAN gather and retained sends draw NOTHING, like the span send.
+ *
+ * Before #2679 CAN overrode only the span send, so a routed frame (the router's `send(iov)`, or
+ * a remote delivery's retained send, which lowers to it) took the base gather: one block from
+ * the link's egress store and one whole-payload copy, and #2661's span send behind it. Here the
+ * egress store refuses everything, so that gather would DROP the frame; the native gather never
+ * asks it. The retained form's stack iov table holds this frame (three head spans, one link), so
+ * it draws nothing either.
+ */
+void test_can_gather_send_allocates_nothing() {
+    std::printf("can send(iov) / retained — no allocation, no egress draw (#2679):\n");
+    tr::net::transport_can_config_t cfg;
+    cfg.node = 12;
+    cfg.path = "node12/sensor/temperature";  // past SSO, so a path copy WOULD allocate
+    auto link = tr::mem::make_poly<fixed_link_t>(tr::mem::net_source());
+    fixed_link_t* raw = link.get();
+    tr::net::can_transport_t can_tx(std::move(link), cfg);
+    tight_egress_t tight;
+    can_tx.set_egress_source(tight.store);
+    tr::net::transport_t& as_link = can_tx;  // the router's view: every form reachable
+
+    const std::vector<std::byte> payload = numbered(24);  // 3 CLASSIC windows
+    const std::size_t widths[] = {5, 0, 11};              // joins mid-slice, one empty span
+    const auto iov = cut_at(payload, widths);
+
+    tr::view::rope_t r;
+    r.append(tr::view::view_t::over(tr::view::heap_alloc(payload.size() - 7)));
+    std::memcpy(const_cast<std::byte*>(r.links()[0].bytes().data()), payload.data() + 7,
+                payload.size() - 7);
+    const tr::graph::value_ref_t value = tr::graph::value_ref_t::composed(std::move(r));
+    const std::span<const std::byte> head[3] = {std::span<const std::byte>(payload).first(4),
+                                                std::span<const std::byte>{},
+                                                std::span<const std::byte>(payload).subspan(4, 3)};
+
+    const std::size_t advertise_frames =
+        (can::kAdvertiseHeaderSize + cfg.path.size() + 7) / 8;  // classic control windows
+    const auto census = [&](const char* form, auto&& send) {
+        raw->reset();
+        if constexpr (tr::mem::kSlabPool) tr::mem::host_root().trim();
+        const std::size_t values_before = tr::mem::value_source().stats().in_use;
+        const std::size_t allocs = count_allocs(send);
+        char label[128];
+        std::snprintf(label, sizeof(label), "a CAN %s send allocates NOTHING", form);
+        check(allocs == 0, label);
+        check(tr::mem::value_source().stats().in_use == values_before,
+              "  ...draws nothing from the process value pool");
+        check(tight.store.used() == 0, "  ...never asks the (refusing) egress store");
+        check(can_tx.drop_stats().dropped_tx == 0, "  ...and drops nothing");
+        const std::vector<std::byte> stream = raw->stream();
+        const std::size_t adv_bytes = can::kAdvertiseHeaderSize + cfg.path.size();
+        check(raw->count() == advertise_frames + 3 && stream.size() == adv_bytes + payload.size() &&
+                  std::equal(payload.begin(), payload.end(), stream.begin() + adv_bytes),
+              "  ...and the three slices carry the payload byte for byte");
+    };
+    census("send(iov)", [&] { as_link.send(std::span<const std::span<const std::byte>>(iov)); });
+    census("retained", [&] {
+        as_link.send(std::span<const std::span<const std::byte>>(head), *value,
+                     tr::graph::delivery_lane_t{});
+    });
+}
+
+/** @brief A block source over the raw heap that counts what it serves (a loopback's source). */
+class counting_source_t final : public tr::mem::block_source_t {
+   public:
+    counting_source_t() noexcept : block_source_t("counting") {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        served_.fetch_add(1, std::memory_order_relaxed);
+        return tr::mem::heap_source().try_alloc(bytes, align);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, bytes, align);
+    }
+    /** @brief How many blocks this source has served. */
+    [[nodiscard]] std::size_t served() const noexcept {
+        return served_.load(std::memory_order_relaxed);
+    }
+
+   private:
+    std::atomic<std::size_t> served_{0};
+};
+
+/**
+ * @brief #2679: a loopback `send(iov)` gathers ONCE, into the receiver's block.
+ *
+ * Before #2679 loopback overrode only the span send, so a gathered frame took the base gather
+ * (a block from the sender's egress store, one copy) and was then copied again into a block from
+ * the receiver's source. The egress store here refuses everything, so that path would drop the
+ * frame. Now the frame costs one block from the receiver's source and nothing else.
+ */
+void test_loopback_gather_send_takes_one_block() {
+    std::printf("loopback send(iov) — one block, the receiver's (#2679):\n");
+    counting_source_t src;
+    tr::net::loopback_channel_t ch(src);
+    tight_egress_t tight;
+    ch.a().set_egress_source(tight.store);
+    sink_t at_b;
+    auto push = [&](std::span<const std::byte> f) { at_b.push(f); };
+    ch.b().set_receiver(push);
+
+    const std::vector<std::byte> payload = numbered(300);
+    const std::size_t widths[] = {1, 0, 64, 100};
+    const auto iov = cut_at(payload, widths);
+    const std::size_t before = src.served();
+    const std::size_t allocs = count_allocs([&] {
+        static_cast<tr::net::transport_t&>(ch.a()).send(
+            std::span<const std::span<const std::byte>>(iov));
+    });
+    check(at_b.wait_for(1, 2000ms), "the gathered frame was delivered");
+    check(src.served() - before == 1, "it took exactly ONE block, from the receiver's source");
+    // That block is the raw heap's, so it is the ONE operator new the send makes.
+    check(tight.store.used() == 0 && allocs == 1,
+          "  ...and nothing else: no egress-store gather, one operator new in all");
+    check(at_b.bytes() == payload, "  ...and it arrived whole, byte for byte");
+    check(ch.a().drop_stats().dropped_tx == 0, "  ...with no drop counted");
+    ch.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // #1951 — the answer to a retired type, on the same injector
 //
@@ -2006,6 +2227,9 @@ int main() {
     test_can_emit_advertise_wire_identical();
     test_can_send_allocates_nothing();
     test_can_send_under_refusing_stores();
+    test_can_gather_send_matches_the_oracle();
+    test_can_gather_send_allocates_nothing();
+    test_loopback_gather_send_takes_one_block();
     test_retired_type_answer_allocates_nothing();
     test_ws_ping_at_the_bound_is_answered();
     test_ws_oversized_ping_fails_the_connection();

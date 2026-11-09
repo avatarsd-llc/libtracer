@@ -109,6 +109,11 @@ inline constexpr std::size_t kCanFdMaxData = 64;
  * #932 removed that too, because a class holding `(payload, mode)` plus a memo of a
  * one-line division is state the caller already has.
  *
+ * @par The reference cut, not the send path (#2679)
+ * `can_transport_t` cuts its slices with a cursor over the caller's spans, so a slice may
+ * straddle two spans and no owned view is needed. This function stays the contiguous
+ * definition of the same windows, and the tests hold the transport's wire to it.
+ *
  * @param payload The contiguous source window being framed.
  * @param mode    Classic (≤8) or CAN-FD (≤64) framing.
  * @param i       Frame index, `0 .. can_frame_count(payload, mode) - 1`.

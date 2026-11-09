@@ -47,6 +47,16 @@
  *   egress-gather  `transport_t::send(iov)` through the BASE default a link inherits when it
  *                  does not override the scatter-gather entry: one block, one whole-frame
  *                  copy per frame (copy ⑨ of the same doc, host form).
+ *   can-tx         `can_transport_t::send(iov)` over a fake bus that keeps nothing, with a
+ *                  routed frame's shape (a head span, then the value's bytes): the native
+ *                  gather (#2679, ADR-0089) cuts every slice straight from the two spans, so
+ *                  the claim is 0 blocks and 0 copies; the per-slice fill of the CAN frame
+ *                  record is the medium's own and not counted. The link's egress store is
+ *                  the raw heap, so a draw from it would show as an allocation. Sizes past
+ *                  the classic group cap run in FD mode.
+ *   loopback-tx    `loopback_endpoint_t::send(iov)`, the same two-span frame: the spans are
+ *                  gathered once into the receiver's block (one block, one copy), drawn from
+ *                  the raw heap so it is counted. The receive thread frees it.
  *   ingress-copy   a FWD{WRITE} frame resolved through the terminus (view tier) whose value
  *                  the build's block source COPIES for a default-hint vertex (RFC-0022
  *                  Amendment 3: on the slab pool, a receive block of a larger class than the
@@ -137,10 +147,12 @@ void operator delete[](void* p, const std::nothrow_t&) noexcept { counted_free(p
 #include <vector>
 
 #include "bench_common.hpp"
+#include "libtracer/loopback.hpp"
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tlv_view.hpp"
 #include "libtracer/tracer.hpp"
+#include "libtracer/transport_can.hpp"
 
 namespace {
 
@@ -312,6 +324,60 @@ void run_egress_gather(std::size_t size) {
     if (link.bytes != (kWarm + kOps) * size) std::fprintf(stderr, "egress-gather: short send\n");
 }
 
+/** @brief A CAN bus that keeps nothing: it counts the data bytes written and allocates none. */
+class null_can_link_t final : public tr::net::can_link_t {
+   public:
+    std::uint64_t bytes = 0;
+    void write_raw(const tr::net::can_frame_data_t& f) override { bytes += f.len; }
+    void on_receive(rx_fn_t) override {}
+    void start() override {}
+};
+
+/** @brief The head a routed frame carries in front of its value (a FWD header's size). */
+constexpr std::size_t kHeadBytes = 24;
+
+void run_can_tx(std::size_t size) {
+    tr::net::transport_can_config_t cfg;
+    cfg.node = 7;
+    cfg.path = "bench/can";
+    const std::size_t classic_slices = (kHeadBytes + size + 7) / 8;
+    if (classic_slices > tr::net::kCanMaxGroupSlices) cfg.mode = tr::net::can::can_frame_mode_t::FD;
+    auto owned = tr::mem::make_poly<null_can_link_t>(tr::mem::net_source());
+    null_can_link_t* const link = owned.get();
+    tr::net::can_transport_t can(std::move(owned), cfg);
+    can.set_egress_source(tr::mem::heap_source());  // a draw from it is an operator new
+    const std::vector<std::byte> head(kHeadBytes, std::byte{0x11});
+    const value_t fx{size};
+    const rope_t r = fx.make();
+    const std::array<std::span<const std::byte>, 2> iov{std::span<const std::byte>(head),
+                                                        r.links()[0].bytes()};
+    const std::uint64_t dropped = can.drop_stats().dropped_tx;
+    measure("can-tx", size, 1, 0,
+            [&] { can.send(std::span<const std::span<const std::byte>>(iov)); });
+    if (can.drop_stats().dropped_tx != dropped || link->bytes < (kWarm + kOps) * size)
+        std::fprintf(stderr, "can-tx: a send was dropped\n");
+}
+
+void run_loopback_tx(std::size_t size) {
+    tr::net::loopback_channel_t ch(tr::mem::heap_source());  // each frame block is an operator new
+    ch.a().set_egress_source(tr::mem::heap_source());
+    std::atomic<std::uint64_t> got{0};
+    ch.b().set_receiver(
+        [](void* c, std::span<const std::byte>) {
+            static_cast<std::atomic<std::uint64_t>*>(c)->fetch_add(1, std::memory_order_relaxed);
+        },
+        &got);
+    const std::vector<std::byte> head(kHeadBytes, std::byte{0x11});
+    const value_t fx{size};
+    const rope_t r = fx.make();
+    const std::array<std::span<const std::byte>, 2> iov{std::span<const std::byte>(head),
+                                                        r.links()[0].bytes()};
+    measure("loopback-tx", size, 1, 1,
+            [&] { ch.a().send(std::span<const std::span<const std::byte>>(iov)); });
+    ch.shutdown();
+    if (got.load() != kWarm + kOps) std::fprintf(stderr, "loopback-tx: frames lost\n");
+}
+
 /** @brief One receive block holding @p n frame bytes, minted as the transport mints it. */
 view_t mint_rx(std::span<const std::byte> frame) {
     tr::view::rx_block_t blk = tr::view::alloc_rx(tr::mem::heap_backend(), frame.size());
@@ -440,6 +506,8 @@ int main() {
         for (const std::size_t k : kFans) run_local_handler(size, k);
         run_producer_own(size);
         run_egress_gather(size);
+        run_can_tx(size);
+        run_loopback_tx(size);
         run_ingress(size, true);
         run_ingress(size, false);
         for (const std::size_t k : kFans) run_proto(size, k);

@@ -55,6 +55,11 @@ class loopback_endpoint_t final : public transport_t {
      *         counted in @ref drop_stats (`dropped_tx`). */
     void send(std::span<const std::byte> frame) override;
 
+    /** @brief Scatter-gather send (#2679): the spans are gathered ONCE, straight into the
+     *         block drawn from the peer's source, with no egress-store temporary. Same
+     *         delivery and drop contract as the span form. */
+    void send(std::span<const std::span<const std::byte>> iov) override;
+
     /** @brief The frames this endpoint's @ref send dropped (`dropped_tx`); the other fields
      *         stay zero. */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {

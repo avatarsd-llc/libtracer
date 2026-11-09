@@ -123,20 +123,9 @@ void udp_transport_t::shut_down() {
 }
 
 void udp_transport_t::send(std::span<const std::byte> frame) {
-    const std::uint64_t p = peer();
-    if (fd_ < 0 || p == 0) {        // no peer (learned or configured) => nobody to send to
-        drops_.count_dropped_tx();  // shed, and counted (#932)
-        return;
-    }
-    sockaddr_in peer{};
-    peer.sin_family = AF_INET;
-    peer.sin_addr.s_addr = static_cast<std::uint32_t>(p >> 16);
-    peer.sin_port = htons(static_cast<std::uint16_t>(p & 0xFFFF));
-    // A refused or short datagram (a full socket buffer, EMSGSIZE, a shut socket) is lost and
-    // counted, never retried: the link carries no acks, and the next value supersedes it (#2279).
-    if (::sendto(fd_, frame.data(), frame.size(), MSG_NOSIGNAL, reinterpret_cast<sockaddr*>(&peer),
-                 sizeof(peer)) != static_cast<ssize_t>(frame.size()))
-        drops_.count_dropped_tx();
+    // One datagram, one body (#2679, ADR-0089 Q6): a single span is a one-entry sendmsg.
+    const std::span<const std::byte> one[1] = {frame};
+    send_to(peer(), one);
 }
 
 void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
@@ -191,7 +180,9 @@ void udp_transport_t::send_to(std::uint64_t address,
     msg.msg_namelen = sizeof(peer);
     msg.msg_iov = vec;
     msg.msg_iovlen = n;
-    if (::sendmsg(fd_, &msg, MSG_NOSIGNAL) != static_cast<ssize_t>(total))  // as in `send` (#2279)
+    // A refused or short datagram (a full socket buffer, EMSGSIZE, a shut socket) is lost and
+    // counted, never retried: the link carries no acks, and the next value supersedes it (#2279).
+    if (::sendmsg(fd_, &msg, MSG_NOSIGNAL) != static_cast<ssize_t>(total))
         drops_.count_dropped_tx();
 }
 

@@ -24,6 +24,10 @@
  *  - span count (1..24) at 8 B/span — where does the `::iovec` table first hit the heap?
  *  - sink tier (owning rope sink vs borrowed span sink) — the receive-strategy branch.
  *  - RX backend (default `heap_backend` vs an injected `pool_t`) — the ADR-0042 §2 seam.
+ *  - CAN egress (#2679, ADR-0089): a `can_transport_t` over a fake bus that keeps nothing, at
+ *    one span (`send(span)`) and at a routed frame's two spans (`send(iov)`), with the link's
+ *    egress store on the raw heap so a gather block would be counted. The native gather cuts
+ *    the slices from the spans, so both read 0. Sizes past the classic group cap run in FD.
  *
  * @section discipline Measurement discipline
  *
@@ -60,6 +64,7 @@
 #include "libtracer/rope.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/transport.hpp"
+#include "libtracer/transport_can.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
@@ -544,6 +549,35 @@ void arm_loopback() {
     }
 }
 
+/** @brief A CAN bus that keeps nothing and allocates nothing (the egress arm's sink). */
+class null_can_link_t final : public tr::net::can_link_t {
+   public:
+    void write_raw(const tr::net::can_frame_data_t&) override {}
+    void on_receive(rx_fn_t) override {}
+    void start() override {}
+};
+
+void arm_can_egress() {
+    for (std::size_t sz :
+         {std::size_t{64}, std::size_t{1024}, std::size_t{4096}, std::size_t{16384}}) {
+        tr::net::transport_can_config_t cfg;
+        cfg.node = 7;
+        cfg.path = "bench/can";
+        if ((sz + 7) / 8 > tr::net::kCanMaxGroupSlices)
+            cfg.mode = tr::net::can::can_frame_mode_t::FD;
+        tr::net::can_transport_t can(tr::mem::make_poly<null_can_link_t>(tr::mem::net_source()),
+                                     cfg);
+        can.set_egress_source(tr::mem::heap_source());  // a gather block would be counted
+        const payload_t flat(1, sz);
+        const payload_t routed(2, sz / 2);
+        char arm[96];
+        std::snprintf(arm, sizeof(arm), "can %6zuB flat", sz);
+        run_egress_flat(arm, can, flat, kFrames);
+        std::snprintf(arm, sizeof(arm), "can %6zuB x2span", sz);
+        run_egress(arm, can, routed, kFrames);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The end-to-end arm: a REAL socket feeding a REAL fwd_router_t
 // ---------------------------------------------------------------------------
@@ -764,6 +798,7 @@ int main(int argc, char** argv) {
         arm_tcp_server_widths();
         arm_tcp_pool_backend();
         arm_loopback();
+        arm_can_egress();
         arm_router_over_wire("ROUTER wire->stub ", false);
         arm_router_over_wire("ROUTER wire->wire ", true);
         std::printf("  rep %d done\n", r + 1);
