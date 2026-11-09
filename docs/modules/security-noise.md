@@ -94,10 +94,19 @@ message is decrypted in place in the carrier's receive buffer, and a send seals 
 of `frame + 25` bytes from `memory.io`, returned after the send.
 
 **Counters.** Reference/23 §11's ten `noise_*` nouns follow the universal three in the link's
-`:stats.link.<child>` block (`transport_t::kind_stats`). This slice keeps no previous session,
-so a message in a replaced session's phase is `noise_stale`. Rekey and the generation rule are
-[#2074](https://github.com/avatarsd-llc/libtracer/issues/2074), persisting the counter and the
-mark is [#2075](https://github.com/avatarsd-llc/libtracer/issues/2075), and ESP-IDF is
+`:stats.link.<child>` block (`transport_t::kind_stats`).
+
+**Rekey.** A rekey is a new handshake that only the initiator starts: at `rekey_after`, at a send
+nonce of 2^60, or on `noise_link_t::rekey`. The old session stays current until the new one is
+acknowledged, so the link stays `up`, and it then keeps receiving as the previous session until
+`previous_expiry` or the next handshake. The previous session and an unconfirmed one never exist
+together, so they share one slot and the overlap costs no RAM. `reject_after` and the 2^62 nonce
+limit discard a session and take the link down. A session boundary (a session discarded with no
+replacement, or a session whose peer started fresh becoming current) fires the link-down notifier
+before any frame of the new session is delivered; a routine rekey fires nothing. A session past
+its limit takes the previous one with it, and so does a fresh peer's session.
+
+Persisting the counter and the mark is [#2075](https://github.com/avatarsd-llc/libtracer/issues/2075), and ESP-IDF is
 [#2076](https://github.com/avatarsd-llc/libtracer/issues/2076).
 
 ## Choosing a backend
