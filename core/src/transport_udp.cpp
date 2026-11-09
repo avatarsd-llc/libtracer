@@ -38,7 +38,7 @@ namespace {
 
 udp_transport_t::udp_transport_t(std::uint16_t bind_port, std::string_view peer_host,
                                  std::uint16_t peer_port, const udp_config_t& config)
-    : backend_(config.memory.rx) {
+    : posix_endpoint_t(config.wait), backend_(config.memory.rx) {
     const std::size_t max_frame = config.max_frame;
     const std::size_t recv_stack = config.recv_stack;
     // `:settings max_frame` (0 = unset) sets the accepted-datagram cap; unset is one Ethernet
@@ -83,19 +83,17 @@ udp_transport_t::udp_transport_t(std::uint16_t bind_port, std::string_view peer_
     if (::getsockname(fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
         bound_port_ = ntohs(bound.sin_port);
 
-    // A receive timeout lets the recv loop poll stop_ for a clean shutdown
-    // (the posix_endpoint_t SO_RCVTIMEO idiom).
-    set_rcv_timeout(fd_);
-
-    // A refused receive-thread spawn (#2288) leaves the link inert: ok() false.
-    if (!start([this] { run(); }, recv_stack, config.memory.stack_or_default())) {
+    // On the wait, with no receive timeout: a refused wait (#2288) leaves the link inert,
+    // ok() false.
+    if (!start(recv_stack, config.memory.stack_or_default()) ||
+        !attach(src_, fd_, &udp_transport_t::on_ready)) {
         ::close(fd_);
         fd_ = -1;
     }
 }
 
 udp_transport_t::~udp_transport_t() {
-    stop_and_join();  // FIRST: the run() thread reads fd_ released below
+    stop_and_join();  // FIRST: a callback reads fd_ released below
     if (fd_ >= 0) ::close(fd_);
 }
 
@@ -186,22 +184,25 @@ void udp_transport_t::send_to(std::uint64_t address,
         drops_.count_dropped_tx();
 }
 
-void udp_transport_t::run() {
+void udp_transport_t::on_ready(void* ctx, wait_source_t& self, std::uint8_t ready) {
+    (void)self;
+    (void)ready;
+    auto& link = *static_cast<udp_transport_t*>(static_cast<posix_endpoint_t*>(ctx));
     // ADR-0042 §2 backpressure by injection: the RX segment size is bounded by the
     // injected backend — a pool's slot payload caps the datagram a bounded node
     // accepts (an MCU's lwIP never yields a 64 KiB datagram anyway); the heap
     // backend reports "unbounded", keeping the full kMaxDatagram cap.
-    const std::size_t rx_cap = std::min(kMaxDatagram, backend_->max_segment_size());
+    const std::size_t rx_cap = std::min(kMaxDatagram, link.backend_->max_segment_size());
     // The CONFIGURED half of the ingress bound (#926): the largest datagram this
     // connection accepts. Buffers are sized ONE BYTE past it, because that is what makes
     // an over-cap datagram observable at all — recvfrom silently truncates a datagram to
     // the buffer it is given and reports the truncated length, so a buffer of exactly the
     // cap would deliver an over-cap datagram as a short, corrupt frame. With a buffer of
     // cap+1, any datagram above the cap reads back as `n > cap` and is refused below.
-    // Unset, the cap is kDefaultMaxFrame, so a link holds a 1,473-byte segment at rest, not
-    // 64 KiB (#2132). A cap at kMaxDatagram makes cap+1 exceed both bounds, and no datagram
+    // Unset, the cap is kDefaultMaxFrame, so a link's segment is 1,473 bytes, not 64 KiB
+    // (#2132). A cap at kMaxDatagram makes cap+1 exceed both bounds, and no datagram
     // can reach 65,536 bytes, so the refusal is unreachable there.
-    const std::size_t frame_cap = max_frame_;
+    const std::size_t frame_cap = link.max_frame_;
     const std::size_t alloc_cap = std::min(rx_cap, frame_cap + 1);
     // The accepted length, on either path: the cap, and the backend's bound too, so an
     // injected bounded backend refuses a datagram too long for its slot whole (#1783).
@@ -209,82 +210,81 @@ void udp_transport_t::run() {
     // The datagram adapter of frame ingress (ADR-0087 §1, #2142). A borrowed sink with a cap
     // inside kUdpStackScratchBytes receives on this thread's stack: nothing held at rest,
     // one recvfrom per datagram, no copy. Every other link receives into ONE held segment of
-    // `alloc_cap` from its own `memory.rx`, reused across receive timeouts and replaced once
-    // handed up, so an owning sink gets the datagram with no copy. The stack array also
-    // drains a datagram that has no segment to land in.
+    // `alloc_cap` from its own `memory.rx`, drawn on the first readable turn (none at rest),
+    // kept across a refusal and redrawn on the next turn once handed up, so an owning sink gets the
+    // datagram with no copy. The stack array also drains a datagram that has no segment to land in.
     std::array<std::byte, graph::kUdpStackScratchBytes + 1> stack;
     const bool fits_stack = span_cap <= graph::kUdpStackScratchBytes;
-    view::segment_ptr_t rx_seg;
+    view::segment_ptr_t& rx_seg = link.rx_seg_;
 
     // The owning-vs-span RECEIVE STRATEGY is decided per iteration off the slot's
-    // rx_.has_rope() — BEFORE the blocking recvfrom (the segment must exist to
+    // link.rx_.has_rope() — BEFORE the blocking recvfrom (the segment must exist to
     // receive into); a stack receive re-checks AFTER recvfrom so a rope sink
-    // installed DURING the blocking call still delivers that datagram owning.
+    // installed DURING the call still delivers that datagram owning.
     // Sink snapshot/tier-select itself lives in the slot (receiver_slot.hpp).
-    while (!stop_.load(std::memory_order_relaxed)) {
-        const bool on_stack = fits_stack && !rx_.has_rope();
-        // Exhaustion is backpressure: the datagram drains through the stack array and is
-        // dropped and counted, never an OOM.
-        if (!on_stack && !rx_seg) rx_seg = view::segment_ptr_t::adopt(backend_->alloc(alloc_cap));
-        const bool drained = !on_stack && !rx_seg;
-        // A held segment takes the datagram; otherwise the stack array does, for a stack
-        // receive (span_cap + 1 fits, by fits_stack) or a drain.
-        const std::span<std::byte> buf =
-            rx_seg ? rx_seg->bytes
-                   : std::span<std::byte>(stack.data(), std::min(span_cap + 1, stack.size()));
-        // recvmsg, not recvfrom, for MSG_TRUNC: a held segment bounded by a tight backend can
-        // be smaller than the cap plus one, and a datagram it truncated must be refused, not
-        // delivered short (#1783). Linux returns the truncated length, lwIP the whole one;
-        // the flag is set either way. Still one syscall per datagram.
-        sockaddr_in from{};
-        ::iovec into{buf.data(), buf.size()};
-        ::msghdr mh{};
-        mh.msg_name = &from;
-        mh.msg_namelen = sizeof(from);
-        mh.msg_iov = &into;
-        mh.msg_iovlen = 1;
-        const ssize_t n = ::recvmsg(fd_, &mh, 0);
-        if (n <= 0) continue;  // timeout / EAGAIN / error → re-check stop_ (rx_seg kept)
-        // Listener mode: the latest datagram's source IS the peer (single-peer
-        // UDP-server shape) — replies/sends target it from now on.
-        source_ = pack_peer(from.sin_addr.s_addr, ntohs(from.sin_port));
-        if (learn_peer_) peer_.store(source_, std::memory_order_relaxed);
-        const auto len = static_cast<std::size_t>(n);
-        if (drained) {
-            drops_.count_dropped_rx();
-            continue;
-        }
-        if (len > span_cap || (mh.msg_flags & MSG_TRUNC) != 0) {
-            // Over the cap, or cut short by a held segment: refuse it whole. It is KEPT (it is
-            // still a clean buffer for the next datagram), so a peer spraying over-cap datagrams
-            // costs no allocator traffic at all.
-            drops_.count_malformed_rx();
-            continue;
-        }
-        if (rx_seg) {
-            // A held segment (an owning sink, a cap above the stack bound, or a sink that
-            // stopped owning since it was drawn) is handed up whole and not redrawn for a
-            // stack receive. Narrow the whole-segment view to the received length and hand it up
-            // owning. Built by aggregate init, NOT over().subview(): `subview` copies the handle,
-            // so a second reference would live across the receiver callback (#845).
-            rx_.deliver(view::view_t{std::move(rx_seg), 0, len});
-            continue;
-        }
-        // A rope sink installed while this thread was blocked in recvfrom takes this one
-        // datagram owning, by a one-time copy into a segment; every later one is received
-        // into a segment above.
-        if (rx_.has_rope()) {
-            view::segment_ptr_t seg = view::segment_ptr_t::adopt(backend_->alloc(alloc_cap));
-            if (!seg) {
-                drops_.count_dropped_rx();
-                continue;
-            }
-            std::memcpy(seg->bytes.data(), stack.data(), len);
-            rx_.deliver(view::view_t{std::move(seg), 0, len});
-            continue;
-        }
-        rx_.deliver_borrowed(std::span<const std::byte>(stack.data(), len));
+    // One datagram per readiness turn: the wait reports the rest again.
+    const bool on_stack = fits_stack && !link.rx_.has_rope();
+    // Exhaustion is backpressure: the datagram drains through the stack array and is
+    // dropped and counted, never an OOM.
+    if (!on_stack && !rx_seg) rx_seg = view::segment_ptr_t::adopt(link.backend_->alloc(alloc_cap));
+    const bool drained = !on_stack && !rx_seg;
+    // A held segment takes the datagram; otherwise the stack array does, for a stack
+    // receive (span_cap + 1 fits, by fits_stack) or a drain.
+    const std::span<std::byte> buf =
+        rx_seg ? rx_seg->bytes
+               : std::span<std::byte>(stack.data(), std::min(span_cap + 1, stack.size()));
+    // recvmsg, not recvfrom, for MSG_TRUNC: a held segment bounded by a tight backend can
+    // be smaller than the cap plus one, and a datagram it truncated must be refused, not
+    // delivered short (#1783). Linux returns the truncated length, lwIP the whole one;
+    // the flag is set either way. Still one syscall per datagram.
+    sockaddr_in from{};
+    ::iovec into{buf.data(), buf.size()};
+    ::msghdr mh{};
+    mh.msg_name = &from;
+    mh.msg_namelen = sizeof(from);
+    mh.msg_iov = &into;
+    mh.msg_iovlen = 1;
+    const ssize_t n = ::recvmsg(link.fd_, &mh, MSG_DONTWAIT);
+    if (n <= 0) return;  // EAGAIN / error: the next turn retries (rx_seg kept)
+    // Listener mode: the latest datagram's source IS the peer (single-peer
+    // UDP-server shape) — replies/sends target it from now on.
+    link.source_ = pack_peer(from.sin_addr.s_addr, ntohs(from.sin_port));
+    if (link.learn_peer_) link.peer_.store(link.source_, std::memory_order_relaxed);
+    const auto len = static_cast<std::size_t>(n);
+    if (drained) {
+        link.drops_.count_dropped_rx();
+        return;
     }
+    if (len > span_cap || (mh.msg_flags & MSG_TRUNC) != 0) {
+        // Over the cap, or cut short by a held segment: refuse it whole. It is KEPT (it is
+        // still a clean buffer for the next datagram), so a peer spraying over-cap datagrams
+        // costs no allocator traffic at all.
+        link.drops_.count_malformed_rx();
+        return;
+    }
+    if (rx_seg) {
+        // A held segment (an owning sink, a cap above the stack bound, or a sink that
+        // stopped owning since it was drawn) is handed up whole and not redrawn for a
+        // stack receive. Narrow the whole-segment view to the received length and hand it up
+        // owning. Built by aggregate init, NOT over().subview(): `subview` copies the handle,
+        // so a second reference would live across the receiver callback (#845).
+        link.rx_.deliver(view::view_t{std::move(rx_seg), 0, len});
+        return;
+    }
+    // A rope sink installed since the receive strategy was picked takes this one
+    // datagram owning, by a one-time copy into a segment; every later one is received
+    // into a segment above.
+    if (link.rx_.has_rope()) {
+        view::segment_ptr_t seg = view::segment_ptr_t::adopt(link.backend_->alloc(alloc_cap));
+        if (!seg) {
+            link.drops_.count_dropped_rx();
+            return;
+        }
+        std::memcpy(seg->bytes.data(), stack.data(), len);
+        link.rx_.deliver(view::view_t{std::move(seg), 0, len});
+        return;
+    }
+    link.rx_.deliver_borrowed(std::span<const std::byte>(stack.data(), len));
 }
 
 }  // namespace tr::net

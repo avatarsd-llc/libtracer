@@ -1,7 +1,7 @@
 /**
  * @file
- * @brief The WebSocket server transport: many inbound connections multiplexed on one poll
- *        thread.
+ * @brief The WebSocket server transport: many inbound connections multiplexed on one wait
+ *        module, with no thread per peer.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -45,7 +45,7 @@
  * Both roles live here: ws_server_transport_t (accept inbound peers) and
  * ws_client_transport_t (dial out to a ws:// peer — device-to-device / NAT egress),
  * the latter sending MASKED client frames per RFC 6455 §5.1. POSIX sockets;
- * mirrors transport_udp's lifecycle (a recv thread polled for a clean shutdown).
+ * mirrors transport_udp's lifecycle (its sockets on the wait module, woken by shutdown).
  * The framing itself is never reimplemented here — it all goes through tr::net::ws.
  *
  * SCOPE — this is the HOST/POSIX WebSocket, and ESP-IDF is NOT in it (#947 ruling).
@@ -143,9 +143,14 @@ struct ws_server_config_t {
     /** @brief Expose the @ref bus_link_t facet (see @ref transport_t::bus): the browser-tabs
      *         server sets it so each tab gets its own return route. */
     bool peer_named = false;
-    /** @brief Poll-thread stack size in bytes, 0 = platform default. One thread multiplexes
+    /** @brief Fallback-thread stack size in bytes, 0 = platform default. One thread multiplexes
      *         the listener and every peer. */
     std::size_t recv_stack = 0;
+    /** @brief The node's wait module (#2147): the link puts its sockets on it and owns no
+     *         thread, and the application drives it (`wait_module_t::run`). Null: a thread of
+     *         the link's own drives a private one, sized by `recv_stack`. Must outlive the
+     *         link. */
+    wait_module_t* wait = nullptr;
     /**
      * @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838). It
      *        SIZES the peer cap and bounds the `101` reply. A server's egress writes never
@@ -180,8 +185,18 @@ struct ws_client_config_t {
     /** @brief Receive cap (0 → `ws_server_transport_t::kMaxFrame`); tighten-only — see
      *         @ref ws_server_config_t::max_frame. */
     std::size_t max_frame = 0;
-    /** @brief Recv-thread stack size in bytes, 0 = platform default. */
+    /** @brief Fallback-thread stack size in bytes, 0 = platform default. */
     std::size_t recv_stack = 0;
+    /** @brief The node's wait module (#2147): the link puts its sockets on it and owns no
+     *         thread, and the application drives it (`wait_module_t::run`). Null: a thread of
+     *         the link's own drives a private one, sized by `recv_stack`. Must outlive the
+     *         link.
+     *
+     *         PONG stall: the PONG this client answers a PING with stays a blocking write,
+     *         bounded by `liveness_window_ms`, until slice 2 of #2147. It runs on the thread
+     *         driving this module, so a server that stops reading stalls every other link on
+     *         the module for up to one window per PING. */
+    wait_module_t* wait = nullptr;
     /** @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838): it
      *         bounds each egress write turn, and offers past a full lane whose turns moved
      *         nothing, `kMaxConsecutiveStalls` rings of them in a row, close the connection. */
@@ -264,12 +279,12 @@ class ws_server_transport_t final : public stream_server_base_t {
      *
      * @param bind_port TCP port to listen on (host byte order; 0 → ephemeral).
      * @param config    The server's knobs (@ref ws_server_config_t): memory, receive cap,
-     *                  peer cap, bus facet, poll-thread stack, liveness window, handshake
+     *                  peer cap, bus facet, fallback-thread stack, liveness window, handshake
      *                  budget.
      */
     explicit ws_server_transport_t(std::uint16_t bind_port, const ws_server_config_t& config = {});
 
-    /** @brief Stop the recv thread and close all sockets. */
+    /** @brief Stop waiting and close all sockets. */
     ~ws_server_transport_t();
 
     /** @brief See @ref transport_t::shut_down. */
@@ -369,14 +384,13 @@ class ws_server_transport_t final : public stream_server_base_t {
 
         /** @brief The owning server's snapshot (#932): a directed facade counts into the
          *         link's own counters, so it reports them rather than a fabricated zero. */
-        [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-            return owner_ == nullptr ? transport_drop_stats_t{} : owner_->drop_stats();
-        }
+        [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override;
 
        private:
         friend class ws_server_transport_t;
-        ws_server_transport_t* owner_ = nullptr; /**< @brief The owning server. */
-        session_t* slot_ = nullptr;              /**< @brief The peer slot this sends to. */
+        /** @brief The peer slot this sends to. The owning server is the slot's wait context
+         *         (@ref slot_server_t::server_of), so the facade holds no pointer to it. */
+        session_t* slot_ = nullptr;
     };
 
     /** @brief The one send body: frame @p parts as one BINARY message, then to every open
@@ -392,6 +406,9 @@ class ws_server_transport_t final : public stream_server_base_t {
     /** @brief One fresh slot with its handshake buffer, frame-ingress state, reassembler and
      *         facade. */
     mem::poly_ptr_t<session_base_t> make_session() override;
+
+    /** @brief The slot's directed facade, its own `endpoint` member. */
+    transport_t& endpoint_of(session_base_t& s) noexcept override;
 
     /** @brief Per-accept setup: clear the slot's handshake and frame buffers. Returns
      *         false — a WS session only carries frames PAST its `101`, which
@@ -456,13 +473,13 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
      * @param host Dotted-quad IPv4 address of the peer (e.g. "127.0.0.1").
      * @param port TCP port of the peer (host byte order).
      * @param config The link's knobs (@ref ws_client_config_t): memory (receive seam and
-     *             egress store), receive cap, recv-thread stack, liveness
+     *             egress store), receive cap, fallback-thread stack, liveness
      *             window, handshake budget.
      */
     ws_client_transport_t(std::string_view host, std::uint16_t port,
                           const ws_client_config_t& config = {});
 
-    /** @brief Stop the recv thread and close the socket. */
+    /** @brief Stop waiting and close the socket. */
     ~ws_client_transport_t();
 
     /** @brief See @ref transport_t::shut_down. */
@@ -499,7 +516,7 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
               const graph::delivery_lane_t& lane) override;
 
     /**
-     * @brief Spawn the recv thread the constructor held back (#1025).
+     * @brief Put the connection on the wait the constructor held back (#1025).
      *
      * The second phase of the two-phase bring-up: the socket is connected and handshaken,
      * the bytes the server pipelined behind its `101` are held, and NOTHING has been
@@ -593,11 +610,12 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
      * this is the DIAL half of the same rule (#1020).
      */
     bool handshake(int fd, std::string_view host, std::uint16_t port, mem::bytes_t& pipelined);
-    /** @brief Frame recv loop, seeded with the bytes `handshake` found behind the 101
-     *         (`pipelined_`, which it releases once they are fed): frame ingress (ADR-0087
-     *         §1, #2141) reads each frame's header first and its payload straight into a
-     *         segment drawn at the exact length from `memory.rx`, with no stream buffer. */
-    void serve(int fd);
+    /** @brief The connection's wait callback, seeded on its first turn with the bytes
+     *         `handshake` found behind the 101 (`pipelined_`, released once fed): frame
+     *         ingress (ADR-0087 §1, #2141) reads each frame's header first and its payload
+     *         straight into a segment drawn at the exact length from `memory.rx`, with no
+     *         stream buffer. */
+    static void on_conn(void* ctx, wait_source_t& self, std::uint8_t ready);
     struct framing_t;               // this end of the RFC 6455 receive rules (defined in the .cpp)
     std::uint32_t next_mask_key();  // per-frame masking key (varied, not crypto)
     /** @brief The one send body: @p frame's spans as one masked message through the egress,
@@ -614,6 +632,12 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
     // The RX seam + ingress bound + counters, identical to the server's (and to tcp's).
     mem::mem_backend_t* backend_;
     std::size_t max_frame_ = ws_server_transport_t::kMaxFrame;
+    struct rx_t;  // the receive state across readiness turns (defined in the .cpp)
+    /** @brief The receive state across readiness turns (ADR-0087 §1): the frame header in
+     *         progress, fragment reassembly and frame ingress. Drawn from `memory.state` by
+     *         @ref start_receiving, and defined in the .cpp, which alone includes the RFC 6455
+     *         rules. */
+    mem::poly_ptr_t<rx_t> rx_state_;
     /** @brief The pre-auth handshake budget (#934) — the server-side member's twin. */
     std::size_t max_handshake_ = ws_server_transport_t::kMaxHandshakeBytes;
     /** @brief The came-up fact `ok()` reports: written once, in the constructor, on
@@ -621,15 +645,15 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
      *         again, so a plain bool is race-free here. */
     bool came_up_ = false;
     /** @brief The liveness flag `link_up()` reports (#1059): set with `came_up_`, cleared
-     *         by the recv thread's teardown path. Written and read across threads —
+     *         by the driving thread's teardown path. Written and read across threads —
      *         relaxed atomic (a hint, not a synchronisation point; deliberately no
      *         lock-free assertion — the rv32/no-A target). */
     std::atomic<bool> connected_{false};
     /**
      * @brief The bytes the server pipelined behind its `101`, parked between the handshake
-     *        and @ref start_receiving (moved into the recv thread there, empty after).
+     *        and @ref start_receiving (moved into the driving thread there, empty after).
      *
-     * Written by the constructor; the recv thread `start_receiving` spawns takes it over
+     * Written by the constructor; the driving thread `start_receiving` spawns takes it over
      * (`serve` feeds it to frame ingress and releases it before reading), and nothing else
      * touches it.
      * Drawn from the link's egress store (#1780).

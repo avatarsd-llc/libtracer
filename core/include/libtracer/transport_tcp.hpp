@@ -37,6 +37,7 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/frame_ingress.hpp"
 #include "libtracer/length_prefix_framer.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/posix_endpoint.hpp"
@@ -103,9 +104,14 @@ struct tcp_config_t {
      *        not treated as malformed (#932).
      */
     std::size_t max_frame = 0;
-    /** @brief Recv-thread stack size in bytes, 0 = platform default
-     *         (`posix_endpoint_t::start`). Non-zero right-sizes the recv thread on an MCU. */
+    /** @brief Fallback-thread stack size in bytes, 0 = platform default
+     *         (`posix_endpoint_t::start`). Non-zero right-sizes the driving thread on an MCU. */
     std::size_t recv_stack = 0;
+    /** @brief The node's wait module (#2147): the link puts its sockets on it and owns no
+     *         thread, and the application drives it (`wait_module_t::run`). Null: a thread of
+     *         the link's own drives a private one, sized by `recv_stack`. Must outlive the
+     *         link. */
+    wait_module_t* wait = nullptr;
     /**
      * @brief The app-provided PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs`
      *        (#838): how long the peer may fail to take bytes before it is treated as broken.
@@ -136,9 +142,14 @@ struct tcp_server_config_t {
     /** @brief Expose the @ref bus_link_t facet (see @ref transport_t::bus) — the board↔board
      *         wiring choice, same contract as `ws_server_transport_t`'s. */
     bool peer_named = false;
-    /** @brief Poll-thread stack size in bytes, 0 = platform default. One thread serves every
+    /** @brief Fallback-thread stack size in bytes, 0 = platform default. One thread serves every
      *         peer, so this is the whole server's recv-stack knob. */
     std::size_t recv_stack = 0;
+    /** @brief The node's wait module (#2147): the link puts its sockets on it and owns no
+     *         thread, and the application drives it (`wait_module_t::run`). Null: a thread of
+     *         the link's own drives a private one, sized by `recv_stack`. Must outlive the
+     *         link. */
+    wait_module_t* wait = nullptr;
     /**
      * @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838). It
      *        SIZES the peer cap. A server's egress writes never wait (#2144): a session that
@@ -247,7 +258,7 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
               const graph::delivery_lane_t& lane) override;
 
     /**
-     * @brief Spawn the recv thread the DIAL constructor held back (#1045).
+     * @brief Put the connection on the wait the DIAL constructor held back (#1045).
      *
      * The second phase of the two-phase bring-up: the socket is connected and NOTHING has
      * been read off it, so a sink installed before this call cannot have missed a frame.
@@ -324,10 +335,11 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
     }
 
    private:
-    void run_listen();  // accept loop (LISTEN mode)
-    /** @brief The per-connection receive loop: frame ingress with no read-ahead (#2141), so
+    /** @brief The connection's wait callback: frame ingress with no read-ahead (#2141), so
      *         each body lands in its exact segment with no copy. */
-    void serve(int fd);
+    static void on_conn(void* ctx, wait_source_t& self, std::uint8_t ready);
+    /** @brief The LISTEN socket's wait callback: one accept. */
+    static void on_listen(void* ctx, wait_source_t& self, std::uint8_t ready);
     /** @brief The one send body: prefix @p parts into one record and put it through the
      *         egress, in @p lane, keeping @p value (whose links end @p parts) if it waits. */
     void send_record(std::span<const std::span<const std::byte>> parts, const graph::value_t* value,
@@ -341,6 +353,9 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
      *         is race-free here. */
     bool came_up_ = false;
 
+    /** @brief The connection's frame ingress: the header being read and the body's segment
+     *         while it fills, across readiness turns (ADR-0087 §1). */
+    frame_ingress_t<length_prefix_framer_t::kPrefixBytes, 0> ingress_;
     // RX segment source for frame reassembly (ADR-0042 §2) + drop counters.
     mem::mem_backend_t* backend_;
     std::size_t max_frame_ = kMaxFrame;  // per-connection receive cap (:settings; 0 => kMaxFrame)
@@ -382,12 +397,12 @@ class tcp_server_transport_t final : public stream_server_base_t {
      *
      * @param bind_port  TCP port to listen on (host byte order; 0 → ephemeral).
      * @param config     The server's knobs (@ref tcp_server_config_t): memory, receive cap,
-     *                   peer cap, bus facet, poll-thread stack, liveness window.
+     *                   peer cap, bus facet, fallback-thread stack, liveness window.
      */
     explicit tcp_server_transport_t(std::uint16_t bind_port,
                                     const tcp_server_config_t& config = {});
 
-    /** @brief Stop the poll thread and close all sockets. */
+    /** @brief Stop waiting and close all sockets. */
     ~tcp_server_transport_t();
 
     /** @brief See @ref transport_t::shut_down. */
@@ -458,14 +473,13 @@ class tcp_server_transport_t final : public stream_server_base_t {
 
         /** @brief The owning server's snapshot (#932): a directed facade counts into the
          *         link's own counters, so it reports them rather than a fabricated zero. */
-        [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-            return owner_ == nullptr ? transport_drop_stats_t{} : owner_->drop_stats();
-        }
+        [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override;
 
        private:
         friend class tcp_server_transport_t;
-        tcp_server_transport_t* owner_ = nullptr; /**< @brief The owning server. */
-        session_t* slot_ = nullptr;               /**< @brief The peer slot this sends to. */
+        /** @brief The peer slot this sends to. The owning server is the slot's wait context
+         *         (@ref slot_server_t::server_of), so the facade holds no pointer to it. */
+        session_t* slot_ = nullptr;
     };
 
     /** @brief The one send body: prefix @p parts into one record, then to every open peer
@@ -480,6 +494,9 @@ class tcp_server_transport_t final : public stream_server_base_t {
 
     /** @brief One fresh slot with its frame-ingress state and directed facade. */
     mem::poly_ptr_t<session_base_t> make_session() override;
+
+    /** @brief The slot's directed facade, its own `endpoint` member. */
+    transport_t& endpoint_of(session_base_t& s) noexcept override;
 
     /** @brief Per-accept setup: TCP_NODELAY + reset ingress state.  Returns true — a raw
      *         stream peer has no handshake, so it is open the moment it is accepted. */

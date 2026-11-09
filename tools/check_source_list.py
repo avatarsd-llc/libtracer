@@ -44,7 +44,8 @@ ESP_IDF_OPT_OUT = {
 # Each PlatformIO deny-list and the source groups it must name exactly.
 PIO_DENY = {
     # Host-only stacks (msquic) and Linux kernel headers (SocketCAN; its stub stays in).
-    "DENY_BASELINE": {"QUIC", "SOCKETCAN_LINUX"},
+    # The epoll wait adapter (#2147) is Linux-only too; the poll one is the package's.
+    "DENY_BASELINE": {"QUIC", "SOCKETCAN_LINUX", "WAIT_EPOLL"},
     # The bus-links opt-in (#1670) is off: no CAN transport and no CAN link.
     "DENY_WITHOUT_BUS_LINKS": {"TRANSPORT_CAN", "SOCKETCAN_STUB"},
     # The self-heal-links opt-in (#1670) is off.

@@ -60,9 +60,14 @@ from typing import Any
 PINNED_TARGET = "esp32c6"
 PINNED_TOOLCHAIN = "riscv32-esp-elf-g++ (crosstool-NG esp-15.2.0_20251204) 15.2.0"
 TRANSPORT_ROWS = (
-    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2710, None),
-    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9216, None),
-    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 8896, None),
+    # 2,710 -> 2,608 B (#2147): the receive thread body becomes one readiness callback.
+    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2608, None),
+    # 9,216 -> 9,446 B (#2147): a frame read resumes across readiness turns, so frame ingress is
+    # out of line and the connection and listener each gain a callback (maintainer ruling 60).
+    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9446, None),
+    # 8,896 -> 9,080 B (#2147): the poll loops give way to turn functions, the write-interest
+    # arm and disarm, and the thread-per-link fallback's block (maintainer ruling 60).
+    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9080, None),
     ("CAN (transport_can + TWAI link)", ("transport_can", "twai_link", "socketcan_link_stub"),
      None, "compiled, not linked: full_node creates no CAN connection, so --gc-sections drops it"),
     ("WebSocket (httpd server + client link)", ("httpd_ws_link", "esp_ws_client_link"),

@@ -63,7 +63,7 @@ For the dial link the recipe has one more step ([#1102](https://github.com/avata
 
 ### lwIP portability audit (what the socket transports use)
 
-The transports compile against lwIP's BSD-socket layer **unmodified — no shim was needed**: `SO_RCVTIMEO` (the recv-loop stop-poll idiom; on by default in ESP-IDF's lwIP), `sendmsg`/`iovec` gather writes (the rope-to-wire path), `getsockname`, `poll`, `TCP_NODELAY`, `inet_pton`. The one MCU-relevant behavior fix landed in core (macro-free): `udp_transport_t` sizes its RX segments to one byte past `min(max_frame, backend->max_segment_size())`, with `max_frame` one MTU (1,472 B) when unset, so a `pool_t` with MTU-sized slots receives datagrams instead of dropping them, and the recv thread no longer carries a 64 KiB scratch frame on its (small) pthread stack.
+The transports compile against lwIP's BSD-socket layer **unmodified — no shim was needed**: `sendmsg`/`iovec` gather writes (the rope-to-wire path), `getsockname`, `poll` (the wait module's poll adapter, woken by a loopback datagram socket, so `LWIP_NETIF_LOOPBACK` must stay on; #2147), `TCP_NODELAY`, `inet_pton`. The one MCU-relevant behavior fix landed in core (macro-free): `udp_transport_t` sizes its RX segments to one byte past `min(max_frame, backend->max_segment_size())`, with `max_frame` one MTU (1,472 B) when unset, so a `pool_t` with MTU-sized slots receives datagrams instead of dropping them, and the receiving thread no longer carries a 64 KiB scratch frame on its (small) stack.
 
 **One audited item was wrong, and is now known-wrong:** this list used to claim `MSG_NOSIGNAL` was fine because lwIP defines it and has no SIGPIPE. It defines it and then *refuses* it — `lwip_sendmsg` returns `EOPNOTSUPP` for it. `lwip_send` ignores unknown flags, so single-buffer writes are unaffected and only the **gather** path breaks. That is what removed WebSocket from this list; `transport_tcp` still rides the same `write_all_iov` and remains on ESP-IDF pending a separate ruling ([#948](https://github.com/avatarsd-llc/libtracer/issues/948)).
 
@@ -123,7 +123,12 @@ These lines are the component's recommended IDF configuration for any node that 
 # instead of a message round trip to the tcpip task.
 CONFIG_LWIP_TCPIP_CORE_LOCKING=y
 CONFIG_LWIP_TCPIP_CORE_LOCKING_INPUT=y
+# Required, not just recommended (#2147): the wait module's poll adapter wakes through a
+# loopback datagram socket. IDF's default is y; the component refuses to configure without it.
+CONFIG_LWIP_NETIF_LOOPBACK=y
 ```
+
+**What the wait module needs (#2147).** On a chip the wait module's poll adapter needs `CONFIG_LWIP_NETIF_LOOPBACK=y`, and the component's CMake stops with an error when it is off. Each module also holds one doorbell socket, so the full node uses 4 of lwIP's default 10 sockets (`CONFIG_LWIP_MAX_SOCKETS`), up from 2; raise that limit if your node opens more links. The C6 cost is measured in a later hardware batch.
 
 **Why core locking.** IDF ships `CONFIG_LWIP_TCPIP_CORE_LOCKING=n`. With it off, every lwIP socket call from a task (`recv`, `send`, `sendto`) posts a message to `tcpip_thread` and blocks on a semaphore until that task has run it: 2 task switches, 1 mailbox post and 1 semaphore pair per call. With it on, the call takes the core mutex and runs in the calling task. `_INPUT` makes the netif input path (the Wi-Fi or Ethernet driver task) take the same mutex instead of posting each received packet to `tcpip_thread`. The counts below are estimates from reading the code paths, not silicon measurements:
 
