@@ -53,13 +53,28 @@ long voluntary_switches(pid_t tid) {
     return -1;
 }
 
-/** @brief Threads in this process. */
-std::size_t thread_count() {
-    std::ifstream in("/proc/self/status");
-    std::string line;
-    while (std::getline(in, line))
-        if (line.rfind("Threads:", 0) == 0) return std::stoul(line.substr(8));
-    return 0;
+/** @brief The ids of the process's threads. */
+std::vector<pid_t> thread_ids() {
+    std::vector<pid_t> ids;
+    for (const auto& e : std::filesystem::directory_iterator("/proc/self/task"))
+        ids.push_back(static_cast<pid_t>(std::stol(e.path().filename().string())));
+    return ids;
+}
+
+/**
+ * @brief The threads that exist now and are not in @p old: the ones spawned since.
+ *
+ * A count of threads cannot stand in for this. A thread another test joined a moment ago
+ * can still be counted (its task outlives the join by a few microseconds; ~1% of joins on
+ * this host), so a count taken then is one too high and a later count looks like a thread
+ * vanished. Comparing ids sees only what was spawned, whatever a runtime or an exiting
+ * thread does to the count.
+ */
+std::vector<pid_t> spawned_since(const std::vector<pid_t>& old) {
+    std::vector<pid_t> fresh;
+    for (const pid_t id : thread_ids())
+        if (std::find(old.begin(), old.end(), id) == old.end()) fresh.push_back(id);
+    return fresh;
 }
 
 /** @brief Poll @p done for up to 2 s. */
@@ -289,7 +304,7 @@ void test_links_share_one_module() {
     driven_t d;
     std::atomic<int> delivered{0};
     auto rx = [&](std::span<const std::byte>) { delivered.fetch_add(1); };
-    const std::size_t threads_before = thread_count();
+    const std::vector<pid_t> old = thread_ids();
     tr::net::tcp_server_transport_t server(0, {.wait = &d.module});
     check(server.ok(), "the server listens on the module");
     server.set_receiver(rx);
@@ -304,7 +319,7 @@ void test_links_share_one_module() {
             0, "127.0.0.1", 9, tr::net::udp_config_t{.wait = &d.module}));
         check(udps.back()->ok(), "a UDP link is up");
     }
-    check(thread_count() == threads_before, "65 links spawned no thread");
+    check(spawned_since(old).empty(), "65 links spawned no thread");
     const std::array<std::byte, 4> frame{};
     for (auto& t : dialers) t->send(std::span<const std::byte>(frame));
     check(eventually([&] { return delivered.load() == 32; }), "every dialer's frame is delivered");
@@ -324,14 +339,6 @@ void test_links_share_one_module() {
     for (auto& u : udps) u->shut_down();
 }
 
-/** @brief The ids of the process's threads. */
-std::vector<pid_t> thread_ids() {
-    std::vector<pid_t> ids;
-    for (const auto& e : std::filesystem::directory_iterator("/proc/self/task"))
-        ids.push_back(static_cast<pid_t>(std::stol(e.path().filename().string())));
-    return ids;
-}
-
 void test_fallback_thread_is_idle() {
     std::printf("-- the thread-per-link fallback: quiet links' threads wake 0 times\n");
     // Only the threads the links add are counted, so a runtime's helper thread (a
@@ -342,9 +349,7 @@ void test_fallback_thread_is_idle() {
     tr::net::udp_transport_t udp(0, "127.0.0.1", 9, {});
     check(server.ok() && dialer.ok() && dialer.start_receiving() && udp.ok(),
           "the fallback links are up, each on a thread of its own");
-    std::vector<pid_t> links;
-    for (const pid_t id : thread_ids())
-        if (std::find(old.begin(), old.end(), id) == old.end()) links.push_back(id);
+    const std::vector<pid_t> links = spawned_since(old);
     check(links.size() == 3, "three link threads, one per fallback link");
     const auto switches = [&links] {
         long sum = 0;
