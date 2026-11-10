@@ -211,7 +211,9 @@ bool posix_endpoint_t::start(std::size_t stack_size, mem::block_source_t& src) {
 void posix_endpoint_t::stop_driver() {
     if (fallback_ == nullptr) return;
     fallback_->module.stop();
-    fallback_->thread.join();
+    // Not from the thread itself: it cannot wait for its own end. Once this callback returns
+    // its run() sees the stop and the thread ends; the destructor joins it.
+    if (!fallback_->module.on_driver()) fallback_->thread.join();
 }
 
 void posix_endpoint_t::stop_and_join() {

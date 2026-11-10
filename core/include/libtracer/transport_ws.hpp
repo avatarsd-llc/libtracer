@@ -467,6 +467,8 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
 
     /** @brief See @ref transport_t::shut_down. */
     void shut_down() override;
+    /** @brief True on this link's own thread, or the node module's driver. */
+    [[nodiscard]] bool on_own_thread() const noexcept override { return on_driver(); }
 
     ws_client_transport_t(const ws_client_transport_t&) = delete;
     ws_client_transport_t& operator=(const ws_client_transport_t&) = delete;

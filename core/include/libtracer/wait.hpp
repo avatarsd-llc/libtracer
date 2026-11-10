@@ -201,6 +201,12 @@ class wait_module_t {
     /** @brief Make @ref run return: wakes it if it is blocked. Idempotent. */
     void stop() noexcept;
 
+    /** @brief True on the thread inside @ref run : a callback of this module may be on the
+     *         caller's stack, so the caller must not free a source it may be running. */
+    [[nodiscard]] bool on_driver() const noexcept {
+        return driver_.load() == detail::this_thread_id();
+    }
+
    private:
     /** @brief Run @p op under the module's lock, or straight away once the module is stopped
      *         and no thread is in @ref run (a stopped module dispatches nothing again). The
@@ -247,7 +253,7 @@ class wait_module_t {
      *         through `%tr::park_wait`, as `std::atomic::wait` costs an MCU libstdc++'s 2 KB
      *         waiter table (#2507). */
     void await_quiet(const wait_source_t& s) noexcept {
-        if (driver_.load() == detail::this_thread_id()) return;
+        if (on_driver()) return;
         waiters_.fetch_add(1);
         for (const wait_source_t* f = firing_.load(); f == &s; f = firing_.load())
             park_wait(firing_, f, std::memory_order_seq_cst);
