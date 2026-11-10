@@ -35,6 +35,7 @@
 #include "libtracer/tlv_arena.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/view.hpp"
+#include "libtracer/wait.hpp"
 
 namespace tr::graph {
 
@@ -1257,6 +1258,9 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
  * are taken in stack-sized batches under the map lock, which draws nothing, and freed outside it.
  */
 void graph_t::collect() {
+    // From a callback, nothing: a release may join a thread that is waiting on this one. The
+    // parked links are left for the next call from an application thread.
+    if (tr::net::on_callback_thread()) return;
     constexpr std::size_t kBatch = 16;
     const detail_qsbr::horizon_t h = detail_qsbr::horizon([this](const detail_qsbr::horizon_t& h0) {
         const std::shared_lock lock(map_mutex_);

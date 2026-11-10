@@ -170,6 +170,10 @@ struct write_result_t {
  * releasing ANY resource a callback touches (sockets, receivers, buffers). It detaches the
  * link's sources, which waits out a callback in flight, so none runs once it returns.
  *
+ * **Lifetime rules:** a deferred teardown (a `shut_down` on a callback thread) only shuts
+ * down; it doesn't close. A link's descriptors stay owned and open until its destructor
+ * runs, and destructors always join.
+ *
  * Stream transports (tcp / ws) layer the shared one-peer fd/teardown discipline on top via
  * @ref stream_endpoint_t — the write-serialization and teardown-under-role invariants live
  * there, with the code.
@@ -241,7 +245,8 @@ class posix_endpoint_t {
 
     /**
      * @brief Stop waiting (idempotent): stop and join the fallback thread, then detach
-     *        @ref src_ . MUST be the FIRST act of every derived destructor.
+     *        @ref src_ . MUST be the FIRST act of every derived destructor, and always joins:
+     *        a destructor runs off every callback thread (asserted).
      *
      * The fallback's driver is joined before the detach, so on a private module the detach
      * takes no lock and a teardown made under a lock a callback takes cannot deadlock on the
@@ -249,12 +254,27 @@ class posix_endpoint_t {
      */
     void stop_and_join();
 
-    /** @brief Stop and join the fallback's thread (idempotent); a no-op on the node's
-     *         module, whose driver is the application's. Called on a thread that runs link
-     *         callbacks (@ref on_callback_thread), this one's included, it stops the thread
-     *         without joining it: the thread ends once its callback returns, and the
-     *         destructor, run by the graph's `collect()` outside every callback, joins it. */
-    void stop_driver();
+    /**
+     * @brief Stop waiting for a `shut_down`: as @ref stop_and_join, except on a thread that
+     *        runs link callbacks (@ref on_callback_thread), where it joins nothing and marks
+     *        the link shut. A shut link's descriptors are shut down and stay open; its
+     *        destructor closes them after its join.
+     * @retval true The teardown is deferred: the link is shut, and nothing was joined.
+     */
+    [[nodiscard]] bool stop_for_shut_down();
+
+    /** @brief Stop the fallback's thread, and join it when @p join (idempotent); a no-op on
+     *         the node's module, whose driver is the application's.
+     *  @param join False only on a deferred teardown (@ref stop_for_shut_down). */
+    void stop_driver(bool join);
+
+    /** @brief Give a socket @p fd back that @p slot held: closed, unless the link is shut,
+     *         when it stays open in @p slot for the destructor to close. */
+    void release_fd(std::atomic<int>& slot, int fd) noexcept;
+
+    /** @brief Give a listening socket back: closed and reset to -1, unless the link is shut,
+     *         when it is only shut down and the destructor closes it. */
+    void release_listen(int& fd) noexcept;
 
     /**
      * @brief The link's own socket's registration: a datagram socket, a dialled connection,
@@ -275,6 +295,9 @@ class posix_endpoint_t {
      *         @ref start; null on the node's module, which needs none of it. One pointer, so
      *         a link on the node's module pays nothing for the fallback it does not use. */
     fallback_t* fallback_ = nullptr;
+    /** @brief Set by a deferred teardown (@ref stop_for_shut_down): from then on no
+     *         descriptor of the link is closed before its destructor. */
+    std::atomic<bool> shut_{false};
 };
 
 /**
@@ -538,7 +561,8 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * The teardown-under-role invariant as code: `shutdown(2)` the fd so a write in flight
      * returns, close the peer's egress (waiting out its writer, releasing its frames), THEN
      * reset @ref conn_fd_ to -1 and `close(2)` the fd — a concurrent `send()` either finished
-     * against the still-open fd or finds the peer closed and sheds.
+     * against the still-open fd or finds the peer closed and sheds. On a shut link the fd
+     * stays open in @ref conn_fd_ for the destructor.
      *
      * @param fd The peer fd the recv loop was serving.
      */
@@ -547,7 +571,8 @@ class stream_endpoint_t : protected posix_endpoint_t {
     /**
      * @brief The @ref transport_t::shut_down of a one-peer stream link: join the receive
      *        thread, then tear the live peer down (@ref teardown_peer), so a later send finds
-     *        the peer closed and sheds. Idempotent.
+     *        the peer closed and sheds. Idempotent. A deferred teardown joins nothing and only
+     *        shuts the peer down.
      */
     void shut_down_stream();
 
@@ -930,6 +955,13 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *         of a derived destructor, which hides @ref posix_endpoint_t::stop_and_join. */
     void stop_and_join();
 
+    /** @brief @ref posix_endpoint_t::stop_for_shut_down for the listener and every session.
+     *  @retval true The teardown is deferred. */
+    [[nodiscard]] bool stop_for_shut_down();
+
+    /** @brief Take every session off the wait (after the listener). */
+    void detach_slots();
+
     /**
      * @brief Tear one slot down and free it for reuse (driving thread only).
      *
@@ -949,7 +981,8 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     /**
      * @brief The @ref transport_t::shut_down of a stream server: join the driving thread, tear
      *        every session down exactly as a remote close does (@ref teardown_slot), and close
-     *        the listen socket. Idempotent.
+     *        the listen socket. Idempotent. A deferred teardown joins nothing and closes
+     *        nothing: the sockets are shut down, and the destructor closes them.
      */
     void shut_down_slots();
 

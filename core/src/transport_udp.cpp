@@ -98,7 +98,7 @@ udp_transport_t::~udp_transport_t() {
 }
 
 void udp_transport_t::shut_down() {
-    stop_and_join();
+    (void)stop_for_shut_down();
     // `send` reads `fd_` without a lock, so the descriptor NUMBER must stay occupied until the
     // object goes; only the socket behind it is released here.
     if (fd_ < 0) return;

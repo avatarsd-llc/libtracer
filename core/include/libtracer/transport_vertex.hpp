@@ -665,8 +665,12 @@ class transport_vertex_t {
      * note); only the routing entry and the vertex go.
      *
      * A node whose connections are removed must therefore call `graph_t::collect()` from time
-     * to time (any thread, any point: a frame still inside the link keeps it), or every
-     * removed link is kept until the graph is destroyed.
+     * to time (any thread outside a link callback; a frame still inside the link keeps it), or
+     * every removed link is kept until the graph is destroyed. Links removed from a callback
+     * are joined and freed at the next collect() or at graph destruction.
+     *
+     * An application liveness subscriber must not remove its own connection from inside the
+     * liveness callback.
      *
      * This is the owner-internal operation the RFC-0014 `NAME`-write removal dispatch
      * (S2b) will call; it is not itself reachable from the wire.

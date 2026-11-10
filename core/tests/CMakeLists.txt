@@ -331,7 +331,7 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_TCP A
     add_test(NAME link_memory_default COMMAND link_memory_default_test)
 endif()
 
-if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP)
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_TCP)
     # #2751 — a link's teardown never waits for one of its callbacks while holding a lock that
     # callback can take, and a link removed from its own callback leaves no thread behind.
     add_executable(link_teardown_wait_test link_teardown_wait_test.cpp)

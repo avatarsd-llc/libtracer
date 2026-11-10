@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <cerrno>
 #include <charconv>
 #include <cstdint>
@@ -208,23 +209,57 @@ bool posix_endpoint_t::start(std::size_t stack_size, mem::block_source_t& src) {
     return false;
 }
 
-void posix_endpoint_t::stop_driver() {
+void posix_endpoint_t::stop_driver(bool join) {
     if (fallback_ == nullptr) return;
     fallback_->module.stop();
-    // Never from a thread that runs link callbacks: the thread may be this one, or be inside a
-    // callback that waits on this one. Once its callback returns its run() sees the stop and
-    // the thread ends; the destructor joins it.
-    if (!on_callback_thread()) fallback_->thread.join();
+    // Not joined on a deferred teardown: the thread may be this one, or be inside a callback
+    // that waits on this one. Once its callback returns its run() sees the stop and the thread
+    // ends; the destructor joins it.
+    if (join) fallback_->thread.join();
 }
 
 void posix_endpoint_t::stop_and_join() {
+    assert(!on_callback_thread() && "a link's destructor runs off every callback thread");
     wait_module_t* const w = wait_.load(std::memory_order_acquire);
     if (w == nullptr) return;
     // A private module's driver goes first: once it is joined no callback can run, so the
     // detach takes no lock and waits on nobody, and a teardown made under the caller's lock
     // (a transport vertex's control plane) cannot cross a callback that takes that lock.
-    stop_driver();
+    stop_driver(true);
     w->detach(src_);
+}
+
+bool posix_endpoint_t::stop_for_shut_down() {
+    const bool deferred = on_callback_thread();
+    // Before any descriptor is read: a callback's release_fd that runs after this keeps its fd.
+    if (deferred) shut_.store(true, std::memory_order_seq_cst);
+    wait_module_t* const w = wait_.load(std::memory_order_acquire);
+    if (w == nullptr) return deferred;
+    stop_driver(!deferred);
+    w->detach(src_);
+    return deferred;
+}
+
+void posix_endpoint_t::release_fd(std::atomic<int>& slot, int fd) noexcept {
+    // Cleared, THEN the mark read, against stop_for_shut_down's mark-then-read (both
+    // seq_cst): a teardown that read this fd sees it kept open, and one that read -1 found
+    // it gone, so no shutdown lands on a closed descriptor.
+    slot.store(-1, std::memory_order_seq_cst);
+    if (!shut_.load(std::memory_order_seq_cst)) {
+        ::close(fd);
+        return;
+    }
+    slot.store(fd, std::memory_order_relaxed);  // the destructor closes it
+}
+
+void posix_endpoint_t::release_listen(int& fd) noexcept {
+    if (fd < 0) return;
+    if (shut_.load(std::memory_order_relaxed)) {
+        (void)::shutdown(fd, SHUT_RDWR);
+        return;
+    }
+    ::close(fd);
+    fd = -1;
 }
 
 stream_endpoint_t::~stream_endpoint_t() {
@@ -426,14 +461,14 @@ void stream_endpoint_t::teardown_peer(int fd) {
     // then is the fd reset and closed (never a write to a closed or reused fd).
     ::shutdown(fd, SHUT_RDWR);
     egress_.close(peer_);
-    conn_fd_.store(-1, std::memory_order_relaxed);
-    ::close(fd);
+    release_fd(conn_fd_, fd);
 }
 
 void stream_endpoint_t::shut_down_stream() {
-    // Detached first, so no callback can tear the peer down under this one.
-    stop_and_join();
-    const int fd = conn_fd_.load(std::memory_order_relaxed);
+    // Detached first, so no callback can tear the peer down under this one. Deferred, a
+    // callback may still run: the fd is read after the link is marked shut, so it stays open.
+    (void)stop_for_shut_down();
+    const int fd = conn_fd_.load(std::memory_order_seq_cst);
     if (fd >= 0) teardown_peer(fd);
 }
 
@@ -819,11 +854,10 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     // session and are never inherited by whoever next claims this slot (#838).
     const bool was_open = s.open.exchange(false, std::memory_order_acq_rel);
     if (wait_module_t* const w = waiting()) w->detach(s);  // no callback for it runs after
-    const int fd = s.fd.load(std::memory_order_relaxed);
+    const int fd = s.fd.load(std::memory_order_seq_cst);
     if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
     egress_.close(s.egress);
-    s.fd.store(-1, std::memory_order_relaxed);
-    if (fd >= 0) ::close(fd);
+    if (fd >= 0) release_fd(s.fd, fd);
     on_slot_reset(s);
     // Departure seam (RFC-0009 §D.5): fired LAST, with no transport lock held — the
     // notifier re-enters the routing plane. Only a session that reached `open` can have
@@ -847,23 +881,28 @@ void slot_server_t::teardown_slot(session_base_t& s) {
 
 void slot_server_t::shut_down_slots() {
     // Off the wait first: once it returns no callback tears a slot down or reads the listen
-    // socket, so both are this call's alone.
-    stop_and_join();
+    // socket, so both are this call's alone. Deferred, the sockets are only shut down.
+    (void)stop_for_shut_down();
     for (const mem::poly_ptr_t<session_base_t>& s : slots_) teardown_slot(*s);
-    if (listen_fd_ >= 0) ::close(listen_fd_);
-    listen_fd_ = -1;
+    release_listen(listen_fd_);
 }
 
 void slot_server_t::stop_and_join() {
-    // A fallback thread first, for the reason posix_endpoint_t::stop_and_join gives. Then the
-    // listener: `slots_` grows only in its callback, so once its detach has waited that out
-    // (or the driver is joined) the table is still, and the sessions can be walked off.
-    stop_driver();
-    if (wait_module_t* const w = waiting()) {
-        w->detach(src_);
-        for (const mem::poly_ptr_t<session_base_t>& s : slots_) w->detach(*s);
-    }
+    // The fallback thread and the listener first, for the reason posix_endpoint_t gives:
+    // `slots_` grows only in the listener's callback, so the table is then still.
     stream_endpoint_t::stop_and_join();
+    detach_slots();
+}
+
+bool slot_server_t::stop_for_shut_down() {
+    const bool deferred = stream_endpoint_t::stop_for_shut_down();
+    detach_slots();
+    return deferred;
+}
+
+void slot_server_t::detach_slots() {
+    if (wait_module_t* const w = waiting())
+        for (const mem::poly_ptr_t<session_base_t>& s : slots_) w->detach(*s);
 }
 
 bool slot_server_t::any_open_session() const {

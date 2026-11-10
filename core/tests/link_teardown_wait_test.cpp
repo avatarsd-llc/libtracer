@@ -49,6 +49,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -59,6 +60,7 @@
 #include "libtracer/builtin_transports.hpp"
 #include "libtracer/conn_spec.hpp"
 #include "libtracer/tracer.hpp"
+#include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/wait.hpp"
 
@@ -109,9 +111,23 @@ std::size_t spawned_since(const std::vector<long>& old) {
     return n;
 }
 
-/** @brief A UDP port free right now. */
-std::uint16_t free_port() {
-    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+/** @brief How many of the process's open sockets are bound to local @p port . */
+std::size_t sockets_on(std::uint16_t port) {
+    std::size_t n = 0;
+    for (const auto& e : std::filesystem::directory_iterator("/proc/self/fd")) {
+        const int fd = std::stoi(e.path().filename().string());
+        sockaddr_in a{};
+        socklen_t len = sizeof a;
+        if (::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len) == 0 &&
+            a.sin_family == AF_INET && ntohs(a.sin_port) == port)
+            ++n;
+    }
+    return n;
+}
+
+/** @brief A port free right now, for @p type (a UDP port by default). */
+std::uint16_t free_port(int type = SOCK_DGRAM) {
+    const int fd = ::socket(AF_INET, type, 0);
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -164,6 +180,8 @@ struct node_b_t {
         : net(g, router, "/net", &tr::mem::net_backend(), &tr::mem::net_source(), nullptr, wait) {
         (void)net.register_module(std::string(tr::net::kUdpServerSuggestedModule), "udp",
                                   conn_role_t::LISTEN);
+        (void)net.register_module(std::string(tr::net::kTcpServerSuggestedModule), "tcp",
+                                  conn_role_t::LISTEN);
         (void)net.register_module("gate-client", "gate", conn_role_t::DIAL);
         net.register_transport_type(
             "gate",
@@ -173,10 +191,10 @@ struct node_b_t {
                 return tr::net::make_transport<gate_link_t>(src);
             });
     }
-    /** @brief Create the UDP listener @p name on @p port . */
-    bool listen(std::string_view name, std::uint16_t port) {
-        return g.write(path_t("/net/udp-server/conn"), tr::net::conn_spec(name, port, "udp"))
-            .has_value();
+    /** @brief Create the @p kind listener @p name on @p port . */
+    bool listen(std::string_view name, std::uint16_t port, std::string_view kind = "udp") {
+        const std::string conn = "/net/" + std::string(kind) + "-server/conn";
+        return g.write(path_t(conn), tr::net::conn_spec(name, port, kind)).has_value();
     }
     /** @brief Whether connection @p qualified still exists. */
     bool has(std::string_view qualified) { return net.settings_of(qualified).has_value(); }
@@ -190,17 +208,19 @@ struct node_a_t {
     node_a_t() {
         (void)net.register_module(std::string(tr::net::kUdpClientSuggestedModule), "udp",
                                   conn_role_t::DIAL);
+        (void)net.register_module(std::string(tr::net::kTcpClientSuggestedModule), "tcp",
+                                  conn_role_t::DIAL);
     }
-    /** @brief Dial @p port as connection @p name , and hold it up. */
-    bool dial(std::string_view name, std::uint16_t port) {
-        if (!g.write(path_t("/net/udp-client/conn"),
-                     tr::net::conn_spec(name, port, "udp", "127.0.0.1"))
+    /** @brief Dial @p port as @p kind connection @p name , and hold it up. */
+    bool dial(std::string_view name, std::uint16_t port, std::string_view kind = "udp") {
+        const std::string module = "net/" + std::string(kind) + "-client/";
+        if (!g.write(path_t("/" + module + "conn"),
+                     tr::net::conn_spec(name, port, kind, "127.0.0.1"))
                  .has_value())
             return false;
-        if constexpr (tr::net::kSelfHealLinks)
-            (void)net.acquire_link("net/udp-client/" + std::string(name));
+        if constexpr (tr::net::kSelfHealLinks) (void)net.acquire_link(module + std::string(name));
         // A write sent before the dialer is up is dropped, so wait for it.
-        const std::string path = "/net/udp-client/" + std::string(name);
+        const std::string path = "/" + module + std::string(name);
         return eventually([&] {
             const auto h = g.find(path_t::parse(path)->key());
             if (!h) return false;
@@ -211,10 +231,11 @@ struct node_a_t {
                    bytes.back() == static_cast<std::byte>(tr::net::link_state_t::UP);
         });
     }
-    /** @brief Write @p payload to @p dst on B, through the dialer @p via . */
+    /** @brief Write @p payload to @p dst on B, through the @p kind dialer @p via . */
     bool write(tr::net::fwd_router_t::origin_t& slot, std::string_view via, std::string_view dst,
-               const tr::view::view_t& payload) {
-        const std::string to = "/net/udp-client/" + std::string(via) + std::string(dst);
+               const tr::view::view_t& payload, std::string_view kind = "udp") {
+        const std::string to =
+            "/net/" + std::string(kind) + "-client/" + std::string(via) + std::string(dst);
         return router.originate(slot, tr::graph::fwd_op_t::WRITE, path_t(to), payload.bytes())
             .has_value();
     }
@@ -323,6 +344,100 @@ void test_two_links_removing_each_other() {
                   "once B frees them, neither link leaves a thread behind");
 }
 
+/** @brief B's TCP listener `srv`, removed by a write A sends over a connection to it. */
+struct tcp_removed_by_its_own_write_t {
+    node_b_t b{nullptr};
+    node_a_t a;
+    std::uint16_t port = 0;
+    std::vector<long> link_threads;  // B's link's own
+    tr::net::fwd_router_t::origin_t slot{&ignore_reply, nullptr};
+    tcp_removed_by_its_own_write_t() {
+        const std::vector<long> before = thread_ids();
+        bool listening = false;  // a port another test takes first is tried again
+        for (int i = 0; i < 8 && !listening; ++i)
+            listening = b.listen("srv", port = free_port(SOCK_STREAM), "tcp");
+        check(listening, "B listens on TCP");
+        for (const long id : thread_ids())
+            if (std::find(before.begin(), before.end(), id) == before.end())
+                link_threads.push_back(id);
+        check(a.dial("tob", port, "tcp"), "A connects to B");
+        check(eventually([&] { return sockets_on(port) == 2; }),
+              "B holds its listening socket and the accepted connection");
+        check(a.write(slot, "tob", "/net/tcp-server/conn", tr::net::conn_remove("srv"), "tcp"),
+              "A sends B the removal of the link it arrives on");
+        check_or_exit(eventually([&] { return !b.has("net/tcp-server/srv"); }),
+                      "the link's teardown, run on its own callback, completes");
+    }
+    ~tcp_removed_by_its_own_write_t() { (void)a.router.cancel(slot); }
+};
+
+/** @brief Runs @p fn once on a thread that runs link callbacks: a wait module's own. */
+template <class Fn>
+void on_a_callback_thread(Fn fn) {
+    tr::net::wait_module_t module;
+    int p[2];
+    check_or_exit(::pipe(p) == 0, "a pipe for the callback");
+    struct ctx_t {
+        Fn* fn;
+        std::atomic<bool> done{false};
+    } ctx{&fn};
+    tr::net::wait_source_t src;
+    src.ctx = &ctx;
+    src.fd.store(p[0]);
+    src.fire = [](void* c, tr::net::wait_source_t& self, std::uint8_t) {
+        auto* x = static_cast<ctx_t*>(c);
+        char byte = 0;
+        if (::read(self.fd.load(), &byte, 1) < 0) byte = 0;
+        if (!x->done.load()) (*x->fn)();
+        x->done.store(true);
+    };
+    check_or_exit(module.attach(src), "the callback source is on the module");
+    std::thread driver([&] { module.run(); });
+    const char byte = 1;
+    check_or_exit(::write(p[1], &byte, 1) == 1, "the callback is woken");
+    check_or_exit(eventually([&] { return ctx.done.load(); }), "the callback ran");
+    module.detach(src);
+    module.stop();
+    driver.join();
+    ::close(p[0]);
+    ::close(p[1]);
+}
+
+void test_deferred_teardown_keeps_the_descriptor_open_until_the_destructor() {
+    std::printf("-- a deferred teardown keeps the link's descriptor open until its destructor\n");
+    tcp_removed_by_its_own_write_t t;
+    std::this_thread::sleep_for(50ms);  // the link's callback sees its shut-down sockets
+    check(sockets_on(t.port) == 2, "removed, B's link still holds both its descriptors open");
+    t.b.g.collect();
+    check(eventually([&] { return sockets_on(t.port) == 0; }),
+          "the destructor, at collect(), closes them");
+}
+
+void test_collect_from_a_callback_frees_nothing() {
+    std::printf("-- collect() from a callback frees nothing\n");
+    tcp_removed_by_its_own_write_t t;
+    on_a_callback_thread([&] { t.b.g.collect(); });
+    check(sockets_on(t.port) == 2, "collect() on a callback thread left the removed link whole");
+    t.b.g.collect();
+    check(eventually([&] { return sockets_on(t.port) == 0; }),
+          "the next collect() from an application thread frees it");
+}
+
+void test_removal_from_a_callback_then_collect_leaves_nothing_behind() {
+    std::printf("-- removal from a callback, then collect() from an app thread\n");
+    tcp_removed_by_its_own_write_t t;
+    t.b.g.collect();
+    check(eventually([&] { return sockets_on(t.port) == 0; }), "no descriptor is left behind");
+    check(!t.link_threads.empty(), "B's link ran a thread of its own");
+    check(eventually([&] {
+              const std::vector<long> now = thread_ids();
+              return std::none_of(t.link_threads.begin(), t.link_threads.end(), [&](long id) {
+                  return std::find(now.begin(), now.end(), id) != now.end();
+              });
+          }),
+          "and no thread of B's link");
+}
+
 }  // namespace
 
 int main() {
@@ -331,6 +446,9 @@ int main() {
     test_removed_by_its_own_write(true);
     test_removed_while_its_callback_waits_for_the_control_plane();
     test_two_links_removing_each_other();
+    test_deferred_teardown_keeps_the_descriptor_open_until_the_destructor();
+    test_collect_from_a_callback_frees_nothing();
+    test_removal_from_a_callback_then_collect_leaves_nothing_behind();
     std::printf("link_teardown_wait_test: %s (%d failures)\n",
                 g_failures == 0 ? "ALL PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;

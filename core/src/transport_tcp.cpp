@@ -243,9 +243,9 @@ tcp_transport_t::~tcp_transport_t() {
 
 void tcp_transport_t::shut_down() {
     shut_down_stream();
-    // Only the joined thread read the listen socket, so it can go now and free its port.
-    if (listen_fd_ >= 0) ::close(listen_fd_);
-    listen_fd_ = -1;
+    // Only the joined thread read the listen socket, so it can go now and free its port;
+    // deferred, it is only shut down, and the destructor closes it.
+    release_listen(listen_fd_);
 }
 
 void tcp_transport_t::send(std::span<const std::byte> frame) {

@@ -12,6 +12,7 @@
 
 #include "libtracer/self_heal_link.hpp"
 
+#include <cassert>
 #include <optional>
 #include <utility>
 
@@ -53,9 +54,14 @@ self_heal_link_t::self_heal_link_t(transport_factory_t factory, conn_settings_t 
       src_(src),
       stack_(stack) {}
 
-self_heal_link_t::~self_heal_link_t() { stop(); }
+self_heal_link_t::~self_heal_link_t() {
+    assert(!on_callback_thread() && "a link's destructor runs off every callback thread");
+    halt(false);
+}
 
 void self_heal_link_t::shut_down() { stop(); }
+
+void self_heal_link_t::stop() { halt(on_callback_thread()); }
 
 void self_heal_link_t::set_liveness_publisher(liveness_publish_fn_t fn) {
     const std::lock_guard l(m_);
@@ -172,12 +178,11 @@ void self_heal_link_t::release() {
     cv_.notify_all();
 }
 
-void self_heal_link_t::stop() {
-    // On a thread that runs link callbacks nothing here may wait (`on_callback_thread`): the
+void self_heal_link_t::halt(bool defer) {
+    // Deferred (a teardown on a thread that runs link callbacks) nothing here waits: the
     // worker could be reaping a socket whose callback is this one, and a socket's own thread
-    // could be the one asking. The stop is still made; the destructor, which the graph's
-    // collect() runs outside every callback, joins and frees what is left.
-    const bool defer = on_callback_thread();
+    // could be the one asking. The stop is still made; the destructor joins and frees what is
+    // left.
     bool started = false;
     {
         const std::lock_guard l(m_);

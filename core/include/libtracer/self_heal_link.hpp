@@ -377,6 +377,12 @@ class self_heal_link_t final : public transport_t {
      *         link, or on a `RECONNECTING` one that no app clock drives. Caller holds `m_`. */
     void demand_locked();
 
+    /** @brief The body of @ref stop and of the destructor: stop the worker and tear every
+     *         socket down. @p defer (a teardown on a callback thread only, never the
+     *         destructor) joins nothing and shuts the sockets down, keeping them for the
+     *         destructor. */
+    void halt(bool defer);
+
     /** @brief Park @p dead on the corpse list (it adopts the hold); caller holds `m_`. */
     void park_locked(sock_ref_t dead) noexcept;
 
