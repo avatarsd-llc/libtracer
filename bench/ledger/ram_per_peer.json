@@ -58,7 +58,7 @@
       "arm": "ws-server",
       "metric": "link_base",
       "goal": null,
-      "moved_by": "#2326 (per-peer lane lock, #2310: egress_t loses its 40 B std::mutex, link base 600 -> 568 B; on ws-server after #2272's 8 B first_ head had moved it 600 -> 616 B; #2351's 8 B tail-padding loss taken back by #2512)",
+      "moved_by": "#2252 (no stream write waits: stream_endpoint_t loses its 4 B send-bound window and its padding, link base 520 -> 504 B); before it #2326 (per-peer lane lock, #2310: egress_t loses its 40 B std::mutex, link base 600 -> 568 B; on ws-server after #2272's 8 B first_ head had moved it 600 -> 616 B; #2351's 8 B tail-padding loss taken back by #2512)",
       "waiver": "#2198 maintainer ruling 2026-10-16 (frozen peers are closed by an app-driven check, implemented per transport vertex): +16 B per server link object, not per peer. It is two 8 B members of stream_endpoint_t, which every stream link inherits: frozen_closed_ (std::atomic<std::size_t>, the count of peers the check closed, read by frozen_closed()) and live_since_ (std::uint64_t, the app-supplied `now` at which the check last saw this endpoint make progress; only the dialer's one-peer record reads it, a server judges each session by its own 8 B live_since). tx_moved_ sits in an existing padding hole and costs 0 B.",
       "note": "Per link, not per peer: what an idle server link holds before any peer. #2136 sets no number; it holds."
     },
