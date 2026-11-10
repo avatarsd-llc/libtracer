@@ -76,6 +76,20 @@ inline int (*write_fault_inject_hook)() noexcept = nullptr;
 
 namespace tr::net {
 
+namespace detail {
+/**
+ * @brief Test seam: called by a stream server's accept on its driving thread right after it
+ *        has taken a session slot (growing the table for a new one), with no lock held and
+ *        before the session goes on the wait. A test parks the accept here to order another
+ *        thread's teardown after the growth.
+ *
+ * Install it before the peer that should trip it connects, and clear it before the test
+ * returns; consulted only when the build binds
+ * `%tr::graph::default_config_t::kFaultInjection` (#1719).
+ */
+inline void (*slot_taken_hook)() = nullptr;
+}  // namespace detail
+
 /**
  * @brief The malformed-call write-fault tally of the POSIX stream transports (#948).
  *
@@ -965,6 +979,11 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
 
     /** @brief Take every session off the wait (after the listener). */
     void detach_slots();
+
+    /** @brief Session @p i of the table, or null past its end. Read under @ref peers_m_ ,
+     *         which the accept grows the table under, so a walk by index is safe against a
+     *         concurrent accept on the link's driving thread. */
+    [[nodiscard]] session_base_t* slot_at(std::size_t i);
 
     /**
      * @brief Tear one slot down and free it for reuse (driving thread only).

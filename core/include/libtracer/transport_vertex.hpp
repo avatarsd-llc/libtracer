@@ -669,8 +669,8 @@ class transport_vertex_t {
      * every removed link is kept until the graph is destroyed. Links removed from a callback
      * are joined and freed at the next collect() or at graph destruction.
      *
-     * An application liveness subscriber must not remove its own connection from inside the
-     * liveness callback.
+     * An application liveness subscriber must not create or remove any connection from inside
+     * the liveness callback.
      *
      * This is the owner-internal operation the RFC-0014 `NAME`-write removal dispatch
      * (S2b) will call; it is not itself reachable from the wire.

@@ -708,6 +708,12 @@ void slot_server_t::accept_peer() {
     session_base_t* slot = nullptr;
     {
         const std::lock_guard lock(peers_m_);
+        // A shut link accepts nothing. Read under the lock a shut link's slot walk takes, so a
+        // session either lands before the walk reaches its index, or finds the link shut.
+        if (shut()) {
+            ::close(fd);
+            return;
+        }
         std::size_t idx = 0;
         for (std::size_t i = 0; i < slots_.size(); ++i)
             if (slots_[i]->fd.load(std::memory_order_relaxed) < 0) {
@@ -753,6 +759,9 @@ void slot_server_t::accept_peer() {
         const std::string_view named =
             format_session_name(slot->handle, std::span<char>(slot->name, kPeerNameChars - 1));
         slot->name[named.size()] = '\0';
+    }
+    if constexpr (graph::kFaultInjection) {
+        if (detail::slot_taken_hook != nullptr) detail::slot_taken_hook();
     }
     // Socket options and the slot's protocol buffers, then its handshake stance: a raw
     // stream peer is open the moment it is accepted, a WS peer only past its 101.
@@ -885,7 +894,7 @@ void slot_server_t::shut_down_slots() {
     // Off the wait first: once it returns no callback tears a slot down or reads the listen
     // socket, so both are this call's alone. Deferred, the sockets are only shut down.
     (void)stop_for_shut_down();
-    for (const mem::poly_ptr_t<session_base_t>& s : slots_) teardown_slot(*s);
+    for (std::size_t i = 0; session_base_t* const s = slot_at(i); ++i) teardown_slot(*s);
     release_listen(listen_fd_);
 }
 
@@ -904,14 +913,22 @@ bool slot_server_t::stop_for_shut_down() {
 
 void slot_server_t::detach_slots() {
     if (wait_module_t* const w = waiting())
-        for (const mem::poly_ptr_t<session_base_t>& s : slots_) w->detach(*s);
+        for (std::size_t i = 0; session_base_t* const s = slot_at(i); ++i) w->detach(*s);
+}
+
+slot_server_t::session_base_t* slot_server_t::slot_at(std::size_t i) {
+    // Under the lock the accept grows the table under: a growth never meets this read, and a
+    // session, never removed once added, stays valid after it.
+    const std::lock_guard lock(peers_m_);
+    return i < slots_.size() ? slots_[i].get() : nullptr;
 }
 
 bool slot_server_t::any_open_session() const {
-    // No lock: this runs on the driving thread (or once the link is off the wait), the only thread
-    // that grows the slot vector or stores `open`, so its own reads need no ordering (#2263).
+    // Under the lock the accept grows the table under: a deferred teardown runs this off the
+    // driving thread.
+    const std::lock_guard lock(peers_m_);
     for (const mem::poly_ptr_t<session_base_t>& s : slots_)
-        if (s->open.load(std::memory_order_relaxed)) return true;
+        if (s->open.load(std::memory_order_acquire)) return true;
     return false;
 }
 

@@ -149,7 +149,9 @@ class self_heal_link_t final : public transport_t {
                      std::span<const std::byte> raw_config, bool inner_delivers_ropes,
                      mem::block_source_t& src, mem::block_source_t& stack = mem::stack_source());
 
-    /** @brief Stops the engine (see @ref stop) and destroys any remaining socket. */
+    /** @brief Stops the engine (see @ref stop) and destroys any remaining socket. Runs off
+     *         every callback thread. A send made directly on the engine (not routed by a
+     *         frame) must be quiesced before the engine is destroyed. */
     ~self_heal_link_t();
 
     /** @brief See @ref transport_t::shut_down. */

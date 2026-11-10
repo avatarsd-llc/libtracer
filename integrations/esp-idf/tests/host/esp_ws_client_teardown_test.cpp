@@ -78,6 +78,7 @@
 #include "gated_source.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
+#include "libtracer/wait.hpp"
 #include "libtracer/ws.hpp"
 #include "libtracer_esp/esp_ws_client_link.hpp"
 
@@ -1079,6 +1080,49 @@ void test_a_ping_mid_fragment_is_answered_whole() {
 
 }  // namespace
 
+/** @brief A receiver that shuts its own link down from inside the delivery, once. */
+struct shut_from_delivery_t {
+    esp_ws_client_link_t* link = nullptr;
+    std::atomic<bool> on_callback{false};
+    std::atomic<bool> returned{false};
+    std::atomic<int> handles_after{-1};
+    void operator()(std::span<const std::byte>) {
+        if (returned.load()) return;
+        on_callback.store(tr::net::on_callback_thread());
+        link->shut_down();  // the removal, delivered on the link's own receive thread
+        handles_after.store(fake_ws::live_handles());
+        returned.store(true);
+    }
+};
+
+/**
+ * @brief #2751 — a `shut_down` made on the link's own receive thread only shuts down: it
+ *        returns without joining that thread and releases no handle; the destructor, off
+ *        every callback thread, joins the thread and releases the connection.
+ */
+void test_shut_down_from_its_own_delivery_only_shuts_down() {
+    std::printf("#2751 shut_down() from its own delivery only shuts down:\n");
+    fake_ws::reset();
+    shut_from_delivery_t rx;
+    {
+        auto link = tr::mem::make_poly<esp_ws_client_link_t>(
+            tr::mem::net_source(), "127.0.0.1", 8080,
+            tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
+        rx.link = link.get();
+        link->set_receiver(rx);
+        link->start_receiving();
+        check(wait_until([&] { return link->link_up(); }, 2s), "a link came up");
+        fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, true, 8, 0x11)});
+        check(wait_until([&] { return rx.returned.load(); }, 2s),
+              "the shut_down made in its own delivery returned");
+        check(rx.on_callback.load(), "the receive thread runs as a callback thread");
+        check(rx.handles_after.load() > 0, "it released no handle: the connection stays held");
+        check(!link->link_up(), "and the link reports down");
+    }  // the destructor, on this thread, joins the receive thread and releases the pair
+    check(drained_fake(), "the destructor released everything");
+    check(fake_ws::handle_misuse() == 0, "with no handle misuse");
+}
+
 int main() {
     std::printf("esp_ws_client_link bounded-blocking host suite (#952, #1058):\n");
     test_teardown_does_not_destroy_handles_under_a_sender();
@@ -1101,6 +1145,7 @@ int main() {
     test_one_send_costs_one_write_and_one_mask_pass();
     test_control_frames_are_answered_through_the_write_path();
     test_a_ping_mid_fragment_is_answered_whole();
+    test_shut_down_from_its_own_delivery_only_shuts_down();
     // Nothing detached may still be running here: a condemned dial's recv thread outlives
     // its link by design, and one still inside the transport at process exit is a crash
     // under ASan/TSan and a leak under LSan. Every case drains, and this is the backstop.
