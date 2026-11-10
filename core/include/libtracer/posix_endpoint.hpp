@@ -88,6 +88,15 @@ namespace detail {
  * `%tr::graph::default_config_t::kFaultInjection` (#1719).
  */
 inline void (*slot_taken_hook)() = nullptr;
+
+/**
+ * @brief Test seam: called by a stream server's slot teardown once it has cleared the
+ *        session's `open` flag and before it closes the session's egress, with no lock held. A
+ *        test parks one teardown here to run another on the same session meanwhile.
+ *
+ * Same rules as @ref slot_taken_hook .
+ */
+inline void (*slot_teardown_hook)() = nullptr;
 }  // namespace detail
 
 /**
@@ -290,6 +299,9 @@ class posix_endpoint_t {
     /** @brief True once a deferred teardown shut the link: its buffers and descriptors are
      *         left for the destructor. */
     [[nodiscard]] bool shut() const noexcept { return shut_.load(std::memory_order_relaxed); }
+    /** @brief @ref shut, read seq_cst: for a check that must be ordered against the mark a
+     *         deferred teardown stores before it walks the link. */
+    [[nodiscard]] bool shut_seq() const noexcept { return shut_.load(std::memory_order_seq_cst); }
 
     /**
      * @brief The link's own socket's registration: a datagram socket, a dialled connection,

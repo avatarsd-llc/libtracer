@@ -47,6 +47,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "libtracer/wait.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
@@ -1600,6 +1601,70 @@ void test_recv_stack_sized() {
     check(at_listener.count() == 1 && at_listener.at(0) == f1, "received bytes are identical");
 }
 
+/**
+ * @brief #2751 — one session torn down by its own callback and by a deferred teardown at
+ *        once departs once.
+ *
+ * The server's own teardown of a departed peer is parked (`detail::slot_teardown_hook`)
+ * after it has cleared the session's `open` flag and before it closes the session's egress.
+ * A `shut_down` made meanwhile on a thread that runs link callbacks tears the same session
+ * down: it finds the session no longer open, so it closes the egress and fires no departure.
+ * Released, the parked teardown finds the egress closed and fires the one departure. Both
+ * keep the session's descriptor for the destructor.
+ */
+void test_a_session_torn_down_twice_departs_once() {
+    std::printf("TCP transport — a session torn down twice at once departs once (#2751):\n");
+    static std::atomic<bool> armed{false}, reached{false}, released{false};
+    armed.store(false);
+    reached.store(false);
+    released.store(false);
+    struct hook_guard_t {
+        ~hook_guard_t() { tr::net::detail::slot_teardown_hook = nullptr; }
+    } const guard;
+    tr::net::detail::slot_teardown_hook = [] {
+        if (!armed.exchange(false)) return;
+        reached.store(true);
+        for (int i = 0; i < 5000 && !released.load(); ++i) std::this_thread::sleep_for(1ms);
+    };
+
+    frame_sink_t srv_rx_sink;
+    auto srv_rx = [&](std::span<const std::byte> f) { srv_rx_sink.push(f); };
+    std::atomic<int> downs{0};
+    {
+        tr::net::tcp_server_transport_t server(0);
+        check(server.ok(), "flat server bound");
+        server.set_receiver(srv_rx);
+        server.set_down_notifier([](void* c) { static_cast<std::atomic<int>*>(c)->fetch_add(1); },
+                                 &downs);
+        std::optional<tcp_transport_t> a;
+        a.emplace("127.0.0.1", server.local_port());
+        a->start_receiving();
+        a->send(test_frame(2, 0xA1));
+        check(srv_rx_sink.wait_for_count(1, 2s), "the peer's session is open");
+
+        armed.store(true);
+        a.reset();  // the peer hangs up: the server's own callback tears its session down
+        const auto deadline = std::chrono::steady_clock::now() + 3s;
+        while (!reached.load() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(1ms);
+        check(reached.load(), "the server's own teardown is parked mid-session");
+
+        std::thread other([&] {
+            const tr::net::callback_thread_scope_t delivering;  // another link's callback
+            server.shut_down();
+        });
+        other.join();
+        check(downs.load() == 0, "the deferred teardown fired no departure for it");
+        released.store(true);
+        const auto d2 = std::chrono::steady_clock::now() + 3s;
+        while (downs.load() == 0 && std::chrono::steady_clock::now() < d2)
+            std::this_thread::sleep_for(1ms);
+        std::this_thread::sleep_for(50ms);
+        check(downs.load() == 1, "the session departed exactly once");
+    }
+    check(downs.load() == 1, "and the destructor fired no second departure");
+}
+
 int main() {
     // #1438: this suite is labelled `bus` because it drives the ADR-0044 peer-named tier —
     // `bus()->set_peer_receiver(...)` and friends. On a build that closed the module out
@@ -1634,5 +1699,6 @@ int main() {
     test_accept_publish_is_atomic_to_senders();
     test_push_on_connect_waits_for_start_receiving();
     test_start_receiving_is_idempotent();
+    test_a_session_torn_down_twice_departs_once();
     return tr::testing::summary("tcp");
 }

@@ -49,6 +49,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_quic.hpp"
+#include "libtracer/wait.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
 #include "transport_vertex_test_access.hpp"
@@ -1058,6 +1059,48 @@ void test_dial_does_not_wait() {
 
 }  // namespace
 
+/**
+ * @brief A link shut down from its own callback: a `shut_down` made on a thread that runs link
+ *        callbacks (msquic's, here) only shuts down and waits for nothing; it delivers nothing
+ *        after; the destructor, on an application thread, closes every handle.
+ */
+void test_shut_down_from_its_own_callback() {
+    std::printf("QUIC transport — shut down from its own receive callback:\n");
+    std::atomic<int> delivered{0};
+    std::atomic<bool> on_callback{false};
+    std::atomic<bool> shut_returned{false};
+    quic_transport_t* listener_p = nullptr;
+    auto listener_rx = [&](std::span<const std::byte>) {
+        if (delivered.fetch_add(1) != 0) return;
+        on_callback.store(tr::net::on_callback_thread());
+        listener_p->shut_down();  // the removal, delivered on the link's own callback
+        shut_returned.store(true);
+    };
+    {
+        quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+        listener_p = &listener;
+        quic_transport_t dialer("127.0.0.1", listener.local_port(), dev_tls());
+        check(await_up(dialer), "dialer reports link up");
+        listener.set_receiver(listener_rx);
+        dialer.send(test_frame(5, 0x10));
+        bool returned = false;
+        for (int i = 0; i < 2500 && !returned; ++i) {
+            returned = shut_returned.load();
+            if (!returned) std::this_thread::sleep_for(2ms);
+        }
+        check(returned, "the shut_down made on its own callback returned");
+        if (!returned) {
+            std::printf("quic: FAIL (stuck; exiting)\n");
+            std::fflush(stdout);
+            std::_Exit(1);
+        }
+        check(on_callback.load(), "msquic's callback runs as a callback thread");
+        dialer.send(test_frame(7, 0x20));
+        std::this_thread::sleep_for(200ms);
+        check(delivered.load() == 1, "the shut link delivers nothing after");
+    }  // destroyed here, on this thread: the destructor's teardown closes every handle
+}
+
 int main() {
     // Generate the self-signed dev pair once (tools/gen-dev-cert.sh) — the
     // LISTEN-side credential every test below serves.
@@ -1102,5 +1145,6 @@ int main() {
     test_spec_dial_trust_keys();
     test_spec_cannot_name_tls_files();
     test_app_default_profile();
+    test_shut_down_from_its_own_callback();
     return tr::testing::summary("quic");
 }

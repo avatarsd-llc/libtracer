@@ -777,6 +777,14 @@ void slot_server_t::accept_peer() {
         teardown_slot(*slot);
         return;
     }
+    // A slot taken before a deferred teardown walked the table may be attached after it: on a
+    // shut link the session is torn down here. Read after the attach (seq_cst, against the
+    // mark the teardown stores before its walk), so either this sees the link shut or the
+    // walk's detach follows the attach.
+    if (shut_seq()) {
+        teardown_slot(*slot);
+        return;
+    }
     // The seam that makes the order testable: the fd is published, the slot not yet open. A
     // broadcast that lands here must skip the slot rather than write to fd -1 (`tcp_test`,
     // the accept-publish race).
@@ -856,6 +864,9 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     // to a closed or reused descriptor. A stalled peer's frames and strikes die with its
     // session and are never inherited by whoever next claims this slot (#838).
     const bool was_open = s.open.exchange(false, std::memory_order_acq_rel);
+    if constexpr (graph::kFaultInjection) {
+        if (detail::slot_teardown_hook != nullptr) detail::slot_teardown_hook();
+    }
     if (wait_module_t* const w = waiting()) w->detach(s);  // no callback for it runs after
     const int fd = s.fd.load(std::memory_order_seq_cst);
     if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
