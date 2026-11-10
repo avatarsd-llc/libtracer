@@ -1298,8 +1298,7 @@ void replaced_initiator_is_admitted() {
         settle(a);
         check(b.count(counter_t::HANDSHAKE_REPLAYED) == 1 && !a.link_up(),
               "  its replacement restarts at counter 1 and is refused");
-        b.clear_mark();
-        check(disk == 0, "  clear_mark persists 0");
+        check(b.clear_mark() && disk == 0, "  clear_mark persists 0");
         (void)a.sweep(10, 0);  // the retransmitted first message, counter 1
         settle(a);
         check(request(a), "  after the clear, the replacement's next first message is admitted");

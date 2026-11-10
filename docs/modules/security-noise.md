@@ -106,27 +106,27 @@ replacement, or a session whose peer started fresh becoming current) fires the l
 before any frame of the new session is delivered; a routine rekey fires nothing. A session past
 its limit takes the previous one with it, and so does a fresh peer's session.
 
-**The counter and the mark across reboots.** Both survive a reboot only through the
-application (reference/23 §4). The initiator's `next_counter()` is a wall clock or a monotonic
-counter that survives reboots; a node with neither returns `noise::boot_counter_t::next()`, a
-persisted boot counter (one write per boot) as the high half and an attempt counter in RAM as the
-low half. If the boot counter's write fails, the node makes no handshake attempt that boot. The responder's mark stays in RAM unless the host is a `noise::mark_store`, which is a
-compile-time choice: a host that also has `restore_mark(ref)` and `persist_mark(ref, mark)` gets
-the mark restored when a LISTEN link is built and persisted each time it changes. That is one
-write per accepted first message, made after the PSK tag verified and before the answer, so a
-peer without the PSK causes none. `persist_mark` answers whether the write succeeded, and a write
-that fails refuses the message: counted in `noise_handshake_failed` and answered by nothing. A
-host without the two seams pays nothing. Such a link keeps its
-`psk_ref`, so the string must outlive it.
+**The counter and the mark across reboots.** Both survive a reboot only through the application
+(reference/23 §4). The initiator's `next_counter()` is a wall clock or a monotonic counter that
+survives reboots; a node with neither returns `noise::boot_counter_t::next()`, a persisted boot
+counter (one write per boot) as the high half and an attempt counter in RAM as the low half. If the
+boot counter's write fails, the node makes no handshake attempt that boot. The responder's mark
+stays in RAM unless the host is a `noise::mark_store`, which is a compile-time choice: a host that
+also has `restore_mark(ref)` and `persist_mark(ref, mark)` gets the mark restored when a LISTEN link
+is built and persisted each time it changes. That is one write per accepted first message, made
+after the PSK tag verified and before the answer, so a peer without the PSK causes none.
+`persist_mark` answers whether the write succeeded, and a write that fails refuses the message:
+counted in `noise_handshake_failed` and answered by nothing. A host without the two seams pays
+nothing. Such a link keeps its `psk_ref`, so the string must outlive it.
 
 | the application wants to | it calls | the mark |
 | --- | --- | --- |
 | admit a replacement initiator whose counter restarted | `clear_mark()` | 0, persisted; recorded first messages pass the counter check once more each |
 | replace the PSK | `replace_psk(ref)` | 0, persisted under the new name; first messages under the old PSK fail the PSK check |
 
-With the mark in RAM only, a responder reboot lets each recorded first message through at most
-once, in increasing counter order; with it persisted, none. Sessions, and a handshake in flight,
-keep the keys they began with across `replace_psk`.
+With the mark in RAM only, a responder reboot lets each recorded first message through at most once,
+in increasing counter order; with it persisted, none. Sessions, and a handshake in flight, keep the
+keys they began with across `replace_psk`.
 
 ESP-IDF is [#2076](https://github.com/avatarsd-llc/libtracer/issues/2076).
 

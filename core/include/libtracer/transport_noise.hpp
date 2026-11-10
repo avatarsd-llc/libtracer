@@ -347,13 +347,13 @@ struct noise_link_test_door_t;
  */
 template <noise::crypto_backend B, noise::link_host Host, noise::datagram_carrier Carrier>
 class noise_link_t final : public transport_t {
-    static_assert(noise::mark_store<Host> ||
-                      !(
-                          requires(Host& h, std::string_view r) { h.restore_mark(r); } ||
-                          requires(Host& h, std::string_view r, std::uint64_t m) {
-                              h.persist_mark(r, m);
-                          }),
-                  "a host that restores or persists the mark must do both (noise::mark_store)");
+    static_assert(
+        noise::mark_store<Host> ||
+            !(
+                requires(Host& h, std::string_view r) { h.restore_mark(r); } ||
+                requires(Host& h, std::string_view r, std::uint64_t m) { h.persist_mark(r, m); }),
+        "a host that restores or persists the mark needs both seams: restore_mark returning "
+        "std::uint64_t and persist_mark returning bool (noise::mark_store)");
 
    public:
     /**
@@ -488,7 +488,7 @@ class noise_link_t final : public transport_t {
      * counter is below one used earlier under this PSK is recovered by @ref replace_psk.
      * @return False when a mark store's write fails; the mark in RAM is 0 regardless.
      */
-    bool clear_mark() {
+    [[nodiscard]] bool clear_mark() {
         const std::lock_guard lock(mu_);
         return set_mark(0);
     }
@@ -504,7 +504,7 @@ class noise_link_t final : public transport_t {
      * @ref clear_mark retries the write.
      * @param ref Borrowed for the call only, unless `Host` is a @ref tr::net::noise::mark_store.
      */
-    bool replace_psk(std::string_view ref) {
+    [[nodiscard]] bool replace_psk(std::string_view ref) {
         const std::lock_guard lock(mu_);
         if (st_ == nullptr) return false;
         noise::key32_t psk{};
