@@ -984,9 +984,9 @@ inline void destroy_edge_pub(mem::block_source_t& src, edge_pub_t* p) noexcept {
  *
  * Pay-for-what-you-use, the #361 §1 discipline: an edgeless vertex — the overwhelming
  * majority on an MCU node — owns a single null pointer, where it used to own an empty
- * `std::vector` (24 B on a host, 12 on rv32). The block itself is never displaced or
- * reclaimed, only its published arrays are, which is why `snapshot_edges` may load it with a
- * plain acquire and no pin at all.
+ * `std::vector` (24 B on a host, 12 on rv32) and, until #2673, its own subscriber count. The block
+ * itself is never displaced or reclaimed, only its published arrays are, which is why
+ * `snapshot_edges` may load it with a plain acquire and no pin at all.
  *
  * Each slot field is stored ONCE (#1622). @ref slots is the `:subscribers[N]` slot table,
  * index-stable per RFC-0009 §D.2 and mutated only under the vertex stripe mutex; it holds the
@@ -1000,6 +1000,16 @@ struct edge_block_t {
     mem::block_array_t<subscriber_slot_t> slots;
     std::atomic<edge_pub_t*> pub{nullptr}; /**< @brief The published array (null ⇒ no edges). */
     std::atomic<edge_pub_t*> retired{nullptr}; /**< @brief Displaced arrays awaiting a scan. */
+    /**
+     * @brief The vertex's own DELIVERING-slot count (active and not suspended, #1533), read
+     *        through `vertex_t::own_subs` and `vertex_t::own_subs_ordered`.
+     *
+     * It lives here and not in `vertex_t` (#2673): a vertex that was never subscribed to has
+     * no block and so no count, and the fan-out's zero-subscriber gate reads the null block
+     * pointer first. The block is reserved before the count is first raised
+     * (`vertex_t::reserve_edges`), so a raise always finds it.
+     */
+    std::atomic<std::uint32_t> own_subs{0};
 
     /** @brief The current array's entries, in slot order; empty when nothing is published.
      *         Call with the stripe lock held. */

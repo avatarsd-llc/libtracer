@@ -2031,7 +2031,7 @@ class vertex_t {
      * ACTIVE edges are never renumbered (§D.2 stability); only a slot already
      * cleared can come to mean a new edge.
      * The edge is PUBLISHED under the same lock hold, in the position the slot append itself
-     * holds (#635): the caller's `own_subs_` seq_cst bump still precedes this whole verb, so
+     * holds (#635): the caller's own-subs seq_cst bump still precedes this whole verb, so
      * ADR-0049's Dekker pairing against a skipping publisher is byte-for-byte the one #708
      * landed. Displaced arrays are scanned AFTER the lock is dropped, on this thread.
      *
@@ -2687,7 +2687,9 @@ class vertex_t {
         set_flag(flag_t::PENDING_MARK, false);
         lkv_.clear(std::memory_order_release);  // a mid-read reader holds its own
                                                 // reference — safe under either policy.
-        own_subs_.store(0, std::memory_order_relaxed);
+        // The count lives in the edge block (#2673); a vertex never subscribed has none.
+        if (edge_block_t* const b = edges_.load(std::memory_order_acquire); b != nullptr)
+            b->own_subs.store(0, std::memory_order_relaxed);
         // The placeholder default (see graph.cpp). Relaxed, and atomic since #1477: the
         // lock-free readers on the write path (`write_impl`'s role forks) run with no map
         // lock, so a plain byte store here was a data race — UB, exactly like the
@@ -3217,9 +3219,11 @@ class vertex_t {
     }
 
     /** @brief This vertex's own DELIVERING-slot count — active and not suspended (#1533) —
-     *         which is what a subtree walk sums. */
+     *         which is what a subtree walk sums. Zero when nothing was ever subscribed: the
+     *         count lives in the edge block (#2673), and such a vertex has none. */
     [[nodiscard]] std::uint32_t own_subs() const noexcept {
-        return own_subs_.load(std::memory_order_relaxed);
+        const edge_block_t* const b = edges_.load(std::memory_order_acquire);
+        return b == nullptr ? 0 : b->own_subs.load(std::memory_order_relaxed);
     }
     /**
      * @brief The same count under `seq_cst` — the SUBSCRIBE half of a Dekker pair, and the
@@ -3250,9 +3254,32 @@ class vertex_t {
      * Both halves take `kDeliverySkipOrder`, which every build `static_assert`s is still
      * `seq_cst` — so the argument above is a build failure when it stops holding, not only a
      * paragraph (#1143).
+     *
+     * The count lives in the edge block (#2673), so the gate is two reads, and a vertex never
+     * subscribed to stops at the first: a null `edges_`. That read is in the same total order
+     * too. The subscriber STORES the block pointer (`ensure_edges`, `kDeliverySkipOrder`)
+     * before it raises the count, so a publisher that reads null is ordered before that store,
+     * hence before the raise and the latch load after it, exactly as a publisher that reads a
+     * zero count is. The edgeless write, the commonest there is, still pays one ordered load.
      */
     [[nodiscard]] std::uint32_t own_subs_ordered() const noexcept {
-        return own_subs_.load(kDeliverySkipOrder);
+        const edge_block_t* const b = edges_.load(kDeliverySkipOrder);
+        return b == nullptr ? 0 : b->own_subs.load(kDeliverySkipOrder);
+    }
+    /**
+     * @brief Make sure the edge block, which holds the own-subs count (#2673), exists before
+     *        the count is first raised. Takes the stripe lock; control-plane cold.
+     * @param src The source a new block is drawn from (the graph's table source).
+     * @return False when @p src refused the block: nothing changed, admit nothing.
+     */
+    [[nodiscard]] bool reserve_edges(tr::mem::block_source_t& src) noexcept {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        return ensure_edges(src) != nullptr;
+    }
+    /** @brief True iff this vertex has an edge block, i.e. was ever subscribed to (or
+     *         reserved). A `:subscribers[N]` replace needs one to name any slot. */
+    [[nodiscard]] bool has_edges() const noexcept {
+        return edges_.load(std::memory_order_acquire) != nullptr;
     }
     /**
      * @brief Adjust the own delivering-slot count by @p delta (subscribe/unsubscribe, and a
@@ -3260,9 +3287,12 @@ class vertex_t {
      * @note `seq_cst`, not relaxed: this is the subscriber's half of the pair
      *       @ref own_subs_ordered describes. Subscribe is control-plane-cold, so the
      *       stronger order costs nothing that is measured.
+     * @pre  The edge block exists (@ref reserve_edges): a raise is preceded by one, and a
+     *       lowering by the raise it undoes.
      */
     void bump_own_subs(std::int32_t delta) noexcept {
-        own_subs_.fetch_add(static_cast<std::uint32_t>(delta), kDeliverySkipOrder);
+        edges_.load(std::memory_order_acquire)
+            ->own_subs.fetch_add(static_cast<std::uint32_t>(delta), kDeliverySkipOrder);
     }
     /** @brief The active subscriber slots on strict ancestors — the one relaxed load the
      *         write hot path pays before deciding whether to walk ancestors at all.
@@ -3392,7 +3422,9 @@ class vertex_t {
         if (b != nullptr) return b;
         b = tr::mem::make_in<edge_block_t>(src, src);
         if (b == nullptr) return nullptr;
-        edges_.store(b, std::memory_order_release);  // pairs with snapshot_edges' acquire
+        // Publishes the block to snapshot_edges' acquire, and is the subscriber's first step in
+        // the delivery-skip total order (#2673, see own_subs_ordered): once per vertex, cold.
+        edges_.store(b, kDeliverySkipOrder);
         return b;
     }
 
@@ -3760,8 +3792,9 @@ class vertex_t {
     // The fan-out edges (#635). Null until this vertex is first subscribed to, which is the
     // overwhelming majority of an MCU node's vertices — where an always-present empty
     // std::vector cost 24 B (12 on rv32) of pure header. Allocated once by ensure_edges under
-    // the stripe lock, published with a release store, freed by ~vertex_t and NEVER displaced,
-    // which is why the publish path may load it with a plain acquire and no pin.
+    // the stripe lock, published with a seq_cst store, freed by ~vertex_t and NEVER displaced,
+    // which is why the publish path may load it with a plain acquire and no pin. It also holds
+    // the own-subs count (#2673), so null is the fan-out's zero-subscriber gate.
     std::atomic<edge_block_t*> edges_{nullptr};
     // The lazily-allocated cold half (#361 §1): handlers, STREAM ring, the ACL state +
     // ADR-0050 effective-merge cache, the owner-side storage magnitudes, and the stream
@@ -3776,10 +3809,8 @@ class vertex_t {
     // ancestors (maintained by graph_t at subscribe/unsubscribe — a subtree walk at
     // control-plane frequency — and summed from ancestors at vertex creation), so
     // the write hot path pays exactly one relaxed load before deciding whether to
-    // walk ancestors at all. `own_subs_` is this vertex's own delivering-slot count
-    // (active and not suspended, #1533) — what the subtree walk and the creation-time sum
-    // read.
-    std::atomic<std::uint32_t> own_subs_{0};
+    // walk ancestors at all. The vertex's OWN delivering-slot count lives in the edge
+    // block (`edge_block_t::own_subs`, #2673), which exists only once subscribed.
     std::atomic<std::uint32_t> listeners_above_{0};
 
     // -- flag bytes (one 4-byte group; all byte-wide by design) ------------------------

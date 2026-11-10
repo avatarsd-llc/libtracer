@@ -3379,6 +3379,14 @@ result_t<subscription_t> graph_t::admit_subscriber(
     //
     // The session-admission seam (#1841) runs inside the same step, ahead of the index entry:
     // an embedder's per-session budget refuses here, BACKPRESSURE, before anything exists.
+    //
+    // The count that bump raises lives in the edge block (#2673), so the block comes first,
+    // ahead of every other admission step so that a refusal here leaves nothing to undo. An
+    // append reserves it (an exhausted table source refuses BACKPRESSURE, the answer the
+    // append's own refusal gives); a replace allocates nothing, because an edgeless vertex has
+    // no slot a `:subscribers[N]` index could name.
+    if (slot ? !v->has_edges() : !v->reserve_edges(*tables_))
+        return std::unexpected(slot ? status_t::INVALID_PATH : status_t::BACKPRESSURE);
     if (!admit_session(admitted, v, caller, link_token, session))
         return std::unexpected(status_t::BACKPRESSURE);
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
