@@ -209,9 +209,34 @@ class wait_module_t {
         const std::lock_guard lock(m_);
         op();
     }
-    /** @brief After a detach of @p s : wait until its callback is not running, unless the caller
-     *         is the driver, whose own callback this is. */
-    void await_quiet(const wait_source_t& s) const noexcept;
+    /**
+     * @brief The driver's one fire: mark @p s firing, then fire it unless a detach (or, on the
+     *        poll adapter, an attach) was made since the batch's generation @p seen .
+     * @return False when one was, and the rest of the batch is left for the next pass.
+     *
+     * The mark is in the module's own memory, never in the source, and it is stored before the
+     * generation is re-read, as a detach bumps the generation before it reads the mark (all
+     * sequentially consistent): either this sees the detach and never touches @p s , or the
+     * detach sees the mark and waits for this one callback. A detach that waits is woken by a
+     * notify, sent only while one is waiting.
+     */
+    bool fire_marked(wait_source_t& s, std::uint8_t ready, std::uint32_t seen) noexcept {
+        firing_.store(&s);
+        const bool live = gen_.load() == seen;
+        if (live) s.fire(s.ctx, s, ready);
+        firing_.store(nullptr);
+        if (waiters_.load() != 0) firing_.notify_all();
+        return live;
+    }
+    /** @brief After a detach of @p s : block until its callback is not running, unless the
+     *         caller is the driver, whose own callback this is. A blocking wait, never a spin,
+     *         so a caller above the driver's priority on one core does not starve it. */
+    void await_quiet(const wait_source_t& s) noexcept {
+        if (driver_.load() == detail::this_thread_id()) return;
+        waiters_.fetch_add(1);
+        for (const wait_source_t* f = firing_.load(); f == &s; f = firing_.load()) firing_.wait(f);
+        waiters_.fetch_sub(1);
+    }
     /** @brief Wake a blocked @ref run (the stop and, on the poll adapter, a set change). */
     void ring() noexcept;
 
@@ -224,13 +249,15 @@ class wait_module_t {
     /** @brief The source whose callback the driver is running, or about to: what a detach
      *         from another thread waits on, so it waits for that source alone. Kept in the
      *         module, never in the source, so the driver never writes to a source a finished
-     *         detach may have freed. */
+     *         detach may have freed. Null between callbacks. */
     std::atomic<const wait_source_t*> firing_{nullptr};
+    /** @brief Detaches blocked waiting for a callback: the driver notifies only while one is. */
+    std::atomic<std::uint32_t> waiters_{0};
     std::atomic<bool> stopping_{false}; /**< @brief Set by @ref stop. */
     /** @brief The thread inside @ref run, or none. */
     std::atomic<detail::thread_id_t> driver_{detail::unowned_thread_id()};
     tr::mutex_t m_; /**< @brief Serializes attach and detach; the poll adapter's driver holds it
-                         while it rebuilds its set and between callbacks, never across one. */
+                         while it rebuilds its set, never across a callback. */
     /** @brief The poll adapter's attached sources, drawn from its source; empty on epoll. */
     mem::block_array_t<wait_source_t*> sources_;
     struct state_t;  // the adapter's own state, defined in its translation unit
