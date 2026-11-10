@@ -769,7 +769,7 @@ jobs:
         run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
 
-  # One-concept examples (#1786, the esp-idf row of #1383): five minimal apps under
+  # One-concept examples (#1786, the esp-idf row of #1383): six minimal apps under
   # examples/concepts/, each with its docs page under docs/examples/esp-idf-*.md, all on the
   # MCU static-arena default (#1783). One chip target: these are compile gates on the
   # component's public surface, not a second portability check (esp-build and full-node carry
@@ -785,10 +785,10 @@ jobs:
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
       options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
-    # The five examples in ONE job, built one after another (CI time audit, ruling 24,
-    # 2026-11-01): one IDF container start and one runner slot instead of five, same five
+    # The six examples in ONE job, built one after another (CI time audit, ruling 24,
+    # 2026-11-01): one IDF container start and one runner slot instead of six, same six
     # -Os builds. A leg took 0.2 to 2.6 min (6.07 max for esp-build's comparable esp32c6
-    # leg); 45 is five of that worst case plus headroom, an estimate to re-measure.
+    # leg); 45 is six of that worst case plus headroom, an estimate to re-measure.
     timeout-minutes: 45
     steps:
       - name: Check the runner workspace has room
@@ -799,7 +799,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build the five concepts examples for esp32c6
+      - name: Build the six concepts examples for esp32c6
         # Every example is built even after one fails (what fail-fast: false gave the
         # matrix), and the step fails at the end naming each one that did.
         shell: bash
@@ -807,7 +807,7 @@ jobs:
         run: |
           . "${IDF_PATH}/export.sh"
           failed=""
-          for example in minimal arena_sizing single_threaded one_link stats_subpools; do
+          for example in minimal arena_sizing single_threaded one_link stats_subpools noise_link; do
             echo "::group::concepts/$example"
             ( cd "$example" && idf.py set-target esp32c6 && idf.py build && idf.py size ) || failed="$failed $example"
             echo "::endgroup::"
@@ -827,7 +827,7 @@ jobs:
         if: always()
         run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
-  # The same five on the ESP-IDF `linux` target, built AND run: each example checks what it
+  # The same six on the ESP-IDF `linux` target, built AND run: each example checks what it
   # prints and exits non-zero on a failed check there (on a chip it only prints its verdict,
   # since an exit is a reset). release-v5.5 and g++-12 for the reason host-build gives.
   # arena_sizing runs with its init-exhaustion step off; that step aborts by design.
@@ -841,8 +841,8 @@ jobs:
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
       options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice' || '--memory 10g' }}
-    # Five host component builds in one job, ~2.4 min each as in host-build, plus the g++-12
-    # install. 30 = ~2.3x.
+    # Six host component builds in one job, ~2.4 min each as in host-build, plus the g++-12
+    # install. 30 = ~1.9x.
     timeout-minutes: 30
     steps:
       - name: Check the runner workspace has room
@@ -863,7 +863,7 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends g++-12 gcc-12
 
-      - name: Build and run the five concepts on the linux target
+      - name: Build and run the six concepts on the linux target
         shell: bash
         working-directory: integrations/esp-idf/examples/concepts
         env:
@@ -871,7 +871,7 @@ jobs:
           CXX: g++-12
         run: |
           . "${IDF_PATH}/export.sh"
-          for example in minimal arena_sizing single_threaded one_link stats_subpools; do
+          for example in minimal arena_sizing single_threaded one_link stats_subpools noise_link; do
             echo "::group::${example}"
             (cd "${example}" &&
               idf.py -D CMAKE_C_COMPILER=gcc-12 -D CMAKE_CXX_COMPILER=g++-12 \

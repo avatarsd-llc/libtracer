@@ -128,7 +128,9 @@ With the mark in RAM only, a responder reboot lets each recorded first message t
 in increasing counter order; with it persisted, none. Sessions, and a handshake in flight, keep the
 keys they began with across `replace_psk`.
 
-ESP-IDF is [#2076](https://github.com/avatarsd-llc/libtracer/issues/2076).
+On ESP-IDF, `CONFIG_LIBTRACER_NOISE_CRYPTO_PSA` turns the module on, and the
+[noise_link example](../examples/esp-idf-noise-link.md) carries one request and its reply over two
+links on an ESP32-C6, with what each link costs.
 
 ## Choosing a backend
 
