@@ -1142,6 +1142,7 @@ struct store_host_t : test_host_t {
     std::uint64_t* disk = nullptr; /**< @brief The persisted mark: outlives any one link. */
     std::size_t writes = 0;        /**< @brief How many times the mark was persisted. */
     std::string ref{};             /**< @brief The PSK reference of the last call. */
+    bool fail = false;             /**< @brief Make every write fail. */
 
     /** @brief The mark last persisted. */
     std::uint64_t restore_mark(std::string_view r) {
@@ -1149,10 +1150,12 @@ struct store_host_t : test_host_t {
         return *disk;
     }
     /** @brief Persist the mark. */
-    void persist_mark(std::string_view r, std::uint64_t m) {
+    bool persist_mark(std::string_view r, std::uint64_t m) {
         ref = r;
-        *disk = m;
         ++writes;
+        if (fail) return false;
+        *disk = m;
+        return true;
     }
 };
 static_assert(noise::mark_store<store_host_t> && !noise::mark_store<test_host_t>);
@@ -1237,6 +1240,15 @@ void mark_across_a_responder_reboot() {
         check(answers(w) == before && rebooted.count(counter_t::HANDSHAKE_REPLAYED) == 3 &&
                   h.writes == 0,
               "  mark persisted: after a reboot no recorded first message is admitted");
+        h.fail = true;
+        rebooted.carrier().inject(first_message(w, 4), kAddrA);
+        check(answers(w) == before && rebooted.count(counter_t::HANDSHAKE_FAILED) == 1 &&
+                  h.writes == 1 && disk == 3,
+              "  a write that fails refuses the message: counted, unanswered, nothing admitted");
+        rebooted.carrier().inject(first_message(w, 4), kAddrA);
+        check(answers(w) == before && rebooted.count(counter_t::HANDSHAKE_REPLAYED) == 4,
+              "  ... and the same message is not admitted later either");
+        check(!rebooted.clear_mark(), "  clear_mark reports a write that fails");
     }
 }
 

@@ -137,10 +137,13 @@ concept link_host = requires(H& h, std::string_view ref, key32_t& key) {
  *
  *  - `restore_mark(ref)` answers the mark last persisted for the PSK named `ref`, 0 when none.
  *    Called once, when a LISTEN link is built.
- *  - `persist_mark(ref, mark)` stores it. Called each time the mark changes: once per accepted
- *    first message (after its PSK tag verified, before the answer is sent, so a peer without the
- *    PSK causes no write), and with 0 on @ref tr::net::noise_link_t::clear_mark and
- *    @ref tr::net::noise_link_t::replace_psk.
+ *  - `persist_mark(ref, mark)` stores it and answers whether the write succeeded. Called each
+ *    time the mark changes: once per accepted first message (after its PSK tag verified, before
+ *    the answer is sent, so a peer without the PSK causes no write), and with 0 on
+ *    @ref tr::net::noise_link_t::clear_mark and @ref tr::net::noise_link_t::replace_psk.
+ *    A write that fails refuses the message: it is counted in `noise_handshake_failed` and
+ *    answered by nothing (reference/23 §9). The mark in RAM still rises, so the message is not
+ *    admitted later either; the initiator's next attempt, with a higher counter, writes again.
  *
  * Both are called under the link's lock. A link of such a host keeps its `psk_ref` view, so
  * the string must outlive the link. A key store that replaces a key while no link holds it
@@ -150,7 +153,7 @@ concept link_host = requires(H& h, std::string_view ref, key32_t& key) {
 template <class H>
 concept mark_store = requires(H& h, std::string_view ref, std::uint64_t mark) {
     { h.restore_mark(ref) } -> std::same_as<std::uint64_t>;
-    h.persist_mark(ref, mark);
+    { h.persist_mark(ref, mark) } -> std::same_as<bool>;
 };
 
 /**
@@ -160,7 +163,9 @@ concept mark_store = requires(H& h, std::string_view ref, std::uint64_t mark) {
  *
  * The application raises @ref boot and persists it once per boot, before the first attempt
  * (one write per boot), and returns @ref next from its `next_counter()`. Counters then rise
- * across reboots under one PSK without a write per attempt.
+ * across reboots under one PSK without a write per attempt. If that write fails, the
+ * application makes no handshake attempt this boot: a boot number that was not persisted can
+ * be handed out again after the next reboot, and its counters would repeat.
  */
 struct boot_counter_t {
     std::uint32_t boot = 0;    /**< @brief This boot's number, persisted by the application. */
@@ -481,10 +486,11 @@ class noise_link_t final : public transport_t {
      * lost it. It also lets every first message recorded under this PSK through the counter
      * check again, each at most once and in increasing counter order. An initiator whose
      * counter is below one used earlier under this PSK is recovered by @ref replace_psk.
+     * @return False when a mark store's write fails; the mark in RAM is 0 regardless.
      */
-    void clear_mark() {
+    bool clear_mark() {
         const std::lock_guard lock(mu_);
-        set_mark(0);
+        return set_mark(0);
     }
 
     /**
@@ -493,7 +499,9 @@ class noise_link_t final : public transport_t {
      *
      * The next first message is written or checked under the new key. Sessions, and a
      * handshake in flight, keep the keys they began with. False, with nothing changed, when
-     * the link is inert or the key store has no such key.
+     * the link is inert or the key store has no such key. Also false when a mark store's write
+     * of the reset mark fails: the new key is then in place and the mark in RAM is 0, and
+     * @ref clear_mark retries the write.
      * @param ref Borrowed for the call only, unless `Host` is a @ref tr::net::noise::mark_store.
      */
     bool replace_psk(std::string_view ref) {
@@ -506,8 +514,7 @@ class noise_link_t final : public transport_t {
         if (!resolved) return false;
         st_->keyed = keyed;
         if constexpr (noise::mark_store<Host>) ref_ = ref;
-        set_mark(0);
-        return true;
+        return set_mark(0);
     }
 
     /**
@@ -677,7 +684,9 @@ class noise_link_t final : public transport_t {
         const auto payload = hs.read_first(datagram);
         if (!payload) return refuse(payload.error());
         if (payload->counter <= mark_) return bump(noise::counter_t::HANDSHAKE_REPLAYED);
-        set_mark(payload->counter);  // whether or not this handshake completes (§4 step 3)
+        // The mark rises whether or not this handshake completes (§4 step 3). A failed write
+        // refuses the message: silent, counted, no Diffie-Hellman.
+        if (!set_mark(payload->counter)) return bump(noise::counter_t::HANDSHAKE_FAILED);
         answer(hs, datagram, source, (payload->flags & 1U) != 0);
     }
 
@@ -991,11 +1000,13 @@ class noise_link_t final : public transport_t {
     /** @brief Whether the armed deadline @p t has passed. */
     [[nodiscard]] bool due(std::uint64_t t) const noexcept { return t != 0 && now_ >= t; }
 
-    /** @brief Responder: set the mark and persist it through a mark store; the lock is held. */
-    void set_mark(std::uint64_t m) {
-        if (role_ != conn_role_t::LISTEN) return;
+    /** @brief Responder: set the mark and persist it through a mark store; the lock is held.
+     *  @return False when the mark store's write failed. */
+    bool set_mark(std::uint64_t m) {
+        if (role_ != conn_role_t::LISTEN) return true;
         mark_ = m;
-        if constexpr (noise::mark_store<Host>) host_.persist_mark(ref_, m);
+        if constexpr (noise::mark_store<Host>) return host_.persist_mark(ref_, m);
+        return true;
     }
 
     /** @brief Step counter @p c; the lock is held. */

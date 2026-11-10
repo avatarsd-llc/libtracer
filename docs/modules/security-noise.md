@@ -110,11 +110,13 @@ its limit takes the previous one with it, and so does a fresh peer's session.
 application (reference/23 §4). The initiator's `next_counter()` is a wall clock or a monotonic
 counter that survives reboots; a node with neither returns `noise::boot_counter_t::next()`, a
 persisted boot counter (one write per boot) as the high half and an attempt counter in RAM as the
-low half. The responder's mark stays in RAM unless the host is a `noise::mark_store`, which is a
+low half. If the boot counter's write fails, the node makes no handshake attempt that boot. The responder's mark stays in RAM unless the host is a `noise::mark_store`, which is a
 compile-time choice: a host that also has `restore_mark(ref)` and `persist_mark(ref, mark)` gets
 the mark restored when a LISTEN link is built and persisted each time it changes. That is one
 write per accepted first message, made after the PSK tag verified and before the answer, so a
-peer without the PSK causes none. A host without them pays nothing. Such a link keeps its
+peer without the PSK causes none. `persist_mark` answers whether the write succeeded, and a write
+that fails refuses the message: counted in `noise_handshake_failed` and answered by nothing. A
+host without the two seams pays nothing. Such a link keeps its
 `psk_ref`, so the string must outlive it.
 
 | the application wants to | it calls | the mark |
