@@ -641,6 +641,7 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/apt-setup
       - name: Install g++-12 (C++23 <expected> for the host/linux toolchain)
         shell: bash
         # Measured p50 0.15 min, max 0.20. 8 = the install-step floor (~40x), so a wedged
@@ -720,6 +721,7 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/apt-setup
       - name: Install g++-12 (C++23 <expected> for the host/linux toolchain)
         shell: bash
         # Measured p50 0.15 min, max 0.20. 8 = the install-step floor (~40x), so a wedged
@@ -851,6 +853,7 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/apt-setup
       - name: Install g++-12 (C++23 <expected> for the host/linux toolchain)
         shell: bash
         timeout-minutes: 8

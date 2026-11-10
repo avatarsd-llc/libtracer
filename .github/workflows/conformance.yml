@@ -93,6 +93,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: ./.github/actions/apt-setup
       # The native Rust core (#57) runs as a cargo example; the driver builds it on
       # demand, so the toolchain must be present before run-all.py / diff_fuzz.py.
       - name: Install curl (the Rust toolchain action downloads rustup with it)

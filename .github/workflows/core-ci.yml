@@ -1270,6 +1270,12 @@ jobs:
             } >> "$GITHUB_ENV"
             echo "ccache: ON (/ccache)"
           fi
+      - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
+      - uses: ./.github/actions/apt-setup
       - name: Install the crypto library (${{ matrix.crypto }})
         timeout-minutes: 10
         run: |
@@ -1311,11 +1317,6 @@ jobs:
             cmake --install "$RUNNER_TEMP/mbedtls-build" > /dev/null
             echo "CMAKE_PREFIX_PATH=$RUNNER_TEMP/mbedtls" >> "$GITHUB_ENV"
           fi
-      - uses: actions/checkout@v4
-        with:
-          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
-          # re-roots `.git/config` after the cleanup step has already run.
-          persist-credentials: false
       - name: Configure + build the Noise suites + ctest
         run: |
           cmake -S core -B core/build-noise -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \

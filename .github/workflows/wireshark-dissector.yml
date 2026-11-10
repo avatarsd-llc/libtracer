@@ -58,6 +58,7 @@ jobs:
         # The container runs as root over a workspace the host runner user owns, so git
         # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: ./.github/actions/apt-setup
       - name: Install Lua (interpreter + compiler)
         # Measured max 0.37 min. 8 = the install-step floor.
         timeout-minutes: 8

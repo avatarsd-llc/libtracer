@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+name: apt-setup
+description: >-
+  Point apt's Ubuntu archive and security sources at an ordered mirror list
+  (azure.archive.ubuntu.com, mirrors.edge.kernel.org, then the canonical host) with
+  retries and short timeouts, so one unreachable mirror fails fast. Run before every
+  apt-get update. Idempotent; works as root in containers and with sudo on the host.
+runs:
+  using: composite
+  steps:
+    - name: Configure apt mirrors, retries and timeouts
+      shell: sh
+      run: sh "$GITHUB_ACTION_PATH/apt-setup.sh"
