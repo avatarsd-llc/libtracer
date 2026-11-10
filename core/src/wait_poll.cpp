@@ -31,7 +31,6 @@
 #include <cerrno>
 #include <cstdint>
 #include <mutex>
-#include <thread>
 
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/wait.hpp"
@@ -70,13 +69,21 @@ std::uint8_t ready_of(short e) noexcept {
 }  // namespace
 
 /** @brief The poll adapter's two descriptor sets: the live one the driver polls, and the spare
- *         an attach grows while that poll is in flight. */
+ *         an attach grows while that poll is in flight. Each set has its sources beside it,
+ *         copied at the rebuild, so the driver fires a batch without the lock. */
 struct wait_module_t::state_t {
-    /** @brief Both sets draw from @p src . */
+    /** @brief Both sets, and both copies of the sources, draw from @p src . */
     explicit state_t(mem::block_source_t& src) noexcept
-        : set{mem::block_array_t<pollfd>(src), mem::block_array_t<pollfd>(src)} {}
+        : set{mem::block_array_t<pollfd>(src), mem::block_array_t<pollfd>(src)},
+          who{mem::block_array_t<wait_source_t*>(src), mem::block_array_t<wait_source_t*>(src)} {}
     mem::block_array_t<pollfd> set[2]; /**< @brief The two sets. */
+    /** @brief The source behind each of a set's entries after the doorbell (`set[i][k + 1]` is
+     *         `who[i][k]`'s socket). Only the driver reads them, and only the live one. */
+    mem::block_array_t<wait_source_t*> who[2];
     unsigned live = 0; /**< @brief The one the driver polls. Driver, under the lock. */
+    /** @brief The generation the live set's sources were copied at: while it holds, the table
+     *         is unchanged, so the copy is current and the live set still fits. Driver. */
+    std::uint32_t copied_at = 0;
 };
 
 wait_module_t::wait_module_t(mem::block_source_t& src) noexcept : sources_(src) {
@@ -96,11 +103,13 @@ wait_module_t::~wait_module_t() {
 bool wait_module_t::attach(wait_source_t& s) noexcept {
     bool done = false;
     locked([&] {
-        // Grow the spare set to the table plus the newcomer and the doorbell, then the table: a
-        // refusal of either refuses the newcomer, and nobody attached is evicted.
+        // Grow the spare set to the table plus the newcomer and the doorbell, its copy of the
+        // sources to match, then the table: a refusal of any refuses the newcomer, and nobody
+        // attached is evicted.
+        const unsigned spare = state_->live ^ 1U;
         done = !s.attached.load(std::memory_order_relaxed) &&
-               state_->set[state_->live ^ 1U].reserve(sources_.size() + 2) &&
-               sources_.push_back(&s);
+               state_->set[spare].reserve(sources_.size() + 2) &&
+               state_->who[spare].reserve(sources_.size() + 1) && sources_.push_back(&s);
         if (done) s.attached.store(true, std::memory_order_relaxed);
         gen_.fetch_add(1, std::memory_order_acq_rel);
     });
@@ -115,17 +124,10 @@ void wait_module_t::detach(wait_source_t& s) noexcept {
         while (sources_[i] != &s) ++i;
         sources_.erase_at(i);
         s.attached.store(false, std::memory_order_relaxed);
-        gen_.fetch_add(1, std::memory_order_acq_rel);
+        gen_.fetch_add(1);  // seq_cst: the other half of fire_marked's handshake
     });
     ring();
     await_quiet(s);
-}
-
-void wait_module_t::await_quiet(const wait_source_t& s) const noexcept {
-    // The driver marks a source firing under m_ and fires it with m_ released: a detach that
-    // unlinked the source waits for that one callback only, never for the batch around it.
-    if (driver_.load() == detail::this_thread_id()) return;
-    while (firing_.load(std::memory_order_acquire) == &s) std::this_thread::yield();
 }
 
 void wait_module_t::want_write(wait_source_t& s, bool on) noexcept {
@@ -136,11 +138,23 @@ void wait_module_t::run() noexcept {
     driver_.store(detail::this_thread_id());  // seq_cst: see wait_module_t::locked
     std::unique_lock lock(m_);
     while (!stopping_.load()) {
-        // Rebuild under the lock: the doorbell, then every source in table order. The spare
-        // was grown by the last attach to hold the whole table, so when the live set is too
-        // small the spare is swapped in, and every push below fits.
-        if (state_->set[state_->live].capacity() < sources_.size() + 1) state_->live ^= 1U;
+        // Rebuild under the lock. The table changes only under it, and every change bumps the
+        // generation, so only a moved generation can outgrow the live set or stale its copy of
+        // the sources. Then the spare, grown by the last attach to hold the whole table, is
+        // swapped in when the live set is too small, and every push below fits.
+        const std::uint32_t seen = gen_.load();
+        if (state_->copied_at != seen) {
+            const std::size_t k = sources_.size();
+            const unsigned live = state_->live;
+            if (state_->set[live].capacity() < k + 1 || state_->who[live].capacity() < k)
+                state_->live ^= 1U;
+            mem::block_array_t<wait_source_t*>& copy = state_->who[state_->live];
+            copy.clear();
+            for (wait_source_t* const s : sources_) (void)copy.push_back(s);
+            state_->copied_at = seen;
+        }
         mem::block_array_t<pollfd>& set = state_->set[state_->live];
+        const mem::block_array_t<wait_source_t*>& who = state_->who[state_->live];
         set.clear();
         (void)set.push_back(pollfd{fd_[0], POLLIN, 0});
         for (wait_source_t* const s : sources_) {
@@ -148,28 +162,24 @@ void wait_module_t::run() noexcept {
                 POLLIN | (s->write.load(std::memory_order_acquire) ? POLLOUT : 0));
             (void)set.push_back(pollfd{s->fd.load(std::memory_order_relaxed), ev, 0});
         }
-        const std::uint32_t seen = gen_.load(std::memory_order_acquire);
         lock.unlock();
-        const int n = ::poll(set.data(), static_cast<nfds_t>(set.size()), -1);
-        lock.lock();
-        if (n <= 0 || gen_.load(std::memory_order_acquire) != seen) continue;
-        if ((set[0].revents & POLLIN) != 0) {
+        int left = ::poll(set.data(), static_cast<nfds_t>(set.size()), -1);
+        if (left > 0 && set[0].revents != 0) {
+            --left;
             char drain[16];
             while (::recv(fd_[0], drain, sizeof(drain), MSG_DONTWAIT) > 0) {
             }
         }
-        // A detach or attach since `seen` changed the table this set mirrors: stop there. The
-        // lock is released across each callback, with the source marked firing under it.
-        for (std::size_t i = 1; i < set.size() && gen_.load(std::memory_order_acquire) == seen;
-             ++i) {
+        // No lock across a callback; a detach or attach since `seen` stops the batch, and the
+        // sources still ready come back next pass. The live set and its sources stay put
+        // without the lock: an attach grows only the spare. `poll` counted the ready entries,
+        // so the walk ends at the last one.
+        for (std::size_t i = 1; left > 0; ++i) {
             if (set[i].revents == 0) continue;
-            wait_source_t* const s = sources_[i - 1];
-            firing_.store(s, std::memory_order_relaxed);
-            lock.unlock();
-            s->fire(s->ctx, *s, ready_of(set[i].revents));
-            lock.lock();
-            firing_.store(nullptr, std::memory_order_relaxed);
+            --left;
+            if (!fire_marked(*who[i - 1], ready_of(set[i].revents), seen)) break;
         }
+        lock.lock();
     }
     lock.unlock();
     driver_.store(detail::unowned_thread_id());

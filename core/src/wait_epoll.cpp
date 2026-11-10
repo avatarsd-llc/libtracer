@@ -19,7 +19,6 @@
 #include <array>
 #include <cstdint>
 #include <mutex>
-#include <thread>
 
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/wait.hpp"
@@ -112,17 +111,9 @@ void wait_module_t::detach(wait_source_t& s) noexcept {
         if (!s.attached.load(std::memory_order_relaxed)) return;
         ::epoll_ctl(fd_[0], EPOLL_CTL_DEL, s.fd.load(std::memory_order_relaxed), nullptr);
         s.attached.store(false, std::memory_order_relaxed);
-        gen_.fetch_add(1);  // seq_cst: the other half of run()'s firing handshake
+        gen_.fetch_add(1);  // seq_cst: the other half of fire_marked's handshake
     });
     await_quiet(s);
-}
-
-void wait_module_t::await_quiet(const wait_source_t& s) const noexcept {
-    // Only this source's callback is waited for, never the batch around it. A callback that
-    // blocks on a lock the caller holds is the caller's own link: that wait is the one a
-    // link's receive thread always had.
-    if (driver_.load() == detail::this_thread_id()) return;
-    while (firing_.load() == &s) std::this_thread::yield();
 }
 
 void wait_module_t::want_write(wait_source_t& s, bool on) noexcept {
@@ -137,23 +128,17 @@ void wait_module_t::run() noexcept {
     driver_.store(detail::this_thread_id());  // seq_cst: see wait_module_t::locked
     std::array<epoll_event, kBatch> ev;
     while (!stopping_.load()) {
-        firing_.store(nullptr, std::memory_order_release);
         const std::uint32_t seen = gen_.load();
         const int n = ::epoll_wait(fd_[0], ev.data(), kBatch, -1);
-        // No lock across a callback. The source is published as firing, in the module's own
-        // memory, THEN the generation is re-read (both sequentially consistent, as is a
-        // detach's bump then its read of the mark): either this sees a detach made since
-        // `seen` and stops before touching the source, leaving the rest for the next pass, or
-        // that detach sees the mark and waits for this one callback.
+        // No lock across a callback; a detach since `seen` stops the batch, and the sources
+        // still ready come back next pass.
         for (int i = 0; i < n; ++i) {
             auto* const s = static_cast<wait_source_t*>(ev[static_cast<std::size_t>(i)].data.ptr);
-            if (s == nullptr) continue;
-            firing_.store(s);
-            if (gen_.load() != seen) break;
-            s->fire(s->ctx, *s, ready_of(ev[static_cast<std::size_t>(i)].events));
+            if (s != nullptr &&
+                !fire_marked(*s, ready_of(ev[static_cast<std::size_t>(i)].events), seen))
+                break;
         }
     }
-    firing_.store(nullptr, std::memory_order_release);
     driver_.store(detail::unowned_thread_id());
 }
 
