@@ -53,7 +53,7 @@ using tr::testing::check;
  *
  * They are `protected static` on @ref tr::net::stream_endpoint_t — a derived class may
  * re-export them, which lets the test drive them over a raw socketpair with no transport,
- * framing or recv thread in the way (the same shim `write_all_eintr_test` uses).
+ * framing or recv thread in the way.
  */
 struct write_probe_t : tr::net::stream_endpoint_t {
     using tr::net::stream_endpoint_t::write_all;

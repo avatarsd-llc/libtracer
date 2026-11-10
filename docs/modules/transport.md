@@ -537,8 +537,8 @@ drawn from the link's `link_memory_t::stack` source, never the platform heap (#2
 :members:
 ```
 
-The full-write helpers below report how one record's write ended, so a stalled peer can be
-counted and closed rather than blocked on forever (#838):
+The write helpers below never wait (#2252) and report how one record's write ended, so a
+stalled peer is counted, its frame held and resumed on writability, and never blocked on (#838):
 
 ```{doxygenenum} tr::net::write_outcome_t
 :project: libtracer

@@ -106,10 +106,12 @@ inline constexpr std::chrono::milliseconds kQuiet = 60ms;
 inline constexpr std::size_t kMaxFrame = 16384;
 
 /**
- * @brief The peer liveness window every rig configures, in ms: how long a send may wait on a
- *        peer that takes no bytes. The stalled-peer case bounds each send by a multiple of it.
+ * @brief The longest any one send may take into a peer that takes no bytes. No write waits
+ *        (#2252), so a send costs a frame copy (and a WS mask) and one refused syscall. The
+ *        figure is slack for a 256 KiB frame on a loaded sanitizer runner; a blocking write
+ *        slept a whole liveness window here, 10 s by default.
  */
-inline constexpr std::uint32_t kLivenessMs = 100;
+inline constexpr std::chrono::milliseconds kNoWait = 250ms;
 
 /** @brief A deterministic payload of @p n bytes, distinct per @p seed. */
 [[nodiscard]] inline bytes_t payload(std::size_t n, std::uint8_t seed) {
@@ -469,10 +471,9 @@ inline void case_stalled_peer(rig_factory_t make) {
     // The precondition, reported on its own so it is never read as a broken link.
     check(l.drop_stats().dropped_tx > dropped_before,
           "the peer's window filled on this host (a shed was counted within the cap)");
-    // A send waits at most about one liveness window on this peer; 20 windows is slack for a
-    // loaded sanitizer runner, and still far short of "blocked until the peer reads".
-    const auto bound = std::chrono::milliseconds(kLivenessMs) * 20;
-    check(slowest < bound, "no send was held by the stalled peer beyond the liveness bound");
+    // No write waits (#2252): every send returns after one nonblocking write, whatever the
+    // peer does.
+    check(slowest < kNoWait, "no send waited on the stalled peer");
 
     std::vector<bytes_t> whole;
     const bool framed = rig->peer_drain(1000ms, whole);

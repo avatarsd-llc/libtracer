@@ -112,15 +112,6 @@ struct tcp_config_t {
      *         the link's own drives a private one, sized by `recv_stack`. Must outlive the
      *         link. */
     wait_module_t* wait = nullptr;
-    /**
-     * @brief The app-provided PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs`
-     *        (#838): how long the peer may fail to take bytes before it is treated as broken.
-     *        It bounds each egress write turn; offers past a full lane whose turns moved
-     *        nothing, `kMaxConsecutiveStalls` rings of them in a row, close the connection. A
-     *        record the socket took only part of keeps
-     *        its place and finishes on the next turn (#2144).
-     */
-    std::uint32_t liveness_window_ms = 0;
 };
 
 /**
@@ -150,13 +141,6 @@ struct tcp_server_config_t {
      *         the link's own drives a private one, sized by `recv_stack`. Must outlive the
      *         link. */
     wait_module_t* wait = nullptr;
-    /**
-     * @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838). It
-     *        SIZES the peer cap. A server's egress writes never wait (#2144): a session that
-     *        is offered `kEgressStallStrikes` rings of frames in a row past a full STREAM lane,
-     *        its socket moving nothing, is closed. A SAMPLE lane never strikes.
-     */
-    std::uint32_t liveness_window_ms = 0;
 };
 
 /**
@@ -189,7 +173,7 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
      * @param peer_host Dotted-quad IPv4 address of the peer (e.g. "127.0.0.1").
      * @param peer_port TCP port of the peer (host byte order).
      * @param config    The link's knobs (@ref tcp_config_t): memory, receive cap, recv-thread
-     *                  stack, liveness window.
+     *                  stack, wait module.
      */
     tcp_transport_t(std::string_view peer_host, std::uint16_t peer_port,
                     const tcp_config_t& config = {});
@@ -298,16 +282,12 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
     [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
 
     /** @brief Strikes a STALLED peer cost (#838, #2144): offers past a full STREAM lane whose
-     *         turn moved nothing, each one a frame shed. `kMaxConsecutiveStalls` rings of them in a
+     *         turn moved nothing, each one a frame shed. `kEgressStallStrikes` rings of them in a
      *         row close the connection, so a non-zero count with @ref link_up still true is a peer
      * that is falling behind but recovering. */
     [[nodiscard]] std::uint64_t stalled_tx() const noexcept {
         return stalled_tx_.load(std::memory_order_relaxed);
     }
-
-    /** @brief The peer liveness window this link bounds its sends by, ms, as constructed
-     *         (`0` ⇒ `kDefaultLivenessWindowMs`) (#838). */
-    [[nodiscard]] std::uint32_t liveness_window_ms() const noexcept { return liveness_window_ms_; }
 
     /** @brief The application's liveness check (#2198, @ref transport_t::sweep):
      *         a frame held on the wire that moved no byte since @p deadline shuts the
@@ -397,7 +377,7 @@ class tcp_server_transport_t final : public stream_server_base_t {
      *
      * @param bind_port  TCP port to listen on (host byte order; 0 → ephemeral).
      * @param config     The server's knobs (@ref tcp_server_config_t): memory, receive cap,
-     *                   peer cap, bus facet, fallback-thread stack, liveness window.
+     *                   peer cap, bus facet, fallback-thread stack, wait module.
      */
     explicit tcp_server_transport_t(std::uint16_t bind_port,
                                     const tcp_server_config_t& config = {});
