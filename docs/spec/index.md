@@ -23,9 +23,10 @@ Normative status is not a property of a directory. It is declared by
   - [03-addressing.md](../reference/03-addressing.md) §path syntax — canonical
     PATH constraints.
   - [23-noise-link-binding.md](../reference/23-noise-link-binding.md) — the
-    Noise link binding (NNpsk0 over a datagram carrier). It applies **only to a
-    link that uses the binding**; a link that does not use it is unaffected
-    ([RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md), amendment, accepted 2026-10-10).
+    Noise link binding (NNpsk0 over a datagram carrier: UDP, or a WebSocket
+    connection since Amendment 2). It applies **only to a link that uses the
+    binding**; a link that does not use it is unaffected
+    ([RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md), amendment, accepted 2026-10-10; Amendment 2 accepted 2026-11-10).
 
   A reader of `v1.md` alone cannot see the frame layout at all; the annexes are
   where the bytes are.

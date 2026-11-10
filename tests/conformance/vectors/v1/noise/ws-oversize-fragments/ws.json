@@ -1,0 +1,102 @@
+{
+  "case": "noise/ws-oversize-fragments",
+  "source": "RFC-0033 Amendment 2 A2.12; reference/23 \u00a713.12",
+  "based_on": "noise/nnpsk0-appendix-a",
+  "summary": "after proof, a fragmented message passes max_frame + 25 at its third fragment",
+  "subprotocol": "tracer-noise-v1",
+  "inputs": {
+    "max_frame": 16,
+    "bound_after_proof": 41
+  },
+  "frames": [
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 2,
+      "mask": "a1b1c1d1",
+      "payload": "01358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254305dfcc173612b651604ae630d4c171a9f19e1d41b12b973f2",
+      "bytes": "82baa1b1c1d1a08441a377879951701f2be33b6e50f09989903c80134fead458a401737cd7b3f5819c2d60c2a0fac4a7c57fc2bc8dc6bb2ed83075aad368d243"
+    },
+    {
+      "dir": "s2c",
+      "fin": true,
+      "opcode": 2,
+      "mask": "",
+      "payload": "0279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a945968a975a98d942d263ea658be0b1b91",
+      "bytes": "82320279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a945968a975a98d942d263ea658be0b1b91"
+    },
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 2,
+      "mask": "a2b2c2d2",
+      "payload": "040000000000000000b215c81b607068db3638292cc0825965",
+      "bytes": "8299a2b2c2d2a6b2c2d2a2b2c2d2a200d71ab9d2b2ba7984fafb8e72408bc7"
+    },
+    {
+      "dir": "s2c",
+      "fin": true,
+      "opcode": 2,
+      "mask": "",
+      "payload": "0400000000000000004a986111144b7702d0a867a37da80f23",
+      "bytes": "82190400000000000000004a986111144b7702d0a867a37da80f23"
+    },
+    {
+      "dir": "c2s",
+      "fin": false,
+      "opcode": 2,
+      "mask": "a3b3c3d3",
+      "payload": "040102030405060708090a0b0c0d0e0f10111213",
+      "bytes": "0294a3b3c3d3a7b2c1d0a7b6c5d4abbac9d8afbecddcb3a2d1c0"
+    },
+    {
+      "dir": "c2s",
+      "fin": false,
+      "opcode": 0,
+      "mask": "a4b4c4d4",
+      "payload": "1415161718191a1b1c1d1e1f2021222324252627",
+      "bytes": "0094a4b4c4d4b0a1d2c3bcaddecfb8a9dacb8495e6f78091e2f3"
+    },
+    {
+      "dir": "c2s",
+      "fin": false,
+      "opcode": 0,
+      "mask": "a5b5c5d5",
+      "payload": "28292a2b2c2d2e2f303132333435363738393a3b",
+      "bytes": "0094a5b5c5d58d9ceffe8998ebfa9584f7e69180f3e29d8cffee"
+    },
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 0,
+      "mask": "a6b6c6d6",
+      "payload": "3c3d3e3f404142434445",
+      "bytes": "808aa6b6c6d69a8bf8e9e6f78495e2f3"
+    },
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 2,
+      "mask": "a7b7c7d7",
+      "payload": "040100000000000000843c7ef02f4b31848add30c2b08aa1eef0985b2201f08621",
+      "bytes": "82a1a7b7c7d7a3b6c7d7a7b7c7d7a733fba957988ce6233d1ae765074d7649475f8c85b6375186"
+    }
+  ],
+  "expected": {
+    "responder": {
+      "malformed_rx": 1,
+      "refused_at_frame": 6,
+      "discarded_frames": [
+        7
+      ],
+      "delivered": [
+        "040100000000000000843c7ef02f4b31848add30c2b08aa1eef0985b2201f08621"
+      ],
+      "sent": [
+        "0279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a945968a975a98d942d263ea658be0b1b91",
+        "0400000000000000004a986111144b7702d0a867a37da80f23"
+      ],
+      "connection_open": true
+    }
+  }
+}

@@ -1,0 +1,82 @@
+{
+  "case": "noise/ws-preproof-bound",
+  "source": "RFC-0033 Amendment 2 A2.12; reference/23 \u00a713.12",
+  "based_on": "noise/nnpsk0-appendix-a",
+  "summary": "before proof, a 59-byte message is refused at byte 59, whole or fragmented",
+  "subprotocol": "tracer-noise-v1",
+  "inputs": {
+    "bound_before_proof": 58,
+    "note": "each variant runs on a fresh connection; the valid first message after the refusal is answered, so the refusal did not close the connection"
+  },
+  "frames": [
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 2,
+      "mask": "a1b1c1d1",
+      "payload": "01358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254305dfcc173612b651604ae630d4c171a9f19e1d41b12b973f200",
+      "bytes": "82bba1b1c1d1a08441a377879951701f2be33b6e50f09989903c80134fead458a401737cd7b3f5819c2d60c2a0fac4a7c57fc2bc8dc6bb2ed83075aad368d243c1"
+    },
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 2,
+      "mask": "a2b2c2d2",
+      "payload": "01358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254305dfcc173612b651604ae630d4c171a9f19e1d41b12b973f2",
+      "bytes": "82baa2b2c2d2a38742a074849a52731c28e0386d53f39a8a933f83104ce9d75ba702707fd4b0f6829f2e63c1a3f9c7a4c67cc1bf8ec5b82ddb3376a9d06bd140"
+    },
+    {
+      "dir": "c2s",
+      "fin": false,
+      "opcode": 2,
+      "mask": "a1b1c1d1",
+      "payload": "01358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd",
+      "bytes": "029ea1b1c1d1a08441a377879951701f2be33b6e50f09989903c80134fead458a401737c"
+    },
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 0,
+      "mask": "a2b2c2d2",
+      "payload": "166254305dfcc173612b651604ae630d4c171a9f19e1d41b12b973f200",
+      "bytes": "809da2b2c2d2b4d096e2ff4e03a1c399a7c4a61ca1dfeea5d84dbb5316c9b00bb120a2"
+    },
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 2,
+      "mask": "a3b3c3d3",
+      "payload": "01358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254305dfcc173612b651604ae630d4c171a9f19e1d41b12b973f2",
+      "bytes": "82baa3b3c3d3a28643a175859b53721d29e1396c52f29b8b923e82114de8d65aa603717ed5b1f7839e2f62c0a2f8c6a5c77dc0be8fc4b92cda3277a8d16ad041"
+    }
+  ],
+  "expected": {
+    "variants": [
+      {
+        "frames": [
+          0,
+          1
+        ],
+        "refused_at_frame": 0,
+        "malformed_rx": 1,
+        "sent": [
+          "0279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a945968a975a98d942d263ea658be0b1b91"
+        ],
+        "connection_open": true
+      },
+      {
+        "frames": [
+          2,
+          3,
+          4
+        ],
+        "refused_at_frame": 3,
+        "malformed_rx": 1,
+        "sent": [
+          "0279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a945968a975a98d942d263ea658be0b1b91"
+        ],
+        "connection_open": true
+      }
+    ]
+  }
+}

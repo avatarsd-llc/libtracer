@@ -1,0 +1,26 @@
+{
+  "case": "noise/ws-text-opcode",
+  "source": "RFC-0033 Amendment 2 A2.12; reference/23 \u00a713.12",
+  "based_on": "noise/nnpsk0-appendix-a",
+  "summary": "a valid first message sent as a text message is refused",
+  "subprotocol": "tracer-noise-v1",
+  "inputs": {},
+  "frames": [
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 1,
+      "mask": "a1b1c1d1",
+      "payload": "01358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254305dfcc173612b651604ae630d4c171a9f19e1d41b12b973f2",
+      "bytes": "81baa1b1c1d1a08441a377879951701f2be33b6e50f09989903c80134fead458a401737cd7b3f5819c2d60c2a0fac4a7c57fc2bc8dc6bb2ed83075aad368d243"
+    }
+  ],
+  "expected": {
+    "responder": {
+      "malformed_rx": 1,
+      "noise_handshake_failed": 0,
+      "sent": [],
+      "connection_open": true
+    }
+  }
+}

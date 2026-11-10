@@ -1,0 +1,59 @@
+{
+  "case": "noise/ws-ping-between-continuations",
+  "source": "RFC-0033 Amendment 2 A2.12; reference/23 \u00a713.12",
+  "based_on": "noise/nnpsk0-appendix-a",
+  "summary": "a Ping between the two frames of a first message does not disturb its reassembly",
+  "subprotocol": "tracer-noise-v1",
+  "inputs": {},
+  "frames": [
+    {
+      "dir": "c2s",
+      "fin": false,
+      "opcode": 2,
+      "mask": "a1b1c1d1",
+      "payload": "01358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2",
+      "bytes": "029da1b1c1d1a08441a377879951701f2be33b6e50f09989903c80134fead458a40173"
+    },
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 9,
+      "mask": "a3b3c3d3",
+      "payload": "",
+      "bytes": "8980a3b3c3d3"
+    },
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 0,
+      "mask": "a2b2c2d2",
+      "payload": "cd166254305dfcc173612b651604ae630d4c171a9f19e1d41b12b973f2",
+      "bytes": "809da2b2c2d26fa4a08692ef3e13d1d3e9b7b4b66cb1affed5c83dab2306b9a07ba150"
+    },
+    {
+      "dir": "s2c",
+      "fin": true,
+      "opcode": 10,
+      "mask": "",
+      "payload": "",
+      "bytes": "8a00"
+    },
+    {
+      "dir": "s2c",
+      "fin": true,
+      "opcode": 2,
+      "mask": "",
+      "payload": "0279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a945968a975a98d942d263ea658be0b1b91",
+      "bytes": "82320279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a945968a975a98d942d263ea658be0b1b91"
+    }
+  ],
+  "expected": {
+    "c2s_messages": [
+      "01358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254305dfcc173612b651604ae630d4c171a9f19e1d41b12b973f2"
+    ],
+    "s2c_messages": [
+      "0279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a945968a975a98d942d263ea658be0b1b91"
+    ],
+    "pong": "8a00"
+  }
+}
