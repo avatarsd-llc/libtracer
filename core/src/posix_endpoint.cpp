@@ -856,9 +856,11 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     if (wait_module_t* const w = waiting()) w->detach(s);  // no callback for it runs after
     const int fd = s.fd.load(std::memory_order_seq_cst);
     if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
-    egress_.close(s.egress);
+    egress_.close(s.egress);  // once per open
     if (fd >= 0) release_fd(s.fd, fd);
-    on_slot_reset(s);
+    // A shut link's session buffers live until its destructor: a callback of the link may
+    // still be using them.
+    if (!shut()) on_slot_reset(s);
     // Departure seam (RFC-0009 §D.5): fired LAST, with no transport lock held — the
     // notifier re-enters the routing plane. Only a session that reached `open` can have
     // flowed frames (subscriptions), and only then.

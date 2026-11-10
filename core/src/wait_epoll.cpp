@@ -126,7 +126,7 @@ void wait_module_t::want_write(wait_source_t& s, bool on) noexcept {
 
 void wait_module_t::run() noexcept {
     driver_.store(detail::this_thread_id());  // seq_cst: see wait_module_t::locked
-    ++g_callback_depth;
+    const callback_thread_scope_t delivering;
     std::array<epoll_event, kBatch> ev;
     while (!stopping_.load()) {
         const std::uint32_t seen = gen_.load();
@@ -140,7 +140,6 @@ void wait_module_t::run() noexcept {
                 break;
         }
     }
-    --g_callback_depth;
     driver_.store(detail::unowned_thread_id());
 }
 

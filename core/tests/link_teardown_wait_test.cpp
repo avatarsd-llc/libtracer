@@ -24,8 +24,16 @@
  *     link's callback, so neither may wait for the other: both complete, and once B's graph
  *     frees them neither link leaves a thread behind.
  *
- * A teardown made on a thread that runs link callbacks waits for nothing; the joins happen at
- * the graph's collect(), outside every callback.
+ *  4. **A deferred teardown keeps the link's descriptor open until its destructor** (TCP).
+ *  5. **collect() from a callback frees nothing.**
+ *  6. **Removal from a callback, then collect() from an app thread, leaves no thread and no
+ *     descriptor behind.**
+ *  7. **A shut session's buffers live until the destructor** (WebSocket, with a second
+ *     session holding half an upgrade request): the removal gives back none of the link's
+ *     connection state; collect() gives back all of it.
+ *
+ * A teardown made on a thread that runs link callbacks waits for nothing and closes nothing;
+ * the joins and closes happen at the graph's collect(), outside every callback.
  *
  * Each wait is bounded: a regression prints `[FAIL]` and exits non-zero at once rather than
  * hanging ctest, since the threads it leaves stuck could not be joined.
@@ -34,7 +42,9 @@
  * (`posix_endpoint_t::stop_driver` always joining) reds section 3 (stuck); for section 1 the
  * self-join fails on a POSIX host and the thread ends unjoined, which TSan reports as a thread
  * leak (on a chip that join waits forever). Keeping the control-plane lock across the
- * teardown's waits reds section 2 (stuck).
+ * teardown's waits reds section 2 (stuck). Closing on a deferred teardown reds sections 4
+ * and 5; dropping collect()'s early return reds section 5; resetting a shut session's
+ * buffers reds section 7.
  */
 
 #include <arpa/inet.h>
@@ -62,6 +72,7 @@
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
+#include "libtracer/transport_ws.hpp"
 #include "libtracer/wait.hpp"
 
 namespace {
@@ -171,16 +182,33 @@ struct gate_link_t : tr::net::transport_t {
 /** @brief A reply sink that keeps nothing: these writes are judged by their effect. */
 void ignore_reply(void*, const tr::view::rope_t&) {}
 
+/** @brief A heap store that counts the bytes it has out, for a link's connection state. */
+struct counting_source_t final : tr::mem::block_source_t {
+    std::atomic<std::size_t> out{0};
+    counting_source_t() noexcept : block_source_t("counting") {}
+    void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        void* const p = tr::mem::heap_source_t::acquire(bytes, align);
+        if (p != nullptr) out.fetch_add(bytes);
+        return p;
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        out.fetch_sub(bytes);
+        tr::mem::heap_source_t::reclaim(p, bytes, align);
+    }
+};
+
 /** @brief Node B, under test: UDP listeners, and the `gate` kind behind a held latch. */
 struct node_b_t {
     tr::graph::graph_t g;
     tr::net::fwd_router_t router{g};
     tr::net::transport_vertex_t net;
-    explicit node_b_t(tr::net::wait_module_t* wait)
-        : net(g, router, "/net", &tr::mem::net_backend(), &tr::mem::net_source(), nullptr, wait) {
+    explicit node_b_t(tr::net::wait_module_t* wait, const tr::net::link_memory_t* memory = nullptr)
+        : net(g, router, "/net", &tr::mem::net_backend(), &tr::mem::net_source(), memory, wait) {
         (void)net.register_module(std::string(tr::net::kUdpServerSuggestedModule), "udp",
                                   conn_role_t::LISTEN);
         (void)net.register_module(std::string(tr::net::kTcpServerSuggestedModule), "tcp",
+                                  conn_role_t::LISTEN);
+        (void)net.register_module(std::string(tr::net::kWsServerSuggestedModule), "ws",
                                   conn_role_t::LISTEN);
         (void)net.register_module("gate-client", "gate", conn_role_t::DIAL);
         net.register_transport_type(
@@ -209,6 +237,8 @@ struct node_a_t {
         (void)net.register_module(std::string(tr::net::kUdpClientSuggestedModule), "udp",
                                   conn_role_t::DIAL);
         (void)net.register_module(std::string(tr::net::kTcpClientSuggestedModule), "tcp",
+                                  conn_role_t::DIAL);
+        (void)net.register_module(std::string(tr::net::kWsClientSuggestedModule), "ws",
                                   conn_role_t::DIAL);
     }
     /** @brief Dial @p port as @p kind connection @p name , and hold it up. */
@@ -261,8 +291,10 @@ void test_removed_by_its_own_write(bool on_module) {
         check_or_exit(eventually([&] { return !b.has("net/udp-server/srv"); }),
                       "the link's teardown, run on its own callback, completes");
         (void)a.router.cancel(slot);
-        b.g.collect();
-        check(eventually([&] { return spawned_since(before) == 0; }),
+        check(eventually([&] {
+                  b.g.collect();  // until no frame still holds the removed link
+                  return spawned_since(before) == 0;
+              }),
               "once B frees it, the removed link leaves no thread behind");
     }
     if (on_module) {
@@ -339,36 +371,72 @@ void test_two_links_removing_each_other() {
         "both teardowns complete");
     (void)a.router.cancel(rx);
     (void)a.router.cancel(ry);
-    b.g.collect();
-    check_or_exit(eventually([&] { return spawned_since(before) == 0; }),
+    check_or_exit(eventually([&] {
+                      b.g.collect();
+                      return spawned_since(before) == 0;
+                  }),
                   "once B frees them, neither link leaves a thread behind");
 }
 
-/** @brief B's TCP listener `srv`, removed by a write A sends over a connection to it. */
-struct tcp_removed_by_its_own_write_t {
-    node_b_t b{nullptr};
+/** @brief B's stream listener `srv` (TCP unless named), removed by a write A sends over a
+ *         connection to it. */
+struct removed_by_its_own_write_t {
+    counting_source_t state;  // B's links' connection state: sessions and their buffers
+    tr::net::link_memory_t memory{.state = &state};
+    std::size_t state_before = 0;  // B's connection state just before the removal
+    node_b_t b{nullptr, &memory};
     node_a_t a;
     std::uint16_t port = 0;
     std::vector<long> link_threads;  // B's link's own
     tr::net::fwd_router_t::origin_t slot{&ignore_reply, nullptr};
-    tcp_removed_by_its_own_write_t() {
+    std::string kind;
+    int half_open = -1;  // a raw connection whose WebSocket upgrade request is half sent
+    explicit removed_by_its_own_write_t(std::string_view k = "tcp", bool with_half_open = false)
+        : kind(k) {
         const std::vector<long> before = thread_ids();
         bool listening = false;  // a port another test takes first is tried again
         for (int i = 0; i < 8 && !listening; ++i)
-            listening = b.listen("srv", port = free_port(SOCK_STREAM), "tcp");
-        check(listening, "B listens on TCP");
+            listening = b.listen("srv", port = free_port(SOCK_STREAM), kind);
+        check(listening, "B listens");
         for (const long id : thread_ids())
             if (std::find(before.begin(), before.end(), id) == before.end())
                 link_threads.push_back(id);
-        check(a.dial("tob", port, "tcp"), "A connects to B");
+        check(a.dial("tob", port, kind), "A connects to B");
         check(eventually([&] { return sockets_on(port) == 2; }),
               "B holds its listening socket and the accepted connection");
-        check(a.write(slot, "tob", "/net/tcp-server/conn", tr::net::conn_remove("srv"), "tcp"),
+        if (with_half_open) {
+            half_open = ::socket(AF_INET, SOCK_STREAM, 0);
+            sockaddr_in to{};
+            to.sin_family = AF_INET;
+            to.sin_port = htons(port);
+            to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            const char req[] = "GET / HTTP/1.1\r\nHost: b\r\nUpgrade: websocket\r\n";
+            check(::connect(half_open, reinterpret_cast<const sockaddr*>(&to), sizeof to) == 0 &&
+                      ::send(half_open, req, sizeof req - 1, 0) ==
+                          static_cast<ssize_t>(sizeof req - 1),
+                  "a second session holds half an upgrade request");
+            check(eventually([&] { return sockets_on(port) == 3; }), "B accepted it");
+        }
+        std::this_thread::sleep_for(50ms);  // the sessions settle
+        state_before = state.out.load();
+        check(a.write(slot, "tob", "/net/" + kind + "-server/conn", tr::net::conn_remove("srv"),
+                      kind),
               "A sends B the removal of the link it arrives on");
-        check_or_exit(eventually([&] { return !b.has("net/tcp-server/srv"); }),
+        check_or_exit(eventually([&] { return !b.has("net/" + kind + "-server/srv"); }),
                       "the link's teardown, run on its own callback, completes");
     }
-    ~tcp_removed_by_its_own_write_t() { (void)a.router.cancel(slot); }
+    ~removed_by_its_own_write_t() {
+        (void)a.router.cancel(slot);
+        if (half_open >= 0) ::close(half_open);
+    }
+    /** @brief Call B's collect() until the removed link is freed (a frame may still hold it
+     *         at the first call); answer whether B's sockets on the port all went. */
+    bool collect_until_freed() {
+        return eventually([&] {
+            b.g.collect();
+            return sockets_on(port) == 0;
+        });
+    }
 };
 
 /** @brief Runs @p fn once on a thread that runs link callbacks: a wait module's own. */
@@ -405,29 +473,24 @@ void on_a_callback_thread(Fn fn) {
 
 void test_deferred_teardown_keeps_the_descriptor_open_until_the_destructor() {
     std::printf("-- a deferred teardown keeps the link's descriptor open until its destructor\n");
-    tcp_removed_by_its_own_write_t t;
+    removed_by_its_own_write_t t;
     std::this_thread::sleep_for(50ms);  // the link's callback sees its shut-down sockets
     check(sockets_on(t.port) == 2, "removed, B's link still holds both its descriptors open");
-    t.b.g.collect();
-    check(eventually([&] { return sockets_on(t.port) == 0; }),
-          "the destructor, at collect(), closes them");
+    check(t.collect_until_freed(), "the destructor, at collect(), closes them");
 }
 
 void test_collect_from_a_callback_frees_nothing() {
     std::printf("-- collect() from a callback frees nothing\n");
-    tcp_removed_by_its_own_write_t t;
+    removed_by_its_own_write_t t;
     on_a_callback_thread([&] { t.b.g.collect(); });
     check(sockets_on(t.port) == 2, "collect() on a callback thread left the removed link whole");
-    t.b.g.collect();
-    check(eventually([&] { return sockets_on(t.port) == 0; }),
-          "the next collect() from an application thread frees it");
+    check(t.collect_until_freed(), "the next collect() from an application thread frees it");
 }
 
 void test_removal_from_a_callback_then_collect_leaves_nothing_behind() {
     std::printf("-- removal from a callback, then collect() from an app thread\n");
-    tcp_removed_by_its_own_write_t t;
-    t.b.g.collect();
-    check(eventually([&] { return sockets_on(t.port) == 0; }), "no descriptor is left behind");
+    removed_by_its_own_write_t t;
+    check(t.collect_until_freed(), "no descriptor is left behind");
     check(!t.link_threads.empty(), "B's link ran a thread of its own");
     check(eventually([&] {
               const std::vector<long> now = thread_ids();
@@ -436,6 +499,19 @@ void test_removal_from_a_callback_then_collect_leaves_nothing_behind() {
               });
           }),
           "and no thread of B's link");
+}
+
+void test_a_shut_sessions_buffers_live_until_the_destructor() {
+    std::printf("-- a WebSocket session removed by its own message keeps its buffers\n");
+    // The removal is decoded from the session's own assembler, on its own callback: freeing
+    // the session's buffers there would pull them from under that callback.
+    removed_by_its_own_write_t t("ws", true);
+    std::this_thread::sleep_for(50ms);  // the link's callback sees its shut-down sockets
+    check(t.state_before != 0 && t.state.out.load() == t.state_before,
+          "removed, B's link gave back none of its connection state");
+    check(sockets_on(t.port) == 3, "and still holds every descriptor open");
+    check(t.collect_until_freed() && t.state.out.load() == 0,
+          "the destructor, at collect(), frees the sessions and their buffers");
 }
 
 }  // namespace
@@ -449,6 +525,7 @@ int main() {
     test_deferred_teardown_keeps_the_descriptor_open_until_the_destructor();
     test_collect_from_a_callback_frees_nothing();
     test_removal_from_a_callback_then_collect_leaves_nothing_behind();
+    test_a_shut_sessions_buffers_live_until_the_destructor();
     std::printf("link_teardown_wait_test: %s (%d failures)\n",
                 g_failures == 0 ? "ALL PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
