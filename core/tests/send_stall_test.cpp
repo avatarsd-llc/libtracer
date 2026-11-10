@@ -376,16 +376,27 @@ void test_tcp_link_sheds_and_drops_a_stalled_peer() {
 
     tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port), {});
     check(link.ok(), "the dial succeeded");
+    // The link-down event, not a clock, says when the verdict reached the connection.
+    std::atomic<bool> down{false};
+    const auto on_down = [](void* ctx) {
+        auto* d = static_cast<std::atomic<bool>*>(ctx);
+        d->store(true);
+        d->notify_all();
+    };
+    if (link.set_down_notifier(on_down, &down)) on_down(&down);
     link.start_receiving();
 
     const int peer = ::accept(listener, nullptr, nullptr);
     check(peer >= 0, "the peer accepted the connection — and now never reads a byte");
 
-    // Push frames until the strikes reach the cap. No send waits, so the loop is bounded by
-    // its count alone.
+    // Push frames until the link goes down. Each send is one turn, and the verdict needs the
+    // cap in strikes IN A ROW: a strike counted while the kernel still took bytes now and then
+    // is cleared by the next byte that moves, so the total count says nothing about the
+    // verdict. No send waits, so the loop is bounded by its count alone; a slow machine only
+    // spends more of the count before the socket stops taking bytes.
     const std::vector<std::byte> frame(64 * 1024);
     std::int64_t slowest = 0;
-    for (int sent = 0; sent < 4096 && link.stalled_tx() < kCap * kRing; ++sent) {
+    for (int sent = 0; sent < 16 * 4096 && !down.load(); ++sent) {
         const auto t0 = clock_t_::now();
         link.send(std::span(frame));
         slowest = std::max(slowest, ms_since(t0));
@@ -399,9 +410,9 @@ void test_tcp_link_sheds_and_drops_a_stalled_peer() {
           "a send to the condemned peer is shed and counted — never a silent drop");
 
     // The verdict reaches the connection: shutdown makes the recv loop see EOF, which runs
-    // the ordinary remote-departure teardown.
-    for (int i = 0; i < 400 && link.link_up(); ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // the ordinary remote-departure teardown and reports the link down. A link that never
+    // condemned the peer never reports it, and the test's own deadline names the hang.
+    down.wait(false);
     check(!link.link_up(), "the peer that would not take bytes is dropped, not blocked on");
     std::printf("  stalled=%llu dropped=%llu, slowest send %lld ms\n",
                 static_cast<unsigned long long>(link.stalled_tx()),
