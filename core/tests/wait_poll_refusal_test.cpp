@@ -12,8 +12,8 @@
  * This suite raises the descriptor limit, fills the numbers below `FD_SETSIZE`, and connects
  * a newcomer to a TCP server on the module: the newcomer's socket lands past the set, and the
  * server's refused registration must close it, keep the first peer open and enumerated, and
- * admit the next peer once low numbers are free again. Built with `wait_poll.cpp` ahead of the
- * archive, so the archive's own adapter is never pulled in.
+ * admit the next peer once low numbers are free again. Built against a library with the lwIP
+ * adapter and `kListedWaitSources` bound, as a chip build is.
  */
 
 #include <arpa/inet.h>

@@ -127,6 +127,7 @@ endif()
 # posix_endpoint_t — the recv-thread/endpoint scaffold shared by every socket transport.
 # WS counts toward it only where the PORTABLE (socket-owning) WS pair compiles; the
 # IDF-native links never touch posix_endpoint_t.
+set(LIBTRACER_LISTED_WAIT_SOURCES false)
 if(CONFIG_LIBTRACER_TRANSPORT_UDP OR CONFIG_LIBTRACER_TRANSPORT_TCP
    OR (CONFIG_LIBTRACER_TRANSPORT_WS AND LIBTRACER_PORTABLE_WS))
     list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_POSIX_ENDPOINT})
@@ -136,6 +137,9 @@ if(CONFIG_LIBTRACER_TRANSPORT_UDP OR CONFIG_LIBTRACER_TRANSPORT_TCP
         list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_WAIT_EPOLL})
     else()
         list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_WAIT_POLL})
+        # Its sources are linked through their own records (#2147, receiver pays): the
+        # fragment below binds kListedWaitSources, and wait_poll.cpp refuses to compile without.
+        set(LIBTRACER_LISTED_WAIT_SOURCES true)
         # The poll adapter's doorbell is a UDP socket on lwIP's loopback interface: without
         # it a stop or a set change never wakes the wait (ADR-0071 Amendment 2026-11-08).
         # Skipped in the requirements-expansion pass, which has no sdkconfig yet.
@@ -529,6 +533,7 @@ struct esp_config_t : default_config_t {
     static constexpr bool kSelfHealLinks = ${LIBTRACER_SELF_HEAL_LINKS};
     static constexpr bool kCreationHooks = ${LIBTRACER_CREATION_HOOKS};
     static constexpr bool kSessionAdmission = ${LIBTRACER_SESSION_ADMISSION};
+    static constexpr bool kListedWaitSources = ${LIBTRACER_LISTED_WAIT_SOURCES};
     static constexpr std::size_t kSelfHealWorkerStackBytes = ${LIBTRACER_SELF_HEAL_WORKER_STACK};
     static constexpr std::size_t kRxDrainFrames = ${LIBTRACER_RX_DRAIN_FRAMES};
     static constexpr std::size_t kRxDrainBytes = ${LIBTRACER_RX_DRAIN_BYTES};

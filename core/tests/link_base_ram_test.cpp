@@ -128,17 +128,14 @@ void run_arm(const char* name) {
  *        idle `rope_t`, takes 48 B off. The wait module (#2147) took the server's poll entry
  *        and slot table entry off, net of the session's wait registration: 56 B off. The slot's
  *        facade pointer (now the server's `endpoint_of`) and the facade's owner pointer (the
- *        registration's context already names the server) go too: 16 B off. The session's
- *        wait registration carries its own place in the poll adapter's list, so the module
- *        holds no table (#2147, receiver pays): 8 B more here, and on the poll adapter 24 B
- *        less of the module's per-peer table on a 32-bit chip.
+ *        registration's context already names the server) go too: 16 B off.
  *
  * The session's `peer_endpoint_t` is a `transport_t`, whose receiver slot holds a
- * `std::mutex`: 40 B on x86_64 glibc, 48 B on aarch64 glibc. So the pin is 624 B plus that
- * mutex, exact on each target: 664 B on x86_64, 672 B on aarch64. Every other byte is
+ * `std::mutex`: 40 B on x86_64 glibc, 48 B on aarch64 glibc. So the pin is 616 B plus that
+ * mutex, exact on each target: 656 B on x86_64, 664 B on aarch64. Every other byte is
  * pointers, sizes and block counts, the same on any 64-bit target.
  */
-constexpr std::size_t kWsPeerBytes64 = 624 + sizeof(std::mutex);
+constexpr std::size_t kWsPeerBytes64 = 616 + sizeof(std::mutex);
 
 /** @brief A receive backend over the platform heap that adds to @p src's live balance. */
 class counting_rx_t final : public tr::mem::mem_backend_t {

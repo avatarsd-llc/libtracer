@@ -33,10 +33,12 @@
  * some links still lack the node module; once every link has it, the fallback becomes a
  * compile-time policy (ADR-0071 §Amendment, ruling 44).
  *
- * **Who pays for the table: the receiving link.** A source's place in the poll adapter's list
+ * **Who pays for the table: the receiving link.** A source's place in the lwIP adapter's list
  * is its own @ref tr::net::wait_source_t::next, in the record its link owns, so each peer is
  * paid by the link it arrived on. The module draws no memory and never grows, on either
- * adapter, so an attach is never refused for want of it (#2147).
+ * adapter, so an attach is never refused for want of it (#2147). The link exists only in a
+ * build that compiles that adapter (@ref tr::net::kListedWaitSources); an `epoll` build
+ * carries none.
  *
  * **A detach waits for its own source only.** The driving thread holds no lock while a callback
  * runs. A @ref tr::net::wait_module_t::detach from another thread waits only for the callback
@@ -57,12 +59,18 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
+#include "libtracer/config.hpp"
 #include "libtracer/park.hpp"
 #include "libtracer/sync.hpp"
 #include "libtracer/thread_id.hpp"
 
 namespace tr::net {
+
+/** @brief The empty stand-in for @ref tr::net::wait_source_t::next on a build whose adapter
+ *         keeps no list (@ref tr::net::kListedWaitSources false). */
+struct unlisted_t {};
 
 /** @brief The readiness bits a @ref tr::net::wait_source_t callback is handed. */
 enum class ready_t : std::uint8_t {
@@ -87,8 +95,8 @@ enum class ready_t : std::uint8_t {
  * @brief One socket registered with a @ref tr::net::wait_module_t, as the `{fire, ctx}`
  *        waiter of ADR-0084 §3 plus the descriptor.
  *
- * The link that owns the socket owns this record and pays for it (32 B on a 64-bit host),
- * its place in the poll adapter's list included. Set @ref
+ * The link that owns the socket owns this record and pays for it (24 B on a 64-bit host),
+ * and on the lwIP adapter its place in the list too (@ref next, one pointer more). Set @ref
  * fire, @ref ctx and @ref fd before
  * @ref wait_module_t::attach, and keep the record alive and unmoved until
  * @ref wait_module_t::detach returns.
@@ -116,10 +124,12 @@ struct wait_source_t {
      *         may clear it under one; every other ordering comes from the lock or the kernel's
      *         registration. */
     std::atomic<bool> attached{false};
-    /** @brief The next source in the poll adapter's list (unused on epoll): the receiving link
-     *         pays for its own entry, so the module holds no table. Written under the module's
-     *         lock; the driver reads it with none, under the source's firing mark. */
-    std::atomic<wait_source_t*> next{nullptr};
+    /** @brief The next source in the lwIP adapter's list: the receiving link pays for its own
+     *         entry, so the module holds no table. Written under the module's lock; the driver
+     *         reads it with none, under the source's firing mark. An empty member, taking no
+     *         space, in a build without that adapter (@ref kListedWaitSources). */
+    [[no_unique_address]] std::conditional_t<kListedWaitSources, std::atomic<wait_source_t*>,
+                                             unlisted_t> next{};
 };
 
 /**

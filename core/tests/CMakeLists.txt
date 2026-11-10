@@ -2149,19 +2149,53 @@ endif()
 
 if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP)
     # #2147 — the wait module's conformance suite and the links on it, run against BOTH
-    # adapters (ADR-0071's two-implementations rule): the build's own, and the poll adapter
-    # linked ahead of the archive, so the archive's adapter is never pulled in.
+    # adapters (ADR-0071's two-implementations rule): the build's own, and the lwIP adapter in
+    # a library of its own (below).
     add_executable(wait_module_test wait_module_test.cpp)
     target_link_libraries(wait_module_test PRIVATE libtracer)
     libtracer_test_warnings(wait_module_test)
     add_test(NAME wait_module COMMAND wait_module_test)
-    add_executable(wait_module_poll_test wait_module_test.cpp ${LIBTRACER_SOURCES_WAIT_POLL})
-    target_link_libraries(wait_module_poll_test PRIVATE libtracer)
+    # The lwIP adapter links its sources through their own records, so it needs a library built
+    # with kListedWaitSources bound (#2147): the socket links over the required core, compiled
+    # with that adapter and a fragment that binds the knob, as the ESP-IDF component does.
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/listed-wait/libtracer/config_override.hpp
+"/**
+ * @file
+ * @brief GENERATED test fixture: the defaults with the lwIP wait adapter's list link (#2147).
+ */
+#pragma once
+
+#include <cstddef>
+
+namespace tr::graph {
+
+/** @brief The defaults, with every wait source linked into the lwIP adapter's list. */
+struct listed_wait_config_t : default_config_t {
+    static constexpr bool kListedWaitSources = true;
+    /** @brief A POSIX host receives a borrowed UDP datagram on the stack (#2142). */
+    static constexpr std::size_t kUdpStackScratchBytes = 16384;
+};
+
+using config_t = listed_wait_config_t;
+
+}  // namespace tr::graph
+")
+    add_library(libtracer_listed_wait STATIC ${LIBTRACER_SOURCES_REQUIRED}
+        ${LIBTRACER_SOURCES_POSIX_ENDPOINT} ${LIBTRACER_SOURCES_TRANSPORT_TCP}
+        ${LIBTRACER_SOURCES_TRANSPORT_UDP} ${LIBTRACER_SOURCES_WAIT_POLL})
+    target_include_directories(libtracer_listed_wait BEFORE PUBLIC
+        ${CMAKE_CURRENT_BINARY_DIR}/listed-wait)
+    target_include_directories(libtracer_listed_wait PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+    target_link_libraries(libtracer_listed_wait PUBLIC Threads::Threads)
+    target_compile_features(libtracer_listed_wait PUBLIC cxx_std_23)
+    add_executable(wait_module_poll_test wait_module_test.cpp)
+    target_link_libraries(wait_module_poll_test PRIVATE libtracer_listed_wait)
     libtracer_test_warnings(wait_module_poll_test)
     add_test(NAME wait_module_poll COMMAND wait_module_poll_test)
-    # The poll adapter's refusal at attach: a refused newcomer is closed, nobody is evicted.
-    add_executable(wait_poll_refusal_test wait_poll_refusal_test.cpp ${LIBTRACER_SOURCES_WAIT_POLL})
-    target_link_libraries(wait_poll_refusal_test PRIVATE libtracer)
+    # The lwIP adapter's one refusal at attach: a socket past FD_SETSIZE is closed, nobody is
+    # evicted.
+    add_executable(wait_poll_refusal_test wait_poll_refusal_test.cpp)
+    target_link_libraries(wait_poll_refusal_test PRIVATE libtracer_listed_wait)
     libtracer_test_warnings(wait_poll_refusal_test)
     add_test(NAME wait_poll_refusal COMMAND wait_poll_refusal_test)
     set_tests_properties(wait_poll_refusal PROPERTIES SKIP_RETURN_CODE 77)

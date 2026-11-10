@@ -24,6 +24,13 @@
 
 namespace tr::net {
 
+// The adapter gate: epoll keeps its sources in the kernel, so a build that compiles it carries
+// no list link in every source (kListedWaitSources is the lwIP adapter's).
+static_assert(!kListedWaitSources,
+              "wait_epoll.cpp is compiled on a build whose config binds kListedWaitSources = "
+              "true, which only the lwIP adapter (wait_poll.cpp) uses: every wait_source_t would "
+              "carry a pointer this adapter never reads. Leave it at its default, false.");
+
 namespace {
 /** @brief Events taken per pass: a larger burst is served over several passes. */
 constexpr int kBatch = 16;
@@ -131,8 +138,10 @@ void wait_module_t::run() noexcept {
         // still ready come back next pass.
         for (int i = 0; i < n; ++i) {
             auto* const s = static_cast<wait_source_t*>(ev[static_cast<std::size_t>(i)].data.ptr);
-            const std::uint8_t ready = ready_of(ev[static_cast<std::size_t>(i)].events);
-            if (s != nullptr && !fire_marked(*s, seen, [&] { s->fire(s->ctx, *s, ready); })) break;
+            const std::uint32_t e = ev[static_cast<std::size_t>(i)].events;
+            if (s != nullptr &&
+                !fire_marked(*s, seen, [s, e] { s->fire(s->ctx, *s, ready_of(e)); }))
+                break;
         }
     }
     driver_.store(detail::unowned_thread_id());

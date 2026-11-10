@@ -36,6 +36,15 @@
 
 namespace tr::net {
 
+// The adapter gate, the shape self_heal_link.cpp states for kSelfHealLinks: this adapter links
+// its sources through their own records, so a build that compiles it binds the member that
+// gives them the link.
+static_assert(kListedWaitSources,
+              "wait_poll.cpp (the lwIP select adapter) is compiled on a build whose config binds "
+              "kListedWaitSources = false. Bind `static constexpr bool kListedWaitSources = "
+              "true;` in libtracer/config_override.hpp (the ESP-IDF component does so for every "
+              "chip target).");
+
 namespace {
 #ifndef MSG_NOSIGNAL
 constexpr int MSG_NOSIGNAL = 0;

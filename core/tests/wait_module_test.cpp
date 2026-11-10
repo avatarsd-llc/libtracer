@@ -7,8 +7,8 @@
  * @brief #2147: the wait module's conformance suite, and the links on it.
  *
  * Built twice: `wait_module_test` runs it against the build's adapter (epoll on a Linux host),
- * `wait_module_poll_test` against the poll adapter (`wait_poll.cpp`, the lwIP sockets one),
- * linked ahead of the library so the archive's adapter is never pulled in. Both must pass the
+ * `wait_module_poll_test` against the lwIP adapter (`wait_poll.cpp`), in a library built with
+ * `kListedWaitSources` bound, as a chip build is. Both must pass the
  * same assertions (ADR-0071's two-implementations rule).
  *
  * The idle checks count the driving thread's voluntary context switches from
