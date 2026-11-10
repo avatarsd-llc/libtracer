@@ -116,7 +116,7 @@
 #
 # ── COMPILER CACHE (#1691) ──────────────────────────────────────────────────────────
 # Every job that compiles on the self-hosted route shares ONE persistent ccache: the host
-# directory /home/github-runner/ccache (runner user, 0775) is bind-mounted at `/ccache`.
+# directory /srv/libtracer-ccache (runner user) is bind-mounted at `/ccache` (#2765).
 # The mount lives in `container.options`, selected by the SAME trust guard as `runs-on`,
 # so a hosted or fork run never names a host path (a fork cannot reach it, and on the
 # hosted fallback the `-v` would just create an empty directory). The "Set build
@@ -131,8 +131,9 @@
 # itself, so the gcc-13 legs and the g++-15 leg cannot collide either, whatever the
 # image's mtimes. `CCACHE_BASEDIR` is the workspace, so paths stay relocatable if a
 # runner's `_work` ever moves. Size cap 20G (LRU-evicted by ccache itself). The files it
-# writes are root-owned (the container runs as root) — every writer is a root container,
-# so that is harmless, and they live OUTSIDE the workspace the cleanup step chowns.
+# writes are owned by the container's root: host root under a rootful daemon, the runner
+# user under a rootless one (#2765). Every writer is a container's root, so that is
+# harmless, and they live OUTSIDE the workspace the cleanup step chowns.
 # perf-local.yml / perf.yml / bench builds are untouched: they do not set the launcher.
 #
 # Each job logs its own hit rate (`CCACHE_STATSLOG`, printed by the "Compiler cache
@@ -143,13 +144,17 @@
 # own default parent on these runners is runners-adhoc.slice (CPUWeight 20, 16 GB cap),
 # which is meant for ad-hoc agent builds; CI runs at normal weight in runners-ci.slice, a
 # child of runners.slice, so the slice's limits still bound it. A hosted or fork run gets
-# no such flag: the slice exists only on these machines.
+# no such flag: the slice exists only on these machines. Under a rootless daemon (#2765)
+# the same flag names a slice of the runner user's systemd manager, so those containers
+# sit under user.slice/user-<uid>.slice/user@<uid>.service/runners-ci.slice instead.
 #
 # BUILD_JOBS on the self-hosted route is ADAPTIVE (#2348): the slice gives ALL runners and
 # containers 11 cores / 24 GB, and three runners take this repository's `ci-local` jobs
 # (studio-ci-1, studio-lt-7 and studio-lt-8); other projects' runners share the slice. The "Set build parallelism" step counts the CI containers running in
-# runners-ci.slice, which the trusted route mounts read-only at `/ci-slice` (the cgroup
-# directory, not the docker socket, which a job container never sees). At most 3 of
+# runners-ci.slice, rootful and rootless alike (#2765): the trusted route mounts the host's
+# cgroup tree read-only at `/host-cgroup` (the cgroup directory, not the docker socket,
+# which a job container never sees), a source that exists on every host whichever runner
+# user or daemon mode it has, so the mount never fails container creation. At most 3 of
 # them, this one included: 4 compilers each, 3 x 4 = 12, ~one per core with a little
 # slack for link/IO stalls. More than 3 (possible only when other projects' containers
 # share the slice), or a count that reads 0 (no mount, unreadable): 2 each. Memory is not
@@ -397,7 +402,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
   build-test:
     needs: changes
     if: >-
@@ -411,7 +416,7 @@ jobs:
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
     # Measured healthy max 4.82 min across the three legs (p50 ~4.5). 20 = ~4x, with
     # extra room over a bare 3x because the image pull and the apt step below are inside
     # the measured job time and are exactly the wedge surface.
@@ -450,8 +455,8 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
-            echo "CI containers running in runners-ci.slice (this one included): $n"
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
@@ -506,7 +511,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # THE NON-DEFAULT build-test LEGS. The same steps as build-test above, for the other
   # configurations its comment names. A separate job only so that the quick set (a branch
@@ -527,7 +532,7 @@ jobs:
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
     # Measured healthy max 4.82 min across the three legs (p50 ~4.5). 20 = ~4x, with
     # extra room over a bare 3x because the image pull and the apt step below are inside
     # the measured job time and are exactly the wedge surface.
@@ -571,8 +576,8 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
-            echo "CI containers running in runners-ci.slice (this one included): $n"
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
@@ -632,7 +637,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # MINIMAL MODULE SET (#1293). Every other leg here configures with the module options at
   # their defaults (all ON), so nothing in CI ever linked the closed module set ADR-0047
@@ -654,7 +659,7 @@ jobs:
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
     # Measured healthy max 2.97 min. Held at the build-test group's 20 rather than
     # tightened: same container + apt step, same wedge surface.
     timeout-minutes: 20
@@ -673,8 +678,8 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
-            echo "CI containers running in runners-ci.slice (this one included): $n"
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
@@ -722,7 +727,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # THE BUS MODULE CLOSED OUT (#375 deliverable 3, ADR-0044 + ADR-0047 §1). Every other leg
   # here compiles `kBusLinks = true` — the test preset and each leg's own fragment opt in, since
@@ -765,7 +770,7 @@ jobs:
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
     # Same container + apt step as the group above; held at its 20-minute wedge bound.
     timeout-minutes: 20
     steps:
@@ -783,8 +788,8 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
-            echo "CI containers running in runners-ci.slice (this one included): $n"
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
@@ -864,7 +869,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # The #1470 module gate, exercised: `kSelfHealLinks = false` + the matching TU switch. Same
   # two-part shape as build-test-bus-closed above — a fragment binds the config member and the
@@ -888,7 +893,7 @@ jobs:
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
     # Same container + apt step as the group above; held at its 20-minute wedge bound.
     timeout-minutes: 20
     steps:
@@ -906,8 +911,8 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
-            echo "CI containers running in runners-ci.slice (this one included): $n"
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
@@ -994,7 +999,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # GCC-15 host gate: build the core + ctest with GCC 15 (the same major the
   # ESP-IDF v6.0 RISC-V toolchain ships), so the core is gated on the compiler
@@ -1020,7 +1025,7 @@ jobs:
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
     # Same container + apt step as the group above; held at its 20-minute wedge bound.
     timeout-minutes: 20
     steps:
@@ -1038,8 +1043,8 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
-            echo "CI containers running in runners-ci.slice (this one included): $n"
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
@@ -1128,7 +1133,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # GCC-15 host gate: build the core + ctest with GCC 15 (the same major the
   # ESP-IDF v6.0 RISC-V toolchain ships), so the core is gated on the compiler
@@ -1149,7 +1154,7 @@ jobs:
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
     # Measured healthy max 4.68 min (5.17 on the incident day), when the job still added
     # the PPA and installed g++-15 at run time (p50 1.55 min of it). The CI image now
     # carries g++-15 (#2627), so that is an upper bound. 20 = ~3.9x.
@@ -1169,8 +1174,8 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
-            echo "CI containers running in runners-ci.slice (this one included): $n"
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
@@ -1218,7 +1223,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # THE NOISE LINK'S CRYPTO BACKEND (#2072). LIBTRACER_NOISE_CRYPTO is a compile-time choice
   # (default `none`, which compiles none of the module), so no other leg builds it. One leg per
@@ -1237,7 +1242,7 @@ jobs:
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d
       # Same container budget and compiler-cache mount as build-test (see there).
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
     timeout-minutes: 20
     strategy:
       matrix:
@@ -1252,8 +1257,8 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
-            echo "CI containers running in runners-ci.slice (this one included): $n"
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
@@ -1338,7 +1343,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # Both sanitizer legs run against both LKV slot bindings (ADR-0069 §1) as parallel
   # matrix jobs rather than extra steps, so the second binding costs no wall clock.
@@ -1374,9 +1379,10 @@ jobs:
       # Build parallelism (#1637) and the host compiler cache (#2348). A host job runs in
       # its runner's own unit under runners.slice, not in runners-ci.slice: moving a
       # process into another system slice needs privilege the runner user does not hold.
-      # It counts the libtracer CI containers in runners-ci.slice plus itself, and takes
+      # It counts the libtracer CI containers in runners-ci.slice (the rootful tree and the
+      # rootless one under user@<uid>.service, #2765) plus itself, and takes
       # core-ci's adaptive rule: 4 with three or fewer running, otherwise 2, and 2 when
-      # the slice cannot be read. The shared /ccache is the containers' (root-owned
+      # neither slice can be read. The shared /ccache is the containers' (root-owned
       # entries), so a host job keeps its own cache under the runner user's home, made
       # relocatable across runners (CI time audit A4: BASEDIR is the workspace's real path,
       # NOHASHDIR keeps the working directory out of the key; debug info then names the
@@ -1388,10 +1394,13 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            slice=/sys/fs/cgroup/runners.slice/runners-ci.slice
-            if [ -d "$slice" ]; then
-              n=$(( $(ls -d "$slice"/docker-*.scope 2>/dev/null | wc -l) + 1 ))
-              echo "libtracer CI jobs running (containers in runners-ci.slice + this host job): $n"
+            n=1; seen=0
+            for slice in /sys/fs/cgroup/runners.slice/runners-ci.slice /sys/fs/cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice; do
+              [ -d "$slice" ] || continue
+              seen=1; n=$(( n + $(find "$slice" -maxdepth 1 -name 'docker-*.scope' 2>/dev/null | wc -l) ))
+            done
+            if [ "$seen" = 1 ]; then
+              echo "libtracer CI jobs running (containers in runners-ci.slice, rootful and rootless, + this host job): $n"
               if [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
             else jobs=2; fi
             {
@@ -1450,7 +1459,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   tsan:
     needs: changes
@@ -1482,9 +1491,10 @@ jobs:
       # Build parallelism (#1637) and the host compiler cache (#2348). A host job runs in
       # its runner's own unit under runners.slice, not in runners-ci.slice: moving a
       # process into another system slice needs privilege the runner user does not hold.
-      # It counts the libtracer CI containers in runners-ci.slice plus itself, and takes
+      # It counts the libtracer CI containers in runners-ci.slice (the rootful tree and the
+      # rootless one under user@<uid>.service, #2765) plus itself, and takes
       # core-ci's adaptive rule: 4 with three or fewer running, otherwise 2, and 2 when
-      # the slice cannot be read. The shared /ccache is the containers' (root-owned
+      # neither slice can be read. The shared /ccache is the containers' (root-owned
       # entries), so a host job keeps its own cache under the runner user's home, made
       # relocatable across runners (CI time audit A4: BASEDIR is the workspace's real path,
       # NOHASHDIR keeps the working directory out of the key; debug info then names the
@@ -1496,10 +1506,13 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            slice=/sys/fs/cgroup/runners.slice/runners-ci.slice
-            if [ -d "$slice" ]; then
-              n=$(( $(ls -d "$slice"/docker-*.scope 2>/dev/null | wc -l) + 1 ))
-              echo "libtracer CI jobs running (containers in runners-ci.slice + this host job): $n"
+            n=1; seen=0
+            for slice in /sys/fs/cgroup/runners.slice/runners-ci.slice /sys/fs/cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice; do
+              [ -d "$slice" ] || continue
+              seen=1; n=$(( n + $(find "$slice" -maxdepth 1 -name 'docker-*.scope' 2>/dev/null | wc -l) ))
+            done
+            if [ "$seen" = 1 ]; then
+              echo "libtracer CI jobs running (containers in runners-ci.slice, rootful and rootless, + this host job): $n"
               if [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
             else jobs=2; fi
             {
@@ -1561,7 +1574,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   tsan-membarrier:
     needs: changes
@@ -1586,9 +1599,10 @@ jobs:
       # Build parallelism (#1637) and the host compiler cache (#2348). A host job runs in
       # its runner's own unit under runners.slice, not in runners-ci.slice: moving a
       # process into another system slice needs privilege the runner user does not hold.
-      # It counts the libtracer CI containers in runners-ci.slice plus itself, and takes
+      # It counts the libtracer CI containers in runners-ci.slice (the rootful tree and the
+      # rootless one under user@<uid>.service, #2765) plus itself, and takes
       # core-ci's adaptive rule: 4 with three or fewer running, otherwise 2, and 2 when
-      # the slice cannot be read. The shared /ccache is the containers' (root-owned
+      # neither slice can be read. The shared /ccache is the containers' (root-owned
       # entries), so a host job keeps its own cache under the runner user's home, made
       # relocatable across runners (CI time audit A4: BASEDIR is the workspace's real path,
       # NOHASHDIR keeps the working directory out of the key; debug info then names the
@@ -1600,10 +1614,13 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            slice=/sys/fs/cgroup/runners.slice/runners-ci.slice
-            if [ -d "$slice" ]; then
-              n=$(( $(ls -d "$slice"/docker-*.scope 2>/dev/null | wc -l) + 1 ))
-              echo "libtracer CI jobs running (containers in runners-ci.slice + this host job): $n"
+            n=1; seen=0
+            for slice in /sys/fs/cgroup/runners.slice/runners-ci.slice /sys/fs/cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice; do
+              [ -d "$slice" ] || continue
+              seen=1; n=$(( n + $(find "$slice" -maxdepth 1 -name 'docker-*.scope' 2>/dev/null | wc -l) ))
+            done
+            if [ "$seen" = 1 ]; then
+              echo "libtracer CI jobs running (containers in runners-ci.slice, rootful and rootless, + this host job): $n"
               if [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
             else jobs=2; fi
             {
@@ -1697,7 +1714,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   install-consume:
     needs: changes
@@ -1712,7 +1729,7 @@ jobs:
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
     # Measured max 1.78 min (p50 ~1.1). Short-job floor of 15 rather than 3x (~5 min):
     # the entire risk here is the container apt step, so the ceiling answers "how long is
     # it acceptable to be wedged", not "how long does the work take".
@@ -1732,8 +1749,8 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
-            echo "CI containers running in runners-ci.slice (this one included): $n"
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
@@ -1792,7 +1809,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # Compile EVERY bench target, run none of them (#781). The measuring workflows
   # (perf.yml, docs.yml) each name the handful of targets they execute, so a bench
@@ -1815,7 +1832,7 @@ jobs:
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
     # Measured max 2.10 min (p50 ~1.3) — the longest of the short container jobs.
     # Short-job floor of 15; see install-consume for why it is not 3x.
     timeout-minutes: 15
@@ -1834,8 +1851,8 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
-            echo "CI containers running in runners-ci.slice (this one included): $n"
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
@@ -1875,7 +1892,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # The failable census, RUN rather than compiled (#1414). Both of its modes are
   # deterministic gates over counts, not timings, so neither needs a quiesced host and
@@ -1905,7 +1922,7 @@ jobs:
       # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
     # One bench target plus libtracer, then two sub-second runs. Short-job floor of 15.
     timeout-minutes: 15
     steps:
@@ -1923,8 +1940,8 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
-            echo "CI containers running in runners-ci.slice (this one included): $n"
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
@@ -1977,7 +1994,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # This workflow's own CORE_CI_PATHS gate (the `changes` job; it was the `paths:` trigger
   # until #1614), checked against what its jobs actually build
@@ -2047,7 +2064,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   format:
     needs: changes
@@ -2096,7 +2113,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   doxygen-gate:
     needs: changes
@@ -2138,7 +2155,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # THE REQUIRED CHECK (#1614). Branch protection requires a check named `build-test`,
   # and this is the one job that always reports it. It needs every job in this file:
@@ -2218,7 +2235,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
 # One group per PR and ONE group for all main pushes, both cancelling (owner ruling
 # 2026-10-29): a main push runs only the smoke set (core-ci.yml's header, QUICK SET),
