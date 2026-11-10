@@ -95,6 +95,7 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [One task, no pool locks](esp-idf-single-threaded.md) | ESP-IDF component | an app-owned `arena_root_t<tr::no_guard_t, N>` injected into the graph |
 | [One link, and its `max_frame`](esp-idf-one-link.md) | ESP-IDF component, `udp` | a SPEC-created link draws its receive blocks from the net sub-pool |
 | [Reading the sub-pools' `:stats`](esp-idf-stats-subpools.md) | ESP-IDF component | `:stats.mem.values`, `.tables`, `.net`, walked in place with `tlv_node_t` |
+| [A request and its reply over Noise](esp-idf-noise-link.md) | ESP-IDF component, `udp`, Noise | two `noise_link_t` over UDP; the application's key store, random source, counter and clock |
 
 The toctree below is the order of record; this table adds the layer and the summary.
 Each example's layer column names the module that owns the types it uses — the
@@ -354,4 +355,5 @@ ESP-IDF: sizing the arena <esp-idf-arena-sizing>
 ESP-IDF: one task, no pool locks <esp-idf-single-threaded>
 ESP-IDF: one link, and its max_frame <esp-idf-one-link>
 ESP-IDF: reading the sub-pools' :stats <esp-idf-stats-subpools>
+ESP-IDF: a request and its reply over Noise <esp-idf-noise-link>
 ```

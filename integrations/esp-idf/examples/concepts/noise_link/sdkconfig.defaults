@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Two Noise links over UDP: the UDP transport stays in, the other two are left out.
+CONFIG_LIBTRACER_TRANSPORT_TCP=n
+CONFIG_LIBTRACER_TRANSPORT_WS=n
+
+# The Noise link over ESP-IDF's mbedTLS through PSA. The option selects
+# CONFIG_MBEDTLS_CHACHA20_C and CONFIG_MBEDTLS_CHACHAPOLY_C, which ESP-IDF leaves off.
+CONFIG_LIBTRACER_NOISE_CRYPTO_PSA=y
+
+# Sized as a node ships. X25519 in mbedTLS runs on the calling task's stack, so the main task
+# gets room for a handshake.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# lwIP core locking, the component's recommended sdkconfig (README "Recommended sdkconfig").
+# The options belong to the lwip component, so the app sets them; they are ignored on `linux`.
+CONFIG_LWIP_TCPIP_CORE_LOCKING=y
+CONFIG_LWIP_TCPIP_CORE_LOCKING_INPUT=y
+# The two links talk over 127.0.0.1, which lwIP serves only with its loopback interface.
+CONFIG_LWIP_NETIF_LOOPBACK=y

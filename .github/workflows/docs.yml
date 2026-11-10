@@ -111,6 +111,7 @@ jobs:
         index.md
         integrations/esp-idf/examples/concepts/arena_sizing/main/app_main.cpp
         integrations/esp-idf/examples/concepts/minimal/main/app_main.cpp
+        integrations/esp-idf/examples/concepts/noise_link/main/app_main.cpp
         integrations/esp-idf/examples/concepts/one_link/main/app_main.cpp
         integrations/esp-idf/examples/concepts/single_threaded/main/app_main.cpp
         integrations/esp-idf/examples/concepts/stats_subpools/main/app_main.cpp

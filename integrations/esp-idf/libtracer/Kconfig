@@ -265,14 +265,18 @@ menu "libtracer"
         bool "Noise link crypto backend: mbedTLS through PSA"
         default n
         select MBEDTLS_CHACHA20_C
+        select MBEDTLS_POLY1305_C
         select MBEDTLS_CHACHAPOLY_C
+        select MBEDTLS_HKDF_C
         help
             Make the Noise link's crypto (RFC-0033, security_noise.hpp) usable in this
             image, over ESP-IDF's own mbedTLS through the PSA API: this component then
             requires mbedtls and defines LIBTRACER_NOISE_CRYPTO_PSA, which aliases
             tr::net::noise::default_crypto_t to psa_crypto_t. It selects
             MBEDTLS_CHACHA20_C and MBEDTLS_CHACHAPOLY_C, which ESP-IDF leaves off by
-            default. ESP-IDF's port already sets MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS,
+            default. On ESP-IDF 5.5 it also selects MBEDTLS_POLY1305_C, which
+            ChaCha20-Poly1305 depends on there, and MBEDTLS_HKDF_C, which Noise's key
+            derivation needs and 5.5 leaves off; 6.0 has neither option. ESP-IDF's port already sets MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS,
             so a frame costs no allocation. Every chip build already has mbedtls; an
             app built for the linux target adds REQUIRES mbedtls to its own component.
 
