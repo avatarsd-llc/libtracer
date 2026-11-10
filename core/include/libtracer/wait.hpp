@@ -61,6 +61,7 @@
 
 #include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/park.hpp"
 #include "libtracer/sync.hpp"
 #include "libtracer/thread_id.hpp"
 
@@ -225,16 +226,19 @@ class wait_module_t {
         const bool live = gen_.load() == seen;
         if (live) s.fire(s.ctx, s, ready);
         firing_.store(nullptr);
-        if (waiters_.load() != 0) firing_.notify_all();
+        if (waiters_.load() != 0) park_wake(firing_);
         return live;
     }
     /** @brief After a detach of @p s : block until its callback is not running, unless the
      *         caller is the driver, whose own callback this is. A blocking wait, never a spin,
-     *         so a caller above the driver's priority on one core does not starve it. */
+     *         so a caller above the driver's priority on one core does not starve it; parked
+     *         through `%tr::park_wait`, as `std::atomic::wait` costs an MCU libstdc++'s 2 KB
+     *         waiter table (#2507). */
     void await_quiet(const wait_source_t& s) noexcept {
         if (driver_.load() == detail::this_thread_id()) return;
         waiters_.fetch_add(1);
-        for (const wait_source_t* f = firing_.load(); f == &s; f = firing_.load()) firing_.wait(f);
+        for (const wait_source_t* f = firing_.load(); f == &s; f = firing_.load())
+            park_wait(firing_, f, std::memory_order_seq_cst);
         waiters_.fetch_sub(1);
     }
     /** @brief Wake a blocked @ref run (the stop and, on the poll adapter, a set change). */
