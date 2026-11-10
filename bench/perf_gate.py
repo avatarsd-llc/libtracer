@@ -566,7 +566,8 @@ def tput_contradicted(cur: dict, base: dict) -> bool:
 MEM_POINTS = ["vertex", "vertex_value", "vertex_app5", "vertex_app5_static", "reg_escape"]
 # Points whose TARGET is reached and is zero: any block or byte they read fails outright,
 # whatever the paired baseline says (a baseline that escapes too would otherwise excuse it).
-# `reg_escape` reached zero with #1991 (the `path_key_t` spill moved onto the graph's source).
+# `reg_escape` reached zero with #1991 (the name spill moved onto the graph's source; #2672
+# keeps every name in the graph's name block on that source).
 MEM_ZERO_POINTS = frozenset({"mem:reg_escape"})
 MEM_REGRESS = 1.02   # fail if live bytes/vertex > baseline * 1.02 ...
 MEM_TICK_B = 1       # ... AND grew by more than one byte (ignore a lone bucket flip)

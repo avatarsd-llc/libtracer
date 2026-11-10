@@ -184,47 +184,4 @@ void path_t::take(path_t& o) noexcept {
     has_field_ = std::exchange(o.has_field_, false);
 }
 
-namespace {
-/**
- * @brief FNV-1a 64-bit over the canonical payload bytes.
- *
- * The 64-bit offset basis and prime
- * can't live in a std::size_t on a 32-bit target (std::size_t is unsigned int on
- * RISC-V MCUs), so accumulate in std::uint64_t and narrow to std::size_t for the
- * bucket index via an explicit cast — the 64-bit state keeps the avalanche, and the
- * cast avoids -Woverflow (GCC 15, newly strict) on 32-bit. The owned-key and by-span
- * hashers share this so a heterogeneous lookup hashes identically to the stored key.
- */
-[[nodiscard]] std::size_t fnv1a_key(std::span<const std::byte> bytes) noexcept {
-    std::uint64_t h = 1469598103934665603ull;
-    for (std::byte b : bytes) {
-        h ^= std::to_integer<std::uint8_t>(b);
-        h *= 1099511628211ull;
-    }
-    return static_cast<std::size_t>(h);
-}
-}  // namespace
-
-result_t<path_key_t> path_key_t::try_make(std::span<const std::byte> b,
-                                          tr::mem::block_source_t& src) noexcept {
-    result_t<path_key_t> k{std::in_place};  // built in place: no move of a half-made key
-    if (!k->assign(b, src)) return std::unexpected(status_t::BACKPRESSURE);
-    return k;
-}
-
-path_key_t::path_key_t(std::span<const std::byte> b) { assign_or_stop(b, nullptr); }
-
-void path_key_t::assign_or_stop(std::span<const std::byte> b, tr::mem::block_source_t* src) {
-    tr::mem::block_source_t& from = src != nullptr ? *src : tr::mem::table_source();
-    if (!assign(b, from)) tr::mem::exhausted_at_init(from, "path_key_t");
-}
-
-std::size_t path_key_hash_t::operator()(const path_key_t& k) const noexcept {
-    return fnv1a_key(k.bytes());
-}
-
-std::size_t path_key_hash_t::operator()(std::span<const std::byte> k) const noexcept {
-    return fnv1a_key(k);
-}
-
 }  // namespace tr::graph

@@ -43,6 +43,8 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -938,17 +940,29 @@ class vertex_t {
      */
     static constexpr std::size_t kNoSlot = static_cast<std::size_t>(-1);
 
+    /** @brief The longest NAME record a vertex can reference: what `%name_len_`'s bits hold.
+     *         A packed record is one length byte plus at most 255 segment bytes (RFC-0018), so
+     *         every record the graph mints fits with room to spare. */
+    static constexpr std::size_t kMaxNameBytes = (std::size_t{1} << 9) - 1;
+
     /** @brief Construct a vertex with its role, own canonical NAME record (ADR-0057 — one
      *         segment, not the full key), and handlers. The cold extension block is
      *         allocated, from @p src, only if this identity needs one (#361 §1).
+     *
+     *  The vertex REFERENCES @p name and copies nothing (#2672): the bytes must stay valid,
+     *  unchanged, for the vertex's whole life. The graph keeps every name in its own name
+     *  block, which lives as long as the graph; a vertex built outside a graph names bytes
+     *  that outlive it. A record longer than @ref kMaxNameBytes is a caller bug and stops the
+     *  node.
      *
      *  The graph builds every vertex as a handler-less placeholder (no allocation) and
      *  installs an identity through `%fill`, whose refusal is a value. A standalone
      * vertex built WITH handlers whose @p src refuses the extension block stops the node
      *  (`%mem::exhausted_at_init`): a constructor has no other way to answer. */
-    vertex_t(role_t role, path_key_t name, handlers_t handlers,
+    vertex_t(role_t role, std::span<const std::byte> name, handlers_t handlers,
              tr::mem::block_source_t& src = tr::mem::table_source())
-        : name_(std::move(name)), role_(role) {
+        : name_(name.data()), role_(role), name_len_(static_cast<std::uint32_t>(name.size())) {
+        if (name.size() > kMaxNameBytes) std::abort();
         if (!adopt_identity(handlers, src)) tr::mem::exhausted_at_init(src, "vertex_t");
     }
 
@@ -979,7 +993,7 @@ class vertex_t {
     /** @brief This vertex's own canonical NAME record (its single path segment, ADR-0057);
      *         empty at the root. The full key is a parent-walk concatenation
      *         (`graph_t`'s `try_build_key`). */
-    [[nodiscard]] const path_key_t& name() const noexcept { return name_; }
+    [[nodiscard]] std::span<const std::byte> name() const noexcept { return {name_, name_len_}; }
     /**
      * @brief Whether the lazily-allocated cold extension block EXISTS on this vertex (#361 §1).
      *
@@ -1247,7 +1261,10 @@ class vertex_t {
      * The list block is lazily allocated on the FIRST child (#380 §1): a leaf — the
      * common MCU vertex — keeps `children_` null and pays exactly one pointer. The
      * list stays sorted by name record, so a wide composite resolves a child in
-     * O(log children). The `vertex_t` itself never moves (only owning pointers do).
+     * O(log children); each entry carries the child's `%name_prefix` beside its pointer,
+     * which is the whole of the sync this insert-only list needs: a name is written once,
+     * before the link, and never renamed. The `vertex_t` itself never moves (only owning
+     * pointers do).
      * The list and @p child must both come from @p src (`graph_t::table_source`, #1778):
      * on success the list OWNS @p child and returns its block to that source when this
      * vertex is destroyed.
@@ -1260,13 +1277,20 @@ class vertex_t {
             children_ = tr::mem::make_in<children_t>(src, src);
             if (children_ == nullptr) return nullptr;
         }
-        tr::mem::block_array_t<vertex_t*>& sorted = children_->sorted;
-        vertex_t* const* const pos =
-            std::lower_bound(sorted.begin(), sorted.end(), child->name().bytes(),
-                             [](const vertex_t* c, std::span<const std::byte> n) {
-                                 return std::ranges::lexicographical_compare(c->name().bytes(), n);
-                             });
-        if (sorted.emplace_at(static_cast<std::size_t>(pos - sorted.begin()), child) == nullptr)
+        // The list grows by 4 up to 16, then by a quarter (#2676), not by the array's default
+        // doubling: an entry is a pointer and a prefix (ruling 49), so doubling's up-to-half slack
+        // costs a wide parent up to one more entry per child, and a parent holds most of a node's
+        // vertices. Growth stays geometric, so an insert is still amortized O(1) copies on top of
+        // its shift.
+        const std::size_t n = children_->sorted.size();
+        if (n == children_->sorted.capacity() &&
+            !children_->sorted.reserve(n + std::max<std::size_t>(n / 4, 4)))
+            return nullptr;
+        const name_prefix_t prefix = name_prefix(child->name());
+        const child_entry_t* const pos = children_->lower_bound(child->name(), prefix);
+        const child_entry_t entry{.child = child, .prefix = prefix};
+        if (children_->sorted.emplace_at(static_cast<std::size_t>(pos - children_->sorted.begin()),
+                                         entry) == nullptr)
             return nullptr;
         child->parent_ = this;
         return child;
@@ -1280,15 +1304,10 @@ class vertex_t {
      */
     [[nodiscard]] vertex_t* child_by_record(std::span<const std::byte> record) const noexcept {
         if (children_ == nullptr) return nullptr;
-        const tr::mem::block_array_t<vertex_t*>& sorted = children_->sorted;
-        const auto it =
-            std::lower_bound(sorted.begin(), sorted.end(), record,
-                             [](const vertex_t* c, std::span<const std::byte> r) {
-                                 return std::ranges::lexicographical_compare(c->name().bytes(), r);
-                             });
-        if (it == sorted.end()) return nullptr;
-        const bool matches = std::ranges::equal((*it)->name().bytes(), record);
-        return matches ? *it : nullptr;
+        const name_prefix_t prefix = name_prefix(record);
+        const child_entry_t* const it = children_->lower_bound(record, prefix);
+        if (it == children_->sorted.end() || it->prefix != prefix) return nullptr;
+        return tie_order(it->child->name(), record) == 0 ? it->child : nullptr;
     }
 
     /**
@@ -1300,7 +1319,7 @@ class vertex_t {
     template <typename F>
     void for_each_child(F&& f) const {
         if (children_ == nullptr) return;
-        for (vertex_t* c : children_->sorted) f(*c);
+        for (const child_entry_t& e : children_->sorted) f(*e.child);
     }
 
     /**
@@ -3730,9 +3749,13 @@ class vertex_t {
      *         `%lkv_slot.hpp` documents both and the contract any policy must satisfy. */
     lkv_slot_t lkv_{};
 
-    path_key_t name_;  // own canonical NAME record (one segment; empty at the root) — the
-                       // full key is rendered on demand by walking parent_ (ADR-0057);
-                       // immutable once the node is linked (lock-free parent walks)
+    /** @brief This vertex's own canonical NAME record (one segment; empty at the root),
+     *         REFERENCED, not held (#2672): the bytes live in the graph's name block, drawn
+     *         from its table source and kept until the graph is destroyed. The full key is
+     *         rendered on demand by walking `parent_` (ADR-0057). Set once, before the node
+     *         is linked, and never written again, so a lock-free parent walk reads it plainly.
+     *         Its length is `%name_len_`, which packs beside `retire_gen_`. */
+    const std::byte* name_ = nullptr;
 
     // The fan-out edges (#635). Null until this vertex is first subscribed to, which is the
     // overwhelming majority of an MCU node's vertices — where an always-present empty
@@ -3779,8 +3802,8 @@ class vertex_t {
     // not a benign torn read. Byte-wide as an atomic too, so the group stays four bytes.
     std::atomic<delivery_mode_t> delivery_mode_{delivery_mode_t::IF_NEWER};
     // Lock-free predicates (see flag_t), packed into ONE byte so the flag group stays exactly four
-    // bytes wide and `sizeof(vertex_t)` stays at the size the ratchets pin (88 B on x86-64,
-    // 72 B on rv32 — the #361 diet's measurement as re-taken by the #1487 census) — the size
+    // bytes wide and `sizeof(vertex_t)` stays at the size the ratchets pin (72 B on x86-64,
+    // 48 B on rv32, #2672) — the size
     // gate's own failure message says to put a new member behind vertex_ext_t rather than
     // inline it, and a bit costs less than either. (`ENUM_HIDDEN`, the RFC-0014 §3 hide seam,
     // is the third: it went here rather than beside `registered_` for exactly that reason.)
@@ -3809,6 +3832,26 @@ class vertex_t {
      */
     std::atomic<std::uint32_t> retire_gen_{0};
 
+    /** @brief `%slot_memo_`'s "no memo recorded" value: the top of its 23 bits. It cannot
+     *         name a real slot below it, and a graph past it falls back to the scan. */
+    static constexpr std::uint32_t kNoSlotMemo = (std::uint32_t{1} << 23) - 1;
+    /** @brief `name_`'s byte length. Set by the constructor and never written again. */
+    std::uint32_t name_len_ : 9;
+    /**
+     * @brief The index of the `graph_t::vertex_slots_` entry that names this vertex (#1486),
+     *        or `%kNoSlotMemo` for a vertex no graph slotted.
+     *
+     * It makes `graph_t::vertex_slot` a load instead of an O(N) scan of the index under the
+     * shared map lock (450 ns at 10^3 resident vertices, 410 us at 10^6). The graph stamps it
+     * once, before the vertex is linked into the tree, so no reader can see it change; the slot
+     * index is immortal (the index is insert-only and a retire re-virginizes in place), so
+     * nothing invalidates it. `vertex_slot` re-validates it against the index before trusting
+     * it. It shares a word with `%name_len_` (#2672): a record is at most
+     * @ref kMaxNameBytes, so 23 bits remain, and a graph with more slots than that resolves the
+     * rest by the scan. Internal: no accessor exists, and it is not a second staleness signal.
+     */
+    std::uint32_t slot_memo_ : 23 = kNoSlotMemo;
+
     // Composite tree links (ADR-0057) at the cold tail. parent_ is immutable once the
     // node is linked (lock-free parent walks); children/registered_ are guarded by
     // graph_t's map lock. Children are owned via non-moving unique_ptr allocations —
@@ -3819,6 +3862,59 @@ class vertex_t {
     // deferred; see ADR-0057 lifetime).
     vertex_t* parent_ = nullptr;
 
+    /**
+     * @brief A child's name prefix: the first `sizeof(name_prefix_t)` record bytes, big-endian,
+     *        zero-padded past a shorter record (#2672, ruling 49).
+     *
+     * Pointer-wide: 4 B on a 32-bit target, 8 B on a 64-bit host, where an entry is 16 B either
+     * way, since a 4 B prefix would leave the other four as padding. A packed
+     * record `[u8 len][bytes]` of up to three segment bytes on 32-bit (seven on 64-bit) is
+     * then told apart by its prefix alone.
+     */
+    using name_prefix_t = std::uintptr_t;
+
+    /**
+     * @brief `%name_prefix_t` of @p record.
+     *
+     * Monotone in the record order: for any byte strings `a <= b` lexicographically gives
+     * `name_prefix(a) <= name_prefix(b)`, because a big-endian load compares as the leading
+     * bytes do and a zero pad sorts a proper prefix first. So unequal prefixes decide a
+     * comparison, and only equal ones need the records themselves.
+     *
+     */
+    [[nodiscard]] static name_prefix_t name_prefix(std::span<const std::byte> record) noexcept {
+        name_prefix_t p = 0;
+        const std::size_t n = std::min(record.size(), sizeof(name_prefix_t));
+        for (std::size_t i = 0; i < n; ++i)
+            p |= std::to_integer<name_prefix_t>(record[i]) << (8 * (sizeof(name_prefix_t) - 1 - i));
+        return p;
+    }
+
+    /**
+     * @brief The order of two records whose prefixes are equal: negative, zero or positive.
+     *
+     * Length first, then the bytes past the prefix, in one `memcmp`. A well-framed record's
+     * first byte is its length, so a tie there already means equal lengths; the length test is
+     * for a ragged record, which a raw key can carry: its length byte overruns it, and
+     * `{9, a..g}` ties with the well-framed `{9, a..i}` on a 64-bit prefix. Zero means the two
+     * records are the same bytes, since equal prefixes and equal lengths cover the head. On
+     * well-framed records this is exactly the record order; only ragged ties sort by length.
+     */
+    [[nodiscard]] static int tie_order(std::span<const std::byte> a,
+                                       std::span<const std::byte> b) noexcept {
+        if (a.size() != b.size()) return a.size() < b.size() ? -1 : 1;
+        if (a.size() <= sizeof(name_prefix_t)) return 0;
+        return std::memcmp(a.data() + sizeof(name_prefix_t), b.data() + sizeof(name_prefix_t),
+                           a.size() - sizeof(name_prefix_t));
+    }
+
+    /** @brief One child-list entry: the owned child and its `%name_prefix`, kept beside the
+     *         pointer so a lookup compares in the array (#2672, ruling 49). */
+    struct child_entry_t {
+        vertex_t* child;      /**< @brief The owned child. */
+        name_prefix_t prefix; /**< @brief `name_prefix(child->name())`, set once at insert. */
+    };
+
     /** @brief The lazily-allocated child list (null for every leaf): the owned children,
      *         sorted by their canonical NAME record bytes. */
     struct children_t {
@@ -3826,11 +3922,30 @@ class vertex_t {
         explicit children_t(tr::mem::block_source_t& src) noexcept : sorted(src) {}
         /** @brief Destroy every child and return its block to the list's source. */
         ~children_t() {
-            for (vertex_t* c : sorted) tr::mem::drop_in(sorted.source(), c);
+            for (const child_entry_t& e : sorted) tr::mem::drop_in(sorted.source(), e.child);
         }
         children_t(const children_t&) = delete;            /**< @brief Owns its children. */
         children_t& operator=(const children_t&) = delete; /**< @brief Owns its children. */
-        tr::mem::block_array_t<vertex_t*> sorted; /**< @brief Sorted owned children (#1778). */
+
+        /**
+         * @brief The first entry whose child's record is not less than @p record (end if none):
+         *        the one binary search insert, lookup and sibling ascent share.
+         *
+         * A probe compares the in-array prefixes first, so a search over distinct prefixes
+         * touches no child at all (#2672, ruling 49). A tie reads the child's length, and its
+         * name bytes only past the prefix (`%tie_order`), so a hit on a short name never loads
+         * the out-of-line record.
+         */
+        [[nodiscard]] const child_entry_t* lower_bound(std::span<const std::byte> record,
+                                                       name_prefix_t p) const noexcept {
+            return std::lower_bound(sorted.begin(), sorted.end(), record,
+                                    [p](const child_entry_t& e, std::span<const std::byte> r) {
+                                        if (e.prefix != p) return e.prefix < p;
+                                        return tie_order(e.child->name(), r) < 0;
+                                    });
+        }
+
+        tr::mem::block_array_t<child_entry_t> sorted; /**< @brief Sorted owned children (#1778). */
     };
     /** @brief The child list, or null for a leaf; drawn from, and freed to, the source its
      *         own `sorted` array names (`graph_t::table_source`). */
@@ -3840,7 +3955,7 @@ class vertex_t {
      * for_each_descendant). */
     [[nodiscard]] vertex_t* first_child() const noexcept {
         if (children_ == nullptr || children_->sorted.empty()) return nullptr;
-        return children_->sorted.front();
+        return children_->sorted.front().child;
     }
 
     /**
@@ -3858,16 +3973,12 @@ class vertex_t {
      */
     [[nodiscard]] vertex_t* next_sibling_of(const vertex_t& c) const noexcept {
         if (children_ == nullptr) return nullptr;
-        const tr::mem::block_array_t<vertex_t*>& sorted = children_->sorted;
-        auto it =
-            std::lower_bound(sorted.begin(), sorted.end(), c.name().bytes(),
-                             [](const vertex_t* e, std::span<const std::byte> n) {
-                                 return std::ranges::lexicographical_compare(e->name().bytes(), n);
-                             });
-        while (it != sorted.end() && *it != &c) ++it;
-        if (it == sorted.end()) return nullptr;  // not our child — caller error, walk stops
+        const child_entry_t* it = children_->lower_bound(c.name(), name_prefix(c.name()));
+        const child_entry_t* const end = children_->sorted.end();
+        while (it != end && it->child != &c) ++it;
+        if (it == end) return nullptr;  // not our child — caller error, walk stops
         ++it;
-        return it == sorted.end() ? nullptr : *it;
+        return it == end ? nullptr : it->child;
     }
 };
 
