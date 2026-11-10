@@ -118,6 +118,14 @@ void wait_module_t::detach(wait_source_t& s) noexcept {
         gen_.fetch_add(1, std::memory_order_acq_rel);
     });
     ring();
+    await_quiet(s);
+}
+
+void wait_module_t::await_quiet(const wait_source_t& s) const noexcept {
+    // The driver marks a source firing under m_ and fires it with m_ released: a detach that
+    // unlinked the source waits for that one callback only, never for the batch around it.
+    if (driver_.load() == detail::this_thread_id()) return;
+    while (firing_.load(std::memory_order_acquire) == &s) std::this_thread::yield();
 }
 
 void wait_module_t::want_write(wait_source_t& s, bool on) noexcept {
@@ -150,11 +158,18 @@ void wait_module_t::run() noexcept {
             while (::recv(fd_[0], drain, sizeof(drain), MSG_DONTWAIT) > 0) {
             }
         }
-        // A detach or attach since `seen` changed the table this set mirrors: stop there.
-        for (std::size_t i = 1; i < set.size() && gen_.load(std::memory_order_acquire) == seen; ++i)
-            if (set[i].revents != 0)
-                sources_[i - 1]->fire(sources_[i - 1]->ctx, *sources_[i - 1],
-                                      ready_of(set[i].revents));
+        // A detach or attach since `seen` changed the table this set mirrors: stop there. The
+        // lock is released across each callback, with the source marked firing under it.
+        for (std::size_t i = 1; i < set.size() && gen_.load(std::memory_order_acquire) == seen;
+             ++i) {
+            if (set[i].revents == 0) continue;
+            wait_source_t* const s = sources_[i - 1];
+            firing_.store(s, std::memory_order_relaxed);
+            lock.unlock();
+            s->fire(s->ctx, *s, ready_of(set[i].revents));
+            lock.lock();
+            firing_.store(nullptr, std::memory_order_relaxed);
+        }
     }
     lock.unlock();
     driver_.store(detail::unowned_thread_id());

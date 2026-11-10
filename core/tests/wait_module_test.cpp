@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <thread>
@@ -244,6 +245,55 @@ void test_detach_waits_out_a_callback() {
     ::close(s.pair[1]);
 }
 
+void test_detach_waits_for_its_own_source_only() {
+    std::printf("-- a foreign detach does not wait for another source's callback\n");
+    // Source A's callback blocks on a lock the detaching thread holds while it detaches source
+    // B. Waiting for the whole batch would deadlock (ruling 44); waiting for B alone returns.
+    driven_t d;
+    counted_t b;
+    struct blocked_t {
+        tr::net::wait_source_t src;
+        int pair[2] = {-1, -1};
+        std::mutex* held = nullptr;
+        std::atomic<bool> inside{false};
+        std::atomic<bool> give_up{false};
+    } a;
+    std::mutex held;
+    (void)::socketpair(AF_UNIX, SOCK_STREAM, 0, a.pair);
+    a.src.fd.store(a.pair[0]);
+    a.src.ctx = &a;
+    a.held = &held;
+    a.src.fire = [](void* ctx, tr::net::wait_source_t&, std::uint8_t) {
+        auto& me = *static_cast<blocked_t*>(ctx);
+        char buf[8];
+        (void)::recv(me.pair[0], buf, sizeof(buf), MSG_DONTWAIT);
+        me.inside.store(true);
+        // A bounded wait, so a regression fails the check below instead of hanging the test.
+        while (!me.held->try_lock()) {
+            if (me.give_up.load()) return;
+            std::this_thread::yield();
+        }
+        me.held->unlock();
+    };
+    check(d.module.attach(a.src) && d.module.attach(b.src), "attached");
+    std::atomic<bool> detached{false};
+    std::thread detacher([&] {
+        const std::lock_guard lock(held);
+        (void)::send(a.pair[1], "x", 1, 0);
+        (void)eventually([&] { return a.inside.load(); });
+        d.module.detach(b.src);
+        detached.store(true);
+        (void)eventually([&] { return a.give_up.load(); });
+    });
+    check(eventually([&] { return detached.load(); }),
+          "detaching B returned while A's callback waits on the detacher's lock");
+    a.give_up.store(true);
+    detacher.join();
+    d.module.detach(a.src);
+    ::close(a.pair[0]);
+    ::close(a.pair[1]);
+}
+
 void test_detach_inside_callback() {
     std::printf("-- a source may detach itself and its neighbour from its callback\n");
     driven_t d;
@@ -372,6 +422,7 @@ int main() {
     test_write_interest();
     test_write_interest_converges();
     test_detach_waits_out_a_callback();
+    test_detach_waits_for_its_own_source_only();
     test_detach_inside_callback();
     test_idle_sources_wake_nobody();
     test_links_share_one_module();
