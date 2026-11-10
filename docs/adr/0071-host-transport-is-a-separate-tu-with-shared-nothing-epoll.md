@@ -116,4 +116,4 @@ Slice 1 ships `tr::net::wait_module_t` with an `epoll` adapter (`wait_epoll.cpp`
 - **`config.wait` stays a runtime pointer.** The thread-per-link fallback becomes a compile-time policy once every link has the node module.
 - **ESP sockets go from 2 to 4 of lwIP's 10 on the full node**, accepted. The poll adapter's doorbell needs `LWIP_NETIF_LOOPBACK`, and the component refuses to configure without it. The cost is measured on the C6 in a later hardware batch.
 - **Peer-table growth is paid by the shared module in slice 1.** Slice 3 MUST draw it from the receiving link's source (receiver pays).
-- **The WS client PONG stays a blocking, deadline-bounded write until slice 2**, run on the driving thread, so a stalled server can hold every link on the module for up to one liveness window per PING.
+- **The WS client PONG stayed a blocking, deadline-bounded write until slice 2**, run on the driving thread, so a stalled server could hold every link on the module for up to one liveness window per PING. Slice 2 (#2252) makes every stream write nonblocking, the PONG included: what the socket does not take waits in the egress and is resumed on writability.

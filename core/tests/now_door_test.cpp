@@ -240,9 +240,8 @@ void test_one_door() {
     transport_vertex_t net(node, router);
 
     declare(net, w, "door-dial", "door-dial", conn_role_t::DIAL, [](world_t& at, auto& src) {
-        auto l = tr::mem::make_poly<tr::net::tcp_transport_t>(
-            src, "127.0.0.1", at.dial_port,
-            tr::net::tcp_config_t{.liveness_window_ms = tr::net::kBoundedWaitMs});
+        auto l = tr::mem::make_poly<tr::net::tcp_transport_t>(src, "127.0.0.1", at.dial_port,
+                                                              tr::net::tcp_config_t{});
         at.dialer = l.get();
         return tr::graph::result_t<tr::net::transport_ptr_t>(std::move(l));
     });

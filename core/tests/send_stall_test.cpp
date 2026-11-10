@@ -1,40 +1,32 @@
 /**
  * @file
- * @brief #838 — a host stream send into a stalled peer is BOUNDED, counted, and the peer
- *        that keeps stalling is closed rather than blocked on forever.
+ * @brief #838, #2252 — a host stream send into a stalled peer never waits, is counted, and
+ *        the peer that keeps stalling is closed.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The defect: `tcp_transport_t::send` held `write_m_` across a fully blocking
- * `write_all_iov` with no `SO_SNDTIMEO` anywhere in the file. A peer that stopped reading —
- * alive, TCP window full, socket open — parked the SENDING APPLICATION THREAD inside that
- * syscall indefinitely, and every other sender on the link behind the mutex with it. The
- * host twin of #835 / PR #837, whose ruling this follows: bound the write, never silently
- * drop, attribute the stall to the peer that earned it.
+ * The defect (#838): `tcp_transport_t::send` held `write_m_` across a fully blocking
+ * `write_all_iov`. A peer that stopped reading — alive, TCP window full, socket open — parked
+ * the SENDING APPLICATION THREAD inside that syscall indefinitely. #838 bounded the block by a
+ * liveness window; #2252 removes it: every write is nonblocking, what the socket did not take
+ * stays held in the link's egress, and the link's driving thread resumes it on writability.
  *
- * Two levels, because the two halves of the fix fail differently:
+ * Two levels, because the two halves fail differently:
  *
- *  1. **The helper, over a socketpair whose buffers are FULL.** The unit that has to be
- *     right: a bounded write returns inside its bound instead of never (arms 1–2), the
- *     egress strikes the stalling peer once its lane is full and closes it after three whole
- *     rings of offers past that depth that moved nothing (arm 4), a record the socket took only
- * part of keeps its place and finishes, so the framing never desyncs (arm 5, #2144), and a turn
- * that moves bytes clears the strikes (arm 6). Deterministic — a socketpair with no reader stays
- * full forever.
- *  2. **A real `tcp_transport_t` against a peer that never reads** (arm 7). The property
- *     that actually matters end to end, and the one a helper test cannot show: `send()`
- *     RETURNS, the frame is counted rather than silently lost, and the link is torn down.
- *     Before the fix this arm hangs the test process; that is the regression it exists to
- *     redden.
+ *  1. **The helper, over a socketpair whose buffers are FULL.** A write returns at once as
+ *     STALLED (arm 1), the egress strikes the stalling peer once its lane is full and closes
+ *     it after `kEgressStallStrikes` whole rings of offers past that depth that moved nothing
+ *     (arm 2), a record the socket took only part of keeps its place and finishes, so the
+ *     framing never desyncs (arm 3, #2144), and a turn that moves bytes clears the strikes
+ *     (arm 4). Deterministic — a socketpair with no reader stays full forever.
+ *  2. **A real `tcp_transport_t` against a peer that never reads** (arms 5–7): `send()`
+ *     returns at once, every record behind a held one reaches the peer in order once it reads,
+ *     a full ring takes its vertex's arm, counted, and a peer that never reads is torn down.
  *
- * A third level was added by **#1295**, which found the bound was a per-CALL property
- * rather than a node one: a directed send is a round of ONE, so it took the whole window
- * for itself, and N of them to N stalled peers serialized N windows behind the same write
- * mutex. The residual arm is the concurrent directed batch on a real peer-named server,
- * which since #2144, with the shared write mutex gone and every server write nonblocking,
- * costs the senders no wait at all. That also retired #1295's window-derived peer ceiling,
- * so the admission arm (#2247) admits 4,096 real peers, the injected cap alone.
+ * #1295's residual arm is the concurrent directed batch on a real peer-named server, which
+ * since #2144 costs the senders no wait at all, and the admission arm (#2247) admits 4,096
+ * real peers, the injected cap alone.
  */
 
 #include <arpa/inet.h>
@@ -80,16 +72,11 @@ using clock_t_ = std::chrono::steady_clock;
 struct stall_probe_t : tr::net::stream_endpoint_t {
     using tr::net::stream_endpoint_t::conn_fd_;
     using tr::net::stream_endpoint_t::drops_;
-    using tr::net::stream_endpoint_t::liveness_window_ms_;
-    using tr::net::stream_endpoint_t::set_snd_timeout;
     using tr::net::stream_endpoint_t::stalled_tx_;
     using tr::net::stream_endpoint_t::write_all;
 
-    /** @brief Drive the egress on @p fd with a one-quantum bound (the window's floor). */
-    explicit stall_probe_t(int fd = -1) {
-        liveness_window_ms_ = tr::net::kBoundedWaitMs;
-        conn_fd_.store(fd, std::memory_order_relaxed);
-    }
+    /** @brief Drive the egress on @p fd. */
+    explicit stall_probe_t(int fd = -1) { conn_fd_.store(fd, std::memory_order_relaxed); }
     /** @brief The fd belongs to the test's pair, not to this probe. */
     ~stall_probe_t() { conn_fd_.store(-1, std::memory_order_relaxed); }
     stall_probe_t(const stall_probe_t&) = delete;
@@ -100,10 +87,14 @@ struct stall_probe_t : tr::net::stream_endpoint_t {
         const ::iovec v{const_cast<std::byte*>(rec.data()), rec.size()};
         const std::span<const ::iovec> vec(&v, 1);
         tr::net::egress_once_t once([&] { return frame_of(vec); });
-        egress_send(
-            once, [&](int fd, std::uint32_t bound) { return write_gather(fd, vec, bound, false); });
+        egress_send(once, [&](int fd) { return write_gather(fd, vec); });
     }
 };
+
+/** @brief The longest one send may take into a full socket: a frame copy and one refused
+ *         syscall, with slack for a loaded sanitizer runner. A blocking write slept a whole
+ *         liveness window here. */
+constexpr std::int64_t kNoWaitMs = 250;
 
 /** @brief Milliseconds elapsed since @p from. */
 [[nodiscard]] std::int64_t ms_since(clock_t_::time_point from) {
@@ -111,14 +102,13 @@ struct stall_probe_t : tr::net::stream_endpoint_t {
 }
 
 /**
- * @brief A connected socketpair whose send direction is FULL and bounded.
+ * @brief A connected socketpair whose send direction is FULL.
  *
  * `a` carries a small send buffer, `b` is never read, and everything that fits has already
- * been pushed in — so every further write on `a` can only expire. `SO_SNDTIMEO` is armed by
- * the code under test's own helper, which is also what makes the fill loop terminate.
+ * been pushed in — so every further write on `a` is refused.
  */
 struct stalled_pair_t {
-    int a = -1; /**< @brief The sending end (full, bounded). */
+    int a = -1; /**< @brief The sending end (full). */
     int b = -1; /**< @brief The peer that never reads. */
 
     stalled_pair_t() {
@@ -131,14 +121,14 @@ struct stalled_pair_t {
         const int small = 4096;
         ::setsockopt(a, SOL_SOCKET, SO_SNDBUF, &small, sizeof(small));
         ::setsockopt(b, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
-        // Fill non-blocking, so the fill itself cannot be the thing that hangs.
-        const int flags = ::fcntl(a, F_GETFL, 0);
-        ::fcntl(a, F_SETFL, flags | O_NONBLOCK);
+        jam(a);
+    }
+
+    /** @brief Fill @p fd 's send direction, nonblocking, so the fill itself cannot hang. */
+    static void jam(int fd) {
         std::vector<std::byte> junk(4096);
-        while (::send(a, junk.data(), junk.size(), MSG_NOSIGNAL) > 0) {
+        while (::send(fd, junk.data(), junk.size(), MSG_NOSIGNAL | MSG_DONTWAIT) > 0) {
         }
-        ::fcntl(a, F_SETFL, flags);
-        stall_probe_t::set_snd_timeout(a);
     }
 
     ~stalled_pair_t() {
@@ -153,32 +143,28 @@ struct stalled_pair_t {
 /** @brief True once @p fd has been shut down: a write on it fails immediately. */
 [[nodiscard]] bool is_shut_down(int fd) {
     const std::byte probe{0x01};
-    return ::send(fd, &probe, 1, MSG_NOSIGNAL) < 0 && errno == EPIPE;
+    return ::send(fd, &probe, 1, MSG_NOSIGNAL | MSG_DONTWAIT) < 0 && errno == EPIPE;
 }
 
 /**
- * @brief Arms 1–3: the bound exists, it is honoured, and it names the right fault.
+ * @brief Arm 1: a write into a full socket returns at once, and names the right fault.
  */
-void test_bounded_write_returns() {
-    std::printf("a write into a peer that stopped reading returns at its bound:\n");
+void test_full_socket_write_returns() {
+    std::printf("a write into a peer that stopped reading returns at once:\n");
     const stalled_pair_t p;
-    check(p.a >= 0, "socketpair up, send buffer full, SO_SNDTIMEO armed");
+    check(p.a >= 0, "socketpair up, send buffer full");
 
-    const std::uint32_t bound = 300;
     std::array<std::byte, 64> payload{};
     const auto t0 = clock_t_::now();
     const tr::net::write_result_t r =
-        stall_probe_t::write_all(p.a, std::span<const std::byte>(payload), bound);
+        stall_probe_t::write_all(p.a, std::span<const std::byte>(payload));
     const std::int64_t took = ms_since(t0);
 
     check(r.outcome == tr::net::write_outcome_t::STALLED,
           "the record is classified STALLED — not a disconnect, and not a malformed call");
     check(r.moved == 0, "nothing of it reached the wire, so the stream is still in framing sync");
-    check(took >= static_cast<std::int64_t>(bound),
-          "it did not give up early: the peer got its whole window");
-    check(took < static_cast<std::int64_t>(bound) * 20,
-          "and it RETURNED — the pre-#838 path blocks here forever");
-    std::printf("  bound=%u ms, returned after %lld ms\n", bound, static_cast<long long>(took));
+    check(took < kNoWaitMs, "and it RETURNED at once — the pre-#838 path blocks here forever");
+    std::printf("  returned after %lld ms\n", static_cast<long long>(took));
 }
 
 /**
@@ -197,13 +183,16 @@ void strike_rings(stall_probe_t& probe, std::span<const std::byte> rec, std::uin
     for (std::uint64_t i = 0; i < rings * kRing; ++i) probe.send(rec);
 }
 
+/** @brief Whole rings of strikes that condemn a peer (`kEgressStallStrikes`). */
+constexpr std::uint64_t kCap = tr::net::kEgressStallStrikes;
+
 /**
- * @brief Arm 4: past a full lane, three whole rings of offers in a row that move nothing
- *        close the peer; one or two do not — and the frames inside the lane's depth wait
- *        instead of being shed.
+ * @brief Arm 2: past a full lane, `kEgressStallStrikes` whole rings of offers in a row that
+ *        move nothing close the peer; one fewer does not — and the frames inside the lane's
+ *        depth wait instead of being shed.
  */
 void test_streak_closes_the_peer() {
-    std::printf("the brokenness detector strikes the stalling peer, three and out:\n");
+    std::printf("the brokenness detector strikes the stalling peer, then closes it:\n");
     const stalled_pair_t p;
     stall_probe_t probe(p.a);
     const std::array<std::byte, 64> rec{};
@@ -211,22 +200,19 @@ void test_streak_closes_the_peer() {
     fill_lane(probe, rec);
     check(probe.stalled_tx_.load() == 0 && probe.drops_.snapshot().dropped_tx == 0,
           "inside the lane's depth a turn that moves nothing waits: no strike, nothing shed");
+    strike_rings(probe, rec, kCap - 1);
+    check(probe.stalled_tx_.load() == (kCap - 1) * kRing && !is_shut_down(p.a),
+          "one ring short of the cap is backpressure, not a verdict");
     strike_rings(probe, rec, 1);
-    check(probe.stalled_tx_.load() == kRing && !is_shut_down(p.a),
-          "one ring of stalls is transient backpressure, not a verdict");
-    strike_rings(probe, rec, 1);
-    check(probe.stalled_tx_.load() == 2 * kRing && !is_shut_down(p.a),
-          "two can straddle a burst — still open");
-    strike_rings(probe, rec, 1);
-    check(is_shut_down(p.a), "the third consecutive ring closes the peer");
-    check(probe.stalled_tx_.load(std::memory_order_relaxed) == 3 * kRing,
-          "every stalled turn is COUNTED — a timed-out peer is never a silent drop");
-    check(probe.drops_.snapshot().dropped_tx == 3 * kRing,
+    check(is_shut_down(p.a), "the ring that reaches the cap closes the peer");
+    check(probe.stalled_tx_.load(std::memory_order_relaxed) == kCap * kRing,
+          "every stalled turn is COUNTED — a stalled peer is never a silent drop");
+    check(probe.drops_.snapshot().dropped_tx == kCap * kRing,
           "each strike cost the lane its oldest frame, counted (#2144)");
 }
 
 /**
- * @brief Arm 5 (#2144): a record the socket took only part of keeps its place and finishes on
+ * @brief Arm 3 (#2144): a record the socket took only part of keeps its place and finishes on
  *        the next turn, so the stream never desyncs and the peer is not condemned for it.
  *
  * Before #2144 a part-written record condemned the session at once: the rest of it was lost,
@@ -239,16 +225,16 @@ void test_partial_record_finishes() {
     const int small = 4096;
     ::setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &small, sizeof(small));
     ::setsockopt(sv[1], SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
-    stall_probe_t::set_snd_timeout(sv[0]);
     stall_probe_t probe(sv[0]);
 
     std::vector<std::byte> big(1024 * 1024);
     for (std::size_t i = 0; i < big.size(); ++i) big[i] = std::byte(i % 251);
-    probe.send(big);  // takes what fits, then runs its bound out with the rest unwritten
+    probe.send(big);  // takes what fits and returns, the rest held
     check(!is_shut_down(sv[0]), "the part-written record does not condemn the peer");
     check(probe.drops_.snapshot().dropped_tx == 0, "and is not shed");
 
-    // The peer reads again; the next send resumes the held record, then writes its own.
+    // The peer reads again; each later send resumes the held record (this probe has no
+    // driving thread to do it on writability), then its own record follows it.
     std::vector<std::byte> got;
     std::atomic<std::size_t> got_n{0};
     std::thread reader([&] {
@@ -263,10 +249,9 @@ void test_partial_record_finishes() {
         }
     });
     const std::vector<std::byte> marker(64, std::byte{0xCC});
-    for (int i = 0; i < 50 && probe.stalled_tx_.load() < tr::net::kMaxConsecutiveStalls; ++i) {
+    for (int i = 0; i < 5000 && got_n.load(std::memory_order_acquire) < big.size() + 64; ++i) {
         probe.send(marker);
-        if (got_n.load(std::memory_order_acquire) >= big.size() + 64) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     reader.join();
     bool whole = got.size() >= big.size() + 64;
@@ -278,7 +263,7 @@ void test_partial_record_finishes() {
 }
 
 /**
- * @brief Arm 6: a turn that moves bytes clears the strikes — the trichotomy's middle arm.
+ * @brief Arm 4: a turn that moves bytes clears the strikes — the trichotomy's middle arm.
  */
 void test_completion_resets_the_streak() {
     std::printf("a peer that takes the next frame is riding out a burst, not broken:\n");
@@ -287,8 +272,8 @@ void test_completion_resets_the_streak() {
     const std::array<std::byte, 64> rec{};
 
     fill_lane(probe, rec);
-    strike_rings(probe, rec, 2);
-    check(probe.stalled_tx_.load() == 2 * kRing, "two rings of strikes accrued");
+    strike_rings(probe, rec, kCap - 1);
+    check(probe.stalled_tx_.load() == (kCap - 1) * kRing, "one ring short of the cap accrued");
     // The peer reads everything it was sent: the socket has room again.
     const int flags = ::fcntl(p.b, F_GETFL, 0);
     ::fcntl(p.b, F_SETFL, flags | O_NONBLOCK);
@@ -299,42 +284,21 @@ void test_completion_resets_the_streak() {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     probe.send(rec);
-    check(probe.stalled_tx_.load() == 2 * kRing && !is_shut_down(p.a),
+    check(probe.stalled_tx_.load() == (kCap - 1) * kRing && !is_shut_down(p.a),
           "the turn that moved the waiting frames clears the strikes");
-    // Jam it again: one fresh ring is a fresh streak of one, not the third.
-    ::fcntl(p.a, F_SETFL, ::fcntl(p.a, F_GETFL, 0) | O_NONBLOCK);
-    std::vector<std::byte> junk(4096);
-    while (::send(p.a, junk.data(), junk.size(), MSG_NOSIGNAL) > 0) {
-    }
-    ::fcntl(p.a, F_SETFL, ::fcntl(p.a, F_GETFL, 0) & ~O_NONBLOCK);
+    // Jam it again: as many rings again would pass the cap, had the streak not restarted.
+    stalled_pair_t::jam(p.a);
     fill_lane(probe, rec);
-    strike_rings(probe, rec, 1);
-    check(probe.stalled_tx_.load() == 3 * kRing && !is_shut_down(p.a),
+    strike_rings(probe, rec, kCap - 1);
+    check(probe.stalled_tx_.load() == 2 * (kCap - 1) * kRing && !is_shut_down(p.a),
           "so the next stall starts a fresh streak instead of closing");
-}
-
-/**
- * @brief The derivation itself: a round fits in one window, and never rounds to "forever".
- */
-void test_bound_derivation() {
-    std::printf("the per-record bound is derived, floored, and never zero:\n");
-    using tr::net::derive_send_bound_ms;
-    check(derive_send_bound_ms(10000, 1) == 10000, "one peer in the round gets the whole window");
-    check(derive_send_bound_ms(10000, 4) == 2500,
-          "four peers split it — the whole fan-out still fits inside one window");
-    check(derive_send_bound_ms(0, 1) == tr::net::kDefaultLivenessWindowMs,
-          "an unconfigured deployment gets the conservative default clamp, never 'unbounded'");
-    check(derive_send_bound_ms(100, 1000) == tr::net::kBoundedWaitMs,
-          "the division is floored: SO_SNDTIMEO 0 means BLOCK FOREVER, which is the defect");
-    check(derive_send_bound_ms(10000, 0) == 10000,
-          "an empty round is one bound, not a divide-by-0");
 }
 
 /**
  * @brief #2247 — the admission cap is the injected `max_peers` alone: 4,096 real peers are
  *        admitted, the next is refused, and none of the admitted is evicted for it.
  *
- * #1295 clamped every server to `window / kBoundedWaitMs` (100 on the default window), because
+ * #1295 clamped every server to the window over its 100 ms floor (100 peers), because
  * each admitted peer could cost the node one blocking write. #2144 made those writes
  * nonblocking, so the ceiling had no reason left. Each peer is a real loopback connection: the
  * clients and the server's sessions together need about 8,200 descriptors, so the soft limit is
@@ -386,9 +350,9 @@ void test_admits_4096_peers() {
  * @brief Arm 7: the end-to-end property, over a real `tcp_transport_t`.
  *
  * A peer that accepts the connection and then never reads a byte. Pre-#838 the first send
- * that fills the window never returns and this function hangs; the fix makes it return,
- * count the stalled turns, and take the dead peer down. Since #2144 the frames it could not
- * write wait in the link's egress, and only those its ring had no room for are shed.
+ * that fills the window never returns and this function hangs. Now every send returns at once
+ * (#2252), the frames it could not write wait in the link's egress, only those its ring had
+ * no room for are shed, and the strikes take the dead peer down.
  */
 void test_tcp_link_sheds_and_drops_a_stalled_peer() {
     std::printf("a real tcp link sheds frames for a stalled peer and then drops it:\n");
@@ -410,44 +374,50 @@ void test_tcp_link_sheds_and_drops_a_stalled_peer() {
     check(::getsockname(listener, reinterpret_cast<sockaddr*>(&local), &llen) == 0,
           "port resolved");
 
-    // A SHORT liveness window, injected exactly as a deployment would: the number is the
-    // app's, not the library's, which is the whole point of the provenance ruling.
-    const std::uint32_t window = 400;
-    tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port),
-                                  {.liveness_window_ms = window});
+    tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port), {});
     check(link.ok(), "the dial succeeded");
+    // The link-down event, not a clock, says when the verdict reached the connection.
+    std::atomic<bool> down{false};
+    const auto on_down = [](void* ctx) {
+        auto* d = static_cast<std::atomic<bool>*>(ctx);
+        d->store(true);
+        d->notify_all();
+    };
+    if (link.set_down_notifier(on_down, &down)) on_down(&down);
     link.start_receiving();
-    check(link.liveness_window_ms() == window, "and the injected window is the one in force");
 
     const int peer = ::accept(listener, nullptr, nullptr);
     check(peer >= 0, "the peer accepted the connection — and now never reads a byte");
 
-    // Push frames until the window jams. Each send is bounded, so this loop is bounded too:
-    // worst case a handful of windows, not a hang.
-    const std::vector<std::byte> frame(256 * 1024);
-    const auto t0 = clock_t_::now();
-    int sent = 0;
-    for (; sent < 64 && link.stalled_tx() < tr::net::kMaxConsecutiveStalls * kRing; ++sent)
+    // Push frames until the link goes down. Each send is one turn, and the verdict needs the
+    // cap in strikes IN A ROW: a strike counted while the kernel still took bytes now and then
+    // is cleared by the next byte that moves, so the total count says nothing about the
+    // verdict. No send waits, so the loop is bounded by its count alone; a slow machine only
+    // spends more of the count before the socket stops taking bytes.
+    const std::vector<std::byte> frame(64 * 1024);
+    std::int64_t slowest = 0;
+    for (int sent = 0; sent < 16 * 4096 && !down.load(); ++sent) {
+        const auto t0 = clock_t_::now();
         link.send(std::span(frame));
-    const std::int64_t took = ms_since(t0);
+        slowest = std::max(slowest, ms_since(t0));
+    }
 
-    check(link.stalled_tx() >= tr::net::kMaxConsecutiveStalls * kRing,
+    check(link.stalled_tx() >= kCap * kRing,
           "the stalled peer cost the link write turns, and they are COUNTED");
-    check(took < (sent + 1) * static_cast<std::int64_t>(window),
-          "and no single send blocked past its bound");
+    check(slowest < kNoWaitMs, "and no send waited on the stalled peer");
     for (int i = 0; i < 4; ++i) link.send(std::span(frame));
     check(link.drop_stats().dropped_tx > 0,
           "a send to the condemned peer is shed and counted — never a silent drop");
 
     // The verdict reaches the connection: shutdown makes the recv loop see EOF, which runs
-    // the ordinary remote-departure teardown.
-    for (int i = 0; i < 400 && link.link_up(); ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // the ordinary remote-departure teardown and reports the link down. A link that never
+    // condemned the peer never reports it, and the test's own deadline names the hang.
+    down.wait(false);
     check(!link.link_up(), "the peer that would not take bytes is dropped, not blocked on");
-    std::printf("  stalled=%llu dropped=%llu after %lld ms\n",
+    std::printf("  stalled=%llu dropped=%llu, slowest send %lld ms\n",
                 static_cast<unsigned long long>(link.stalled_tx()),
                 static_cast<unsigned long long>(link.drop_stats().dropped_tx),
-                static_cast<long long>(took));
+                static_cast<long long>(slowest));
 
     ::close(peer);
     ::close(listener);
@@ -459,23 +429,16 @@ void test_tcp_link_sheds_and_drops_a_stalled_peer() {
  *
  * #1295's defect: a directed send took the whole liveness window for itself, and directed
  * sends on one server serialized behind one write mutex, so N callers targeting N stalled
- * peers queued up N full windows. #1295 divided the bound by the admission cap so the batch
- * fit one window. #2144 removes the mutex and makes every server write nonblocking: a full
- * socket refuses the syscall at once, the frame waits in that peer's own ring, and the batch
- * costs syscalls, not windows.
+ * peers queued up N full windows. #2144 removes the mutex and makes every server write
+ * nonblocking: a full socket refuses the syscall at once, the frame waits in that peer's own
+ * ring, and the batch costs syscalls, not windows.
  */
-void test_concurrent_directed_sends_share_one_window() {
+void test_concurrent_directed_sends_cost_no_wait() {
     std::printf("N concurrent directed sends to N stalled peers cost the senders no wait:\n");
-    // Sized so the division is exact: window/peers is well above kBoundedWaitMs, and so the
-    // per-record bound is a real quotient rather than the floor.
-    const std::uint32_t window = 1600;
     const std::size_t peers = 4;
-    tr::net::tcp_server_transport_t server(
-        0, {.max_peers = peers, .peer_named = true, .liveness_window_ms = window});
+    tr::net::tcp_server_transport_t server(0, {.max_peers = peers, .peer_named = true});
     check(server.ok(), "the peer-named listener is up");
     check(server.max_peers() == peers, "the injected cap is the one enforced");
-    check(server.directed_send_bound_ms() == window / peers,
-          "and a DIRECTED send divides by that cap — not by the round's size of one");
 
     // N clients that connect, then never read a byte. Small receive buffers so a couple of
     // frames fill each window instead of megabytes of them.
@@ -532,87 +495,16 @@ void test_concurrent_directed_sends_share_one_window() {
     check(server.drop_stats().dropped_tx >= peers,
           "every peer did stall — the batch ran into full sockets and overflowed the rings, "
           "it did not just fit in the socket buffers");
-    // A sender that waited on a stalled socket would pay a directed bound per send:
-    // frames_per_peer of them, about six windows. Copying the frames costs milliseconds
-    // (most of a second under TSan), so two windows separates the two cleanly.
-    check(took < 2 * static_cast<std::int64_t>(window),
-          "and the whole batch took a fraction of one bound per send — no sender waited on "
-          "a stalled peer's socket, its own or another's (#2144)");
-    std::printf(
-        "  peers=%zu window=%u ms directed bound=%u ms — the concurrent batch took "
-        "%lld ms, dropped=%llu\n",
-        peers, window, server.directed_send_bound_ms(), static_cast<long long>(took),
-        static_cast<unsigned long long>(server.drop_stats().dropped_tx));
+    // Copying the frames costs milliseconds (most of a second under TSan); a sender that
+    // waited even one 100 ms quantum per send would pay 2.4 s for its 24.
+    check(took < kNoWaitMs * frames_per_peer / 3,
+          "and the whole batch took copies, not waits — no sender waited on a stalled peer's "
+          "socket, its own or another's (#2144)");
+    std::printf("  peers=%zu — the concurrent batch took %lld ms, dropped=%llu\n", peers,
+                static_cast<long long>(took),
+                static_cast<unsigned long long>(server.drop_stats().dropped_tx));
 
     for (const int c : clients) ::close(c);
-}
-
-/**
- * @brief RFC 0028 slice 2 (#1619): a second publisher never waits on the first one's write.
- *
- * The defect this reddens on: `tcp_transport_t::send` held `write_m_` across the bounded
- * write, so while one publisher sat in a write to a peer that had stopped reading, a second
- * publisher to the same link queued on the mutex for the rest of that write — up to the whole
- * liveness window. Delivery is in-call, so that second publisher is whatever unrelated task
- * wrote a vertex. With enqueue-then-write the second publisher copies its record into the
- * link's queue and returns at once; the writer already on the wire drains it.
- *
- * The bound asserted is a small fraction of the window, so it is independent of the write
- * budget: before the fix the second send took about the rest of the window.
- */
-void test_second_publisher_never_waits_on_a_stalled_write() {
-    std::printf("a second publisher returns at once while the first is stuck on a stalled peer:\n");
-    const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
-    check(listener >= 0, "listener socket");
-    const int one = 1;
-    ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    const int small = 4096;
-    ::setsockopt(listener, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
-    sockaddr_in local{};
-    local.sin_family = AF_INET;
-    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    local.sin_port = 0;
-    check(::bind(listener, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0, "bound");
-    check(::listen(listener, 1) == 0, "listening");
-    socklen_t llen = sizeof(local);
-    check(::getsockname(listener, reinterpret_cast<sockaddr*>(&local), &llen) == 0,
-          "port resolved");
-
-    // A LONG window, so "the rest of the first write" is unmistakable against the bound below.
-    const std::uint32_t window = 3000;
-    tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port),
-                                  {.liveness_window_ms = window});
-    check(link.ok(), "the dial succeeded");
-    link.start_receiving();
-    const int peer = ::accept(listener, nullptr, nullptr);
-    check(peer >= 0, "the peer accepted the connection — and now never reads a byte");
-
-    // The first publisher: one record far larger than both socket buffers, so its write is
-    // still in flight when the second publisher arrives.
-    const std::vector<std::byte> big(8 * 1024 * 1024);
-    std::atomic<bool> first_done{false};
-    std::thread first([&] {
-        link.send(std::span(big));
-        first_done.store(true, std::memory_order_release);
-    });
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    check(!first_done.load(std::memory_order_acquire),
-          "the first publisher is stuck in its write to the stalled peer");
-
-    const std::vector<std::byte> small_frame(64);
-    const auto t0 = clock_t_::now();
-    link.send(std::span(small_frame));
-    const std::int64_t took = ms_since(t0);
-    const bool first_still_writing = !first_done.load(std::memory_order_acquire);
-    check(took < 100,
-          "the second publisher returned at once — it did not wait out the first one's write");
-    check(first_still_writing, "and it returned while the first write was still in flight");
-    std::printf("  second send took %lld ms (window %u ms)\n", static_cast<long long>(took),
-                window);
-
-    first.join();
-    ::close(peer);
-    ::close(listener);
 }
 
 /**
@@ -624,8 +516,8 @@ struct parked_peer_t {
     int peer = -1;     /**< @brief The accepted end, which reads only in @ref read_records. */
     std::unique_ptr<tr::net::tcp_transport_t> link; /**< @brief The link under test. */
 
-    /** @brief Dial with a window of @p window ms and a small peer receive buffer. */
-    explicit parked_peer_t(std::uint32_t window) {
+    /** @brief Dial, with a small peer receive buffer. */
+    parked_peer_t() {
         listener = ::socket(AF_INET, SOCK_STREAM, 0);
         const int one = 1;
         ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -638,9 +530,8 @@ struct parked_peer_t {
         (void)::listen(listener, 1);
         socklen_t llen = sizeof(local);
         (void)::getsockname(listener, reinterpret_cast<sockaddr*>(&local), &llen);
-        link = std::make_unique<tr::net::tcp_transport_t>(
-            "127.0.0.1", ntohs(local.sin_port),
-            tr::net::tcp_config_t{.liveness_window_ms = window});
+        link = std::make_unique<tr::net::tcp_transport_t>("127.0.0.1", ntohs(local.sin_port),
+                                                          tr::net::tcp_config_t{});
         link->start_receiving();
         peer = ::accept(listener, nullptr, nullptr);
         const timeval tv{.tv_sec = 5, .tv_usec = 0};
@@ -691,38 +582,37 @@ struct parked_peer_t {
     }
 };
 
+/** @brief Send @p rec on @p p 's link and answer whether it returned at once. */
+bool returns_at_once(parked_peer_t& p, std::span<const std::byte> rec) {
+    const auto t0 = clock_t_::now();
+    p.link->send(rec);
+    return ms_since(t0) < kNoWaitMs;
+}
+
 /**
- * @brief #1619: every record a publisher queued behind a stalled write reaches the peer, in
- *        admission order, once the peer reads again.
+ * @brief #1619, #2144, #2252: a send into a peer that stopped reading returns at once with its
+ *        record held, a second publisher returns at once behind it, and once the peer reads
+ *        every record arrives, in admission order, with no further send.
  *
- * The case above proves a queued publisher RETURNS at once; this one proves its record is
- * not lost. A queue that discarded what it queued would pass the case above and fail here.
+ * Nothing is sent after the peer starts reading, so the held record and the two queued
+ * behind it can only be finished by the link's own wait on writability.
  */
-void test_queued_records_are_all_delivered_in_order() {
-    std::printf("every record queued behind a stalled write is delivered, in order:\n");
-    parked_peer_t p(/*window=*/3000);
+void test_held_and_queued_records_are_all_delivered_in_order() {
+    std::printf("a send into a stalled peer returns at once; every record is delivered:\n");
+    parked_peer_t p;
     check(p.link->ok() && p.peer >= 0, "the link is dialed and the peer accepted");
     const std::vector<std::byte> big(8 * 1024 * 1024, std::byte{0x11});
-    std::atomic<bool> first_done{false};
-    std::thread first([&] {
-        p.link->send(std::span(big));
-        first_done.store(true, std::memory_order_release);
-    });
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    check(!first_done.load(std::memory_order_acquire), "the first write is parked on the peer");
+    check(returns_at_once(p, big), "an 8 MiB send returned at once with its record cut short");
+    check(p.link->drop_stats().dropped_tx == 0, "the rest is held, not shed");
     const std::vector<std::byte> a(64, std::byte{0xA1});
     const std::vector<std::byte> b(64, std::byte{0xA2});
-    p.link->send(std::span(a));
-    p.link->send(std::span(b));
-    check(!first_done.load(std::memory_order_acquire), "two records queued behind it");
+    check(returns_at_once(p, a) && returns_at_once(p, b),
+          "two more publishers returned at once, queued behind it");
 
-    // The peer reads again, well inside the window: the writer finishes its own record and
-    // then drains the two it queued.
     const std::vector<parked_peer_t::record_t> got = p.read_records(3);
-    first.join();
     check(got.size() == 3, "all three records reached the peer");
     if (got.size() == 3) {
-        check(got[0].len == big.size() && got[0].mark == 0x11, "the writer's own record first");
+        check(got[0].len == big.size() && got[0].mark == 0x11, "the cut record first, whole");
         check(got[1].len == 64 && got[1].mark == 0xA1, "then the first queued record");
         check(got[2].len == 64 && got[2].mark == 0xA2, "then the second, in admission order");
     }
@@ -737,7 +627,7 @@ void test_queued_records_are_all_delivered_in_order() {
  */
 void full_ring_case(bool reliable) {
     constexpr std::size_t depth = 8;
-    parked_peer_t p(/*window=*/3000);
+    parked_peer_t p;
     static int vertex = 0;  // the lane's identity: compared, never dereferenced
     const tr::graph::delivery_lane_t lane{
         .key = &vertex, .depth = static_cast<std::uint16_t>(depth), .reliable = reliable};
@@ -749,13 +639,7 @@ void full_ring_case(bool reliable) {
     };
     check(p.link->ok() && p.peer >= 0, "the link is dialed and the peer accepted");
     const std::vector<std::byte> big(8 * 1024 * 1024, std::byte{0x11});
-    std::atomic<bool> first_done{false};
-    std::thread first([&] {
-        p.link->send(std::span(big));
-        first_done.store(true, std::memory_order_release);
-    });
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    check(!first_done.load(std::memory_order_acquire), "the first write is parked on the peer");
+    check(returns_at_once(p, big), "the first record is held on the peer");
     const std::uint64_t before = p.link->drop_stats().dropped_tx;
     for (std::size_t i = 0; i < depth; ++i) deliver(static_cast<std::uint8_t>(0xB0 + i));
     check(p.link->drop_stats().dropped_tx == before, "the vertex's ring took all of its depth");
@@ -763,10 +647,8 @@ void full_ring_case(bool reliable) {
     deliver(0xEE);
     check(ms_since(t0) < 100, "the record past the depth returned at once");
     check(p.link->drop_stats().dropped_tx == before + 1, "and one record was lost and counted");
-    check(!first_done.load(std::memory_order_acquire), "while the first write was still parked");
 
     const std::vector<parked_peer_t::record_t> got = p.read_records(depth + 2);
-    first.join();
     check(got.size() == depth + 1, "the writer's record and a full ring arrived, no more");
     std::vector<std::uint8_t> want{0x11};
     for (std::size_t i = reliable ? 0 : 1; i < depth; ++i)
@@ -776,27 +658,6 @@ void full_ring_case(bool reliable) {
     for (std::size_t i = 0; order && i < got.size(); ++i) order = got[i].mark == want[i];
     check(order, reliable ? "reliable: in order, the refused newest record not among them"
                           : "best-effort: in order, the shed oldest record not among them");
-}
-
-/**
- * @brief #2144 (review): a dialer record the socket cut short finishes on writability alone.
- *
- * The send's turn runs its one-quantum bound out with part of an 8 MiB record on the wire and
- * returns. Nothing else is sent: the link's own receive thread waits for writability while the
- * frame is held and resumes it there, so the peer reads the whole record.
- */
-void test_dialer_resumes_a_cut_record() {
-    std::printf("a dialer record cut short finishes on writability, with no second send:\n");
-    parked_peer_t p(/*window=*/tr::net::kBoundedWaitMs);
-    check(p.link->ok() && p.peer >= 0, "the link is dialed and the peer accepted");
-    const std::vector<std::byte> big(8 * 1024 * 1024, std::byte{0x33});
-    const auto t0 = clock_t_::now();
-    p.link->send(std::span(big));
-    check(ms_since(t0) < 2000, "the send returned at its bound with the record cut short");
-    check(p.link->drop_stats().dropped_tx == 0, "the rest is held, not shed");
-    const std::vector<parked_peer_t::record_t> got = p.read_records(1);
-    check(got.size() == 1 && got[0].len == big.size() && got[0].mark == 0x33,
-          "the peer read the whole record: the link's own wait resumed it");
 }
 
 void test_full_ring_takes_its_arm() {
@@ -816,19 +677,16 @@ int main() {
                                     "this build closed the ADR-0044 bus module out "
                                     "(kBusLinks = false); the directed per-peer sends under "
                                     "test have no peer tier to resolve through");
-    std::printf("== #838: host stream sends are bounded, counted and attributed ==\n");
-    test_bounded_write_returns();
+    std::printf("== #838, #2252: host stream sends never wait, are counted and attributed ==\n");
+    test_full_socket_write_returns();
     test_streak_closes_the_peer();
     test_partial_record_finishes();
     test_completion_resets_the_streak();
-    test_bound_derivation();
     test_admits_4096_peers();
     test_tcp_link_sheds_and_drops_a_stalled_peer();
-    test_second_publisher_never_waits_on_a_stalled_write();
-    test_queued_records_are_all_delivered_in_order();
+    test_held_and_queued_records_are_all_delivered_in_order();
     test_full_ring_takes_its_arm();
-    test_dialer_resumes_a_cut_record();
-    test_concurrent_directed_sends_share_one_window();
+    test_concurrent_directed_sends_cost_no_wait();
     // The shared runner's verdict, not a hard-coded "all checks passed": this suite used to
     // print that line and `return 0` whatever the counter said, so a red check here could
     // never redden ctest — and #1295's guard is only a guard if it can (#874's summary).

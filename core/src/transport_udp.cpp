@@ -180,7 +180,8 @@ void udp_transport_t::send_to(std::uint64_t address,
     msg.msg_iovlen = n;
     // A refused or short datagram (a full socket buffer, EMSGSIZE, a shut socket) is lost and
     // counted, never retried: the link carries no acks, and the next value supersedes it (#2279).
-    if (::sendmsg(fd_, &msg, MSG_NOSIGNAL) != static_cast<ssize_t>(total))
+    // Nonblocking (#2252): a full send buffer refuses the datagram instead of parking the sender.
+    if (::sendmsg(fd_, &msg, MSG_NOSIGNAL | MSG_DONTWAIT) != static_cast<ssize_t>(total))
         drops_.count_dropped_tx();
 }
 

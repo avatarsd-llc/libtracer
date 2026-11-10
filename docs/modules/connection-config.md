@@ -195,14 +195,14 @@ a field on `conn_settings_t`, and no kind can read another kind's key.
 | key | value | applies to | default | meaning |
 | --- | --- | --- | --- | --- |
 | `peer_named` | `VALUE` u8 (flag) | LISTEN | `0` | Non-zero exposes the `bus_link_t` facet (ADR-0044): each accepted peer gets its own return-route identity and the connection's `:children[]` enumerates live peers. Without it a listener is a **broadcast** link — `send` fans out to every open peer and no peer is individually addressable. |
-| `max_peers` | `VALUE` u32 | LISTEN | `0` | Concurrent-peer admission cap (RFC-0006); a connection beyond it is accepted and immediately closed. Any other value is enforced as given: a newcomer past it is refused, and no admitted peer is evicted. `0` is **not** uncapped: it takes `kDefaultMaxPeers`, **100**. The cap is a RAM decision, independent of `liveness_window` (#2247; since #2144 a server's peer writes never wait). |
-| `liveness_window` | `VALUE` u32 | DIAL + LISTEN | `0` | The peer **liveness window** (#838): how long a peer may fail to take bytes before it is treated as broken. It bounds every send (and the write-mutex hold it takes) — a broadcast record gets `window ÷ peers-in-this-round` and a **directed** record `window ÷ max_peers` (#1295), both floored at 100 ms — so a stalled peer can no longer freeze the sending thread, and N stalled peers cost the node one window rather than N. Three consecutive stalled records to one peer, or one that half-reached the wire, close that peer. `0` = the conservative 10 s default clamp, **never** "unbounded". The number is the deployer's, exactly as `connect_timeout` and CAN's `peer_ttl` are; it converges into RFC-0014 §S5's single liveness contract. |
+| `max_peers` | `VALUE` u32 | LISTEN | `0` | Concurrent-peer admission cap (RFC-0006); a connection beyond it is accepted and immediately closed. Any other value is enforced as given: a newcomer past it is refused, and no admitted peer is evicted. `0` is **not** uncapped: it takes `kDefaultMaxPeers`, **100**. The cap is a RAM decision alone (#2247): no write waits (#2144, #2252). |
 
 <!-- config-keys:end -->
 
-The first two are ignored on a DIAL: a client has exactly one peer, itself. `liveness_window`
-applies to both roles — a dialled client can be stalled by its server just as a listener can by
-a peer.
+Both are ignored on a DIAL: a client has exactly one peer, itself. No key bounds a send: every
+write is nonblocking (#2252), a frame the socket did not take waits in its peer's lane and is
+resumed on writability, and a peer that stays frozen is closed by the application's liveness
+check (#2198), not by a send timeout.
 
 ### `ws` — the same keys, verbatim
 
@@ -212,7 +212,6 @@ a peer.
 | --- | --- | --- | --- | --- |
 | `peer_named` | `VALUE` u8 (flag) | LISTEN | `0` | As `tcp`: the ADR-0044 per-peer identity facet instead of a broadcast link. |
 | `max_peers` | `VALUE` u32 | LISTEN | `0` | As `tcp`: the concurrent-peer admission cap, with `0` resolving to `kDefaultMaxPeers` rather than "uncapped". |
-| `liveness_window` | `VALUE` u32 | DIAL + LISTEN | `0` | As `tcp`: the peer liveness window every send is bounded by (#838). The shipped case here is a throttled background browser tab that stops reading — it now costs counted frames and its own session, not the server's sending thread. |
 | `max_handshake` | `VALUE` u32 | DIAL + LISTEN | `0` | Bytes. The **pre-auth** opening-handshake request budget (#934): the most an unauthenticated host — one that has completed a TCP connect and nothing else, no ACL, no subscription, no router — may make this node accumulate before its HTTP Upgrade request (LISTEN) or `101` response header block (DIAL) is refused. `0` = the 16 KiB `ws_server_transport_t::kMaxHandshakeBytes` default, and the key is **tighten-only**: a larger value is clamped to that default, because a config-writable key must never *raise* a pre-auth bound. The budget is a **total-request** one, not a per-read one, and it is enforced *before* the bytes that would exceed it are copied — over budget ticks `malformed_rx` and closes the link (count-then-close). It does not bound what a server pipelines *behind* its `101`; those are frame bytes under `max_frame`. |
 
 <!-- config-keys:end -->

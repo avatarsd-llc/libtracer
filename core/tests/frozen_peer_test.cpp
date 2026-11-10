@@ -148,8 +148,7 @@ void test_tcp_dialer() {
     std::printf("tcp dialer:\n");
     {
         listener_t l;
-        tr::net::tcp_transport_t link("127.0.0.1", l.port,
-                                      {.liveness_window_ms = tr::net::kBoundedWaitMs});
+        tr::net::tcp_transport_t link("127.0.0.1", l.port, {});
         link.start_receiving();
         const int peer = ::accept(l.fd, nullptr, nullptr);
         check(link.ok() && peer >= 0, "dialed, and the peer never reads");
@@ -163,8 +162,7 @@ void test_tcp_dialer() {
     }
     {
         listener_t l;
-        tr::net::tcp_transport_t link("127.0.0.1", l.port,
-                                      {.liveness_window_ms = tr::net::kBoundedWaitMs});
+        tr::net::tcp_transport_t link("127.0.0.1", l.port, {});
         link.start_receiving();
         const int peer = ::accept(l.fd, nullptr, nullptr);
         std::atomic<bool> stop{false};
@@ -282,8 +280,7 @@ void test_ws_client() {
         head += "\r\n\r\n";
         (void)::send(peer, head.data(), head.size(), MSG_NOSIGNAL);
     });
-    tr::net::ws_client_transport_t client("127.0.0.1", l.port,
-                                          {.liveness_window_ms = tr::net::kBoundedWaitMs});
+    tr::net::ws_client_transport_t client("127.0.0.1", l.port, {});
     client.start_receiving();
     srv.join();
     check(client.ok() && peer >= 0, "the handshake completed, and the server never reads");

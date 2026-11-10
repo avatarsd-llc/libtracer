@@ -63,7 +63,7 @@
     },
     "tr::net::classify_write_fault": {
       "ccn": [
-        19
+        18
       ],
       "file": "core/src/posix_endpoint.cpp"
     },

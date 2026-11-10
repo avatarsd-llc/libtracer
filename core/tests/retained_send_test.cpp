@@ -174,8 +174,14 @@ void test_tcp_retained_race() {
             }
         }
         std::atomic<std::size_t> queued{0};
+        // No send waits (#2252), so a sender that ran ahead would only overflow its lane and
+        // shed: on a slow machine one thread can run its whole burst while the other's frames
+        // sit in the lane, and every frame of its own is shed. Each sender keeps one record in
+        // flight instead, the link's own release of the last value its turn: the two still race
+        // onto one link, and nothing is shed for the race to hide behind.
         const auto sender = [&](std::uint8_t t) {
             for (std::uint32_t s = 0; s < kPerThread; ++s) {
+                while (s != 0 && values[t][s - 1]->use_count() > 1) std::this_thread::yield();
                 const value_t& v = *values[t][s];
                 const auto h = race_head(t, s, static_cast<std::uint32_t>(v.total_length()));
                 const std::array<span_t, 1> head{span_t(h)};
@@ -189,29 +195,30 @@ void test_tcp_retained_race() {
         a.join();
         b.join();
 
+        // Turns, not a clock: the link lets go of each value as its record leaves, and the
+        // reader counts each frame as it lands. A link that kept a value, or a frame that
+        // never lands, hangs here and the test's own deadline names it.
         const std::size_t sent = 2u * kPerThread;
-        const auto deadline = std::chrono::steady_clock::now() + 20s;
-        while (std::chrono::steady_clock::now() < deadline) {
+        for (const auto& per : values)
+            while (per.back()->use_count() > 1) std::this_thread::yield();
+        for (;;) {
             {
                 const std::lock_guard lock(sink.m);
                 if (sink.frames + dialer.drop_stats().dropped_tx >= sent) break;
             }
-            std::this_thread::sleep_for(2ms);
+            std::this_thread::yield();
         }
         bool released = true;
-        for (int spin = 0; spin < 1000; ++spin) {
-            released = true;
-            for (const auto& per : values)
-                for (const value_ref_t& v : per) released = released && v->use_count() == 1;
-            if (released) break;
-            std::this_thread::sleep_for(2ms);
-        }
+        for (const auto& per : values)
+            for (const value_ref_t& v : per) released = released && v->use_count() == 1;
         {
             const std::lock_guard lock(sink.m);
             check(sink.torn == 0, "no frame torn (each arrived whole and byte-exact)");
             check(sink.reordered == 0, "each thread's frames arrived in order");
             check(sink.frames + dialer.drop_stats().dropped_tx == sent,
                   "every frame is accounted for: received, or dropped and counted");
+            check(dialer.drop_stats().dropped_tx == 0,
+                  "nothing was shed: one record in flight per sender");
             check(sink.last_seq[0] >= 0 && sink.last_seq[1] >= 0, "both threads delivered");
         }
         check(released, "the link let go of every value once it drained");

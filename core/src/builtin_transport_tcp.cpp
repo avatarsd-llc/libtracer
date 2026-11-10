@@ -40,12 +40,6 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     //  - `max_peers` (VALUE u32) is the concurrent-peer admission cap (RFC-0006), enforced
     //    as given: a newcomer past it is refused, no admitted peer is evicted. An omitted
     //    key (0) takes kDefaultMaxPeers, never "unbounded".
-    // A third tcp-private key, honored on BOTH halves and mirroring ws's verbatim (#838):
-    //  - `liveness_window` (VALUE u32, ms; default 0 = kDefaultLivenessWindowMs) — how long
-    //    a peer may fail to take bytes before it is broken. It is the send bound's
-    //    provenance: a host has no task watchdog to derive one from the way the MCU link
-    //    does (#835), so the number comes from the deployer, exactly as `connect_timeout`
-    //    and CAN's `peer_ttl` (ADR-0044) do.
     // tcp has both a dial and a listen shape, so it is TWO modules (RFC-0014 §1) — but the
     // library registers NEITHER (ADR-0073 §4): the application declares each module under a
     // name IT chooses via register_module (kTcpClientSuggestedModule /
@@ -77,7 +71,6 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                     return graph::result_t<transport_ptr_t>(
                         std::unexpected(graph::status_t::TYPE_MISMATCH));
             const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
-            const std::uint32_t liveness_window = cfg.u32("liveness_window").value_or(0);
             auto link = dial_or_listen(
                 s,
                 [&] {
@@ -92,8 +85,7 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                     return make_checked<tcp_transport_t>(
                         src, s.addr, s.port,
                         tcp_config_t{.memory = builtin_link_memory(rx_backend, egress, node),
-                                     .max_frame = s.max_frame,
-                                     .liveness_window_ms = liveness_window});
+                                     .max_frame = s.max_frame});
                 },
                 [&] {
                     return make_checked<tcp_server_transport_t>(
@@ -101,8 +93,7 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                         tcp_server_config_t{.memory = builtin_link_memory(rx_backend, egress, node),
                                             .max_frame = s.max_frame,
                                             .max_peers = max_peers,
-                                            .peer_named = peer_named,
-                                            .liveness_window_ms = liveness_window});
+                                            .peer_named = peer_named});
                 });
             // The ADR-0079 egress store, wired before the link is handed to the router (#873).
             return with_egress_source(std::move(link), egress);

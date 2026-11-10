@@ -114,60 +114,12 @@ struct write_fault_stats_t {
 [[nodiscard]] bool parse_ipv4(std::string_view host, ::in_addr& out) noexcept;
 
 /**
- * @brief The default peer LIVENESS WINDOW, milliseconds — how long a peer may fail to
- *        take bytes before it is treated as broken (#838).
- *
- * The bound's provenance is an APP-PROVIDED liveness window, not a core literal: the
- * deployer injects it (`liveness_window` — see the stream transports' constructors and the
- * `tcp`/`ws` factory keys), exactly as `connect_timeout`, CAN's `peer_ttl` (ADR-0044) and
- * `httpd_ws_link_t::send_timeout_ms` are injected. An MCU derives its own bound from the
- * task watchdog (`T = TWDT / cap`, #835); a host has no watchdog to derive from, so the
- * injection arm IS the answer there.
- *
- * This value is what an unconfigured deployment gets, and it exists because "safe unless
- * you opt out" beats "buggy unless you opt in": before #838 a host stream send was
- * UNBOUNDED, so one peer that stopped reading froze the sending application thread — and
- * everything queued behind it — forever. Ten seconds is a conservative clamp on that: far
- * longer than any healthy loopback/LAN peer needs to accept one frame (so it never fires
- * in normal operation), and far shorter than "never" (so a stalled peer is detected and
- * shed while the node is still alive). It is the fallback of last resort — a deployment
- * that knows its own SLA injects that number instead.
- */
-inline constexpr std::uint32_t kDefaultLivenessWindowMs = 10000;
-
-/**
- * @brief The floor under every derived per-record send bound, milliseconds.
- *
- * Two jobs, neither of them a policy knob. (1) A derived bound is a DIVISION
- * (window ÷ peers in the round) and a division has no natural floor — the #956 lesson from
- * #837's MCU twin, where `SO_SNDTIMEO = 0` means *block forever*, so a bound that rounds
- * to zero would restore the very defect being fixed. (2) It is the `SO_SNDTIMEO` quantum
- * @ref posix_endpoint_t::set_snd_timeout arms, so a blocked send returns to observe the
- * record's deadline. A send-side quantum only: no receive wait is timed (#2147).
- */
-inline constexpr std::uint32_t kBoundedWaitMs = 100;
-
-/**
- * @brief Whole rings of consecutive strikes that mark a one-peer link's connection broken
- *        (#838): offers that found the peer's STREAM lane full and whose bounded write turn
- *        moved NOTHING, counted in rings of the lane's depth. A SAMPLE lane never strikes.
- *
- * The brokenness-detector trichotomy #837 established: one ring is transient backpressure,
- * and any turn that moves a byte resets the count. Two can straddle a burst. Three in a row,
- * each turn a whole bound long and each past a full lane, means the peer is not riding out a
- * burst at all. A multi-peer server's turns never wait, so its cap is
- * `kEgressStallStrikes` (#2144). A brokenness detector, not a tunable — hence a named
- * constant and NOT a config knob.
- */
-inline constexpr std::uint8_t kMaxConsecutiveStalls = 3;
-
-/**
  * @brief The concurrent-peer admission cap of a stream server that was given none (RFC-0006).
  *
  * A deployment injects its own `max_peers`, and that number alone is the cap: a newcomer past
- * it is refused, and no admitted peer is ever evicted for it. The cap is a RAM decision, so it
- * is not derived from the liveness window: since #2144 a server's peer writes never wait, and
- * the peers it admits no longer add up to blocking. `0` asks for this default instead.
+ * it is refused, and no admitted peer is ever evicted for it. The cap is a RAM decision alone:
+ * no write waits (#2144, #2252), so the peers it admits never add up to blocking. `0` asks for
+ * this default instead.
  */
 inline constexpr std::size_t kDefaultMaxPeers = 100;
 
@@ -181,8 +133,8 @@ inline constexpr std::size_t kDefaultMaxPeers = 100;
  */
 enum class write_outcome_t : std::uint8_t {
     COMPLETE, /**< @brief Every byte of the record reached the socket. */
-    STALLED,  /**< @brief The send bound expired with the record unfinished — the peer is
-                          not taking bytes. */
+    STALLED,  /**< @brief The socket filled with the record unfinished — the peer is not
+                          taking bytes right now. */
     FAILED,   /**< @brief Abandoned: the socket is dead (#66 lifecycle), or the call itself
                           was rejected past its one re-attempt (counted in
                           `write_fault_stats`). */
@@ -204,39 +156,6 @@ struct write_result_t {
      */
     std::size_t moved = 0;
 };
-
-/**
- * @brief Derive the per-record send bound for a round covering @p peers peers, ms (#838).
- *
- * One full fan-out round — one bounded record to EVERY peer in it, all of them stalled —
- * must fit inside ONE liveness window, because the round is what holds the write lock and
- * the sending application thread. So the window is divided by the number of peers actually
- * in the round (a fact in hand at the call site, not a guessed cap), and floored at
- * `kBoundedWaitMs` so the division can never yield "block forever".
- *
- * **What @p peers is for a DIRECTED send** (#1295). A directed send —
- * `bus_link_t::peer_link(name)->send()` — is a round of ONE, so passing the round's own
- * size handed it the whole window: N callers targeting N stalled peers each took a full
- * window, and because directed sends on one server then serialized on one write lock they
- * accumulated N of them. Bounded per call, unbounded per node — which is not a bound.
- * A directed send on a stream SERVER therefore divides by the server's admission cap
- * (@ref slot_server_t::max_peers), not by 1: the cap is the most peers that can ever be
- * directed at concurrently, so the sum over all of them is one window, the same claim the
- * broadcast round makes. The
- * genuinely single-peer endpoints (a dialled client, a one-peer LISTEN) still pass 1 —
- * for them the round of one IS the whole node.
- *
- * @param window_ms The peer liveness window (0 ⇒ `kDefaultLivenessWindowMs`).
- * @param peers     How many peers share this bound (0 and 1 both mean "one bound").
- * @return The per-record bound in milliseconds, never 0.
- */
-[[nodiscard]] constexpr std::uint32_t derive_send_bound_ms(std::uint32_t window_ms,
-                                                           std::size_t peers) noexcept {
-    const std::uint32_t window = window_ms != 0 ? window_ms : kDefaultLivenessWindowMs;
-    const std::uint32_t n = peers > 1 ? static_cast<std::uint32_t>(peers) : 1U;
-    const std::uint32_t bound = window / n;
-    return bound > kBoundedWaitMs ? bound : kBoundedWaitMs;
-}
 
 /**
  * @brief The shared wait scaffold of the POSIX socket transports (#2147).
@@ -334,19 +253,6 @@ class posix_endpoint_t {
     void stop_driver();
 
     /**
-     * @brief Arm the bounded SEND timeout (`SO_SNDTIMEO`, `kBoundedWaitMs`) on @p fd (#838).
-     *
-     * Without it a `send`/`sendmsg` into a peer whose TCP receive window is full blocks
-     * INDEFINITELY inside the writer's turn. The option is the short quantum rather than the
-     * policy bound: it makes each blocked syscall RETURN so the record's deadline
-     * (@ref stream_endpoint_t::write_all_iov's @p bound_ms, derived from the liveness window)
-     * can be observed, since a stream write may need several syscalls.
-     *
-     * @param fd The socket to arm.
-     */
-    static void set_snd_timeout(int fd);
-
-    /**
      * @brief The link's own socket's registration: a datagram socket, a dialled connection,
      *        or a listening socket. Its context is the link.
      */
@@ -406,16 +312,14 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *
      * @param tx_src   The link's egress store: every shared frame, each (peer, vertex) ring,
      *                 and a frame's gather overflow (@ref write_frame).
-     * @param one_peer This endpoint IS the one peer (a dialer, a one-peer listener), whose
-     *                 write turn waits for a bound: its strike cap is `kMaxConsecutiveStalls`.
-     *                 A multi-peer server passes false and keeps one peer per session; its
-     *                 writes never wait, so its cap is `kEgressStallStrikes`.
+     * @param one_peer This endpoint IS the one peer (a dialer, a one-peer listener). A
+     *                 multi-peer server passes false and keeps one peer per session. Neither
+     *                 one's writes wait (#2252), so both take the strike cap
+     *                 `kEgressStallStrikes`.
      */
     explicit stream_endpoint_t(mem::block_source_t& tx_src, bool one_peer = true,
                                wait_module_t* node = nullptr)
-        : posix_endpoint_t(node),
-          io_src_(&tx_src),
-          egress_(tx_src, one_peer ? kMaxConsecutiveStalls : kEgressStallStrikes) {
+        : posix_endpoint_t(node), io_src_(&tx_src), egress_(tx_src) {
         // Open from the start: a send before a peer connects finds no fd and sheds, counted.
         if (one_peer) egress_.open(peer_);
     }
@@ -435,54 +339,35 @@ class stream_endpoint_t : protected posix_endpoint_t {
     stream_endpoint_t& operator=(const stream_endpoint_t&) = delete;
 
     /**
-     * @brief Write @p bytes to @p fd completely, resuming partial writes.
+     * @brief Write what the socket takes now of @p bytes to @p fd, never waiting (#2252).
      *
-     * A stream write may stop anywhere; loops `send(2)` (MSG_NOSIGNAL — a
-     * vanished peer must not SIGPIPE the process) until done. A signal that
-     * interrupts the blocked write before any byte moved (EINTR) is RESUMED,
-     * not abandoned — the connection is healthy, and a partial frame left on a
-     * live framed stream would desync the peer's framing permanently (#903).
-     * A socket-dead errno drops the rest silently (link-down is #66 lifecycle);
-     * every OTHER errno means the call itself was malformed, is re-attempted once
-     * and counted in `write_fault_stats()` rather than mistaken for a
-     * disconnect (#948).
-     *
-     * A peer that stops taking bytes is bounded by @p bound_ms (#838): the write gives up
-     * once the deadline passes, and @ref write_result_t says how far it got.
+     * `send(2)` with `MSG_DONTWAIT` (and MSG_NOSIGNAL — a vanished peer must not SIGPIPE the
+     * process), looped while the socket keeps taking bytes. A full socket ends the write as
+     * `STALLED` with the bytes it took, so no caller waits on a peer that stopped reading,
+     * and no write reads a clock. A socket-dead errno drops the rest silently (link-down is
+     * #66 lifecycle); every OTHER errno means the call itself was malformed, is re-attempted
+     * once and counted in `write_fault_stats()` rather than mistaken for a disconnect (#948).
      *
      * @param fd    The destination fd; a negative fd is a no-op.
      * @param bytes The bytes to write.
-     * @param bound_ms Deadline for the WHOLE record, ms; 0 = unbounded (the pre-#838
-     *        behaviour, kept for sockets with no `SO_SNDTIMEO` armed — there a blocked
-     *        write never returns to observe a deadline anyway).
-     * @return How the write ended.
-     */
-    static write_result_t write_all(int fd, std::span<const std::byte> bytes,
-                                    std::uint32_t bound_ms = 0);
-
-    /**
-     * @brief Write the gathered @p vec entries to @p fd as ONE record, resuming partial
-     *        writes — the zero-copy scatter-gather twin of @ref write_all.
-     *
-     * `sendmsg(2)` (MSG_NOSIGNAL — a vanished peer must not SIGPIPE the process)
-     * emits every iovec in one syscall; a stream write may stop anywhere, so the
-     * loop resumes from the first unwritten byte. @p vec is READ-ONLY (#932): the
-     * gather is NOT consumed, so the same array may be fanned to many fds with no
-     * per-fd copy. EINTR resumes, a socket-dead errno drops the rest silently, and any
-     * other errno is a malformed call that is re-attempted once and counted — the same
-     * ONE write-fault policy as @ref write_all (#903 / #948; link-down is #66
-     * lifecycle).
-     *
-     * @param fd       The destination fd; a negative fd is a no-op.
-     * @param vec      The entries to gather, in order, as ONE record.
-     * @param bound_ms Deadline for the whole record, ms; 0 = unbounded (see @ref write_all).
-     * @param nonblock Write only what the socket takes now (`MSG_DONTWAIT`), reading no clock:
-     *                 a full socket ends the write as `STALLED` with the bytes it took. The
-     *                 shape of a multi-peer server, whose writes must never wait (#2144).
      * @return How the write ended, and how many bytes reached the socket.
      */
-    static write_result_t write_all_iov(int fd, std::span<const ::iovec> vec,
-                                        std::uint32_t bound_ms = 0, bool nonblock = false);
+    static write_result_t write_all(int fd, std::span<const std::byte> bytes);
+
+    /**
+     * @brief Write the gathered @p vec entries to @p fd as ONE record, never waiting — the
+     *        zero-copy scatter-gather twin of @ref write_all.
+     *
+     * `sendmsg(2)` emits every iovec in one syscall; a stream write may stop anywhere, so the
+     * loop resumes from the first unwritten byte while the socket takes more. @p vec is
+     * READ-ONLY (#932): the gather is NOT consumed, so the same array may be fanned to many
+     * fds with no per-fd copy. The same ONE write-fault policy as @ref write_all (#948).
+     *
+     * @param fd  The destination fd; a negative fd is a no-op.
+     * @param vec The entries to gather, in order, as ONE record.
+     * @return How the write ended, and how many bytes reached the socket.
+     */
+    static write_result_t write_all_iov(int fd, std::span<const ::iovec> vec);
 
     /**
      * @brief One egress write turn: @p f from its byte @p off, gathered as one write — the
@@ -492,21 +377,17 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * than thrown, which writes nothing and reports a failed turn (a shed frame, never a
      * desync).
      *
-     * @param fd       The destination fd.
-     * @param f        The frame.
-     * @param off      Bytes of @p f already on the wire.
-     * @param bound_ms The turn's send bound (see @ref write_all); ignored with @p nonblock.
-     * @param nonblock Write without waiting (see @ref write_all_iov).
+     * @param fd  The destination fd.
+     * @param f   The frame.
+     * @param off Bytes of @p f already on the wire.
      */
-    egress_step_t write_frame(int fd, const egress_frame_t& f, std::size_t off,
-                              std::uint32_t bound_ms, bool nonblock);
+    egress_step_t write_frame(int fd, const egress_frame_t& f, std::size_t off);
 
     /**
      * @brief One egress write turn of the caller's own gathered record (the direct write).
-     * @see write_frame for the parameters.
+     * @see write_all_iov for the parameters.
      */
-    static egress_step_t write_gather(int fd, std::span<const ::iovec> vec, std::uint32_t bound_ms,
-                                      bool nonblock);
+    static egress_step_t write_gather(int fd, std::span<const ::iovec> vec);
 
     /**
      * @brief A shared frame of the gathered record @p rec: what comes before @p value's links
@@ -574,11 +455,11 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * writer role and writes its record straight from its own memory through @p direct, with
      * the fd read inside the role; one that finds a write in flight puts a reference to the
      * shared frame @p frame builds in the peer's ring and returns at once. So no publisher
-     * waits on another publisher's write to a stalled peer (#1619); the writer's own wait
-     * stays bounded per turn by the liveness window (#838).
+     * waits on another publisher's write to a stalled peer (#1619), and the writer itself
+     * never waits (#2252): what the socket did not take stays held, and the driving thread
+     * resumes it on writability.
      *
-     * @tparam Direct Callable `egress_step_t(int fd, std::uint32_t bound_ms)`: write the
-     *                caller's own record within the turn's bound.
+     * @tparam Direct Callable `egress_step_t(int fd)`: write the caller's own record.
      * @param frame  Builds the shared frame (the record copied, a kept value by reference)
      *               when the record has to wait.
      * @param lane   The ring it waits in: its vertex's, or the control lane (a default).
@@ -586,7 +467,6 @@ class stream_endpoint_t : protected posix_endpoint_t {
     template <class Direct>
     void egress_send(function_ref_t<egress_frame_t*()> frame, Direct&& direct,
                      const graph::delivery_lane_t& lane = {}) {
-        const std::uint32_t bound = derive_send_bound_ms(liveness_window_ms_, 1);
         int fd = -1;
         const egress_result_t r = egress_.send(
             peer_, lane, frame,
@@ -594,12 +474,12 @@ class stream_endpoint_t : protected posix_endpoint_t {
                 fd = conn_fd_.load(std::memory_order_acquire);
                 // No live peer (still dialing, or torn down) => a counted drop.
                 if (fd < 0) return egress_step_t{0, false, true};
-                return held_turn(std::forward<Direct>(direct)(fd, bound));
+                return held_turn(std::forward<Direct>(direct)(fd));
             },
             [&](const egress_frame_t& f, std::size_t off) {
                 fd = conn_fd_.load(std::memory_order_acquire);
                 if (fd < 0) return egress_step_t{0, false, true};
-                return held_turn(write_frame(fd, f, off, bound, false));
+                return held_turn(write_frame(fd, f, off));
             },
             [&] { condemn_fd(fd); });
         note_egress(r);
@@ -676,13 +556,9 @@ class stream_endpoint_t : protected posix_endpoint_t {
     void shut_down_stream();
 
     std::atomic<int> conn_fd_{-1}; /**< @brief The live peer connection (-1 = none). */
-    /** @brief The injected peer liveness window, ms (0 = `kDefaultLivenessWindowMs`) —
-     *         the number every per-record send bound on this endpoint derives from
-     *         (`derive_send_bound_ms`). Set once at construction, read-only after. */
-    std::uint32_t liveness_window_ms_ = 0;
     /** @brief A byte of ours went out to the ONE peer since the last liveness check (#2198), in
-     *         the hole after @ref liveness_window_ms_.
-     *         Set by the writer, taken by @ref sweep_one; a new session sets it. */
+     *         the hole after @ref conn_fd_. Set by the writer, taken by @ref sweep_one; a new
+     * session sets it. */
     std::atomic<bool> tx_moved_{true};
     /** @brief Write turns that found the peer's socket full and moved nothing (#838, #2144)
      *         — the "how often did a stalled peer refuse us" counter, each one a strike.
@@ -795,28 +671,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
         return stalled_tx_.load(std::memory_order_relaxed);
     }
 
-    /** @brief The injected peer liveness window this server bounds its sends by, ms —
-     *         the value as configured, `0` meaning `kDefaultLivenessWindowMs` (#838). */
-    [[nodiscard]] std::uint32_t liveness_window_ms() const noexcept { return liveness_window_ms_; }
-
     /** @brief The concurrent-peer admission cap ENFORCED on the accept path: the injected
-     *         cap, or `%kDefaultMaxPeers` for `0`, so never 0. Also the denominator of
-     *         @ref directed_send_bound_ms. */
+     *         cap, or `%kDefaultMaxPeers` for `0`, so never 0. */
     [[nodiscard]] std::size_t max_peers() const noexcept { return max_peers_; }
-
-    /**
-     * @brief The per-record send bound a DIRECTED send to one peer of this server gets, ms
-     *        (#1295).
-     *
-     * The liveness window divided by @ref max_peers — NOT by 1. A directed send is a round
-     * of one, but it is not the only one a node can have in flight: every open peer can be
-     * the target of a concurrent directed send. Dividing by the cap makes the SUM over every
-     * peer that could be stalled one window. Since #2144 a server's peer writes never wait,
-     * so only the ws server's one blocking write, its `101`, still uses it.
-     */
-    [[nodiscard]] std::uint32_t directed_send_bound_ms() const noexcept {
-        return derive_send_bound_ms(liveness_window_ms_, max_peers_);
-    }
 
     /**
      * @brief The mode authority (#889): the `peer_named` this server was constructed with.
@@ -1023,20 +880,16 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * @param state_src  The store the slot table, every session and each poll pass's tables
      *                   are drawn from (the link's `memory.state`, #1780). Must outlive the
      *                   server.
-     * @param liveness_window_ms The app-provided peer liveness window, ms (0 =
-     *                   `kDefaultLivenessWindowMs`) — see @ref directed_send_bound_ms (#1295).
      * @param node       The node's wait module, or null for a thread of the server's own
      *                   (@ref posix_endpoint_t).
      */
-    slot_server_t(std::size_t max_peers, bool peer_named, std::uint32_t liveness_window_ms = 0,
+    slot_server_t(std::size_t max_peers, bool peer_named,
                   mem::block_source_t& src = mem::net_source(),
                   mem::block_source_t& state_src = mem::net_source(), wait_module_t* node = nullptr)
         : stream_endpoint_t(src, false, node),
           slots_(state_src),
           max_peers_(max_peers != 0 ? max_peers : kDefaultMaxPeers),
-          peer_named_(peer_named) {
-        liveness_window_ms_ = liveness_window_ms;
-    }
+          peer_named_(peer_named) {}
 
     /**
      * @brief Closes the listen socket and sweeps every slot's fd.
