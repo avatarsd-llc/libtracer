@@ -22,11 +22,13 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <utility>
 
 #include "libtracer/transport_can.hpp"
+#include "libtracer/wait.hpp"
 
 namespace tr::net {
 
@@ -84,6 +86,7 @@ void socketcan_link_t::start() {
 }
 
 socketcan_link_t::~socketcan_link_t() {
+    assert(!on_callback_thread() && "a link's destructor runs off every callback thread");
     stop_.store(true, std::memory_order_relaxed);
     if (started_) {
         ::pthread_join(thread_, nullptr);
@@ -133,6 +136,7 @@ void socketcan_link_t::write_raw(const can_frame_data_t& frame) {
 }
 
 void socketcan_link_t::run() {
+    const callback_thread_scope_t delivering;  // a removal delivered here waits for nothing
     while (!stop_.load(std::memory_order_relaxed)) {
         canfd_frame f{};
         const ssize_t n = ::read(fd_, &f, sizeof(f));

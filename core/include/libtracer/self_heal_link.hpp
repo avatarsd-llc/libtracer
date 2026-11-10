@@ -292,8 +292,9 @@ class self_heal_link_t final : public transport_t {
     /**
      * @brief One counted hold on a `sock_t` — what `inner_` and an in-flight send keep.
      *        The last hold to go destroys the socket (joining its receive thread) and
-     *        returns its block, on whichever thread drops it, as the `std::shared_ptr` it
-     *        replaces did.
+     *        returns its block. That last hold is always the corpse list's, dropped by the
+     *        worker or the destructor, never a send's: the list lets go only of a corpse no
+     *        one else holds.
      */
     class sock_ref_t {
        public:
@@ -386,8 +387,13 @@ class self_heal_link_t final : public transport_t {
     /** @brief Park @p dead on the corpse list (it adopts the hold); caller holds `m_`. */
     void park_locked(sock_ref_t dead) noexcept;
 
-    /** @brief Drop the list's hold on every corpse from @p head; call with `m_` RELEASED. */
-    static void drop_corpses(sock_t* head) noexcept;
+    /** @brief Shut every corpse from @p head down and drop the list's hold on each one that
+     *         no send still holds (every one when @p all); call with `m_` RELEASED.
+     *  @return The corpses kept, for `keep_corpses`. */
+    static sock_t* drop_corpses(sock_t* head, bool all = false) noexcept;
+
+    /** @brief Put corpses `drop_corpses` kept back on the list; caller holds `m_`. */
+    void keep_corpses(sock_t* kept) noexcept;
 
     /** @brief Serializes every engine transition. Ordering: `m_` is taken AFTER the
      *         owner's control mutex (acquire/release under `ctl_m_`) and never before it;
@@ -420,6 +426,7 @@ class self_heal_link_t final : public transport_t {
     bool stop_ = false;                          /**< @brief Terminal; set by @ref stop. */
     bool born_ = false;                          /**< @brief @ref born has run: the worker may
                                                              start (#2353). */
+    bool reap_due_ = false; /**< @brief A corpse was parked since the last reap. */
 
     sock_ref_t inner_;          /**< @brief The live socket (UP only). */
     sock_t* corpses_ = nullptr; /**< @brief Dead sockets awaiting reap — an intrusive list

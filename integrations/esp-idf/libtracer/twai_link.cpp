@@ -18,6 +18,7 @@
 
 #include "driver/gpio.h"
 #include "freertos/task.h"
+#include "libtracer/wait.hpp"
 
 namespace tr::net {
 
@@ -345,6 +346,7 @@ bool twai_link_t::on_tx_done_isr(twai_node_handle_t node, const twai_tx_done_eve
 }
 
 void twai_link_t::run() {
+    const callback_thread_scope_t delivering;  // a removal delivered here waits for nothing
     can_frame_data_t frame;
     while (!stop_.load(std::memory_order_relaxed)) {
         // A bounded wait keeps the stop_ poll responsive (the SO_RCVTIMEO idiom).

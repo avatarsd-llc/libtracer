@@ -276,6 +276,10 @@ class posix_endpoint_t {
      *         when it is only shut down and the destructor closes it. */
     void release_listen(int& fd) noexcept;
 
+    /** @brief True once a deferred teardown shut the link: its buffers and descriptors are
+     *         left for the destructor. */
+    [[nodiscard]] bool shut() const noexcept { return shut_.load(std::memory_order_relaxed); }
+
     /**
      * @brief The link's own socket's registration: a datagram socket, a dialled connection,
      *        or a listening socket. Its context is the link.
@@ -968,7 +972,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * Two phases: stop name resolution under @ref peers_m_ (so no new sender targets the
      * dying slot), then clear `open`, shut the fd down and close the session's egress —
      * which waits out a writer in flight — BEFORE resetting the fd and `close(2)`ing it.
-     * @ref on_slot_reset clears the protocol buffers, and the departure seam
+     * @ref on_slot_reset clears the protocol buffers, except on a shut link, whose session
+     * buffers live until its destructor. The egress close and the departure seam run once
+     * per session, whichever of concurrent teardowns gets there first. The departure seam
      * (RFC-0009 §D.5) fires LAST with no transport lock held — the notifier re-enters the
      * routing plane. Which seam depends on @ref peer_named() — the departed peer's own name
      * when peer-named, the whole link when flat, and then only once no open session is

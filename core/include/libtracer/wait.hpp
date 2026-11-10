@@ -152,6 +152,19 @@ inline thread_local unsigned g_callback_depth = 0;
 [[nodiscard]] inline bool on_callback_thread() noexcept { return g_callback_depth != 0; }
 
 /**
+ * @brief Marks the calling thread as one that runs link callbacks (@ref on_callback_thread)
+ *        for its lifetime. Every thread that delivers a link's callbacks holds one while it
+ *        delivers: a wait module's `run`, a CAN receive thread, the self-heal worker's
+ *        liveness publish.
+ */
+struct callback_thread_scope_t {
+    callback_thread_scope_t() noexcept { ++g_callback_depth; }
+    ~callback_thread_scope_t() { --g_callback_depth; }
+    callback_thread_scope_t(const callback_thread_scope_t&) = delete;
+    callback_thread_scope_t& operator=(const callback_thread_scope_t&) = delete;
+};
+
+/**
  * @brief The node's one wait module (ADR-0087 §3): every socket wait on the node, with no
  *        timeout.
  *
