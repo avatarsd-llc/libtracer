@@ -206,9 +206,8 @@ struct ws_server_transport_t::framing_t {
 
 ws_server_transport_t::ws_server_transport_t(std::uint16_t bind_port,
                                              const ws_server_config_t& config)
-    : stream_server_base_t(config.max_peers, config.peer_named, config.liveness_window_ms,
-                           config.memory.io_or_default(), config.memory.state_or_default(),
-                           config.wait),
+    : stream_server_base_t(config.max_peers, config.peer_named, config.memory.io_or_default(),
+                           config.memory.state_or_default(), config.wait),
       backend_(config.memory.rx) {
     max_frame_ = length_prefix_framer_t::configured_cap(config.max_frame);  // tighten-only (#1035)
     max_handshake_ = handshake_cap(config.max_handshake);                   // tighten-only (#934)
@@ -456,13 +455,11 @@ ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_
       stack_src_(&config.memory.stack_or_default()) {
     mem::block_source_t* const egress_src = config.memory.io;
     const std::size_t max_frame = config.max_frame;
-    const std::uint32_t liveness_window_ms = config.liveness_window_ms;
     const std::size_t max_handshake = config.max_handshake;
     // Wire the BASE's egress store to the same one, before anything can send: the gather
     // temporary of `transport_t::send(iov)` and this class's masked frames are then one
     // store, not two. First statement on purpose, before anything can send.
     if (egress_src != nullptr) set_egress_source(*egress_src);
-    liveness_window_ms_ = liveness_window_ms;                        // the #838 send bound's source
     max_frame_ = length_prefix_framer_t::configured_cap(max_frame);  // tighten-only (#1035)
     // One home for the resolution, shared with the accept side (#934): a dialled server is
     // no more trusted with our pre-auth memory than a peer that dialled us.
@@ -489,11 +486,6 @@ ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_
         ::close(fd);
         return;
     }
-
-    // The bounded send (#838), armed before the first byte goes out: without it the
-    // handshake request AND every later frame block forever on a peer that stops reading,
-    // inside the writer's turn.
-    set_snd_timeout(fd);
 
     // Bytes the server pipelined behind its 101 — carried out of the handshake and into
     // the recv loop's buffer, never re-read from the socket (they are already off it).
@@ -590,7 +582,7 @@ void ws_client_transport_t::send_masked(std::span<const std::span<const std::byt
     // write the socket holds keeps the SAME frame on the wire, never a second masked copy; a
     // publisher that arrives while a write is in flight shares it. So the link keeps no
     // buffer between sends, and exhaustion drops the frame (#848, #932) instead of aborting
-    // under -fno-exceptions. Each writer turn is still bounded by the liveness window (#838).
+    // under -fno-exceptions. The writer never waits (#2252).
     const std::uint32_t key = next_mask_key();
     std::size_t len = 0;
     for (const std::span<const std::byte>& part : frame) len += part.size();
@@ -602,11 +594,11 @@ void ws_client_transport_t::send_masked(std::span<const std::span<const std::byt
     });
     egress_send(
         once,
-        [&](int fd, std::uint32_t bound) {
+        [&](int fd) {
             const egress_frame_t* const f = once();
             // No block for the frame => a counted drop (#932), nothing written.
             if (f == nullptr) return egress_step_t{0, false, true};
-            return write_frame(fd, *f, 0, bound, false);
+            return write_frame(fd, *f, 0);
         },
         lane);
 }
@@ -640,10 +632,10 @@ bool ws_client_transport_t::handshake(int fd, std::string_view host, std::uint16
            "Sec-WebSocket-Key: "
         << key << "\r\nSec-WebSocket-Version: 13\r\n\r\n";
     if (!req.ok) return false;
-    // Bounded (#838) — this runs in the CONSTRUCTOR, so an unbounded write here hangs the
-    // application thread that is wiring the link. No sender can race it: the fd is not
-    // published to conn_fd_ until the handshake has succeeded.
-    write_all(fd, req.bytes(), derive_send_bound_ms(liveness_window_ms_, 1));
+    // Nonblocking (#2252): the request is far smaller than a fresh socket's send buffer, so a
+    // socket that does not take all of it at once is not one to dial. No sender can race it:
+    // the fd is not published to conn_fd_ until the handshake has succeeded.
+    if (write_all(fd, req.bytes()).outcome != write_outcome_t::COMPLETE) return false;
 
     // Read the response header block (CRLFCRLF) with plain blocking reads: no receive
     // timeout (#2147). A server that never answers holds the dial, as the connect does.
@@ -722,13 +714,11 @@ struct ws_client_transport_t::framing_t {
         const std::size_t plen =
             ws::encode_client_control(pong, ws::opcode_t::PONG, payload, link.next_mask_key());
         // Through the egress like any frame (#2144): never interleaved with a publisher's
-        // record, and bounded per turn (#838).
+        // record, and never waiting (#2252).
         const ::iovec pv{pong.data(), plen};
         const std::span<const ::iovec> rec(&pv, 1);
         egress_once_t once([&] { return link.frame_of(rec); });
-        link.egress_send(once, [&](int wfd, std::uint32_t bound) {
-            return link.write_gather(wfd, rec, bound, false);
-        });
+        link.egress_send(once, [&](int wfd) { return link.write_gather(wfd, rec); });
     }
     /** @brief A CLOSE is not answered: the connection is torn down at once. */
     void closing(std::span<const std::byte>) const {}
