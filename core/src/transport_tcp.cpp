@@ -156,8 +156,6 @@ tcp_transport_t::tcp_transport_t(std::string_view peer_host, std::uint16_t peer_
       recv_stack_(config.recv_stack),
       stack_src_(&config.memory.stack_or_default()) {
     const std::size_t max_frame = config.max_frame;
-    const std::uint32_t liveness_window_ms = config.liveness_window_ms;
-    liveness_window_ms_ = liveness_window_ms;                        // the #838 send bound's source
     max_frame_ = length_prefix_framer_t::configured_cap(max_frame);  // tighten-only (#1035)
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return;
@@ -170,9 +168,6 @@ tcp_transport_t::tcp_transport_t(std::string_view peer_host, std::uint16_t peer_
         ::close(fd);
         return;
     }
-    // The bounded send (#838): without it a send into a peer that has stopped reading blocks
-    // forever in the writer's turn, and every record behind it waits in the ring.
-    set_snd_timeout(fd);
     set_nodelay(fd);
     conn_fd_.store(fd, std::memory_order_relaxed);
     came_up_ = true;  // the ok() fact (#1059): the dial succeeded; liveness is link_up()
@@ -209,8 +204,6 @@ tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, const tcp_config_t& co
       backend_(config.memory.rx) {
     const std::size_t max_frame = config.max_frame;
     const std::size_t recv_stack = config.recv_stack;
-    const std::uint32_t liveness_window_ms = config.liveness_window_ms;
-    liveness_window_ms_ = liveness_window_ms;                        // the #838 send bound's source
     max_frame_ = length_prefix_framer_t::configured_cap(max_frame);  // tighten-only (#1035)
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ < 0) return;
@@ -293,12 +286,10 @@ void tcp_transport_t::send_record(std::span<const std::span<const std::byte>> pa
     // straight from the caller's gather; one that finds a write in flight leaves ONE shared
     // frame in its vertex's ring and returns, never waiting on another publisher's write
     // (#1619). The frame copies the prefix and the head — header-sized — and keeps one
-    // reference to the value. The writer's turn is bounded by the liveness window (#838).
+    // reference to the value. The writer never waits (#2252): what the socket did not take is
+    // held and resumed on writability.
     egress_once_t once([&] { return frame_of(rec.span(), value); });
-    egress_send(
-        once,
-        [&](int fd, std::uint32_t bound) { return write_gather(fd, rec.span(), bound, false); },
-        lane);
+    egress_send(once, [&](int fd) { return write_gather(fd, rec.span()); }, lane);
 }
 
 void tcp_transport_t::on_conn(void* ctx, wait_source_t& self, std::uint8_t ready) {
@@ -326,7 +317,6 @@ void tcp_transport_t::on_listen(void* ctx, wait_source_t& self, std::uint8_t rea
     link.accept_one(
         link.listen_fd_,
         [&link](int fd) {
-            set_snd_timeout(fd);  // the #838 egress bound, same as the DIAL socket's
             set_nodelay(fd);
             link.ingress_.reset();
             return true;
@@ -356,9 +346,8 @@ struct tcp_server_transport_t::session_t : slot_server_t::session_base_t {
 
 tcp_server_transport_t::tcp_server_transport_t(std::uint16_t bind_port,
                                                const tcp_server_config_t& config)
-    : stream_server_base_t(config.max_peers, config.peer_named, config.liveness_window_ms,
-                           config.memory.io_or_default(), config.memory.state_or_default(),
-                           config.wait),
+    : stream_server_base_t(config.max_peers, config.peer_named, config.memory.io_or_default(),
+                           config.memory.state_or_default(), config.wait),
       backend_(config.memory.rx) {
     max_frame_ = length_prefix_framer_t::configured_cap(config.max_frame);  // tighten-only (#1035)
     if (!bind_listen(bind_port)) return;

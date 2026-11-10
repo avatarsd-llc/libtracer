@@ -8,7 +8,6 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
@@ -17,7 +16,6 @@
 #include <atomic>
 #include <cerrno>
 #include <charconv>
-#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <utility>
@@ -39,38 +37,10 @@ constexpr int MSG_NOSIGNAL = 0;
  * @brief How a failed `send(2)`/`sendmsg(2)` attempt is classified (#903 / #948).
  */
 enum class write_fault_t : std::uint8_t {
-    RESUME,         /**< @brief EINTR on a healthy connection — resume where the write stopped. */
     PEER_GONE,      /**< @brief This socket is dead — drop the rest silently (#66 lifecycle). */
-    STALLED,        /**< @brief The socket's bounded send expired: the peer is not taking
-                                bytes (#838). Healthy call, healthy socket, absent peer. */
+    STALLED,        /**< @brief The socket is full: the peer is not taking bytes right now
+                                (#838). Healthy call, healthy socket, slow or absent peer. */
     MALFORMED_CALL, /**< @brief The arguments were rejected — OUR defect, not a disconnect. */
-};
-
-/**
- * @brief The deadline that bounds ONE record's write — and, with it, the write-mutex hold
- *        the caller is inside (#838).
- *
- * A per-syscall `SO_SNDTIMEO` alone does not bound a RECORD: a stream write may need
- * several syscalls, and a peer that accepts one byte per timeout would restart the clock
- * forever. So the bound is a monotonic deadline taken once at the top of the record and
- * consulted before every attempt. `bound_ms == 0` reproduces the pre-#838 unbounded
- * behaviour exactly, for sockets that carry no send timeout at all.
- */
-struct send_deadline_t {
-    std::chrono::steady_clock::time_point at{}; /**< @brief When the record is abandoned. */
-    bool bounded = false;                       /**< @brief False ⇒ no deadline at all. */
-    int flags = 0; /**< @brief `MSG_DONTWAIT` for a nonblocking write, which ends `STALLED`
-                               the first time the socket is full (#2144), else 0. */
-
-    /** @brief Reads the clock only for a bounded write: an unbounded (@p bound_ms 0) or
-     *         nonblocking one costs none (#2144). */
-    send_deadline_t(std::uint32_t bound_ms, bool nonblock)
-        : bounded(bound_ms != 0 && !nonblock), flags(static_cast<int>(nonblock) * MSG_DONTWAIT) {
-        if (bounded) at = std::chrono::steady_clock::now() + std::chrono::milliseconds(bound_ms);
-    }
-
-    /** @brief True once the record may no longer be worked on. */
-    [[nodiscard]] bool expired() const { return bounded && std::chrono::steady_clock::now() >= at; }
 };
 
 /** @brief Process-wide malformed-call tally (#948) — see @ref write_fault_stats_t. Word-wide,
@@ -83,27 +53,24 @@ std::atomic<int> g_last_malformed_errno{0};
 /**
  * @brief The ONE write-fault policy of the one full-write loop (#903 / #948 / #838).
  *
- * Four outcomes, not two — conflating the last with the middle is #948, where one
+ * Three outcomes, not two — conflating the last with the first is #948, where one
  * unimplemented flag on one platform's `sendmsg` made every data frame vanish while the
- * connection stayed up, looking exactly like a peer that never asked for anything:
+ * connection stayed up, looking exactly like a peer that never asked for anything. Every
+ * write is nonblocking (#2252), so no write sleeps and none is interrupted by a signal: an
+ * `EINTR` has nothing to resume and is an ordinary malformed call.
  *
- * - **RESUME.** A blocking `send`/`sendmsg` that a signal interrupts BEFORE any byte moved
- *   fails with EINTR — the connection is untouched and healthy, so the write must resume
- *   where it stopped. Abandoning it would leave a partial frame on a live framed stream and
- *   desync the peer's framing permanently (every later byte parses under the wrong length).
  * - **PEER_GONE.** An errno that says this fd is no longer a usable connection (the peer
  *   went away, the route died, the fd is not an open socket), plus the `n == 0` a stream
  *   write of a non-empty buffer must never return. Nothing is deliverable on it: drop the
  *   rest silently, link-down is #66 lifecycle. `EBADF`/`ENOTSOCK` sit here deliberately —
  *   a recycled fd is indistinguishable from a vanished peer, and a teardown race must not
  *   fabricate a defect report in the counter below.
- * - **STALLED.** `EAGAIN`/`EWOULDBLOCK`: the socket's `SO_SNDTIMEO` (#838, armed by
- *   @ref posix_endpoint_t::set_snd_timeout) expired with nothing written, because the
- *   peer's receive window is full. Nothing is wrong with the call OR the socket — the PEER
- *   is not taking bytes. It used to land in MALFORMED_CALL below, which would both mis-file
- *   a stalled peer as a libtracer defect and abandon the record after one re-attempt; it is
- *   its own arm precisely so the record can be retried until the caller's deadline and then
- *   attributed to the peer that earned it.
+ * - **STALLED.** `EAGAIN`/`EWOULDBLOCK`: the socket is full, because the peer's receive
+ *   window is. Nothing is wrong with the call OR the socket — the PEER is not taking bytes
+ *   right now. It used to land in MALFORMED_CALL below, which would both mis-file a stalled
+ *   peer as a libtracer defect and abandon the record after one re-attempt; it is its own
+ *   arm so the egress keeps the frame and its offset, resumes it on writability, and
+ *   attributes the stall to the peer that earned it.
  * - **MALFORMED_CALL.** Everything else: the kernel rejected the ARGUMENTS (`EOPNOTSUPP`,
  *   `EINVAL`, …) or ran short of buffers (`ENOBUFS`). The socket is fine and the bytes are
  *   still deliverable, so this must never be read as a disconnect — it is counted, its errno
@@ -115,8 +82,6 @@ write_fault_t classify_write_fault(ssize_t n) {
     // errno is meaningful only for a negative return.
     if (n == 0) return write_fault_t::PEER_GONE;
     switch (errno) {
-        case EINTR:
-            return write_fault_t::RESUME;
         case EAGAIN:
 #if EWOULDBLOCK != EAGAIN
         case EWOULDBLOCK:
@@ -259,13 +224,6 @@ void posix_endpoint_t::stop_and_join() {
     w->detach(src_);
 }
 
-void posix_endpoint_t::set_snd_timeout(int fd) {
-    // The 100 ms quantum that makes a blocked send return so the record deadline (#838) can
-    // be observed.
-    timeval tv{.tv_sec = 0, .tv_usec = static_cast<suseconds_t>(kBoundedWaitMs) * 1000};
-    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-}
-
 stream_endpoint_t::~stream_endpoint_t() {
     // The derived destructor already ran stop_and_join (its first act, per the
     // posix_endpoint_t teardown invariant), so nothing races this exchange.
@@ -274,25 +232,19 @@ stream_endpoint_t::~stream_endpoint_t() {
     egress_.close(peer_);  // every waiting frame and lane back to the link's store
 }
 
-write_result_t stream_endpoint_t::write_all(int fd, std::span<const std::byte> bytes,
-                                            std::uint32_t bound_ms) {
+write_result_t stream_endpoint_t::write_all(int fd, std::span<const std::byte> bytes) {
     const ::iovec v{const_cast<std::byte*>(bytes.data()), bytes.size()};
     // An empty record is a complete one, with no syscall.
-    return write_all_iov(fd, std::span<const ::iovec>(&v, bytes.empty() ? 0 : 1), bound_ms, false);
+    return write_all_iov(fd, std::span<const ::iovec>(&v, bytes.empty() ? 0 : 1));
 }
 
-write_result_t stream_endpoint_t::write_all_iov(int fd, std::span<const ::iovec> vec,
-                                                std::uint32_t bound_ms, bool nonblock) {
+write_result_t stream_endpoint_t::write_all_iov(int fd, std::span<const ::iovec> vec) {
     if (fd < 0) return {write_outcome_t::FAILED, 0};
-    const send_deadline_t dl(bound_ms, nonblock);
     std::size_t moved = 0;  // bytes of this record on the socket
     bool retry_spent = false;
     std::size_t i = 0;     // the first entry not yet fully written
     std::size_t skip = 0;  // bytes of entry i already written
     while (i < vec.size()) {
-        // Bounded per record, not per syscall (#838): the deadline covers this loop and
-        // therefore the caller's whole writer turn.
-        if (dl.expired()) return {write_outcome_t::STALLED, moved};
         msghdr msg{};
         // sendmsg does not modify the iovec array; the cast is the C API's missing const,
         // not a licence to consume the caller's gather (#932). A write that stopped INSIDE
@@ -306,14 +258,12 @@ write_result_t stream_endpoint_t::write_all_iov(int fd, std::span<const ::iovec>
             msg.msg_iov = &rest;
             msg.msg_iovlen = 1;
         }
-        const ssize_t n = send_gather(fd, &msg, dl.flags);
+        // Nonblocking (#2252): a full socket refuses the call at once, so no caller waits on
+        // a peer that stopped reading.
+        const ssize_t n = send_gather(fd, &msg, MSG_DONTWAIT);
         if (n <= 0) {
             const write_fault_t fault = classify_write_fault(n);
-            if (fault == write_fault_t::RESUME) continue;
-            if (fault == write_fault_t::STALLED) {
-                if (dl.flags != 0) return {write_outcome_t::STALLED, moved};  // full: never wait
-                continue;  // re-attempt until the deadline
-            }
+            if (fault == write_fault_t::STALLED) return {write_outcome_t::STALLED, moved};
             if (fault == write_fault_t::PEER_GONE)
                 return {write_outcome_t::FAILED, moved};  // dead socket → drop the rest
             if (!retry_malformed_call(retry_spent)) return {write_outcome_t::FAILED, moved};
@@ -360,13 +310,11 @@ std::string_view format_session_name(peer_handle_t peer, std::span<char> out) no
 }
 }  // namespace
 
-egress_step_t stream_endpoint_t::write_gather(int fd, std::span<const ::iovec> vec,
-                                              std::uint32_t bound_ms, bool nonblock) {
-    return step_of(write_all_iov(fd, vec, bound_ms, nonblock));
+egress_step_t stream_endpoint_t::write_gather(int fd, std::span<const ::iovec> vec) {
+    return step_of(write_all_iov(fd, vec));
 }
 
-egress_step_t stream_endpoint_t::write_frame(int fd, const egress_frame_t& f, std::size_t off,
-                                             std::uint32_t bound_ms, bool nonblock) {
+egress_step_t stream_endpoint_t::write_frame(int fd, const egress_frame_t& f, std::size_t off) {
     // One gathered write from byte off: the head the frame copied, then a kept value's
     // links straight from the published block (RFC-0028 §6.9).
     std::array<std::span<const std::byte>, kMaxInlineIov> inline_spans;
@@ -381,7 +329,7 @@ egress_step_t stream_endpoint_t::write_frame(int fd, const egress_frame_t& f, st
     const std::size_t n = f.spans_from(off, sp);
     for (std::size_t k = 0; k < n; ++k)
         vec[k] = ::iovec{const_cast<std::byte*>(sp[k].data()), sp[k].size()};
-    return write_gather(fd, std::span<const ::iovec>(vec, n), bound_ms, nonblock);
+    return write_gather(fd, std::span<const ::iovec>(vec, n));
 }
 
 std::size_t stream_endpoint_t::retained_parts(std::span<std::span<const std::byte>> parts,
@@ -449,7 +397,7 @@ void stream_endpoint_t::flush_one(int fd) {
     note_egress(egress_.flush(
         peer_,
         [&](const egress_frame_t& f, std::size_t off) {
-            return note_moved(tx_moved_, write_frame(fd, f, off, 0, true));
+            return note_moved(tx_moved_, write_frame(fd, f, off));
         },
         [fd] { condemn_fd(fd); }));
     disarm_flushed(src_, peer_);
@@ -676,9 +624,9 @@ void slot_server_t::send_one(session_base_t& s, function_ref_t<egress_frame_t*()
     // it, and teardown closes the egress (waiting the role out) before resetting it.
     const auto fd = [&s] { return s.fd.load(std::memory_order_relaxed); };
     const egress_result_t r = egress_.send(
-        s.egress, lane, frame, [&] { return session_turn(s, write_gather(fd(), rec, 0, true)); },
+        s.egress, lane, frame, [&] { return session_turn(s, write_gather(fd(), rec)); },
         [&](const egress_frame_t& f, std::size_t off) {
-            return session_turn(s, write_frame(fd(), f, off, 0, true));
+            return session_turn(s, write_frame(fd(), f, off));
         },
         [&] { condemn_fd(fd()); });
     note_egress(r);
@@ -711,7 +659,7 @@ void slot_server_t::send_to(session_base_t& s, std::span<const ::iovec> rec,
 void slot_server_t::flush_peer(session_base_t& s) {
     const auto fd = [&s] { return s.fd.load(std::memory_order_relaxed); };
     const auto write = [&](const egress_frame_t& f, std::size_t off) {
-        return note_moved(s.tx_moved, write_frame(fd(), f, off, 0, true));
+        return note_moved(s.tx_moved, write_frame(fd(), f, off));
     };
     const auto condemn = [&] { condemn_fd(fd()); };
     note_egress(egress_.flush(s.egress, write, condemn));
@@ -773,10 +721,6 @@ void slot_server_t::accept_peer() {
             format_session_name(slot->handle, std::span<char>(slot->name, kPeerNameChars - 1));
         slot->name[named.size()] = '\0';
     }
-    // The bounded send (#838), armed here rather than in either derived on_accept. Every
-    // egress write on a server is nonblocking (#2144), the WS 101 included; the bound stays
-    // armed for any blocking write a derived server makes.
-    set_snd_timeout(fd);
     // Socket options and the slot's protocol buffers, then its handshake stance: a raw
     // stream peer is open the moment it is accepted, a WS peer only past its 101.
     const bool opens_now = on_accept(*slot, fd);

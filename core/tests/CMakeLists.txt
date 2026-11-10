@@ -2249,17 +2249,6 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
 endif()
 
 if(LIBTRACER_ANY_SOCKET_TRANSPORT)
-    # #903 — the stream_endpoint_t full-write helpers under a REAL signal storm: a
-    # socketpair with a small SO_SNDBUF, a deliberately slow reader, and SIGUSR1
-    # (no SA_RESTART) fired at the writer thread, so a blocked send returns EINTR
-    # mid-frame. Both write_all and write_all_iov must resume, not truncate.
-    add_executable(write_all_eintr_test write_all_eintr_test.cpp)
-    target_link_libraries(write_all_eintr_test PRIVATE libtracer)
-    libtracer_test_warnings(write_all_eintr_test)
-    add_test(NAME write_all_eintr COMMAND write_all_eintr_test)
-endif()
-
-if(LIBTRACER_ANY_SOCKET_TRANSPORT)
     # #948 — the write-fault classification: a malformed send/sendmsg call (EOPNOTSUPP,
     # EINVAL) is OUR defect, not a dead socket, so it must be re-attempted and counted
     # rather than swallowed as a disconnect. Driven through the

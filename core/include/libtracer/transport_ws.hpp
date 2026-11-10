@@ -152,14 +152,6 @@ struct ws_server_config_t {
      *         link. */
     wait_module_t* wait = nullptr;
     /**
-     * @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838). It
-     *        SIZES the peer cap and bounds the `101` reply. A server's egress writes never
-     *        wait (#2144), so a tab that stops reading cannot freeze the sending thread; a
-     *        session offered `kEgressStallStrikes` rings of frames in a row past a full STREAM
-     *        lane, its socket moving nothing, is closed. A SAMPLE lane never strikes.
-     */
-    std::uint32_t liveness_window_ms = 0;
-    /**
      * @brief PRE-AUTH request-size budget for the opening handshake in bytes (0 →
      *        `ws_server_transport_t::kMaxHandshakeBytes`). TIGHTEN-ONLY (`handshake_cap`):
      *        enforced BEFORE the append, so the byte that would exceed it is never copied;
@@ -190,17 +182,8 @@ struct ws_client_config_t {
     /** @brief The node's wait module (#2147): the link puts its sockets on it and owns no
      *         thread, and the application drives it (`wait_module_t::run`). Null: a thread of
      *         the link's own drives a private one, sized by `recv_stack`. Must outlive the
-     *         link.
-     *
-     *         PONG stall: the PONG this client answers a PING with stays a blocking write,
-     *         bounded by `liveness_window_ms`, until slice 2 of #2147. It runs on the thread
-     *         driving this module, so a server that stops reading stalls every other link on
-     *         the module for up to one window per PING. */
+     *         link. */
     wait_module_t* wait = nullptr;
-    /** @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838): it
-     *         bounds each egress write turn, and offers past a full lane whose turns moved
-     *         nothing, `kMaxConsecutiveStalls` rings of them in a row, close the connection. */
-    std::uint32_t liveness_window_ms = 0;
     /**
      * @brief The DIAL half of the pre-auth handshake budget (#934), resolved through
      *        `ws_server_transport_t::handshake_cap` (0 → the default; tighten-only). It bounds
@@ -279,7 +262,7 @@ class ws_server_transport_t final : public stream_server_base_t {
      *
      * @param bind_port TCP port to listen on (host byte order; 0 → ephemeral).
      * @param config    The server's knobs (@ref ws_server_config_t): memory, receive cap,
-     *                  peer cap, bus facet, fallback-thread stack, liveness window, handshake
+     *                  peer cap, bus facet, fallback-thread stack, wait module, handshake
      *                  budget.
      */
     explicit ws_server_transport_t(std::uint16_t bind_port, const ws_server_config_t& config = {});
@@ -552,15 +535,11 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
     }
 
     /** @brief Strikes a STALLED server cost (#838, #2144): offers past a full STREAM lane
-     *         whose turn moved nothing, each one a frame shed. `kMaxConsecutiveStalls` rings of
+     *         whose turn moved nothing, each one a frame shed. `kEgressStallStrikes` rings of
      * them in a row close the connection. */
     [[nodiscard]] std::uint64_t stalled_tx() const noexcept {
         return stalled_tx_.load(std::memory_order_relaxed);
     }
-
-    /** @brief The peer liveness window this link bounds its sends by, ms, as constructed
-     *         (`0` ⇒ `kDefaultLivenessWindowMs`) (#838). */
-    [[nodiscard]] std::uint32_t liveness_window_ms() const noexcept { return liveness_window_ms_; }
 
     /** @brief The application's liveness check (#2198, @ref transport_t::sweep):
      *         a frame held on the wire that moved no byte since @p deadline shuts the
