@@ -863,8 +863,13 @@ void test_a_refused_scratch_is_a_failed_dial() {
  *        down now, free at collect()").
  *
  * After shut_down() the connection is closed and its pair released, the link reports down,
- * and a send is shed without reaching the transport or counting a drop; the scratches stay
+ * and a send is shed without reaching the transport or counting a drop; the dial slot stays
  * drawn until the destructor, which then returns everything.
+ *
+ * What stays drawn is sampled once the link has settled, not at link_up(): the dial publishes
+ * the connection BEFORE the recv thread frames the bytes pipelined behind the 101 and returns
+ * the handshake block (a delivery there may reply, and a reply needs the link up). A sample
+ * taken in that window counted a block that was already on its way back (#2752).
  */
 void test_shut_down_stops_now_and_the_destructor_frees() {
     std::printf("#1606 shut_down() stops now, the destructor frees:\n");
@@ -876,9 +881,11 @@ void test_shut_down_stops_now_and_the_destructor_frees() {
     {
         auto link =
             tr::mem::make_poly<esp_ws_client_link_t>(tr::mem::net_source(), "127.0.0.1", 8080, cfg);
+        const int slot = state.live.load();  // the dial slot and its string copies
         link->start_receiving();
         check(wait_until([&] { return link->link_up(); }, 2s), "a link came up");
-        const int drawn = state.live.load();
+        check(wait_until([&] { return state.live == slot; }, 2s),
+              "and returned its handshake block once the first bytes were framed");
         const auto start = std::chrono::steady_clock::now();
         link->shut_down();
         check_under_ms(ms_since(start), 1500, "shut_down() is bounded");
@@ -888,7 +895,7 @@ void test_shut_down_stops_now_and_the_destructor_frees() {
         link->send(payload());
         check(fake_ws::writes_started() == writes, "a later send never reaches the transport");
         check(link->stats().c.tx_drops == 0, "and is not counted as a loss toward the peer");
-        check(state.live == drawn, "the memory stays drawn until the destructor");
+        check(state.live == slot, "the dial slot stays drawn until the destructor");
         link->shut_down();  // idempotent
     }
     check(drained_fake(), "it drained");
