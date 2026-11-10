@@ -1270,6 +1270,7 @@ jobs:
             } >> "$GITHUB_ENV"
             echo "ccache: ON (/ccache)"
           fi
+      - uses: ./.github/actions/apt-setup
       - name: Install the crypto library (${{ matrix.crypto }})
         timeout-minutes: 10
         run: |

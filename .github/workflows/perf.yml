@@ -457,6 +457,7 @@ jobs:
         # The container runs as root over a workspace the host runner user owns, so git
         # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: ./.github/actions/apt-setup
       # strace is the instrument. Without it syscall_guard.py reports verdict=UNAVAILABLE,
       # and check_compose_audit.py treats that as a FAILURE rather than a pass — a guard that
       # silently downgrades to measuring nothing is the shape this leg exists to remove.

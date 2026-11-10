@@ -111,6 +111,7 @@ jobs:
         # refuses it as dubious ownership; checkout trusts it only for its own calls (#2348).
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      - uses: ./.github/actions/apt-setup
       - name: Install the msquic build and headless-Chrome runtime dependencies
         # The CI base image is ubuntu:24.04 plus a compiler; the hosted image carried these.
         # msquic's bundled quictls configures with perl and its Linux platform links
