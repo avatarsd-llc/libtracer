@@ -77,7 +77,10 @@ enum class ready_t : std::uint8_t {
     NONE = 0,   /**< @brief Nothing. */
     READ = 1,   /**< @brief Readable, or a listening socket has a connection to accept. */
     WRITE = 2,  /**< @brief Writable, reported only while write interest is armed. */
-    HANGUP = 4, /**< @brief The peer hung up or the socket failed: a read reports which. */
+    HANGUP = 4, /**< @brief The peer hung up or the socket failed: a read reports which. The
+                     `epoll` adapter reports it from the kernel; the lwIP adapter, whose
+                     `select` folds a hang-up into READ, only for a socket closed while still
+                     attached. */
 };
 
 /** @brief True when @p set says a read is due: readable, or hung up (the read reports it). */

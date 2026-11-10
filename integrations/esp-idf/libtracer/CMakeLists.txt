@@ -131,7 +131,7 @@ set(LIBTRACER_LISTED_WAIT_SOURCES false)
 if(CONFIG_LIBTRACER_TRANSPORT_UDP OR CONFIG_LIBTRACER_TRANSPORT_TCP
    OR (CONFIG_LIBTRACER_TRANSPORT_WS AND LIBTRACER_PORTABLE_WS))
     list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_POSIX_ENDPOINT})
-    # The wait module's adapter (#2147): epoll on the `linux` target, poll(2) over lwIP on a
+    # The wait module's adapter (#2147): epoll on the `linux` target, select(2) over lwIP on a
     # chip. A TU choice, as the WS plane's is.
     if(IDF_TARGET STREQUAL "linux")
         list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_WAIT_EPOLL})
@@ -140,11 +140,11 @@ if(CONFIG_LIBTRACER_TRANSPORT_UDP OR CONFIG_LIBTRACER_TRANSPORT_TCP
         # Its sources are linked through their own records (#2147, receiver pays): the
         # fragment below binds kListedWaitSources, and wait_poll.cpp refuses to compile without.
         set(LIBTRACER_LISTED_WAIT_SOURCES true)
-        # The poll adapter's doorbell is a UDP socket on lwIP's loopback interface: without
+        # The lwIP adapter's doorbell is a UDP socket on lwIP's loopback interface: without
         # it a stop or a set change never wakes the wait (ADR-0071 Amendment 2026-11-08).
         # Skipped in the requirements-expansion pass, which has no sdkconfig yet.
         if(NOT CMAKE_BUILD_EARLY_EXPANSION AND NOT CONFIG_LWIP_NETIF_LOOPBACK)
-            message(FATAL_ERROR "libtracer: the wait module's poll adapter needs "
+            message(FATAL_ERROR "libtracer: the wait module's lwIP adapter needs "
                 "CONFIG_LWIP_NETIF_LOOPBACK=y (its wake is a loopback datagram socket).")
         endif()
     endif()

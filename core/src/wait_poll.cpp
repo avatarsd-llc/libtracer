@@ -22,6 +22,7 @@
  */
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -50,7 +51,9 @@ namespace {
 constexpr int MSG_NOSIGNAL = 0;
 #endif
 
-/** @brief A UDP socket on the loopback address, connected to itself, or -1. */
+/** @brief A UDP socket on the loopback address, connected to itself, or -1: also when its
+ *         number is past `FD_SETSIZE`, which an lwIP socket never is but a busy host's may be,
+ *         so the wait never sets a bit past its set and the module reports itself not ok. */
 int open_doorbell() noexcept {
     const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return -1;
@@ -60,11 +63,18 @@ int open_doorbell() noexcept {
     socklen_t len = sizeof(a);
     if (::bind(fd, reinterpret_cast<sockaddr*>(&a), len) != 0 ||
         ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len) != 0 ||
-        ::connect(fd, reinterpret_cast<sockaddr*>(&a), len) != 0) {
+        ::connect(fd, reinterpret_cast<sockaddr*>(&a), len) != 0 || fd >= FD_SETSIZE) {
         ::close(fd);
         return -1;
     }
     return fd;
+}
+
+/** @brief @ref ready_t::HANGUP when @p fd is no open socket, else nothing: what a failed
+ *         `select` reports to each source, as `poll` reported `POLLNVAL`. */
+std::uint8_t hangup_of(int fd) noexcept {
+    return (::fcntl(fd, F_GETFL) < 0 && errno == EBADF) ? static_cast<std::uint8_t>(ready_t::HANGUP)
+                                                        : 0U;
 }
 
 /** @brief The @ref ready_t bits @p fd holds in @p rd and @p wr . A failed or hung-up socket
@@ -142,6 +152,10 @@ void wait_module_t::run() noexcept {
         }
         lock.unlock();
         int left = ::select(top + 1, &rd, &wr, nullptr, nullptr);
+        // A socket closed while still attached fails the whole wait (EBADF): each source then
+        // hears whether its own socket is the bad one, as a hang-up its read reports, so a
+        // link that broke the detach-before-close rule is told rather than spun on.
+        const bool failed = left < 0 && errno != EINTR;
         if (left > 0 && FD_ISSET(fd_[0], &rd)) {
             --left;
             char drain[16];
@@ -153,12 +167,13 @@ void wait_module_t::run() noexcept {
         // a detach of it has either stopped this walk or waits for it; its successor is taken
         // before its callback runs, which may detach it. `select` counted the ready bits, so the
         // walk ends at the last one.
-        for (wait_source_t* s = first; s != nullptr && left > 0;) {
+        for (wait_source_t* s = first; s != nullptr && (left > 0 || failed);) {
             wait_source_t* next = nullptr;
             const bool live = fire_marked(*s, seen, [&] {
                 next = s->next.load(std::memory_order_relaxed);
-                const std::uint8_t ready = ready_of(s->fd.load(std::memory_order_relaxed), rd, wr);
-                left -= (ready & 1U) + (ready >> 1U);  // a READ bit and a WRITE bit each count one
+                const int fd = s->fd.load(std::memory_order_relaxed);
+                const std::uint8_t ready = failed ? hangup_of(fd) : ready_of(fd, rd, wr);
+                left -= (ready & 1U) + ((ready >> 1U) & 1U);  // READ and WRITE bits count one each
                 if (ready != 0) s->fire(s->ctx, *s, ready);
             });
             if (!live) break;

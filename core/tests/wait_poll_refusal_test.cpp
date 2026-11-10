@@ -4,8 +4,9 @@
  */
 /**
  * @file
- * @brief The poll adapter's one refusal at attach (#2147, the #2156 rule on the wait module):
- *        a socket numbered past `FD_SETSIZE` is refused, and nobody attached is evicted.
+ * @brief The lwIP adapter's one refusal at attach (#2147, the #2156 rule on the wait module):
+ *        a socket numbered past `FD_SETSIZE` is refused, and nobody attached is evicted; and a
+ *        socket closed while still attached is reported to its source as a hang-up.
  *
  * The receiving link pays for its own place in the adapter's list, and the descriptor sets
  * are fixed `fd_set`s, so the module draws no memory and an attach is never refused for it.
@@ -55,7 +56,7 @@ struct idle_t {
         src.fire = [](void*, tr::net::wait_source_t&, std::uint8_t) {};
     }
     ~idle_t() {
-        ::close(pair[0]);
+        if (pair[0] >= 0) ::close(pair[0]);
         ::close(pair[1]);
     }
 };
@@ -139,6 +140,29 @@ void test_refused_attach_refuses_the_newcomer() {
     }
 }
 
+/** @brief A source whose socket is closed while still attached hears a hang-up. */
+void test_closed_while_attached_hears_a_hangup() {
+    std::printf("-- a socket closed while attached is reported as a hang-up, not spun on\n");
+    tr::net::wait_module_t module;
+    std::thread driver([&module] { module.run(); });
+    std::atomic<unsigned> hangups{0};
+    idle_t lost;
+    lost.src.ctx = &hangups;
+    lost.src.fire = [](void* ctx, tr::net::wait_source_t&, std::uint8_t ready) {
+        if ((ready & static_cast<std::uint8_t>(tr::net::ready_t::HANGUP)) != 0)
+            static_cast<std::atomic<unsigned>*>(ctx)->fetch_add(1);
+    };
+    check(module.attach(lost.src), "the source is attached");
+    ::close(lost.pair[0]);              // breaks the detach-before-close rule on purpose
+    module.want_write(lost.src, true);  // rings the doorbell, so the next wait sees the bad socket
+    check(eventually([&] { return hangups.load() != 0; }),
+          "the failed wait reports a hang-up to the source whose socket is gone");
+    module.detach(lost.src);
+    lost.pair[0] = -1;
+    module.stop();
+    driver.join();
+}
+
 }  // namespace
 
 int main() {
@@ -147,5 +171,6 @@ int main() {
         return tr::testing::skipped("wait_poll_refusal_test",
                                     "the hard descriptor limit is below FD_SETSIZE");
     test_refused_attach_refuses_the_newcomer();
+    test_closed_while_attached_hears_a_hangup();
     return tr::testing::summary("wait_poll_refusal_test");
 }
