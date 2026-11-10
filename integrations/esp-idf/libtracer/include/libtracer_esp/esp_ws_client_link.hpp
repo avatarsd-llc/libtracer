@@ -458,7 +458,8 @@ class esp_ws_client_link_t final : public transport_t {
      * `send()` after this is shed without touching a handle and without counting a drop.
      * Its cost is the destructor's worst case, `kPollMs + kWriteBudgetMs`; a dial in flight
      * is condemned rather than waited out, as there. IDEMPOTENT, and safe to follow with
-     * the destructor.
+     * the destructor. On a thread that runs link callbacks (the recv thread among them) it
+     * only shuts down: the destructor joins the recv thread and releases the connection.
      */
     void shut_down() override;
 
@@ -706,6 +707,12 @@ class esp_ws_client_link_t final : public transport_t {
                    *          this object — it is gone. */
     };
 
+    /** @brief Stop the link for good, once (the second call is a no-op): disarm every wait
+     *         and condemn a dial in flight. Waits for nothing. */
+    void disarm();
+    /** @brief Join (or, for a condemned dial, detach) the recv thread, then release the
+     *         connection under `write_m_`. Idempotent; off every callback thread. */
+    void finish();
     /** @brief The recv thread body: (re)connect, then poll+read+deliver until stopped. */
     void recv_loop();
     /** @brief The recv thread's entry: `recv_loop()` on the link @p self. */

@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <charconv>
 #include <cstdint>
 #include <cstring>
@@ -38,6 +39,7 @@
 #include "libtracer/mem_string.hpp"
 #include "libtracer/park.hpp"
 #include "libtracer/sync.hpp"
+#include "libtracer/wait.hpp"
 #include "libtracer/ws.hpp"
 #include "libtracer/ws_assembler.hpp"
 #include "libtracer/ws_framing.hpp"
@@ -554,6 +556,13 @@ void esp_ws_client_link_t::recv_entry(void* self) {
 }
 
 void esp_ws_client_link_t::shut_down() {
+    disarm();
+    // Deferred on a thread that runs link callbacks (the recv thread among them): it only
+    // shuts down. The destructor joins the recv thread and releases the connection.
+    if (!on_callback_thread()) finish();
+}
+
+void esp_ws_client_link_t::disarm() {
     // Disarm the link BEFORE waiting on anything. `stop_` is what every blocking wait
     // in the recv loop is predicated on, and it is also what a sender re-reads after it
     // gets `write_m_` — so from here on no NEW work reaches the handles. Clearing
@@ -590,6 +599,9 @@ void esp_ws_client_link_t::shut_down() {
             dial_orphaned_ = true;
         }
     }
+}
+
+void esp_ws_client_link_t::finish() {
     if (dial_orphaned_ && recv_thread_.joinable()) {
         ESP_LOGI(kTag, "torn down mid-dial: the dial is orphaned, not waited out");
         recv_thread_.detach();
@@ -620,9 +632,12 @@ void esp_ws_client_link_t::shut_down() {
 
 esp_ws_client_link_t::~esp_ws_client_link_t() {
     // Shut down now, free here (#1606): an owner that already called shut_down() at the
-    // link's removal finds this a no-op, and the destructor — at the graph's collect() —
-    // only waits out the senders and returns the memory.
-    shut_down();
+    // link's removal finds the disarm done, and the destructor — at the graph's collect() —
+    // joins the recv thread if that shut_down was deferred, waits out the senders and
+    // returns the memory. Destructors always join, off every callback thread.
+    assert(!on_callback_thread() && "a link's destructor runs off every callback thread");
+    disarm();
+    finish();
     // The slot has exactly one owner left (#1880): a condemned dial returns it itself as it
     // resolves, so only a slot with no dial in flight is this destructor's to return.
     if (!dial_orphaned_) mem::drop_in(*dial_->src, dial_);
@@ -1108,6 +1123,7 @@ void esp_ws_client_link_t::write_locked(std::span<const std::byte> wire) {
 }
 
 void esp_ws_client_link_t::recv_loop() {
+    const callback_thread_scope_t delivering;  // a teardown made here waits for nothing
     // The connection's framing (#2484): core's RFC 6455 receive rules over the raw TCP bytes,
     // on this thread's stack. Every body is received into a segment of its exact length drawn
     // from the link's own source — `memory.rx` when the application named one (#1661),

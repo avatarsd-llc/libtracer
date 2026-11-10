@@ -31,6 +31,8 @@
  *  7. **A shut session's buffers live until the destructor** (WebSocket, with a second
  *     session holding half an upgrade request): the removal gives back none of the link's
  *     connection state; collect() gives back all of it.
+ *  8. **A stream listener removed by another link's write while a peer arrives**: the
+ *     teardown's walk of the sessions is ordered after the accept that grew them (TSan).
  *
  * A teardown made on a thread that runs link callbacks waits for nothing and closes nothing;
  * the joins and closes happen at the graph's collect(), outside every callback.
@@ -188,11 +190,11 @@ struct counting_source_t final : tr::mem::block_source_t {
     counting_source_t() noexcept : block_source_t("counting") {}
     void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
         void* const p = tr::mem::heap_source_t::acquire(bytes, align);
-        if (p != nullptr) out.fetch_add(bytes);
+        if (p != nullptr) out.fetch_add(bytes, std::memory_order_relaxed);
         return p;
     }
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
-        out.fetch_sub(bytes);
+        out.fetch_sub(bytes, std::memory_order_relaxed);
         tr::mem::heap_source_t::reclaim(p, bytes, align);
     }
 };
@@ -514,6 +516,83 @@ void test_a_shut_sessions_buffers_live_until_the_destructor() {
           "the destructor, at collect(), frees the sessions and their buffers");
 }
 
+/** @brief Where the slot hook parks the listener's thread. Relaxed atomics on purpose: the
+ *         park must order nothing between the listener's thread and the others. */
+struct accept_park_t {
+    std::atomic<bool> armed{false};
+    std::atomic<bool> reached{false};
+    std::atomic<bool> released{false};
+} g_accept_park;
+
+void test_listener_removed_by_another_link_while_peers_arrive() {
+    std::printf("-- a stream listener removed by another link's write while a peer arrives\n");
+    // The listener's own thread grows its session table for an arriving peer and is parked
+    // right after (the slot hook), holding no lock and before the session goes on the wait. A
+    // removal queued on the UDP link's thread behind the held control plane then runs, so the
+    // teardown's walk of the sessions follows that growth with nothing ordering the two but
+    // the lock the walk and the accept share: without it, TSan reports the walk.
+    struct hook_guard_t {
+        ~hook_guard_t() { tr::net::detail::slot_taken_hook = nullptr; }
+    } const guard;
+    g_accept_park.reached.store(false, std::memory_order_relaxed);
+    g_accept_park.released.store(false, std::memory_order_relaxed);
+    tr::net::detail::slot_taken_hook = [] {
+        if (!g_accept_park.armed.exchange(false, std::memory_order_relaxed)) return;
+        g_accept_park.reached.store(true, std::memory_order_relaxed);
+        for (int i = 0; i < 5000 && !g_accept_park.released.load(std::memory_order_relaxed); ++i)
+            std::this_thread::sleep_for(2ms);
+    };
+
+    counting_source_t state;
+    tr::net::link_memory_t memory{.state = &state};
+    node_b_t b(nullptr, &memory);
+    node_a_t a;
+    const std::uint16_t pctl = free_port();
+    check(a.dial("toctl", pctl), "A dials B's control link");
+    check(b.listen("ctl", pctl), "B listens on UDP");
+    std::uint16_t psrv = 0;
+    bool listening = false;
+    for (int i = 0; i < 8 && !listening; ++i)
+        listening = b.listen("srv", psrv = free_port(SOCK_STREAM), "tcp");
+    check(listening, "B listens on TCP");
+
+    // Queue the removal behind a creation that holds B's control plane.
+    g_gate.entered.store(0);
+    g_gate.close();
+    std::thread holder([&] {
+        (void)b.g.write(path_t("/net/gate-client/conn"), tr::net::conn_spec("held3", 0, "gate"));
+    });
+    check_or_exit(eventually([] { return g_gate.entered.load() == 1; }),
+                  "a creation holds B's control plane");
+    tr::net::fwd_router_t::origin_t slot{&ignore_reply, nullptr};
+    check(a.write(slot, "toctl", "/net/tcp-server/conn", tr::net::conn_remove("srv")),
+          "A sends B the removal of the listener over another link");
+    std::this_thread::sleep_for(100ms);  // it waits behind the held creation
+
+    g_accept_park.armed.store(true, std::memory_order_relaxed);
+    const int peer = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(psrv);
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    check(::connect(peer, reinterpret_cast<const sockaddr*>(&to), sizeof to) == 0,
+          "a peer connects to the listener");
+    check_or_exit(eventually([] { return g_accept_park.reached.load(std::memory_order_relaxed); }),
+                  "the listener grew its session table for it and is parked");
+    g_gate.release();
+    holder.join();
+    check_or_exit(eventually([&] { return !b.has("net/tcp-server/srv"); }),
+                  "the listener's teardown completes while its accept is parked");
+    g_accept_park.released.store(true, std::memory_order_relaxed);
+    (void)a.router.cancel(slot);
+    check(eventually([&] {
+              b.g.collect();
+              return sockets_on(psrv) == 0;
+          }),
+          "collect() frees the listener and its session");
+    ::close(peer);
+}
+
 }  // namespace
 
 int main() {
@@ -526,6 +605,7 @@ int main() {
     test_collect_from_a_callback_frees_nothing();
     test_removal_from_a_callback_then_collect_leaves_nothing_behind();
     test_a_shut_sessions_buffers_live_until_the_destructor();
+    test_listener_removed_by_another_link_while_peers_arrive();
     std::printf("link_teardown_wait_test: %s (%d failures)\n",
                 g_failures == 0 ? "ALL PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
