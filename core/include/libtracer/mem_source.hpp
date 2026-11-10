@@ -571,7 +571,9 @@ struct size_class_t {
  * §Introspection, counting doctrine 1).
  * #2709's transposition in `find` (a hit moves its class one slot forward) grows `find` by
  * **+42 B** (42 → 84 B, riscv32-esp-elf-g++ 14.2.0, same flags, `-march=rv32imac`), with
- * `try_alloc` and `release` byte-identical.
+ * `try_alloc` and `release` byte-identical. #2747's front-hit return, which skips the swap
+ * of a slot with itself, takes `find` back to **78 B** (-6 B), the other two again
+ * byte-identical.
  * The two 256 B / 380 B figures quoted while choosing between the policies were
  * feature-matched *prototypes* — neither carried the alignment key, the overflow counter
  * or the foreign-pointer check this one does — so they compare the shapes to each other
@@ -748,20 +750,22 @@ class pool_source_t final : public block_source_t {
      * frame climb to the first slots, and a shape seen once moves only one. Without it a shape
      * kept its claim order, and the one a node first releases late (a borrowed segment's
      * control block, #2709) sat behind every wiring-time shape, so each of its draws and
-     * returns scanned the whole table. A hit at the front swaps the slot with itself, which
-     * keeps the hit path free of a branch. Called inside the @p Sync section, so the swap is
+     * returns scanned the whole table. A hit at the front returns at once: the shape a node
+     * draws on every frame sits there, and a swap of the slot with itself cost it six loads and
+     * stores per draw and per return (#2747). Called inside the @p Sync section, so the swap is
      * as synchronized as the free lists are.
      */
     [[nodiscard]] size_class_t* find(std::size_t bytes, std::size_t align) noexcept {
         for (std::size_t i = 0; i < n_; ++i) {
             if (cls_[i].bytes != bytes || cls_[i].align != align) continue;
-            const std::size_t j = i - static_cast<std::size_t>(i != 0);
-            void* const head = cls_[i].head;
-            cls_[i].bytes = cls_[j].bytes;
-            cls_[i].align = cls_[j].align;
-            cls_[i].head = cls_[j].head;
-            cls_[j] = size_class_t{bytes, align, head};
-            return &cls_[j];
+            if (i != 0) {
+                void* const head = cls_[i].head;
+                cls_[i].bytes = cls_[i - 1].bytes;
+                cls_[i].align = cls_[i - 1].align;
+                cls_[i].head = cls_[i - 1].head;
+                cls_[--i] = size_class_t{bytes, align, head};
+            }
+            return &cls_[i];
         }
         return nullptr;
     }

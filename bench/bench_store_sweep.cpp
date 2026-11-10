@@ -16,6 +16,8 @@
  *
  *  * `latency`    — single-threaded per-op cost, in PICOseconds, split into the workload's three
  *                   legs plus the composite. Arms rotate per round (`--round0`).
+ *                   `--fwd-payload=N` times only the forward hop, on a `FWD{WRITE}` with an
+ *                   N-byte value, as `net-fwd-<N>B` rows: the payload rows above 1 KiB (#2747).
  *  * `throughput` — the fan-out arm across `kThreads = {1,2,4,8,16,24}`: T lanes, T receive
  *                   threads, the whole workload each. This is the arm ADR-0079 predicts WIDE's
  *                   shared lock to collapse on.
@@ -174,13 +176,28 @@ void emit_chan(const char* arm, std::size_t threads, const char* channel,
     std::fflush(stdout);
 }
 
-/** @brief Time every leg of one arm, single-threaded, and emit its four rows. */
-[[nodiscard]] bool run_latency_arm(int round, const char* tag, arm_t arm) {
+/**
+ * @brief Time every leg of one arm, single-threaded, and emit its four rows.
+ *
+ * @param fwd_payload Non-zero (`--fwd-payload=N`, #2747): time only the forward hop, on a
+ *        `FWD{WRITE}` carrying an N-byte `VALUE` (@ref bench_store::fwd_write_frame), and label
+ *        the row `net-fwd-<N>B`. These are the rows above 1 KiB; zero keeps the gated rows.
+ */
+[[nodiscard]] bool run_latency_arm(int round, const char* tag, arm_t arm, std::size_t fwd_payload) {
     // One lane, this one thread: NARROW's graph store takes no lock here (#2709). WIDE keeps
     // its lock because a WIDE store is the shared-store shape; that difference is deliberate.
     node_t n(arm, /*lanes=*/1, /*count_channels=*/false, nullptr, nullptr,
              bench_store::graph_store_use_t::ONE_THREAD);
     bench_store::lane_t& l = n.lane(0);
+
+    if (fwd_payload != 0) {
+        l.frame = bench_store::fwd_write_frame(0, fwd_payload);
+        const std::string leg = "net-fwd-" + std::to_string(fwd_payload) + "B";
+        const bench::batch_timing_t t =
+            bench::time_batches([&] { step(n, l, leg_t::NET); }, kCellBudgetNs);
+        emit_lat(round, tag, name_of(arm), leg.c_str(), t);
+        return n.faults("latency", 1);
+    }
 
     for (const leg_t leg : kLegs) {
         // The harness's one batch loop (#1904): the batch is sized by WINDOW rather than by
@@ -385,12 +402,15 @@ int main(int argc, char** argv) {
         argc > 1 ? std::string_view(argv[1]) : std::string_view("latency");
     int round0 = 0;
     const char* tag = "A";
+    std::size_t fwd_payload = 0;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a.rfind("--round0=", 0) == 0) {
             round0 = std::atoi(a.c_str() + 9);
         } else if (a.rfind("--tag=", 0) == 0) {
             tag = argv[i] + 6;
+        } else if (a.rfind("--fwd-payload=", 0) == 0) {
+            fwd_payload = std::strtoull(a.c_str() + 14, nullptr, 10);
         }
     }
 
@@ -416,7 +436,7 @@ int main(int argc, char** argv) {
             // next is the shape that produced the recorded 55.2 / 53.0 / 149.8 M deliv/s swing
             // on identical code (bench/run_pin_ratio.sh), and nothing here does that.
             const arm_t arm = kArms[(static_cast<std::size_t>(round0) + j) % kNArms];
-            if (!run_latency_arm(round0, tag, arm)) ++faults;
+            if (!run_latency_arm(round0, tag, arm, fwd_payload)) ++faults;
         }
         bench::emit_family_rss("store-lat", start_kb);  // after the last row (#1908)
     } else if (mode == "throughput") {
@@ -440,7 +460,9 @@ int main(int argc, char** argv) {
             }
         }
     } else {
-        std::fprintf(stderr, "usage: %s latency|throughput|hwm|calibrate [--round0=N] [--tag=X]\n",
+        std::fprintf(stderr,
+                     "usage: %s latency|throughput|hwm|calibrate [--round0=N] [--tag=X] "
+                     "[--fwd-payload=N]\n",
                      argv[0]);
         return 2;
     }

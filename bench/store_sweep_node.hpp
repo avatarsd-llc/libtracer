@@ -331,6 +331,24 @@ class counting_source_t final : public tr::mem::block_source_t {
     return r;
 }
 
+/**
+ * @brief Lane @p lane's forward frame carrying a @p payload byte `VALUE`: a `FWD{WRITE}` to
+ *        the lane's sink, split into @ref kRopeLinks links like the timed `READ` frame (#2747).
+ *
+ * The rows above 1 KiB the payload rule asks of every perf report: the hop gathers the value
+ * onward untouched, so what grows with @p payload is the egress gather, drawn from the link's
+ * egress source. An arm whose egress slab cannot carve the gathered frame forwards nothing,
+ * which @ref node_t::faults then reports rather than timing a miss.
+ */
+[[nodiscard]] inline tr::view::rope_t fwd_write_frame(std::size_t lane, std::size_t payload) {
+    std::vector<std::byte> src = b_path({"reply-ep"});
+    const std::vector<std::byte> value = b_value(payload);
+    src.insert(src.end(), value.begin(), value.end());
+    const std::vector<std::byte> bytes =
+        b_fwd(fwd_op_t::WRITE, b_path({"u" + std::to_string(lane), "sensor"}), src);
+    return rope_of(bytes, kRopeLinks);
+}
+
 // --- links ---------------------------------------------------------------------------------
 
 /** @brief The inbound link: hands the frame up as the rope it already is (ADR-0053 §5). */
