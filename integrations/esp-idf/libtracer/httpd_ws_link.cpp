@@ -946,6 +946,10 @@ struct httpd_ws_link_t::session_t {
      * matches whoever lands on the slot next. Guarded by `peers_m_`, like the name.
      */
     peer_handle_t handle;
+    /** @brief This session's READs in the current run (#2774): the httpd task points
+     *         `inbound_tally_` at it before it delivers the session's frame, and resets it at
+     *         the claim. No byte when the READ budget is off. */
+    [[no_unique_address]] session_read_tally_t read_tally{};
     bool open = false; /**< @brief True between handshake and close. */
     /**
      * @brief The peer's ROUTABLE name — `p<slot>~<gen>` (ADR-0073 §2, #426, #994).
@@ -2368,6 +2372,7 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     // the TX path and the routing plane, never two that could disagree. `gen` is
     // never 0 after the increment on a claim, so the handle is always valid.
     slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen};
+    slot->read_tally = session_read_tally_t{};  // a new tenancy has read nothing (#2774)
     // ADR-0073 §2: the routable NAME is the handle spelled out, `p<slot>~<gen>`, legal
     // by construction, and the `<ip>:<port>` goes to the diagnostics field instead of
     // into the graph. The generation makes a reused slot's name a fresh one.
@@ -2653,6 +2658,10 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         refuse_upgraded(fd);
         return ESP_OK;  // the shutdown above closes it, as an auth REJECT does
     }
+    // Every delivery below is this session's (#2774). Never cleared: the router reads it only
+    // inside a delivery this task just pointed it for, and slots are never freed while the
+    // link lives.
+    inbound_tally_ = &slot->read_tally;
     // Reclaim the slot on close — armed once, when first claimed (the free_ctx fires on the
     // httpd task at close). Outside peers_m_ so no httpd lock nests under ours.
     if (newly_claimed) {
