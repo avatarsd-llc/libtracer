@@ -2164,6 +2164,7 @@ if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP)
     target_link_libraries(wait_poll_refusal_test PRIVATE libtracer)
     libtracer_test_warnings(wait_poll_refusal_test)
     add_test(NAME wait_poll_refusal COMMAND wait_poll_refusal_test)
+    set_tests_properties(wait_poll_refusal PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)

@@ -20,7 +20,6 @@
 #include <cstdint>
 #include <mutex>
 
-#include "libtracer/mem_heap.hpp"
 #include "libtracer/wait.hpp"
 
 namespace tr::net {
@@ -71,7 +70,7 @@ std::uint8_t ready_of(std::uint32_t e) noexcept {
 }
 }  // namespace
 
-wait_module_t::wait_module_t(mem::block_source_t& src) noexcept : sources_(src) {
+wait_module_t::wait_module_t() noexcept {
     fd_[0] = ::epoll_create1(EPOLL_CLOEXEC);
     fd_[1] = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     if (!ok()) return;
@@ -84,8 +83,6 @@ wait_module_t::wait_module_t(mem::block_source_t& src) noexcept : sources_(src) 
         fd_[1] = -1;
     }
 }
-
-wait_module_t::wait_module_t() noexcept : wait_module_t(mem::net_source()) {}
 
 wait_module_t::~wait_module_t() {
     for (const int fd : fd_)
@@ -134,9 +131,8 @@ void wait_module_t::run() noexcept {
         // still ready come back next pass.
         for (int i = 0; i < n; ++i) {
             auto* const s = static_cast<wait_source_t*>(ev[static_cast<std::size_t>(i)].data.ptr);
-            if (s != nullptr &&
-                !fire_marked(*s, ready_of(ev[static_cast<std::size_t>(i)].events), seen))
-                break;
+            const std::uint8_t ready = ready_of(ev[static_cast<std::size_t>(i)].events);
+            if (s != nullptr && !fire_marked(*s, seen, [&] { s->fire(s->ctx, *s, ready); })) break;
         }
     }
     driver_.store(detail::unowned_thread_id());

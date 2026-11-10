@@ -175,8 +175,8 @@ write_fault_stats_t write_fault_stats() noexcept {
  *        holds only the pointer.
  */
 struct posix_endpoint_t::fallback_t {
-    /** @brief Opens the private module, its poll-adapter tables drawn from @p s . */
-    explicit fallback_t(mem::block_source_t& s) noexcept : src(&s), module(s) {}
+    /** @brief Opens the private module; the block came from @p s . */
+    explicit fallback_t(mem::block_source_t& s) noexcept : src(&s) {}
     mem::block_source_t* src; /**< @brief Where this block (and the thread's stack) came from. */
     wait_module_t module;     /**< @brief The private module. */
     static_thread_t thread;   /**< @brief Its driver. */
