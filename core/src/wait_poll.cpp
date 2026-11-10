@@ -174,7 +174,7 @@ void wait_module_t::run() noexcept {
         // sources still ready come back next pass. The live set and its sources stay put
         // without the lock: an attach grows only the spare. `poll` counted the ready entries,
         // so the walk ends at the last one.
-        for (std::size_t i = 1; left > 0; ++i) {
+        for (std::size_t i = 1; left > 0 && i < set.size(); ++i) {
             if (set[i].revents == 0) continue;
             --left;
             if (!fire_marked(*who[i - 1], ready_of(set[i].revents), seen)) break;

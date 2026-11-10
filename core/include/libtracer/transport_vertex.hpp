@@ -53,6 +53,8 @@
 
 namespace tr::net {
 
+class wait_module_t;  // wait.hpp: the node's one wait module (#2147)
+
 class fwd_router_t;
 class self_heal_link_t;
 
@@ -316,12 +318,19 @@ class transport_vertex_t {
      *                   it. Read through @ref link_memory. The object and every source it
      *                   names must outlive this vertex and the `graph_t::collect()` that
      *                   frees a removed link, as @p egress_src must.
+     * @param wait       The node's wait module (#2147, ADR-0087): every link the built-in
+     *                   udp, tcp and ws factories build puts its sockets on it and owns no
+     *                   thread, and the application drives it with `wait_module_t::run` on
+     *                   the thread it chooses. `nullptr` (the default) changes nothing: each
+     *                   such link keeps a thread of its own. A self-healing dial still runs
+     *                   on its engine's worker. Read through @ref wait_module. Must outlive
+     *                   this vertex and the `graph_t::collect()` that frees a removed link.
      */
     transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
                        std::string_view net_root = "/net",
                        mem::mem_backend_t* rx_backend = &mem::net_backend(),
                        mem::block_source_t* egress_src = &mem::net_source(),
-                       const link_memory_t* link_memory = nullptr);
+                       const link_memory_t* link_memory = nullptr, wait_module_t* wait = nullptr);
 
     /**
      * @brief SLIM ctor (@ref slim_net_t): bind to @p graph / @p router and register
@@ -353,11 +362,13 @@ class transport_vertex_t {
      *                   node registers its factories itself, and each built-in
      *                   `register_*_transport` it calls reads this default off the vertex
      *                   through @ref link_memory.
+     * @param wait       The node's wait module, as on the default ctor, read the same way
+     *                   through @ref wait_module.
      */
     transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string_view net_root,
                        mem::mem_backend_t* rx_backend, slim_net_t,
                        mem::block_source_t* egress_src = &mem::net_source(),
-                       const link_memory_t* link_memory = nullptr);
+                       const link_memory_t* link_memory = nullptr, wait_module_t* wait = nullptr);
 
     /**
      * @brief Retire the connection handlers and drain in-flight calls, then detach every
@@ -465,6 +476,15 @@ class transport_vertex_t {
      * through @ref register_transport_type may do the same, or name memory of its own.
      */
     [[nodiscard]] const link_memory_t* link_memory() const noexcept { return link_memory_; }
+
+    /**
+     * @brief This node's wait module (the ctor's `wait`, #2147), or `nullptr` when none was
+     *        given.
+     *
+     * The built-in udp, tcp and ws registrations read it here and put every link they build
+     * on it; a factory registered through @ref register_transport_type may do the same.
+     */
+    [[nodiscard]] wait_module_t* wait_module() const noexcept { return wait_; }
 
     /**
      * @brief Declare the MODULE that connections of @p kind and @p role mount under.
@@ -1127,6 +1147,7 @@ class transport_vertex_t {
     // injected source (the net sub-pool when nothing is injected, ADR-0083 Q21).
     mem::block_source_t* egress_src_;
     const link_memory_t* link_memory_;  // the node-wide link memory default, or null (#2574)
+    wait_module_t* wait_;               // the node's wait module, or null (#2147)
     mem::string_t net_root_;
     // One factory-catalog row: the constructor and the kind's capability declarations
     // (RFC-0014 S5). Traits ride WITH the factory so one lookup answers both.

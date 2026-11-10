@@ -331,6 +331,15 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_TCP A
     add_test(NAME link_memory_default COMMAND link_memory_default_test)
 endif()
 
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
+    # #2147 slice 3 — the node's wait module through the transport vertex: a SPEC-created udp,
+    # tcp or ws link puts its sockets on the module the vertex was given and spawns no thread.
+    add_executable(node_wait_module_test node_wait_module_test.cpp)
+    target_link_libraries(node_wait_module_test PRIVATE libtracer)
+    libtracer_test_warnings(node_wait_module_test)
+    add_test(NAME node_wait_module COMMAND node_wait_module_test)
+endif()
+
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_CAN)
     # ADR-0044 — stateless transport-peer enumeration + transparent per-peer FWD over
     # the CAN bus binding: join hellos -> synthesized /net/can0:children[], directed
