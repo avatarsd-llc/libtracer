@@ -477,13 +477,11 @@ void tcp_server_transport_t::on_readable(session_base_t& base, int fd) {
     // so the field names a session only while its frame is being delivered (#1915).
     auto framing = prefix_framing(max_frame_, drops_, [&](view::view_t f) {
         delivering_ = s.handle;
-        inbound_tally_ = &s.read_tally;  // the READ budget's session (#2774)
         if (bus_mode())
             deliver_to_peer(s.handle, std::move(f));
         else
             rx_.deliver(std::move(f));
         delivering_ = {};
-        inbound_tally_ = nullptr;
     });
     // Frame ingress reads each prefix first and each body straight into its exact segment
     // (ADR-0087 §1); false is a peer that closed, a read error, or a desynced stream.

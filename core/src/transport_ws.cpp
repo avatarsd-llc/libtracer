@@ -195,14 +195,12 @@ struct ws_server_transport_t::framing_t {
      */
     void hand_up(tr::view::rope_t message) const {
         link.delivering_ = s.handle;
-        link.inbound_tally_ = &s.read_tally;  // the READ budget's session (#2774)
         const bool delivered =
             link.bus_mode()
                 ? link.deliver_to_peer_rope(s.handle, std::move(message), *link.backend_)
                 : link.rx_.deliver_rope(std::move(message), *link.backend_);
         link.drops_.count_dropped_rx(static_cast<std::size_t>(!delivered));
         link.delivering_ = {};
-        link.inbound_tally_ = nullptr;
     }
 };
 
