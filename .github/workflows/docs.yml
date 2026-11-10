@@ -260,7 +260,7 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
             echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi

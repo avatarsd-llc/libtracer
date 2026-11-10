@@ -145,8 +145,11 @@
 # which is meant for ad-hoc agent builds; CI runs at normal weight in runners-ci.slice, a
 # child of runners.slice, so the slice's limits still bound it. A hosted or fork run gets
 # no such flag: the slice exists only on these machines. Under a rootless daemon (#2765)
-# the same flag names a slice of the runner user's systemd manager, so those containers
-# sit under user.slice/user-<uid>.slice/user@<uid>.service/runners-ci.slice instead.
+# the same flag names a slice of the runner user's systemd manager (systemd nests the
+# dash-named slice), so those containers sit under
+# user.slice/user-<uid>.slice/user@<uid>.service/runners.slice/runners-ci.slice instead:
+# outside the system runners.slice and its 11-core / 24 GB caps, bounded only by whatever
+# the host sets on that user's slice.
 #
 # BUILD_JOBS on the self-hosted route is ADAPTIVE (#2348): the slice gives ALL runners and
 # containers 11 cores / 24 GB, and three runners take this repository's `ci-local` jobs
@@ -455,7 +458,7 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
             echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
@@ -576,7 +579,7 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
             echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
@@ -678,7 +681,7 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
             echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
@@ -788,7 +791,7 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
             echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
@@ -911,7 +914,7 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
             echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
@@ -1043,7 +1046,7 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
             echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
@@ -1174,7 +1177,7 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
             echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
@@ -1257,7 +1260,7 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
             echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
@@ -1395,7 +1398,7 @@ jobs:
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
             n=1; seen=0
-            for slice in /sys/fs/cgroup/runners.slice/runners-ci.slice /sys/fs/cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice; do
+            for slice in /sys/fs/cgroup/runners.slice/runners-ci.slice /sys/fs/cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice; do
               [ -d "$slice" ] || continue
               seen=1; n=$(( n + $(find "$slice" -maxdepth 1 -name 'docker-*.scope' 2>/dev/null | wc -l) ))
             done
@@ -1507,7 +1510,7 @@ jobs:
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
             n=1; seen=0
-            for slice in /sys/fs/cgroup/runners.slice/runners-ci.slice /sys/fs/cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice; do
+            for slice in /sys/fs/cgroup/runners.slice/runners-ci.slice /sys/fs/cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice; do
               [ -d "$slice" ] || continue
               seen=1; n=$(( n + $(find "$slice" -maxdepth 1 -name 'docker-*.scope' 2>/dev/null | wc -l) ))
             done
@@ -1615,7 +1618,7 @@ jobs:
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
             n=1; seen=0
-            for slice in /sys/fs/cgroup/runners.slice/runners-ci.slice /sys/fs/cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice; do
+            for slice in /sys/fs/cgroup/runners.slice/runners-ci.slice /sys/fs/cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice; do
               [ -d "$slice" ] || continue
               seen=1; n=$(( n + $(find "$slice" -maxdepth 1 -name 'docker-*.scope' 2>/dev/null | wc -l) ))
             done
@@ -1749,7 +1752,7 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
             echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
@@ -1851,7 +1854,7 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
             echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
@@ -1940,7 +1943,7 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
             echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
