@@ -13,6 +13,9 @@
  *
  * The idle checks count the driving thread's voluntary context switches from
  * `/proc/self/task/<tid>/status`: a wait with no timeout makes none while nothing is ready.
+ * Each starts counting only once the thread is asleep (@ref asleep), not after a fixed pause:
+ * the wake an attach or a send rings is a real one, and on a loaded host it can still be
+ * pending when a pause ends (#2776).
  */
 
 #include <netinet/in.h>
@@ -51,6 +54,52 @@ long voluntary_switches(pid_t tid) {
     while (std::getline(in, line))
         if (line.rfind("voluntary_ctxt_switches:", 0) == 0) return std::stol(line.substr(24));
     return -1;
+}
+
+/** @brief Thread @p tid's scheduler state letter (`R`, `S`, ...), or 0. */
+char sched_state(pid_t tid) {
+    std::ifstream in("/proc/self/task/" + std::to_string(tid) + "/stat");
+    std::string stat;
+    std::getline(in, stat);
+    const std::size_t comm_end = stat.rfind(')');  // the name may hold spaces or ')'
+    return comm_end != std::string::npos && comm_end + 2 < stat.size() ? stat[comm_end + 2] : '\0';
+}
+
+/** @brief True iff @p nr is a readiness wait: what a wait module or a link thread blocks in. */
+bool is_wait_syscall(long nr) {
+    const long waits[] = {
+#ifdef SYS_poll
+        SYS_poll,
+#endif
+#ifdef SYS_select
+        SYS_select,
+#endif
+#ifdef SYS_epoll_wait
+        SYS_epoll_wait,
+#endif
+#ifdef SYS_epoll_pwait2
+        SYS_epoll_pwait2,
+#endif
+        SYS_ppoll,        SYS_pselect6, SYS_epoll_pwait};
+    return std::find(std::begin(waits), std::end(waits), nr) != std::end(waits);
+}
+
+/**
+ * @brief True iff thread @p tid is asleep in its readiness wait: state `S` before and after
+ *        reading `/proc/self/task/<tid>/syscall`, which names a wait.
+ *
+ * Asleep there after the test's last attach, arm, send or detach has returned means the
+ * thread has taken every wake those rang: each ring is queued before its call returns, and a
+ * wait with a readable doorbell or socket returns at once instead of sleeping. So the next
+ * voluntary switch is a wake from nothing. State `S` alone is not enough: a thread asleep on
+ * a lock the test's own call holds is `S` too, and wakes into its wait right after (#2776).
+ */
+bool asleep(pid_t tid) {
+    if (sched_state(tid) != 'S') return false;
+    std::ifstream in("/proc/self/task/" + std::to_string(tid) + "/syscall");
+    long nr = -1;
+    if (!(in >> nr) || !is_wait_syscall(nr)) return false;
+    return sched_state(tid) == 'S';
 }
 
 /** @brief The ids of the process's threads. */
@@ -158,7 +207,9 @@ void test_write_interest() {
     d.module.want_write(c.src, true);
     check(eventually([&] { return c.writes.load() > 0; }), "an armed, writable socket fires");
     d.module.want_write(c.src, false);
-    std::this_thread::sleep_for(30ms);
+    // Asleep, not after a pause: an armed writable socket never lets the driver sleep, so a
+    // driver asleep has taken the disarm.
+    check(eventually([&] { return asleep(d.tid.load()); }), "the driver is asleep");
     const int seen = c.writes.load();
     std::this_thread::sleep_for(50ms);
     check(c.writes.load() == seen, "disarmed, it stops");
@@ -290,7 +341,7 @@ void test_idle_sources_wake_nobody() {
         idle.push_back(std::make_unique<counted_t>());
         check(d.module.attach(idle.back()->src), "attached");
     }
-    std::this_thread::sleep_for(50ms);
+    check(eventually([&] { return asleep(d.tid.load()); }), "the driver is asleep");
     const long before = voluntary_switches(d.tid.load());
     std::this_thread::sleep_for(500ms);
     const long after = voluntary_switches(d.tid.load());
@@ -325,7 +376,7 @@ void test_links_share_one_module() {
     check(eventually([&] { return delivered.load() == 32; }), "every dialer's frame is delivered");
     server.send(std::span<const std::byte>(frame));
     check(eventually([&] { return delivered.load() == 64; }), "the broadcast reaches every dialer");
-    std::this_thread::sleep_for(50ms);
+    check(eventually([&] { return asleep(d.tid.load()); }), "the driver is asleep");
     const long before = voluntary_switches(d.tid.load());
     std::this_thread::sleep_for(500ms);
     const long after = voluntary_switches(d.tid.load());
@@ -351,12 +402,24 @@ void test_fallback_thread_is_idle() {
           "the fallback links are up, each on a thread of its own");
     const std::vector<pid_t> links = spawned_since(old);
     check(links.size() == 3, "three link threads, one per fallback link");
+    // A frame across the TCP pair, so the server has accepted the dialer: the listener turns
+    // readable whenever the loopback stack delivers the handshake's last ACK, which on a
+    // loaded host can be after the server's thread first went to sleep (#2776).
+    std::atomic<int> delivered{0};
+    auto rx = [&](std::span<const std::byte>) { delivered.fetch_add(1); };
+    server.set_receiver(rx);
+    const std::array<std::byte, 4> frame{};
+    dialer.send(std::span<const std::byte>(frame));
+    check(eventually([&] { return delivered.load() == 1; }), "the server accepted the dialer");
     const auto switches = [&links] {
         long sum = 0;
         for (const pid_t id : links) sum += voluntary_switches(id);
         return sum;
     };
-    std::this_thread::sleep_for(100ms);
+    check(eventually([&] {
+              return std::all_of(links.begin(), links.end(), [](pid_t id) { return asleep(id); });
+          }),
+          "every link thread is asleep");
     const long before = switches();
     std::this_thread::sleep_for(500ms);
     const long after = switches();
