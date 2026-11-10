@@ -1241,19 +1241,18 @@ int main() {
     // longer covers it, and nothing measured whether the seam was honored.
     //
     // The fixture is the shape RFC-0014 actually produces, not a bare leaf: a
-    // `/net/<module>/<name>` path whose NAME record EXCEEDS `path_key_t::kInlineBytes`
-    // (a connection name is peer-chosen, and `conn-192-168-1-50-47301` is 23 characters
-    // against a 12-character inline budget), registered with a handler so the extension
-    // block and the value seam are both installed. Every one of the six allocation sites
-    // fires.
+    // `/net/<module>/<name>` path with a long, peer-chosen NAME record
+    // (`conn-192-168-1-50-47301` is 23 characters, past the 16 B the old inline key held),
+    // registered with a handler so the extension block and the value seam are both installed. Every
+    // one of the six allocation sites fires.
     //
     // `allocs=` is the number that matters and it is exact, host-independent and
     // ratcheted (perf_gate.py): it counts the blocks that ESCAPE to the global heap.
     //
     // It reads ZERO, blocks and bytes. The `vertex_t` block, the extension block and the
     // value seam moved onto the graph's source with #1778/#1885, and the last escape, the
-    // 24 B `path_key_t` spill of the 24-byte NAME record, with #1991 (the spill block is
-    // drawn through `path_key_t::try_make` from the graph's table source). `mr_served=`
+    // 24 B spill of the 24-byte NAME record, with #1991 (since #2672 every name is carved
+    // into the graph's name block from the graph's table source). `mr_served=`
     // is where those blocks went. perf_gate.py pins this row at zero outright, on top of
     // the paired ratchet, so a new escape fails even against a baseline that has one.
     {

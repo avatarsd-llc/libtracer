@@ -1365,6 +1365,11 @@ add_test(NAME children COMMAND children_test)
 
 # L4 fold, Slice 0 — folded :children projection is byte-identical to the materialized
 # serialize and is a genuine scatter-gather rope the tlv_view cursor walks.
+add_executable(child_prefix_test child_prefix_test.cpp)
+target_link_libraries(child_prefix_test PRIVATE libtracer)
+libtracer_test_warnings(child_prefix_test)
+add_test(NAME child_prefix COMMAND child_prefix_test)
+
 add_executable(folded_children_test folded_children_test.cpp)
 target_link_libraries(folded_children_test PRIVATE libtracer)
 libtracer_test_warnings(folded_children_test)
@@ -3082,18 +3087,18 @@ add_executable(retention_only_vertex_heap_test retention_only_vertex_heap_test.c
 target_link_libraries(retention_only_vertex_heap_test PRIVATE libtracer)
 libtracer_test_warnings(retention_only_vertex_heap_test)
 add_test(NAME retention_only_vertex_heap COMMAND retention_only_vertex_heap_test)
-# #1991 — a long vertex name is drawn from the graph's injected source, not the global heap.
-add_executable(path_key_seam_test path_key_seam_test.cpp)
-target_link_libraries(path_key_seam_test PRIVATE libtracer)
-libtracer_test_warnings(path_key_seam_test)
-add_test(NAME path_key_seam COMMAND path_key_seam_test)
+# #1991, #2672 — a vertex name is drawn from the graph's injected source into its name block.
+add_executable(name_block_seam_test name_block_seam_test.cpp)
+target_link_libraries(name_block_seam_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(name_block_seam_test)
+add_test(NAME name_block_seam COMMAND name_block_seam_test)
 
 # #1533: suspend/resume a subscription in place; a suspended edge is not published.
 add_executable(subscriber_suspend_test subscriber_suspend_test.cpp)
 target_link_libraries(subscriber_suspend_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(subscriber_suspend_test)
 add_test(NAME subscriber_suspend COMMAND subscriber_suspend_test)
-# #2052 — with every source injected, the path_key_t spill and a bus link's :children[]
+# #2052 — with every source injected, a long vertex name and a bus link's :children[]
 # listing draw nothing from the default root (the MCU arena).
 if(LIBTRACER_NET_PLANE)
     add_executable(injected_scratch_test injected_scratch_test.cpp)

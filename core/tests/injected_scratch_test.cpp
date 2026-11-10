@@ -13,8 +13,8 @@
  * against what is left, so the instrument is each sub-pool's PEAK, read after each step of a
  * process that injected every source.
  *
- * - (a) a name record past `path_key_t::kInlineBytes`, registered and then copied, spills to
- *       the graph's injected source only (#1991): every peak is still zero.
+ * - (a) a long name record, registered, lands in the graph's name block, drawn from the
+ *       graph's injected source only (#1991, #2672): every peak is still zero.
  * - (b) creating a bus connection and publishing its liveness leave every peak at zero; before
  *       #2052 the liveness value came from `tr::mem::heap_backend()`. A read of the connection
  *       vertex's `:children[]` then stages its listing on, and answers it from, the owning
@@ -135,19 +135,11 @@ int main() {
     // A path the app parses draws from the source it names (#2286): here, the graph's own.
     const auto at = [&g](std::string_view text) { return *path_t::parse(text, g.table_source()); };
 
-    // (a) The path_key_t spill: a 34-byte name record, then a copy of the key.
-    std::printf("(a) a long name spills to the graph's source:\n");
+    // (a) A 34-byte name record, into the graph's name block.
+    std::printf("(a) a long name lands on the graph's source:\n");
     std::size_t before = root.draws;
     (void)g.register_vertex(at("/n/a-name-well-past-sixteen-bytes"), role_t::STORED_VALUE);
-    check(root.draws > before, "the spill drew the graph's source");
-    // The copy constructor draws from the source that served the original (#1991).
-    const std::string_view text = "a-record-well-past-sixteen-bytes";
-    const auto key =
-        tr::graph::path_key_t::try_make(std::as_bytes(std::span(text)), g.table_source());
-    check(key.has_value() && key->bytes().size() > tr::graph::path_key_t::kInlineBytes,
-          "a key past the inline bytes spills");
-    const tr::graph::path_key_t copy = *key;
-    check(copy == *key, "and its copy holds the same bytes");
+    check(root.draws > before, "the registration drew the graph's source");
     report_default_root();
     check(default_root_peak() == 0, "and nothing from the default root");
 

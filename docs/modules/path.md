@@ -15,8 +15,8 @@ strip a trailing `/`, reject empty segments (`//`) and unrooted paths, enforce t
 limits (≤64 B/segment, ≤1024 B total, ≤255 segments, ≤8 field steps). It emits the
 canonical key — e.g. `/sensor/temp` → `06 'sensor' 04 'temp'`
 (12 bytes; each record is `[u8 len][utf8]`, RFC-0018) — and parses the `:`-tail into a `field_path_t` (`settings.app.setpoint`,
-`subscribers[]`, `subscribers[3]`) for the field-write surface. `path_key_t` +
-`path_key_hash_t` (FNV-1a over the bytes) key the `unordered_map`.
+`subscribers[]`, `subscribers[3]`) for the field-write surface. The graph resolves those
+bytes one record at a time down its vertex tree (ADR-0057).
 
 ## Interface
 
@@ -32,8 +32,6 @@ class path_t {
     const field_path_t& field() const;               // the :field.sub[N] tail
     std::size_t segment_count() const;
 };
-class path_key_t { /* owned key bytes; ≤16 B inline, else one heap block */ };
-struct path_key_hash_t { /* FNV-1a over the key bytes */ };
 ```
 
 The two entry points differ in what failure means. `path_t::parse` is for a string whose
@@ -78,10 +76,10 @@ flowchart LR
   component size fixed scratch instead of allocating per frame — the mount-prefix walk's
   stitch buffer is two segments' worth, `std::array<std::byte, kMaxSegmentBytes * 2>`
   (`core/src/fwd_router.cpp`), and no longer scales with how wide a mount is (#523).
-- **Ordinary names cost no heap block.** `path_key_t` holds records up to 16 bytes inline
-  (`path_key_t::kInlineBytes`, `core/include/libtracer/path.hpp:path_key_t::kInlineBytes`) — a packed segment
-  record is a 1-byte length prefix plus the segment text, so a name of up to 15 characters
-  never allocates; longer records spill to a single owned block.
+- **A name costs its bytes and nothing else.** A vertex keeps only a reference to its own
+  segment record (#2672); the bytes live in the graph's name block, chunks drawn from the
+  graph's table source and kept until the graph goes, so no name takes a heap block of its
+  own and an 8-character name costs 9 bytes plus its share of a chunk header.
 
 ## API reference
 
@@ -102,32 +100,11 @@ Generated from `core/include/libtracer/path.hpp` by Doxygen.
 :members:
 ```
 
-### The owned key
+### The delivery-target key
 
-A path is looked up by an owned copy of its canonical bytes rather than by a
-string. `path_key_t` is that copy, with a small-buffer optimization sized so that
-a packed segment record — a 1-byte length prefix plus the segment text — fits inline
-for names up to fifteen characters, which is the overwhelming norm; a longer record spills to
-one block drawn from a block source (`try_make` takes it; a graph passes its injected table
-source, so a registration takes nothing from the global heap, #1991). It is immutable after construction, matching its use: a vertex's
-name never changes. `path_key_hash_t` and `path_key_eq_t` are the hash-map
-bindings over it, and `target_key_t` is the delivery-target key `try_make_target_key`
-builds.
-
-```{doxygenclass} tr::graph::path_key_t
-:project: libtracer
-:members:
-```
-
-```{doxygenstruct} tr::graph::path_key_hash_t
-:project: libtracer
-:members:
-```
-
-```{doxygenstruct} tr::graph::path_key_eq_t
-:project: libtracer
-:members:
-```
+`target_key_t` is the delivery-target key `try_make_target_key` builds. A vertex's own name
+is not a key type any more: since #2672 the vertex references its record in the graph's name
+block (`vertex_t::name()`).
 
 ```{doxygenclass} tr::graph::target_key_t
 :project: libtracer

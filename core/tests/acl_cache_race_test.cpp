@@ -90,7 +90,6 @@ using tr::graph::ace_t;
 using tr::graph::ace_type_t;
 using tr::graph::acl_right_t;
 using tr::graph::graph_t;
-using tr::graph::path_key_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::vertex_handle_t;
@@ -334,7 +333,8 @@ std::vector<std::byte> merged_subject(std::span<const ace_t> merged) {
  */
 void test_mark_inside_rebuild_defeats_the_publish() {
     std::printf("an invalidation inside the rebuild defeats the publish (ADR-0078, #1043):\n");
-    vertex_t v{role_t::STORED_VALUE, path_key_t{as_bytes("bearer")}, {}};
+    static const std::vector<std::byte> name = as_bytes("bearer");  // outlives v (#2672)
+    vertex_t v{role_t::STORED_VALUE, name, {}};
     // Allocates the extension block and leaves the counter ODD, so the next gated evaluation
     // rebuilds — the state a first-ever `acl_allows` on a freshly written vertex is in.
     const ace_t keeper[] = {grant(kKeeper, acl_right_t::WRITE, false)};

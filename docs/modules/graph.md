@@ -785,11 +785,11 @@ next frame over an already-minted binding.
 `vertex_slot` is the mint side. It returns the index **and** the generation together, from
 one lock hold, because either alone is not a reference: read as two calls they can straddle
 a retire, and the pair would then name the successor tenant's vertex while the caller
-believes it bound the one its operation reached. And it **scans**. That is deliberate rather than pending: a
-per-vertex index field costs 4 bytes on rv32, where `sizeof(vertex_t)` sits at
-`config_t::kMaxVertexBytes32` with zero headroom, and a pointer→index side map costs
-strictly more than the 4 B/vertex the slot vector does. A mint happens once per binding, on
-a reply already being assembled.
+believes it bound the one its operation reached. It does not scan: each vertex carries the
+index of its own slot (#1486), stamped once before the vertex is linked in, and the call
+validates it against the index. Since #2672 that memo shares one word with the vertex's name
+length, so it costs no byte; the scan remains only for a vertex no graph slotted, or one past
+the memo's 23 bits.
 
 ### Registration and subscription
 
