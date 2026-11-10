@@ -314,8 +314,6 @@ void transport_vertex_t::ctl_txn_t::publish(vertex_handle_t vertex, link_state_t
 
 void transport_vertex_t::ctl_txn_t::unroute(mem::string_t name) { unroute_ = std::move(name); }
 
-void transport_vertex_t::ctl_txn_t::stop_engine(self_heal_link_t* engine) { stop_ = engine; }
-
 void transport_vertex_t::ctl_txn_t::born_engine(self_heal_link_t* engine) { born_ = engine; }
 
 void transport_vertex_t::ctl_txn_t::destroy_link(transport_ptr_t link, mem::bytes_t config) {
@@ -331,26 +329,11 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
     release_lock();
     result_t<void> out{};
     // Teardown order, unchanged from when these lines ran under the lock (#494): un-route
-    // FIRST so the NAME stops resolving before anything is destroyed, then stop the engine
-    // so no liveness write can land on a vertex that is about to retire, then retire, then
-    // destroy the socket.
+    // FIRST so the NAME stops resolving before anything is destroyed, then retire, then shut
+    // the socket down (an engine stops with it; its publishes already find no connection).
     if (!unroute_.empty()) {
         (void)owner_.router_.remove_child(unroute_.view());
         unroute_.clear();
-    }
-    // `if constexpr` on the module gate (#1470), here and at every other call INTO the
-    // engine: with `kSelfHealLinks = false` nothing mints one, so `stop_` is provably null —
-    // and discarding the call is what stops the linker pulling `self_heal_link.cpp`'s 4.3 KB
-    // back into an image that can never reach it. A null CHECK would not: the reference is
-    // what costs, not the branch.
-    if constexpr (kSelfHealLinks) {
-        if (stop_ != nullptr) {
-            self_heal_link_t* const engine = stop_;
-            stop_ = nullptr;
-            // JOINS the worker — the reason this is not under `ctl_m_`. The sockets stay up:
-            // they go with the link's shut_down below, once `ops_m_` is down too.
-            engine->stop_worker();
-        }
     }
     bool retired = false;
     if (retire_) {
@@ -403,6 +386,11 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
     // write (#2353), and a refused write must not strand the link undialable. The pointer holds
     // because creation is an `OPERATION`, and every removal is too: `ops_m_` keeps one out
     // until this transaction ends.
+    // `if constexpr` on the module gate (#1470), here and at every other call INTO the
+    // engine: with `kSelfHealLinks = false` nothing mints one, so `born_` is provably null —
+    // and discarding the call is what stops the linker pulling `self_heal_link.cpp`'s 4.3 KB
+    // back into an image that can never reach it. A null CHECK would not: the reference is
+    // what costs, not the branch.
     if constexpr (kSelfHealLinks) {
         if (self_heal_link_t* const engine = std::exchange(born_, nullptr)) engine->born();
     }
@@ -1258,21 +1246,19 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     // how a `client`'s `UP` once landed over a socket the factory had just BOUND as a listener.
     //
     // The engine is the sole writer of this connection's later DIAL transitions (RFC-0014
-    // §4): its publisher, installed here with the birth publish, writes the vertex VALUE
-    // directly — deliberately NOT through set_link_state, whose ctl_m_ the engine's worker
-    // must never take (the teardown path joins that worker while HOLDING ctl_m_). A frame
-    // routed to this child can reach the engine as soon as `add_child` has run, with no
-    // `ctl_m_`, so the engine starts no worker until phase 2 has written the birth state
-    // (`born_engine`, #2353): its first report then follows that write instead of being lost
-    // or overwritten. remove_connection stops the engine before the vertex retires, so no
-    // publish lands on a retired vertex.
+    // §4): its publisher, installed here with the birth publish, resolves the connection
+    // through the control plane on every transition (`publish_engine_state`), as an operation
+    // of its own. So a publish made after the connection is removed finds it gone and writes
+    // nothing, and the engine's worker need not be stopped before the vertex retires: a
+    // teardown waits on that worker, as on everything of the link's, only with both locks
+    // down, or not at all on a thread that runs link callbacks. A frame routed to this child
+    // can reach the engine as soon as `add_child` has run, so the engine starts no worker
+    // until phase 2 has written the birth state (`born_engine`, #2353): its first report then
+    // follows that write instead of being lost or overwritten.
     if (engine != nullptr) {
         if constexpr (kSelfHealLinks) {  // #1470 module gate — see `ctl_txn_t::discharge`
-            graph::graph_t* const g = &graph_;
-            const vertex_handle_t vh = *v;
-            engine->set_liveness_publisher([g, vh](link_state_t s) {
-                (void)g->write(vh, link_state_value(s, g->value_backend()));
-            });
+            engine->set_liveness_publisher(
+                [this, engine](link_state_t s) { (void)publish_engine_state(engine, s); });
         }
         (void)set_link_state_locked(txn, qv, link_state_t::DORMANT);
         txn.born_engine(engine);
@@ -1281,6 +1267,17 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
             txn, qv,
             effective_role == conn_role_t::LISTEN ? link_state_t::LISTENING : link_state_t::UP);
     return v;
+}
+
+result_t<void> transport_vertex_t::publish_engine_state(const self_heal_link_t* engine,
+                                                        link_state_t state) {
+    ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // one step against a concurrent teardown
+    for (std::size_t i = 0; i < conns_.size(); ++i)
+        if (conns_.at(i).value.engine == engine) {
+            txn.publish(conns_.at(i).value.vertex, state);
+            return txn.discharge();
+        }
+    return {};  // removed: nothing to publish to
 }
 
 result_t<void> transport_vertex_t::remove_connection(std::string_view name) {
@@ -1303,18 +1300,18 @@ result_t<void> transport_vertex_t::remove_connection_locked(ctl_txn_t& txn, std:
     //
     //  1. Un-route BEFORE anything is destroyed: after this the NAME resolves to nothing,
     //     so the socket can go without a forward ever reaching freed memory.
-    //  2. Stop the S5 engine BEFORE the vertex retires: its worker publishes liveness by
-    //     writing that vertex. `stop()` JOINS the worker, and the worker may be inside a
-    //     publish whose fan-out reaches a subscriber that calls back in here (S6's own
-    //     wiring does exactly that) — which is why it must not run under `ctl_m_`.
+    //  2. Erase the entry (below, under the lock): an S5 engine's worker resolves its
+    //     connection through it on every publish (`publish_engine_state`), so from here on
+    //     it publishes nothing, and the engine stops with its link in step 4.
     //  3. Retire the identity vertex (RFC-0009 §B.6): /net/<name> re-virginizes, so a later
     //     connection may take the same name — which is exactly the tombstone the registry
     //     reuses. Retiring an already-retired or unregistered vertex is a no-op, so a
     //     half-built connection tears down cleanly too.
-    //  4. Shut the owned socket down, which joins its recv thread — the second join, and the
-    //     second reason phase 2 exists, run with `ops_m_` down too because that thread may be
-    //     waiting for it — and park it until a collect() that no router frame open now is
-    //     still inside, so a frame already on its way into it finds a valid object.
+    //  4. Shut the owned socket down, with both locks down: it joins the link's threads (and
+    //     an engine's worker), which may be waiting for either lock; on a thread that runs
+    //     link callbacks it waits for nothing and the joins happen at collect(). Then park it
+    //     until a collect() that no router frame open now is still inside, so a frame already
+    //     on its way into it finds a valid object.
     //     A provided link is borrowed and left untouched.
     //
     // #576: step 3 is the peer-driven append site of the value-seam park — but only for a
@@ -1331,7 +1328,6 @@ result_t<void> transport_vertex_t::remove_connection_locked(ctl_txn_t& txn, std:
     // The routing name is handed over with the entry's own key: the entry goes below, the
     // un-route happens in phase 2, and nothing is copied to bridge the two.
     txn.unroute(std::move(entry.key));
-    txn.stop_engine(entry.value.engine);
     txn.retire(entry.value.vertex);
     txn.park(entry.value.park);
     txn.destroy_link(std::move(entry.value.owned), std::move(entry.value.config));

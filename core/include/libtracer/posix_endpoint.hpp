@@ -250,18 +250,11 @@ class posix_endpoint_t {
     void stop_and_join();
 
     /** @brief Stop and join the fallback's thread (idempotent); a no-op on the node's
-     *         module, whose driver is the application's. Called on that thread itself (a
-     *         link torn down from its own callback) it stops the thread without joining it:
-     *         the thread ends once the callback returns, and the destructor, run from
-     *         another thread, joins it. */
+     *         module, whose driver is the application's. Called on a thread that runs link
+     *         callbacks (@ref on_callback_thread), this one's included, it stops the thread
+     *         without joining it: the thread ends once its callback returns, and the
+     *         destructor, run by the graph's `collect()` outside every callback, joins it. */
     void stop_driver();
-
-    /** @brief True on the thread that delivers this endpoint's callbacks: its fallback
-     *         thread, or the node module's driver (`transport_t::on_own_thread`). */
-    [[nodiscard]] bool on_driver() const noexcept {
-        const wait_module_t* const w = wait_.load(std::memory_order_acquire);
-        return w != nullptr && w->on_driver();
-    }
 
     /**
      * @brief The link's own socket's registration: a datagram socket, a dialled connection,
@@ -635,9 +628,6 @@ class stream_endpoint_t : protected posix_endpoint_t {
  */
 class slot_server_t : public transport_t, protected stream_endpoint_t {
    public:
-    /** @brief True on this link's own thread, or the node module's driver. */
-    [[nodiscard]] bool on_own_thread() const noexcept override { return on_driver(); }
-
     /** @brief The peer-visitor shape the query trio speaks — @ref bus_link_t's, so the
      *         facet arm's overrides are the same signature and no consumer sees two. */
     using peer_visitor_t = bus_link_t::peer_visitor_t;

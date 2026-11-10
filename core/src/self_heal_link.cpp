@@ -17,6 +17,7 @@
 
 #include "libtracer/frame.hpp"
 #include "libtracer/sync.hpp"
+#include "libtracer/wait.hpp"
 
 namespace tr::net {
 
@@ -171,22 +172,23 @@ void self_heal_link_t::release() {
     cv_.notify_all();
 }
 
-void self_heal_link_t::stop_worker() {
+void self_heal_link_t::stop() {
+    // On a thread that runs link callbacks nothing here may wait (`on_callback_thread`): the
+    // worker could be reaping a socket whose callback is this one, and a socket's own thread
+    // could be the one asking. The stop is still made; the destructor, which the graph's
+    // collect() runs outside every callback, joins and frees what is left.
+    const bool defer = on_callback_thread();
     bool started = false;
     {
         const std::lock_guard l(m_);
         stop_ = true;
-        // Claim the worker under the lock and clear the flag, so a second call (`stop()`, or
-        // the destructor after an explicit one) joins nothing rather than joining twice.
-        started = worker_started_;
-        worker_started_ = false;
+        // Claim the worker under the lock and clear the flag, so a second `stop()` (the
+        // destructor after an explicit one) joins nothing rather than joining twice.
+        started = worker_started_ && !defer;
+        if (!defer) worker_started_ = false;
         cv_.notify_all();
     }
     if (started) worker_.join();
-}
-
-void self_heal_link_t::stop() {
-    stop_worker();
     // Tear the sockets down with `m_` RELEASED: each destruction joins a receive thread
     // that may itself be blocked in on_socket_down waiting for `m_`.
     // The live socket joins the corpses, so every socket leaves the same way: shut down here,
@@ -199,24 +201,17 @@ void self_heal_link_t::stop() {
         live_gen_ = 0;
         state_ = link_state_t::DORMANT;  // terminal resting value; nothing publishes it
     }
-    // A socket whose callback may be on this very stack (the link torn down from its own
-    // receive path) is shut down but kept: it cannot be freed under that callback, nor its
-    // thread joined from itself. The destructor, which runs on another thread, frees it.
-    sock_t* drop = nullptr;
-    sock_t* kept = nullptr;
-    while (dead != nullptr) {
-        sock_t* const next = dead->next_corpse;
-        sock_t*& list = dead->link->on_own_thread() ? kept : drop;
-        dead->next_corpse = list;
-        list = dead;
-        dead = next;
+    if (!defer) {
+        drop_corpses(dead);
+        return;
     }
-    for (sock_t* s = kept; s != nullptr; s = s->next_corpse) s->link->shut_down();
-    if (kept != nullptr) {
-        const std::lock_guard l(m_);
-        corpses_ = kept;
-    }
-    drop_corpses(drop);
+    // Deferred: shut down (which waits for nothing here), and kept for the destructor.
+    for (sock_t* s = dead; s != nullptr; s = s->next_corpse) s->link->shut_down();
+    const std::lock_guard l(m_);
+    sock_t** tail = &dead;
+    while (*tail != nullptr) tail = &(*tail)->next_corpse;
+    *tail = corpses_;  // a socket the worker parked meanwhile
+    corpses_ = dead;
 }
 
 void self_heal_link_t::send(std::span<const std::byte> frame) {

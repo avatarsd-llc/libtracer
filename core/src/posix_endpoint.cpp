@@ -211,9 +211,10 @@ bool posix_endpoint_t::start(std::size_t stack_size, mem::block_source_t& src) {
 void posix_endpoint_t::stop_driver() {
     if (fallback_ == nullptr) return;
     fallback_->module.stop();
-    // Not from the thread itself: it cannot wait for its own end. Once this callback returns
-    // its run() sees the stop and the thread ends; the destructor joins it.
-    if (!fallback_->module.on_driver()) fallback_->thread.join();
+    // Never from a thread that runs link callbacks: the thread may be this one, or be inside a
+    // callback that waits on this one. Once its callback returns its run() sees the stop and
+    // the thread ends; the destructor joins it.
+    if (!on_callback_thread()) fallback_->thread.join();
 }
 
 void posix_endpoint_t::stop_and_join() {

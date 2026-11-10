@@ -18,16 +18,23 @@
  *  2. **Removed by another link's write while its own callback waits for the control plane.**
  *     A removal of B's link `x` arrives on B's link `y` while a creation that arrived on `x`
  *     is waiting for the same control plane (both queued behind a creation the test holds
- *     open). The teardown of `x` waits for `x`'s callback, which needs the control plane the
- *     removal has finished with: it completes.
+ *     open). Both complete.
+ *  3. **Two links removing each other.** A removal of `y` arrives on `x` and a removal of `x`
+ *     arrives on `y`, both queued behind the held creation. Each teardown runs on the other
+ *     link's callback, so neither may wait for the other: both complete, and once B's graph
+ *     frees them neither link leaves a thread behind.
+ *
+ * A teardown made on a thread that runs link callbacks waits for nothing; the joins happen at
+ * the graph's collect(), outside every callback.
  *
  * Each wait is bounded: a regression prints `[FAIL]` and exits non-zero at once rather than
  * hanging ctest, since the threads it leaves stuck could not be joined.
  *
- * Ablations, by hand: keeping the control-plane lock across the teardown's waits reds
- * section 2 (stuck). Joining a link's own thread from itself passes on a POSIX host, where
- * the join fails and the thread ends unjoined, but under TSan it is reported as a thread
- * leak; on a chip that join waits forever.
+ * Ablations, by hand: joining a link's thread in place from a callback thread
+ * (`posix_endpoint_t::stop_driver` always joining) reds section 3 (stuck); for section 1 the
+ * self-join fails on a POSIX host and the thread ends unjoined, which TSan reports as a thread
+ * leak (on a chip that join waits forever). Keeping the control-plane lock across the
+ * teardown's waits reds section 2 (stuck).
  */
 
 #include <arpa/inet.h>
@@ -280,6 +287,42 @@ void test_removed_while_its_callback_waits_for_the_control_plane() {
     b.g.collect();
 }
 
+void test_two_links_removing_each_other() {
+    std::printf("-- two links whose callbacks remove each other\n");
+    node_b_t b(nullptr);
+    node_a_t a;
+    const std::uint16_t px = free_port();
+    const std::uint16_t py = free_port();
+    check(a.dial("tox", px) && a.dial("toy", py), "A dials twice");
+    const std::vector<long> before = thread_ids();
+    check(b.listen("x", px) && b.listen("y", py), "B listens twice");
+
+    g_gate.entered.store(0);
+    g_gate.close();
+    std::thread holder([&] {
+        (void)b.g.write(path_t("/net/gate-client/conn"), tr::net::conn_spec("held2", 0, "gate"));
+    });
+    check_or_exit(eventually([] { return g_gate.entered.load() == 1; }),
+                  "a creation holds B's control plane");
+    tr::net::fwd_router_t::origin_t rx{&ignore_reply, nullptr};
+    tr::net::fwd_router_t::origin_t ry{&ignore_reply, nullptr};
+    check(a.write(rx, "tox", "/net/udp-server/conn", tr::net::conn_remove("y")),
+          "the removal of y is sent over x");
+    check(a.write(ry, "toy", "/net/udp-server/conn", tr::net::conn_remove("x")),
+          "the removal of x is sent over y");
+    std::this_thread::sleep_for(100ms);  // both callbacks now wait behind the held creation
+    g_gate.release();
+    holder.join();
+    check_or_exit(
+        eventually([&] { return !b.has("net/udp-server/x") && !b.has("net/udp-server/y"); }),
+        "both teardowns complete");
+    (void)a.router.cancel(rx);
+    (void)a.router.cancel(ry);
+    b.g.collect();
+    check_or_exit(eventually([&] { return spawned_since(before) == 0; }),
+                  "once B frees them, neither link leaves a thread behind");
+}
+
 }  // namespace
 
 int main() {
@@ -287,6 +330,7 @@ int main() {
     test_removed_by_its_own_write(false);
     test_removed_by_its_own_write(true);
     test_removed_while_its_callback_waits_for_the_control_plane();
+    test_two_links_removing_each_other();
     std::printf("link_teardown_wait_test: %s (%d failures)\n",
                 g_failures == 0 ? "ALL PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
