@@ -164,7 +164,7 @@ struct router_stats_t {
 
 /**
  * @brief The router's allocation planes as ONE aggregate (RFC-0028 §8.2, slice 10) — what
- *        `%fwd_router_t`'s constructor takes in place of six positional, defaulted seams.
+ *        `fwd_router_t`'s constructor takes in place of six positional, defaulted seams.
  *
  * Every member defaults to the process net sub-pool (`mem::net_source()` /
  * `mem::net_backend()`, #1777), so
@@ -1329,9 +1329,17 @@ class fwd_router_t {
          * canonical.
          */
         std::atomic<bool> retired{false};
-        /** @brief The READ tally of a link that is one session (#2774): one with no
-         *         `%transport_t::inbound_tally_` of its own. Written only on the link's receive
-         *         thread; no byte when the READ budget is off. */
+        /**
+         * @brief The READ tally of a link that is one session (#2774): one whose
+         *        `%transport_t::inbound_tally` answers null. Written only on the link's receive
+         *        thread; no byte when the READ budget is off.
+         *
+         * NOT reset when a re-add rebinds this ctx (#884). It is a plain word owned by the
+         * receive thread, and a departing link's thread may still be inside a frame when the
+         * control thread rebinds. A reset there would be a data race, and it would buy little:
+         * the run stamp already ages the count, so a link re-added within one run carries its
+         * count to the end of that run and no further.
+         */
         [[no_unique_address]] mutable session_read_tally_t read_tally{};
         /**
          * @brief Next published receiver ctx — the LOCK-FREE reader chain (ADR-0063 §3).
@@ -1580,7 +1588,7 @@ class fwd_router_t {
      *        another session READ in this run, in which case it has answered
      *        `tr::flow::backpressure` (the stack-built refusal) and the caller stops.
      *
-     * The session's tally is the delivering slot's (`%transport_t::inbound_tally_`) or, for a
+     * The session's tally is the delivering slot's (`%transport_t::inbound_tally`) or, for a
      * link that is one session, its registration's. A frame with no receive ctx (the public
      * `on_frame` doors, a frame this node originates) belongs to no session and is never refused.
      */

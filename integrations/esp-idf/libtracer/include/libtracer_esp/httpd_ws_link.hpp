@@ -640,6 +640,12 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     [[nodiscard]] peer_handle_t inbound_peer() const noexcept override { return rx_peer_; }
 
     /**
+     * @brief The delivering session's READ tally (#2774): the slot @ref inbound_peer's handle
+     *        names, on either `peer_named` setting; null when no open slot holds that handle.
+     */
+    [[nodiscard]] read_tally_t* inbound_tally() noexcept override;
+
+    /**
      * @brief Close one peer's session by NAME — the "revoke this controller" action
      *        (#1146), callable from any task.
      *
@@ -2070,8 +2076,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *         (the default) — see @ref set_auth_cb. Read on the httpd task, unlocked. */
     auth_fn_t auth_fn_ = nullptr;
     void* auth_ctx_ = nullptr;
-    /** @brief The handle of the frame a FLAT link is delivering (@ref inbound_peer), written
-     *         before each flat delivery on the httpd task; unused when `peer_named`. */
+    /** @brief The handle of the frame this link is delivering (@ref inbound_peer,
+     *         @ref inbound_tally), written before each delivery on the httpd task. */
     peer_handle_t rx_peer_{};
     /** @brief The `deadline` of the last liveness check (#2257): written by
      *         @ref sweep, read by the @ref sweep_auth_deadlines it posts. */

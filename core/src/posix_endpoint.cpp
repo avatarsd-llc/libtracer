@@ -624,6 +624,14 @@ transport_t* slot_server_t::peer_link_of(peer_handle_t peer) {
     return s.open.load(std::memory_order_relaxed) && s.handle == peer ? &endpoint_of(s) : nullptr;
 }
 
+read_tally_t* slot_server_t::inbound_tally() noexcept {
+    // Asked inside a delivery, on the driving thread: the slot table's only mutator, so the
+    // lookup takes no lock. `delivering_` names the session whose frame is in flight and is
+    // cleared once it is handed up, so outside a delivery this answers null.
+    if (!delivering_.valid() || delivering_.index >= slots_.size()) return nullptr;
+    return tally_of(slots_[delivering_.index]->read_tally);
+}
+
 bool slot_server_t::close_peer(std::string_view peer) {
     // Shutdown-only under peers_m_; the driving thread's next pass observes the close and runs
     // the IDENTICAL remote-FIN teardown — no duplicate logic, and no off-thread touch of the

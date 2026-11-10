@@ -679,6 +679,10 @@ struct default_config_t {
      * and its count lives in that slot (receiver pays). At 0, every tally member is an empty
      * `[[no_unique_address]]` type and the check is not compiled: 0 bytes, no branch.
      *
+     * The census counts sessions that READ in the run, not sessions still connected: a session
+     * that READ and left still counts until the run closes, so a newcomer that is alone past
+     * its N-th READ may be refused for the rest of that run.
+     *
      * Override fragment: `static constexpr std::uint8_t kReadBudget = 3;`. At most 254.
      */
     static constexpr std::uint8_t kReadBudget = 0;

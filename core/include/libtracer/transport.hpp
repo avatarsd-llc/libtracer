@@ -646,26 +646,27 @@ inline constexpr bool kReadBudgetOn = graph::config_t::kReadBudget != 0;
  * sent in that run (bits 7-0, saturating). A stamp that is not the current run's means zero
  * READs, so closing a run touches no session (`%fwd_router_t::close_read_run`). Written only on
  * the thread delivering the session's frames.
+ *
+ * The stamp skips 0 and so repeats every 2^24 - 1 closes (about 19 days at one close per
+ * 100 ms). A tally last written exactly a multiple of that many runs ago reads as a member of
+ * the open run: it skips the census join and resumes its old count, for that one run only.
  */
 struct read_tally_t {
     std::uint32_t word = 0; /**< @brief Run stamp and READ count; 0 ⇒ no READ yet. */
 };
 
-/**
- * @brief What a `%read_tally_t` and a pointer to one become when the budget is off: an empty
- *        member that takes no byte and an assignment that compiles to nothing.
- */
-struct no_read_tally_t {
-    /** @brief Accepts the address of a session's (equally empty) tally and keeps nothing. */
-    constexpr no_read_tally_t& operator=(const no_read_tally_t* /*tally*/) noexcept {
-        return *this;
-    }
-};
+/** @brief What a `%read_tally_t` becomes when the budget is off: an empty member, no byte. */
+struct no_read_tally_t {};
 
 /** @brief A session slot's tally member: `%read_tally_t`, or nothing when the budget is off. */
 using session_read_tally_t = std::conditional_t<kReadBudgetOn, read_tally_t, no_read_tally_t>;
-/** @brief A link's pointer to the tally of the session it is delivering, or nothing. */
-using inbound_read_tally_t = std::conditional_t<kReadBudgetOn, read_tally_t*, no_read_tally_t>;
+
+/** @brief The address of a session slot's tally, the answer `transport_t::inbound_tally` gives. */
+[[nodiscard]] inline read_tally_t* tally_of(read_tally_t& tally) noexcept { return &tally; }
+/** @brief Off, a slot has no tally to point at. */
+[[nodiscard]] constexpr read_tally_t* tally_of(no_read_tally_t& /*tally*/) noexcept {
+    return nullptr;
+}
 
 /**
  * @brief The node's READ census (#2774): which run is open, and whether two or more sessions
@@ -683,7 +684,7 @@ class read_census_t {
     /**
      * @brief Count one READ of the session that owns @p slot, or @p own when the link delivering
      *        it named no slot; true iff it is beyond @p budget while two sessions READ.
-     * @param slot   The delivering link's `%transport_t::inbound_tally_`; null ⇒ the link is the
+     * @param slot   The delivering link's `%transport_t::inbound_tally`; null ⇒ the link is the
      *               session.
      * @param own    The tally of a link that is one session.
      * @param budget `%graph::config_t::kReadBudget`.
@@ -718,7 +719,7 @@ template <>
 class read_census_t<false> {
    public:
     /** @brief Never over budget. */
-    static constexpr bool over(no_read_tally_t /*slot*/, no_read_tally_t& /*own*/,
+    static constexpr bool over(read_tally_t* /*slot*/, no_read_tally_t& /*own*/,
                                std::uint32_t /*budget*/) noexcept {
         return false;
     }
@@ -1158,6 +1159,18 @@ class transport_t {
     [[nodiscard]] virtual peer_handle_t inbound_peer() const noexcept { return {}; }
 
     /**
+     * @brief The READ tally of the session whose frame this link is delivering RIGHT NOW
+     *        (#2774), or null when the link itself is the session.
+     *
+     * The READ budget's seam, shaped like @ref inbound_peer and valid on the same terms: only
+     * inside a receive callback, on the thread running it. A link that carries several
+     * sessions (a stream server's slots) answers with the delivering session's tally; the
+     * router then counts that READ in it. Null, the DEFAULT, makes the router count the READ
+     * against the link's registration. Asked only by a build whose budget is on.
+     */
+    [[nodiscard]] virtual read_tally_t* inbound_tally() noexcept { return nullptr; }
+
+    /**
      * @brief The SUBJECT token of the peer @p peer names — *who wrote this*, never *where*
      *        (ADR-0082 §Decision 1).
      *
@@ -1252,17 +1265,6 @@ class transport_t {
      *         for borrowed ones — and key receive-buffer strategy off
      *         `rx_.has_rope()`. */
     receiver_slot_t<> rx_;
-
-    /**
-     * @brief The tally of the session whose frame this link is delivering (#2774), or null.
-     *
-     * A link that carries several sessions (a stream server's slots) points this at the
-     * delivering session's `%session_read_tally_t` before it hands the frame up, beside
-     * @ref inbound_peer's handle; the router reads it at the terminus of a READ. Null, the link
-     * itself is the session and the router counts against its registration. Takes no byte
-     * when @ref tr::graph::default_config_t::kReadBudget is 0.
-     */
-    [[no_unique_address]] inbound_read_tally_t inbound_tally_{};
 
    private:
     /** @brief The router replays a fire that came before its install (@ref set_down_notifier)
