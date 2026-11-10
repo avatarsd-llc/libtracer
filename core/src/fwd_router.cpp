@@ -1753,6 +1753,25 @@ bool fwd_router_t::door_allows(const child_registry_t::child_t* door, std::strin
     return v && graph_.allows(*v, caller, *right);
 }
 
+template <class Cursor>
+inline bool fwd_router_t::read_refused(const Cursor& cur, const fwd_pre_t& pre, fwd_op_t op,
+                                       std::string_view inbound_name,
+                                       const child_rx_ctx_t* inbound_ctx) {
+    if constexpr (!kReadBudgetOn) {
+        return false;
+    } else {
+        if (op != fwd_op_t::READ || inbound_ctx == nullptr ||
+            !read_run_.over(inbound_ctx->entry->bound().link->inbound_tally_,
+                            inbound_ctx->read_tally, graph::config_t::kReadBudget))
+            return false;
+        // The refusal every exhausted terminus answers with (#1612): built on the stack from
+        // the request's own offsets, so it draws from no source.
+        if (transport_t* const in = reply_link(inbound_name, inbound_ctx))
+            emit_refusal_reply(cur, pre, *in, graph::status_t::BACKPRESSURE);
+        return true;
+    }
+}
+
 // `always_inline`, and the reason is measured: each of its two callers (`on_frame_impl`,
 // `on_frame_rope_impl`) is its only call site for that cursor, and GCC's choice to inline it
 // there is a unit-wide budget decision, not a local one. When #2124 shrank every frame bracket
@@ -1823,7 +1842,8 @@ template <class Cursor, class Reject, class Terminus, class Reply>
         // REPLY (a reply's `dst` is canonical, RFC-0029 §6.1), so what reaches here is a
         // request resolved against the element rather than against a name nothing spelled.
         // HANDLED stops here too; only PASS goes on to the canonical path.
-        if (d == head_dst_t::TERMINUS) terminus(&head_target, pre);
+        if (d == head_dst_t::TERMINUS && !read_refused(cur, pre, op, inbound_name, inbound_ctx))
+            terminus(&head_target, pre);
         if (d != head_dst_t::PASS) return true;
     }
     {
@@ -1865,7 +1885,7 @@ template <class Cursor, class Reject, class Terminus, class Reply>
         reply(pre);
         return true;
     }
-    terminus(nullptr, pre);
+    if (!read_refused(cur, pre, op, inbound_name, inbound_ctx)) terminus(nullptr, pre);
     return true;
 }
 

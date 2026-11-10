@@ -635,6 +635,97 @@ struct sweep_t {
     }
 };
 
+/** @brief True iff this build bounds a session's READs under contention (#2774): see
+ *         @ref tr::graph::default_config_t::kReadBudget. */
+inline constexpr bool kReadBudgetOn = graph::config_t::kReadBudget != 0;
+
+/**
+ * @brief One session's READ tally for the current run (#2774), kept in the session's own slot.
+ *
+ * One word: the run stamp the router's census handed out (bits 31-8) and the READs this session
+ * sent in that run (bits 7-0, saturating). A stamp that is not the current run's means zero
+ * READs, so closing a run touches no session (`%fwd_router_t::close_read_run`). Written only on
+ * the thread delivering the session's frames.
+ */
+struct read_tally_t {
+    std::uint32_t word = 0; /**< @brief Run stamp and READ count; 0 ⇒ no READ yet. */
+};
+
+/**
+ * @brief What a `%read_tally_t` and a pointer to one become when the budget is off: an empty
+ *        member that takes no byte and an assignment that compiles to nothing.
+ */
+struct no_read_tally_t {
+    /** @brief Accepts the address of a session's (equally empty) tally and keeps nothing. */
+    constexpr no_read_tally_t& operator=(const no_read_tally_t* /*tally*/) noexcept {
+        return *this;
+    }
+};
+
+/** @brief A session slot's tally member: `%read_tally_t`, or nothing when the budget is off. */
+using session_read_tally_t = std::conditional_t<kReadBudgetOn, read_tally_t, no_read_tally_t>;
+/** @brief A link's pointer to the tally of the session it is delivering, or nothing. */
+using inbound_read_tally_t = std::conditional_t<kReadBudgetOn, read_tally_t*, no_read_tally_t>;
+
+/**
+ * @brief The node's READ census (#2774): which run is open, and whether two or more sessions
+ *        have READ in it. The off arm is empty and answers "not over budget" as a constant.
+ *
+ * One word, `%fwd_router_t`'s: the run stamp (bits 31-8) and the sessions that READ in the run
+ * (bits 7-0, saturating at 2, which is all the budget asks). A session's first READ of a run
+ * joins by CAS, so a close racing it makes it join the run that is open.
+ *
+ * @tparam On `%kReadBudgetOn`.
+ */
+template <bool On>
+class read_census_t {
+   public:
+    /**
+     * @brief Count one READ of the session that owns @p slot, or @p own when the link delivering
+     *        it named no slot; true iff it is beyond @p budget while two sessions READ.
+     * @param slot   The delivering link's `%transport_t::inbound_tally_`; null ⇒ the link is the
+     *               session.
+     * @param own    The tally of a link that is one session.
+     * @param budget `%graph::config_t::kReadBudget`.
+     */
+    bool over(read_tally_t* slot, read_tally_t& own, std::uint32_t budget) noexcept {
+        read_tally_t& tally = slot != nullptr ? *slot : own;
+        std::uint32_t run = word_.load(std::memory_order_relaxed);
+        if (((tally.word ^ run) & ~kCount) != 0) {
+            while ((run & kCount) < 2 &&
+                   !word_.compare_exchange_weak(run, run + 1, std::memory_order_relaxed)) {
+            }
+            tally.word = run & ~kCount;
+            run += (run & kCount) < 2 ? 1u : 0u;
+        }
+        if ((tally.word & kCount) != kCount) ++tally.word;
+        return (run & kCount) >= 2 && (tally.word & kCount) > budget;
+    }
+    /** @brief Close the run: the next stamp, no session counted; stamp 0 is skipped, because a
+     *         fresh tally (word 0) must never look like a member of the open run. */
+    void close() noexcept {
+        const std::uint32_t next = (word_.load(std::memory_order_relaxed) | kCount) + 1;
+        word_.store(next != 0 ? next : kCount + 1, std::memory_order_relaxed);
+    }
+
+   private:
+    static constexpr std::uint32_t kCount = 0xFFu; /**< @brief The low byte of both words. */
+    std::atomic<std::uint32_t> word_{kCount + 1};  /**< @brief Stamp 1, nobody read yet. */
+};
+
+/** @brief The census when the budget is off: no state, never over budget. */
+template <>
+class read_census_t<false> {
+   public:
+    /** @brief Never over budget. */
+    static constexpr bool over(no_read_tally_t /*slot*/, no_read_tally_t& /*own*/,
+                               std::uint32_t /*budget*/) noexcept {
+        return false;
+    }
+    /** @brief Nothing to close. */
+    static constexpr void close() noexcept {}
+};
+
 /**
  * @brief A point-to-point (or bus-facet-exposing) transport link: the byte seam
  *        between the routing plane and one wire (ws/tcp/udp/quic/CAN).
@@ -1161,6 +1252,17 @@ class transport_t {
      *         for borrowed ones — and key receive-buffer strategy off
      *         `rx_.has_rope()`. */
     receiver_slot_t<> rx_;
+
+    /**
+     * @brief The tally of the session whose frame this link is delivering (#2774), or null.
+     *
+     * A link that carries several sessions (a stream server's slots) points this at the
+     * delivering session's `%session_read_tally_t` before it hands the frame up, beside
+     * @ref inbound_peer's handle; the router reads it at the terminus of a READ. Null, the link
+     * itself is the session and the router counts against its registration. Takes no byte
+     * when @ref tr::graph::default_config_t::kReadBudget is 0.
+     */
+    [[no_unique_address]] inbound_read_tally_t inbound_tally_{};
 
    private:
     /** @brief The router replays a fire that came before its install (@ref set_down_notifier)

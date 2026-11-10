@@ -94,6 +94,9 @@ concept frame_observer = requires(std::string_view inbound_link_name) {
     { O::on_frame(inbound_link_name) } noexcept -> std::same_as<void>;
 };
 
+static_assert(graph::config_t::kReadBudget <= 254,
+              "config_t::kReadBudget counts in a saturating byte; at most 254 (#2774).");
+
 static_assert(frame_observer<graph::config_t::frame_observer_t>,
               "config_t::frame_observer_t needs `static void on_frame(std::string_view) "
               "noexcept` (#2580); see default_config_t::frame_observer_t in config.hpp.");
@@ -161,7 +164,7 @@ struct router_stats_t {
 
 /**
  * @brief The router's allocation planes as ONE aggregate (RFC-0028 §8.2, slice 10) — what
- *        `fwd_router_t`'s constructor takes in place of six positional, defaulted seams.
+ *        `%fwd_router_t`'s constructor takes in place of six positional, defaulted seams.
  *
  * Every member defaults to the process net sub-pool (`mem::net_source()` /
  * `mem::net_backend()`, #1777), so
@@ -877,6 +880,18 @@ class fwd_router_t {
      */
     void on_frame(std::string_view inbound_name, std::span<const std::byte> frame);
 
+    /**
+     * @brief Close the current READ run (#2774): every session starts the next one with no
+     *        READs counted, and the census of sessions that READ starts at zero again.
+     *
+     * The application's clock drives the budget (`%graph::default_config_t::kReadBudget`): it
+     * calls this when its own run length has passed, for example from its idle task every
+     * 100 ms. The library reads no clock. O(1) whatever the session count: closing a run moves
+     * one word and touches no session. Call it from one thread. When the budget is off it does
+     * nothing, so application code need not test the build.
+     */
+    void close_read_run() noexcept { read_run_.close(); }
+
     // -- origination (#1645) ------------------------------------------------------------
 
     /**
@@ -1314,6 +1329,10 @@ class fwd_router_t {
          * canonical.
          */
         std::atomic<bool> retired{false};
+        /** @brief The READ tally of a link that is one session (#2774): one with no
+         *         `%transport_t::inbound_tally_` of its own. Written only on the link's receive
+         *         thread; no byte when the READ budget is off. */
+        [[no_unique_address]] mutable session_read_tally_t read_tally{};
         /**
          * @brief Next published receiver ctx — the LOCK-FREE reader chain (ADR-0063 §3).
          *
@@ -1555,6 +1574,19 @@ class fwd_router_t {
      */
     [[gnu::cold]] void refuse_unserved_type(std::byte type, std::string_view inbound_name,
                                             const child_rx_ctx_t* inbound_ctx) noexcept;
+    /**
+     * @brief The READ budget's verdict (#2774), compiled to `false` when it is off: true iff
+     *        @p op is a READ this node terminates whose session is over the budget while
+     *        another session READ in this run, in which case it has answered
+     *        `tr::flow::backpressure` (the stack-built refusal) and the caller stops.
+     *
+     * The session's tally is the delivering slot's (`%transport_t::inbound_tally_`) or, for a
+     * link that is one session, its registration's. A frame with no receive ctx (the public
+     * `on_frame` doors, a frame this node originates) belongs to no session and is never refused.
+     */
+    template <class Cursor>
+    bool read_refused(const Cursor& cur, const fwd_pre_t& pre, graph::fwd_op_t op,
+                      std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx);
     /**
      * @brief Classify ONE inbound FWD frame and dispatch it — the ingress driver, once.
      *
@@ -2009,6 +2041,9 @@ class fwd_router_t {
     /** @brief @ref reply_name_lookups's counter: cold state, so it sits with the drops. Bumped
      *         only on the by-name arm of `reply_link`, never on a point-to-point reply. */
     std::atomic<std::size_t> reply_name_lookups_{0};
+    /** @brief The READ run's census (#2774), advanced by @ref close_read_run; no byte when the
+     *         budget is off. */
+    [[no_unique_address]] read_census_t<kReadBudgetOn> read_run_;
 
     /**
      * @brief Where a terminating `FWD{REPLY}` goes: the oldest armed @ref origin_t whose return

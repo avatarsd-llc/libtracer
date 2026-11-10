@@ -926,6 +926,10 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
          *         @ref handle is minted at. Bumped once per accept (never reused, never
          *         zero), so the counter survives the retire that clears @ref handle. */
         std::uint32_t gen_seq = 0;
+        /** @brief This session's READs in the current run (#2774): written by the driving
+         *         thread, which points @ref transport_t::inbound_tally_ at it while it delivers
+         *         the session's frame; reset at accept. No byte when the budget is off. */
+        [[no_unique_address]] session_read_tally_t read_tally{};
         /** @brief This session's egress (ADR-0087 §2, #2144): its frames waiting per vertex,
          *         its writer role and its strikes. Closed while the slot is free; reset as the
          *         slot is recycled, so a stalled peer's frames and strikes are never inherited

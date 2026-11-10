@@ -2044,6 +2044,16 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(fwd_frame_observer_test)
     add_test(NAME fwd_frame_observer COMMAND fwd_frame_observer_test)
     set_property(TEST fwd_frame_observer PROPERTY SKIP_RETURN_CODE 77)
+    # #2774 — the per-session READ budget: refused only past N while two sessions read in the
+    # run, never a WRITE/SUBSCRIBE/REPLY/forward; a TCP listener's slots are its sessions. A
+    # leg with its own fragment has the budget off and exits 77.
+    if(LIBTRACER_TRANSPORT_TCP)
+        add_executable(fwd_read_budget_test fwd_read_budget_test.cpp)
+        target_link_libraries(fwd_read_budget_test PRIVATE libtracer)
+        libtracer_test_warnings(fwd_read_budget_test)
+        add_test(NAME fwd_read_budget COMMAND fwd_read_budget_test)
+        set_property(TEST fwd_read_budget PROPERTY SKIP_RETURN_CODE 77)
+    endif()
 
     # ADR-0084 — a remote AWAIT is answered from a one-shot receiver-side waiter charged to
     # the receiving link's rx source, and never holds that link's receive context.

@@ -760,6 +760,7 @@ void slot_server_t::accept_peer() {
         // mistaken for its successor's.
         if (++slot->gen_seq == 0) slot->gen_seq = 1;
         slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen_seq};
+        slot->read_tally = session_read_tally_t{};  // a new tenancy has read nothing (#2774)
         // The routable NAME is the handle spelled out — `p<slot>~<gen>`, legal by
         // construction (ADR-0073 §2). It carries the generation, so a reused slot gets a
         // FRESH name: a route another node still holds for the previous session names
