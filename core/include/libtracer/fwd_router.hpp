@@ -865,8 +865,8 @@ class fwd_router_t {
      *
      * Forwards (dst-shrink + src-grow) toward a transport child, resolves+replies
      * for a local terminus, or delivers a terminal REPLY to the reply sink. A
-     * malformed or non-FWD frame is dropped. Never blocks on a downstream peer
-     * beyond the transport's own bounded send.
+     * malformed or non-FWD frame is dropped. Never blocks on a downstream peer:
+     * every transport write is nonblocking (#2252).
      *
      * Runs on the calling (transport RX) thread and takes graph and router locks — the
      * caller must hold no transport-internal locks across this call.

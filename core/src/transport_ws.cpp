@@ -242,8 +242,7 @@ transport_drop_stats_t ws_server_transport_t::peer_endpoint_t::drop_stats() cons
 }
 
 bool ws_server_transport_t::on_accept(session_base_t& base, int fd) {
-    (void)fd;  // no per-socket option of its own: WS rides the shared stream setup, which
-               // since #838 includes the bounded SO_SNDTIMEO armed in accept_peer
+    (void)fd;  // no per-socket option of its own: WS rides the shared stream setup
 
     session_t& s = static_cast<session_t&>(base);
     s.hs_buf.clear();
