@@ -170,8 +170,6 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
 
     /** @brief See @ref transport_t::shut_down. */
     void shut_down() override;
-    /** @brief True on this link's own thread, or the node module's driver. */
-    [[nodiscard]] bool on_own_thread() const noexcept override { return on_driver(); }
 
     udp_transport_t(const udp_transport_t&) = delete;
     udp_transport_t& operator=(const udp_transport_t&) = delete;

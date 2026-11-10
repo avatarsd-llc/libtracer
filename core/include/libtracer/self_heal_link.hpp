@@ -201,25 +201,14 @@ class self_heal_link_t final : public transport_t {
     /**
      * @brief Stop the engine: join the worker, tear down every socket. Idempotent.
      *
-     * `transport_vertex_t::remove_connection` joins the worker (@ref stop_worker) BEFORE
-     * retiring the connection vertex, so no liveness write can land on a retired vertex,
-     * and runs this through @ref shut_down once its own locks are released. After it
-     * returns the engine publishes nothing and @ref send drops everything. A dial attempt
-     * in flight is waited for (the factory's own connect deadline bounds the wait). A
-     * socket whose callback may be on the caller's stack is shut down and freed later, by
-     * the destructor.
+     * `transport_vertex_t::remove_connection` runs this through @ref shut_down once its own
+     * locks are released. After it returns @ref send drops everything, and a liveness
+     * publish still in flight finds the connection gone. A dial attempt in flight is waited
+     * for (the factory's own connect deadline bounds the wait). On a thread that runs link
+     * callbacks (`on_callback_thread`) it waits for nothing: it stops the worker and shuts
+     * the sockets down, and the destructor joins and frees them.
      */
     void stop();
-
-    /**
-     * @brief The first half of @ref stop : join the worker and leave the sockets up.
-     *        Idempotent.
-     *
-     * After it returns the engine publishes nothing. It waits only on the worker, which
-     * never takes the owner's locks, so the owner may call it under them; the sockets,
-     * whose receive paths may take those locks, go with the later @ref stop.
-     */
-    void stop_worker();
 
     /** @brief The engine's current liveness state (the owner/test introspection door). */
     [[nodiscard]] link_state_t state() const;

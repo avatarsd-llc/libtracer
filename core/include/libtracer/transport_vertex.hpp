@@ -816,7 +816,7 @@ class transport_vertex_t {
      * `%publish` is a `graph_t::write` that fans out to subscribers (a routing-plane
      * subscriber of a connection's own liveness is what S6 wires, and it drives
      * @ref transport_vertex_t::acquire_link — straight back into `ctl_m_`), and
-     * `%stop_engine` / `%destroy_link` JOIN a thread that may be inside such a
+     * `%destroy_link` JOINS threads that may be inside such a
      * fan-out. Held across `ctl_m_`, either one deadlocks a non-recursive mutex.
      *
      * An `OPERATION` keeps `ops_m_` for the WHOLE of both phases, which is what preserves
@@ -857,10 +857,6 @@ class transport_vertex_t {
 
         /** @brief Collect `fwd_router_t::remove_child(name)` — the un-route, first in phase 2. */
         void unroute(mem::string_t name);
-
-        /** @brief Collect `self_heal_link_t::stop_worker()` on @p engine — JOINS its worker;
-         *         its sockets go with the link's shut_down. */
-        void stop_engine(self_heal_link_t* engine);
 
         /** @brief Collect `self_heal_link_t::born()` on @p engine: it runs after the publish,
          *         so its worker cannot report a state the birth write would overwrite (#2353). */
@@ -905,7 +901,6 @@ class transport_vertex_t {
         std::unique_lock<tr::mutex_t> ops_lock_;    /**< @brief Engaged for an `OPERATION`. */
         std::unique_lock<tr::mutex_t> lock_;        /**< @brief `ctl_m_`; dropped by phase 2. */
         mem::string_t unroute_{mem::null_source()}; /**< @brief Empty = no un-route. */
-        self_heal_link_t* stop_ = nullptr;          /**< @brief Null = no engine to stop. */
         self_heal_link_t* born_ = nullptr;          /**< @brief Null = no engine to release. */
         transport_ptr_t destroy_;                   /**< @brief Null = nothing to destroy. */
         /** @brief The destroyed connection's config bytes; released after `destroy_`. */
@@ -1040,6 +1035,16 @@ class transport_vertex_t {
      */
     [[nodiscard]] graph::result_t<void> set_link_state_locked(ctl_txn_t& txn, std::string_view name,
                                                               link_state_t state);
+
+    /**
+     * @brief A self-healing connection's liveness transition, published by its engine's
+     *        worker: resolve the connection whose engine is @p engine and write @p state to
+     *        its vertex, or nothing once it is removed.
+     *
+     * An `OPERATION` of its own, so a publish and a teardown of the same connection never
+     * interleave, and no publish lands on a retired vertex.
+     */
+    graph::result_t<void> publish_engine_state(const self_heal_link_t* engine, link_state_t state);
 
     /**
      * @brief Serializes every CONTROL-PLANE mutation here (ADR-0063 §3).
