@@ -823,7 +823,10 @@ class transport_vertex_t {
      * ADR-0063 §3's serialization promise now that the discharge is outside `ctl_m_`: two
      * mutations cannot interleave, so a deferred publish can no longer land on a vertex a
      * concurrent teardown is retiring. `ops_m_` is safe to hold there precisely because the
-     * doors a fan-out reaches never take it.
+     * doors a fan-out reaches never take it. A link's own callbacks can take it, though: an
+     * operation that arrived on a link runs on that link's receive path. So a teardown drops
+     * `ops_m_` too before it waits on the link it removes (its shut down and join), once the
+     * mutation itself is done; nothing it changes is left for a concurrent operation to see.
      *
      * A `LOOKUP` that collects nothing is a plain scoped lock — which is the point: every
      * acquisition of either mutex in this class goes through this type, so the re-entrancy
@@ -855,7 +858,8 @@ class transport_vertex_t {
         /** @brief Collect `fwd_router_t::remove_child(name)` — the un-route, first in phase 2. */
         void unroute(mem::string_t name);
 
-        /** @brief Collect `self_heal_link_t::stop()` on @p engine — JOINS its worker. */
+        /** @brief Collect `self_heal_link_t::stop_worker()` on @p engine — JOINS its worker;
+         *         its sockets go with the link's shut_down. */
         void stop_engine(self_heal_link_t* engine);
 
         /** @brief Collect `self_heal_link_t::born()` on @p engine: it runs after the publish,
@@ -879,7 +883,8 @@ class transport_vertex_t {
          *        park it, publish, let a new engine's worker run.
          *
          * `ops_m_`, if this is an `OPERATION`, is NOT dropped here: it is the destructor's,
-         * so the whole mutation stays one serialized step.
+         * so the whole mutation stays one serialized step, except before a teardown's waits on
+         * its link, whose callbacks may need it.
          *
          * Idempotent (a second call has nothing left to do), so the destructor may run it
          * again harmlessly after an explicit call.
@@ -893,6 +898,8 @@ class transport_vertex_t {
        private:
         /** @brief End phase 1: clear the `ctl_m_` stamp, then unlock it. Idempotent. */
         void release_lock();
+        /** @brief Clear the `ops_m_` stamp, then unlock it, if this holds it. Idempotent. */
+        void release_ops();
 
         const transport_vertex_t& owner_;
         std::unique_lock<tr::mutex_t> ops_lock_;    /**< @brief Engaged for an `OPERATION`. */

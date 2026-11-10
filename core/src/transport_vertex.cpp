@@ -288,12 +288,15 @@ transport_vertex_t::ctl_txn_t::~ctl_txn_t() {
     // on, so the status goes; every explicit caller that wants it calls discharge() itself.
     (void)discharge();
     // `ops_m_` outlives phase 2 by exactly this much: the whole operation, decision and
-    // discharge, is one serialized step (see the member's doc). Stamp cleared first, for
-    // the reason release_lock() gives.
-    if (ops_lock_.owns_lock()) {
-        owner_.ops_owner_.store(detail::unowned_thread_id(), std::memory_order_relaxed);
-        ops_lock_.unlock();
-    }
+    // discharge, is one serialized step (see the member's doc), short of a teardown's waits.
+    release_ops();
+}
+
+void transport_vertex_t::ctl_txn_t::release_ops() {
+    if (!ops_lock_.owns_lock()) return;
+    // Stamp cleared first, for the reason release_lock() gives.
+    owner_.ops_owner_.store(detail::unowned_thread_id(), std::memory_order_relaxed);
+    ops_lock_.unlock();
 }
 
 void transport_vertex_t::ctl_txn_t::release_lock() {
@@ -344,7 +347,9 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
         if (stop_ != nullptr) {
             self_heal_link_t* const engine = stop_;
             stop_ = nullptr;
-            engine->stop();  // JOINS the worker — the reason this is not under `ctl_m_`
+            // JOINS the worker — the reason this is not under `ctl_m_`. The sockets stay up:
+            // they go with the link's shut_down below, once `ops_m_` is down too.
+            engine->stop_worker();
         }
     }
     bool retired = false;
@@ -354,13 +359,25 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
         out = owner_.graph_.retire(vertex);
         retired = out.has_value();
     }
+    // Every step below waits on the link's own callbacks, and one of them may be inside a
+    // control-plane operation waiting for `ops_m_` (a SPEC or removal that arrived on that
+    // link): so the waits run with `ops_m_` down. The mutation itself is done, the entry gone
+    // and the identity retired, so nothing a concurrent operation can see is left to change.
+    // A teardown publishes nothing, which is why the publish below may still keep it.
+    if (park_ != nullptr || destroy_) {
+        assert(!publish_ && "ctl_txn_t: a teardown publishes nothing (see discharge's return)");
+        release_ops();
+    }
     // The link is shut down here, not destroyed: a forward or a listing already on its way
     // into it must find a valid object. It goes with its config into the connection's park,
     // which the graph frees only if the vertex really is gone (see `conn_park_t`).
     if (conn_park_t* const p = std::exchange(park_, nullptr)) {
         p->config = std::move(destroy_config_);
         p->link = std::move(destroy_);
-        if (p->link) p->link->shut_down();  // JOINS the receive thread — not under `ctl_m_`
+        // JOINS the receive thread — not under either lock. Called on that thread itself (the
+        // link removed from its own callback) it only stops it: the graph's collect() frees
+        // the link from another thread, and its destructor joins there.
+        if (p->link) p->link->shut_down();
         // Its entry was reserved at creation, so this park cannot be refused. A refused retire
         // (counted and returned in `out`) keeps the block for the graph's lifetime instead.
         if (retired)
@@ -1295,8 +1312,9 @@ result_t<void> transport_vertex_t::remove_connection_locked(ctl_txn_t& txn, std:
     //     reuses. Retiring an already-retired or unregistered vertex is a no-op, so a
     //     half-built connection tears down cleanly too.
     //  4. Shut the owned socket down, which joins its recv thread — the second join, and the
-    //     second reason phase 2 exists — and park it until a collect() that no router frame
-    //     open now is still inside, so a frame already on its way into it finds a valid object.
+    //     second reason phase 2 exists, run with `ops_m_` down too because that thread may be
+    //     waiting for it — and park it until a collect() that no router frame open now is
+    //     still inside, so a frame already on its way into it finds a valid object.
     //     A provided link is borrowed and left untouched.
     //
     // #576: step 3 is the peer-driven append site of the value-seam park — but only for a

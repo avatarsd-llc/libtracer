@@ -953,7 +953,10 @@ class transport_t {
      *        @ref start_receiving.
      *
      * When this returns, no inbound frame is delivered any more and the link's own threads
-     * have been joined. The object itself stays valid, and every call on it stays safe, until
+     * have been joined, unless it was called from one of them (see @ref on_own_thread): then
+     * that thread ends as soon as the callback on it returns, and the destructor joins it, so
+     * such a link is destroyed from another thread, never from its own. The object itself
+     * stays valid, and every call on it stays safe, until
      * it is destroyed. What a later send does is the link's: the stream links (TCP,
      * WebSocket) have closed their connections and shed it; UDP on a POSIX host has released
      * its socket and the send fails; UDP over lwIP, and CAN, keep their socket or bus until
@@ -968,6 +971,17 @@ class transport_t {
      * overrides it.
      */
     virtual void shut_down() {}
+
+    /**
+     * @brief True when the caller runs on a thread that delivers this link's callbacks (the
+     *        link's own thread, or the node wait module's driver): one of them may be on the
+     *        caller's stack.
+     *
+     * An owner asks this before it destroys a link it shut down: one that answers true is
+     * destroyed later, from another thread (`transport_vertex_t` does so at the graph's next
+     * `collect()`). The default is false, right for a link with no thread of its own.
+     */
+    [[nodiscard]] virtual bool on_own_thread() const noexcept { return false; }
 
     /**
      * @brief The application's clock reached @p now (#2481): run every deadline it passed and
