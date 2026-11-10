@@ -2189,7 +2189,8 @@ void graph_t::fan_out(vertex_t* v, const value_t& value) {
     //
     // It does NOT gate bubbling: an ancestor's subscribers are listeners_above_'s business
     // and both callers check that separately.
-    if (v->own_subs_ordered() == 0) return;
+    const std::uint32_t own = v->own_subs_ordered();
+    if (own == 0) return;
 
     // ADR-0080's grace-point bracket, taken ONCE for this whole fan-out and deliberately
     // BELOW the gate above: a publish nobody subscribed to — the cheapest and commonest write
@@ -2216,10 +2217,11 @@ void graph_t::fan_out(vertex_t* v, const value_t& value) {
     // since a callback that re-publishes gets a frame of its own. The frame is built only on
     // the wide arm, so the small fan-out (incl. the fan-1-vs-Zenoh path) pays one compare for
     // it; on the small arm `overflow` is reached only when a subscriber was added between
-    // own_subs() and the snapshot, and then it draws from the table source directly.
+    // the gate's count read and the snapshot, and then it draws from the table source directly.
+    // The width test reuses that read (#2673: a second read is a second edge-block load).
     std::array<std::byte, kFanoutFrameBytes> scratch;
     std::optional<mem::bump_source_t> frame;
-    if (v->own_subs() > vertex_t::kInlineFanout) frame.emplace(scratch, *tables_);
+    if (own > vertex_t::kInlineFanout) frame.emplace(scratch, *tables_);
     mem::block_array_t<edge_view_t> overflow(frame ? static_cast<mem::block_source_t&>(*frame)
                                                    : *tables_);
     vertex_t::snapshot_drops_t drops;
