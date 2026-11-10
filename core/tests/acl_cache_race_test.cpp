@@ -38,8 +38,9 @@
  * A third decides whether the instrument is LIVE, and it belongs to B, not to A: the run
  * ends when B has banked @ref kClaimsPerParity brackets of each parity (and A has raced at
  * least @ref kRaceEpochsMin epochs), never when a clock runs out — @ref kQuietEpochStride
- * has A hold still until B can bank one. The wall clock survives only as
- * @ref kRunCeilingMs, whose expiry is a FAILURE.
+ * has A hold still until B can bank one. Both counts are reached in a bounded number of turns
+ * whatever the host's load, so no wall clock bounds the run (#2769): a slow host takes longer,
+ * and a wedge is named by the test's own ctest deadline, not by a ceiling inside it.
  *
  * A fourth decides WHICH lost update is reachable, and it is the level A rewrites (#1043).
  * `graph_t::acl_allows`'s rebuild lambda walks the parent chain from the bearer UPWARD, so
@@ -70,6 +71,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <expected>
 #include <span>
 #include <string>
@@ -195,19 +197,6 @@ constexpr std::uint32_t kQuietEpochStride = 127;
  * CEILING the wall-clock budget it replaces used to reach, so no run races less than before.
  */
 constexpr std::uint32_t kRaceEpochsMin = 4096;
-/**
- * @brief Wall-clock ceiling on the whole race, in milliseconds.
- *
- * A CEILING, never a budget: reaching it means the prober could not bank its quota (or the
- * writer could not reach @ref kRaceEpochsMin) and the run is reported as a FAILURE. It is
- * not a stop condition the assertions then accommodate — that is precisely how a flaky case
- * becomes a vacuous one, green on exactly the loaded host where the interleaving never
- * happened. So the margin has to be wide enough that only a wedge reaches it: a TSan build
- * needs ~0.5 s unloaded, ~1.2 s pinned to two cores, and ~13.5 s pinned to two cores against
- * six competing spinners — four times the oversubscription of the runner that filed #1036.
- */
-constexpr std::int64_t kRunCeilingMs = 60000;
-
 /** @brief True iff epoch @p e's ancestor ACL grants @ref kProbe the READ right. */
 constexpr bool grants_probe(std::uint32_t e) { return (e % 2) == 0; }
 
@@ -271,16 +260,32 @@ std::int64_t ns_since(std::chrono::steady_clock::time_point start) {
         .count();
 }
 
+/**
+ * @brief CPU time this thread has run, in nanoseconds.
+ *
+ * The calibration's clock, not the steady one (#2769). On a loaded host a wall-clock sample
+ * counts every preemption: the 32-cycle sample spans many, the short spin sample often none,
+ * so the ratio came out tens of times too large, the writer's swept delay grew with the load,
+ * and then ran at the load's share of a CPU. CPU time counts only the work, so the delay is
+ * the same number of cycles on a loaded host as on an idle one.
+ */
+std::int64_t thread_cpu_ns() {
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return (static_cast<std::int64_t>(ts.tv_sec) * 1000000000) + ts.tv_nsec;
+}
+
 /** @brief What one invalidate-plus-rebuild-plus-evaluate cycle costs on THIS build. */
 struct calibration_t {
-    std::int64_t cycle_ns = 1;     /**< @brief Wall-clock of one cycle. */
+    std::int64_t cycle_ns = 1;     /**< @brief CPU time of one cycle. */
     std::uint32_t cycle_spins = 1; /**< @brief @ref spin units that take about as long. */
 };
 
 /**
  * @brief Time one cycle single-threaded, before the racer starts.
  *
- * Times the cycle, times @ref spin, and returns both, so the writer's swept delay is
+ * Times the cycle, times @ref spin (both in this thread's CPU time, see
+ * @ref thread_cpu_ns), and returns both, so the writer's swept delay is
  * expressed in CYCLES instead of in a spin count that only means something on one host and
  * one instrumentation level. A TSan build evaluates two orders of magnitude slower than a
  * release one; the first draft of this test hard-coded the delay and completed FIVE probes
@@ -288,16 +293,16 @@ struct calibration_t {
  */
 calibration_t calibrate(graph_t& g, vertex_handle_t bearer, std::string_view rewritten_acl,
                         std::span<const std::byte> acl_a, std::span<const std::byte> acl_b) {
-    const auto cycle_start = std::chrono::steady_clock::now();
+    const std::int64_t cycle_start = thread_cpu_ns();
     for (int i = 0; i < kCalibrationCycles; ++i) {
         (void)g.write(path_t(rewritten_acl), make_value((i % 2) == 0 ? acl_a : acl_b));
         (void)g.read(bearer, kProbe);
     }
     const std::int64_t cycle_ns =
-        std::max<std::int64_t>(1, ns_since(cycle_start) / kCalibrationCycles);
-    const auto spin_start = std::chrono::steady_clock::now();
+        std::max<std::int64_t>(1, (thread_cpu_ns() - cycle_start) / kCalibrationCycles);
+    const std::int64_t spin_start = thread_cpu_ns();
     spin(kSpinCalibration);
-    const std::int64_t spin_ns = std::max<std::int64_t>(1, ns_since(spin_start));
+    const std::int64_t spin_ns = std::max<std::int64_t>(1, thread_cpu_ns() - spin_start);
     return calibration_t{.cycle_ns = cycle_ns,
                          .cycle_spins = static_cast<std::uint32_t>(
                              std::max<std::int64_t>(1, (cycle_ns * kSpinCalibration) / spin_ns))};
@@ -442,7 +447,7 @@ void test_ancestor_rewrite_vs_descendant_eval(std::size_t rewritten_level, std::
     std::atomic<std::uint32_t> committed{0};    // epoch whose write has fully landed
     std::atomic<std::uint32_t> quiet_epoch{0};  // epoch the writer is HELD at (0 ⇒ racing)
     std::atomic<std::uint32_t> quiet_ack{0};    // newest held epoch the prober bracketed
-    std::atomic<bool> prober_done{false};       // quota banked, or the ceiling hit
+    std::atomic<bool> prober_done{false};       // quota banked and the epoch floor reached
     std::thread writer([&] {
         for (std::uint32_t e = 1; !prober_done.load(std::memory_order_acquire); ++e) {
             pending.store(e, std::memory_order_release);
@@ -468,14 +473,9 @@ void test_ancestor_rewrite_vs_descendant_eval(std::size_t rewritten_level, std::
     std::uint64_t denied_claims = 0;
     std::uint64_t stale_hits = 0;
     std::uint32_t first_stale_epoch = 0;
-    bool ceiling_hit = false;
     const auto race_start = std::chrono::steady_clock::now();
     while (granted_claims < kClaimsPerParity || denied_claims < kClaimsPerParity ||
            committed.load(std::memory_order_acquire) < kRaceEpochsMin) {
-        if (ns_since(race_start) > kRunCeilingMs * 1000000) {
-            ceiling_hit = true;
-            break;
-        }
         const std::uint32_t before = committed.load(std::memory_order_acquire);
         if (before == 0) continue;  // no epoch has landed yet
         const bool allowed = g.read(bearer, kProbe).has_value();
@@ -515,14 +515,12 @@ void test_ancestor_rewrite_vs_descendant_eval(std::size_t rewritten_level, std::
                     grants_probe(first_stale_epoch) ? "ALLOW" : "DENY",
                     grants_probe(first_stale_epoch) ? "DENY" : "ALLOW");
 
-    // Instrument liveness first: a run that stopped on the clock instead of on the prober's
-    // quota measured whatever the host let it — the vacuous-guard failure mode, reported as
-    // such rather than accommodated.
+    // Instrument liveness first. The loop above leaves only on the quota, so this restates
+    // its exit condition; it stays so a future early exit cannot pass vacuously.
     char quota_msg[128];
     std::snprintf(quota_msg, sizeof(quota_msg),
                   "the prober banked %llu bracketed claims of EACH parity (instrument is live)",
                   static_cast<unsigned long long>(kClaimsPerParity));
-    check(!ceiling_hit, "the race ended on the prober's quota, not on the wall-clock ceiling");
     check(granted_claims >= kClaimsPerParity && denied_claims >= kClaimsPerParity, quota_msg);
     check(stale_hits == 0,
           "no evaluation saw a pre-write ancestor merge inside a quiescent bracket");

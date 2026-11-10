@@ -1108,6 +1108,9 @@ add_executable(acl_cache_race_test acl_cache_race_test.cpp)
 target_link_libraries(acl_cache_race_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(acl_cache_race_test)
 add_test(NAME acl_cache_race COMMAND acl_cache_race_test)
+# The race ends on counts, not a clock (#2769), so this deadline only names a wedge: a TSan
+# build takes ~1.5 s idle and ~30 s on one CPU shared with 16 busy threads.
+set_tests_properties(acl_cache_race PROPERTIES TIMEOUT 300)
 
 # #895 — RFC-0008 sweep-set exclusion under a concurrent `set_policy` delivery-mode flip: the flip must
 # not leave one vertex in BOTH `pending_` and `unconditional_` (a sweep would deliver it
