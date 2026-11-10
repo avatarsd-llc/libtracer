@@ -232,7 +232,8 @@ class posix_endpoint_t {
 
     /**
      * @brief Arm write interest on @p s, from inside the egress writer role, once a write
-     *        left a frame held. Before @ref start it does nothing: the first attach arms it.
+     *        left a frame held and the peer reports it (`egress_t::send`'s `arm`). Before
+     *        @ref start it does nothing: the first attach arms it.
      */
     void arm_write(wait_source_t& s) noexcept {
         if (wait_module_t* const w = wait_.load(std::memory_order_acquire)) w->want_write(s, true);
@@ -433,14 +434,6 @@ class stream_endpoint_t : protected posix_endpoint_t {
      */
     std::uint64_t sweep_one(std::uint64_t now, std::uint64_t deadline);
 
-    /** @brief A write turn of the ONE peer, inside its writer role: its bytes are recorded in
-     *         @ref tx_moved_ and a held frame arms write interest on @ref src_, so the driving
-     *         thread resumes it on writability. Returns @p s. */
-    egress_step_t held_turn(egress_step_t s) noexcept {
-        if (s.held) arm_write(src_);
-        return note_moved(tx_moved_, s);
-    }
-
     /** @brief Record @p s 's bytes in @p moved, a peer's TX progress flag (#2198); returns
      *         @p s. */
     static egress_step_t note_moved(std::atomic<bool>& moved, egress_step_t s) noexcept {
@@ -474,14 +467,14 @@ class stream_endpoint_t : protected posix_endpoint_t {
                 fd = conn_fd_.load(std::memory_order_acquire);
                 // No live peer (still dialing, or torn down) => a counted drop.
                 if (fd < 0) return egress_step_t{0, false, true};
-                return held_turn(std::forward<Direct>(direct)(fd));
+                return note_moved(tx_moved_, std::forward<Direct>(direct)(fd));
             },
             [&](const egress_frame_t& f, std::size_t off) {
                 fd = conn_fd_.load(std::memory_order_acquire);
                 if (fd < 0) return egress_step_t{0, false, true};
-                return held_turn(write_frame(fd, f, off));
+                return note_moved(tx_moved_, write_frame(fd, f, off));
             },
-            [&] { condemn_fd(fd); });
+            [&] { condemn_fd(fd); }, [this] { arm_write(src_); });
         note_egress(r);
     }
 
@@ -1165,10 +1158,6 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     /** @brief Admit one inbound connection into a free (or newly grown) slot, refused when
      *         the cap, the slot table or the wait module refuses it. */
     void accept_peer();
-
-    /** @brief A write turn of @p s inside its writer role: its bytes recorded in its TX
-     *         progress flag (#2198), and a held frame arms its write interest. */
-    egress_step_t session_turn(session_base_t& s, egress_step_t step) noexcept;
 
     /** @brief The listening socket's wait callback: one accept. */
     static void on_listen(void* ctx, wait_source_t& self, std::uint8_t ready);

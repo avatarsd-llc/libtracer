@@ -623,19 +623,14 @@ void slot_server_t::send_one(session_base_t& s, function_ref_t<egress_frame_t*()
     // The fd is read INSIDE the writer role: accept opens the egress only after publishing
     // it, and teardown closes the egress (waiting the role out) before resetting it.
     const auto fd = [&s] { return s.fd.load(std::memory_order_relaxed); };
+    // The arm runs inside the session's writer role, so its fd cannot be closed under it.
     const egress_result_t r = egress_.send(
-        s.egress, lane, frame, [&] { return session_turn(s, write_gather(fd(), rec)); },
+        s.egress, lane, frame, [&] { return note_moved(s.tx_moved, write_gather(fd(), rec)); },
         [&](const egress_frame_t& f, std::size_t off) {
-            return session_turn(s, write_frame(fd(), f, off));
+            return note_moved(s.tx_moved, write_frame(fd(), f, off));
         },
-        [&] { condemn_fd(fd()); });
+        [&] { condemn_fd(fd()); }, [&] { arm_write(s); });
     note_egress(r);
-}
-
-egress_step_t slot_server_t::session_turn(session_base_t& s, egress_step_t step) noexcept {
-    // Inside the session's writer role, so its fd cannot be closed under the arm.
-    if (step.held) arm_write(s);
-    return note_moved(s.tx_moved, step);
 }
 
 void slot_server_t::broadcast(std::span<const ::iovec> rec, const graph::value_t* value,
