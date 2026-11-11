@@ -249,7 +249,7 @@ class udp_transport_t : public transport_t {
                     std::uint16_t peer_port,
                     mem::mem_backend_t* backend = &mem::heap_backend(),
                     std::size_t max_frame = 0, std::size_t recv_stack = 0);
-    // send(span) = a one-entry sendmsg; send(iov) = one sendmsg(iovec) — a composite rope
+    // send(span) = one sendto; send(iov) = one sendmsg(iovec) (sendto for one span) — a composite rope
     // in one syscall. Datagrams land in segments from `backend`; exhaustion drops
     // the datagram and ticks dropped_rx. `max_frame` (the universal :settings key,
     // 0 = kDefaultMaxFrame, one MTU's 1,472 B; at most kMaxDatagram) is the largest

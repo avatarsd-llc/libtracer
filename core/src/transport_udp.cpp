@@ -121,7 +121,8 @@ void udp_transport_t::shut_down() {
 }
 
 void udp_transport_t::send(std::span<const std::byte> frame) {
-    // One datagram, one body (#2679, ADR-0089 Q6): a single span is a one-entry sendmsg.
+    // One datagram, one body (#2679, ADR-0089 Q6): a single span is a one-entry gather, which
+    // send_to hands to `sendto` (#2723).
     const std::span<const std::byte> one[1] = {frame};
     send_to(peer(), one);
 }
@@ -132,8 +133,10 @@ void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
 
 void udp_transport_t::send_to(std::uint64_t address,
                               std::span<const std::span<const std::byte>> iov) {
-    if (fd_ < 0) {
-        drops_.count_dropped_tx();  // no socket => a counted drop
+    // No socket, or no peer (learned or configured): nobody to send to, so the datagram is
+    // shed and counted (#932).
+    if (fd_ < 0 || address == 0) {
+        drops_.count_dropped_tx();
         return;
     }
     if (iov.empty()) return;  // nothing to send is not a drop
@@ -164,15 +167,10 @@ void udp_transport_t::send_to(std::uint64_t address,
         vec[i] = ::iovec{const_cast<std::byte*>(iov[i].data()), iov[i].size()};
         total += iov[i].size();
     }
-    const std::uint64_t p = address;
-    if (p == 0) {  // no peer (learned or configured) => nobody to send to
-        drops_.count_dropped_tx();
-        return;
-    }
     sockaddr_in peer{};
     peer.sin_family = AF_INET;
-    peer.sin_addr.s_addr = static_cast<std::uint32_t>(p >> 16);
-    peer.sin_port = htons(static_cast<std::uint16_t>(p & 0xFFFF));
+    peer.sin_addr.s_addr = static_cast<std::uint32_t>(address >> 16);
+    peer.sin_port = htons(static_cast<std::uint16_t>(address & 0xFFFF));
     msghdr msg{};
     msg.msg_name = &peer;
     msg.msg_namelen = sizeof(peer);
@@ -181,8 +179,13 @@ void udp_transport_t::send_to(std::uint64_t address,
     // A refused or short datagram (a full socket buffer, EMSGSIZE, a shut socket) is lost and
     // counted, never retried: the link carries no acks, and the next value supersedes it (#2279).
     // Nonblocking (#2252): a full send buffer refuses the datagram instead of parking the sender.
-    if (::sendmsg(fd_, &msg, MSG_NOSIGNAL | MSG_DONTWAIT) != static_cast<ssize_t>(total))
-        drops_.count_dropped_tx();
+    // A one-span datagram goes out through `sendto`, which skips the kernel's msghdr and iovec
+    // copy-in that measured 35-45 ns per send over a one-entry `sendmsg` (#2723).
+    constexpr int kFlags = MSG_NOSIGNAL | MSG_DONTWAIT;
+    const ssize_t sent = n == 1 ? ::sendto(fd_, vec[0].iov_base, total, kFlags,
+                                           reinterpret_cast<sockaddr*>(&peer), sizeof(peer))
+                                : ::sendmsg(fd_, &msg, kFlags);
+    if (sent != static_cast<ssize_t>(total)) drops_.count_dropped_tx();
 }
 
 void udp_transport_t::on_ready(void* ctx, wait_source_t& self, std::uint8_t ready) {
