@@ -13,8 +13,7 @@
  *
  *  1. **Removed by its own write.** A removal of B's link `srv` arrives on `srv` itself.
  *     The teardown runs on `srv`'s own callback, so it cannot wait for that callback: it
- *     completes, and once B's graph frees the link no thread of it is left. Checked with the
- *     link on a thread of its own and on the node's wait module.
+ *     completes, and once B's graph frees the link no thread of it is left.
  *  2. **Removed by another link's write while its own callback waits for the control plane.**
  *     A removal of B's link `x` arrives on B's link `y` while a creation that arrived on `x`
  *     is waiting for the same control plane (both queued behind a creation the test holds
@@ -204,8 +203,8 @@ struct node_b_t {
     tr::graph::graph_t g;
     tr::net::fwd_router_t router{g};
     tr::net::transport_vertex_t net;
-    explicit node_b_t(tr::net::wait_module_t* wait, const tr::net::link_memory_t* memory = nullptr)
-        : net(g, router, "/net", &tr::mem::net_backend(), &tr::mem::net_source(), memory, wait) {
+    explicit node_b_t(const tr::net::link_memory_t* memory = nullptr)
+        : net(g, router, "/net", &tr::mem::net_backend(), &tr::mem::net_source(), memory) {
         (void)net.register_module(std::string(tr::net::kUdpServerSuggestedModule), "udp",
                                   conn_role_t::LISTEN);
         (void)net.register_module(std::string(tr::net::kTcpServerSuggestedModule), "tcp",
@@ -273,14 +272,10 @@ struct node_a_t {
     }
 };
 
-void test_removed_by_its_own_write(bool on_module) {
-    std::printf("-- a link removed by a write that arrived on it (%s)\n",
-                on_module ? "node wait module" : "a thread of its own");
-    tr::net::wait_module_t module;
-    std::thread driver;
-    if (on_module) driver = std::thread([&] { module.run(); });
+void test_removed_by_its_own_write() {
+    std::printf("-- a link removed by a write that arrived on it\n");
     {
-        node_b_t b(on_module ? &module : nullptr);
+        node_b_t b;
         node_a_t a;
         const std::uint16_t port = free_port();
         // A first, so the census below counts B's link alone (a UDP dial needs no listener).
@@ -299,15 +294,11 @@ void test_removed_by_its_own_write(bool on_module) {
               }),
               "once B frees it, the removed link leaves no thread behind");
     }
-    if (on_module) {
-        module.stop();
-        driver.join();
-    }
 }
 
 void test_removed_while_its_callback_waits_for_the_control_plane() {
     std::printf("-- a link removed by another link's write while its own callback waits\n");
-    node_b_t b(nullptr);
+    node_b_t b;
     node_a_t a;
     const std::uint16_t px = free_port();
     const std::uint16_t py = free_port();
@@ -344,7 +335,7 @@ void test_removed_while_its_callback_waits_for_the_control_plane() {
 
 void test_two_links_removing_each_other() {
     std::printf("-- two links whose callbacks remove each other\n");
-    node_b_t b(nullptr);
+    node_b_t b;
     node_a_t a;
     const std::uint16_t px = free_port();
     const std::uint16_t py = free_port();
@@ -386,7 +377,7 @@ struct removed_by_its_own_write_t {
     counting_source_t state;  // B's links' connection state: sessions and their buffers
     tr::net::link_memory_t memory{.state = &state};
     std::size_t state_before = 0;  // B's connection state just before the removal
-    node_b_t b{nullptr, &memory};
+    node_b_t b{&memory};
     node_a_t a;
     std::uint16_t port = 0;
     std::vector<long> link_threads;  // B's link's own
@@ -545,7 +536,7 @@ void test_listener_removed_by_another_link_while_peers_arrive() {
 
     counting_source_t state;
     tr::net::link_memory_t memory{.state = &state};
-    node_b_t b(nullptr, &memory);
+    node_b_t b(&memory);
     node_a_t a;
     const std::uint16_t pctl = free_port();
     check(a.dial("toctl", pctl), "A dials B's control link");
@@ -597,8 +588,7 @@ void test_listener_removed_by_another_link_while_peers_arrive() {
 
 int main() {
     std::printf("== #2751: link teardown never waits on a callback holding the lock it needs ==\n");
-    test_removed_by_its_own_write(false);
-    test_removed_by_its_own_write(true);
+    test_removed_by_its_own_write();
     test_removed_while_its_callback_waits_for_the_control_plane();
     test_two_links_removing_each_other();
     test_deferred_teardown_keeps_the_descriptor_open_until_the_destructor();
