@@ -17,6 +17,8 @@
  *   a second session puts the first one's surplus under the budget.
  * - Under contention, with both sessions over budget: a WRITE, a SUBSCRIBE, a REPLY, a READ
  *   this node forwards and a READ through the public by-name door are never refused.
+ * - `close_read_run` is safe from another thread: closing runs without pause while two
+ *   sessions READ on their own threads leaves every READ answered exactly once (run under TSan).
  * - The session is the stream server's SLOT: two real TCP clients of one listener are two
  *   sessions, each counted in its own slot, on the flat tier and (where the build carries the
  *   bus module) the peer-named tier.
@@ -260,6 +262,43 @@ void never_refused(std::size_t n) {
           "  a READ through the public by-name door has no session and is not refused");
 }
 
+void concurrent_close() {
+    std::printf("close_read_run from another thread while two sessions READ\n");
+    node_t node;
+    constexpr std::size_t kReads = 4000;
+    std::atomic<int> readers_left{2};
+    std::atomic<std::size_t> closes{0};
+    // Each session's READs come from its own thread, as each link's receive thread delivers
+    // them; a third thread closes runs without pause until both have finished.
+    std::thread closer([&] {
+        do {
+            node.router.close_read_run();
+            closes.fetch_add(1, std::memory_order_relaxed);
+        } while (readers_left.load(std::memory_order_acquire) != 0);
+    });
+    std::thread ta([&] {
+        node.a.reads(kReads);
+        readers_left.fetch_sub(1, std::memory_order_release);
+    });
+    std::thread tb([&] {
+        node.b.reads(kReads);
+        readers_left.fetch_sub(1, std::memory_order_release);
+    });
+    ta.join();
+    tb.join();
+    closer.join();
+    check(closes.load() >= 1, "  the closer ran");
+    check(node.a.got.result + node.a.got.backpressure == kReads && node.a.got.other == 0,
+          "  a: every READ answered once, with a result or BACKPRESSURE");
+    check(node.b.got.result + node.b.got.backpressure == kReads && node.b.got.other == 0,
+          "  b: every READ answered once, with a result or BACKPRESSURE");
+    node.router.close_read_run();
+    const answers_t before = node.a.got;
+    node.a.reads(3);
+    check(node.a.got.result == before.result + 3,
+          "  after the threads stop, a fresh run serves a session alone");
+}
+
 /** @brief Poll @p f until it holds or the deadline passes; the final answer is returned. */
 template <class Fn>
 bool wait_until(Fn f, std::chrono::milliseconds timeout = 5000ms) {
@@ -355,6 +394,7 @@ int main() {
         census(n);
         sole_session(n);
         never_refused(n);
+        concurrent_close();
         tcp_slots(n, /*peer_named=*/false);
         if constexpr (tr::net::kBusLinks) tcp_slots(n, /*peer_named=*/true);
         return tr::testing::summary("fwd_read_budget");
