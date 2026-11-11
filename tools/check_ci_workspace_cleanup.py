@@ -103,7 +103,9 @@ STEP_NAME = "Clean this job's workspace off the host runner"
 STEP_RUN = (
     'w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; '
     'if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then '
-    f'docker run --rm -v "$w/..:/w" -v "$t:/t" {CI_IMAGE} chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; '
+    f'docker run --rm -v "$w/..:/w" -v "$t:/t" {CI_IMAGE} '
+    "sh -c 'read -r a h b </proc/self/uid_map; [ \"$h\" = 0 ] || set -- 0:0; chown -R \"$1\" /w /t' "
+    'sh "$(id -u):$(id -g)" || r=1; fi; '
     'find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; '
     'find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; '
     "find \"$t\" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; "
@@ -117,7 +119,14 @@ No `sudo` (#2348): the runner user holds no sudo grant. Inside a container the
 step is already root. On a host self-hosted job, which runs as the runner user,
 a throwaway container of the pinned CI image first hands every file under the workspace's
 parent and `$RUNNER_TEMP` back to that user, so the root-owned leftovers of a
-container job that died before its own cleanup can be deleted. On the hosted
+container job that died before its own cleanup can be deleted. The owner it hands
+them to follows the daemon (#2765): the container reads the host uid of its own root
+from `/proc/self/uid_map`. 0 means a rootful daemon, so the files go to the runner
+user's `id -u:id -g` as before; anything else means a rootless daemon, whose
+container root IS the runner user, so the files go to `0:0` (the runner user's own
+uid would be a subordinate uid there and lock the runner out of its workspace).
+Inside a container job the later `stat` of `..` already reads `0:0` under a rootless
+daemon, so that part needs no branch. On the hosted
 fallback there is nothing root-owned to remove, so that container is skipped. The `:?` guards make an unset variable abort the step
 instead of widening `find` to `/`, and the trailing `/` is stripped first so
 `${w##*/}` always names the workspace dir. Each part runs whatever the one
@@ -188,10 +197,15 @@ def _strip_inline_comment(text: str) -> str:
 
 
 def _scalar(raw: str) -> str:
-    """@brief Unquote a plain/single/double-quoted YAML scalar. No escapes are needed here."""
+    """@brief Unquote a plain/single/double-quoted YAML scalar.
+
+    The one escape handled is the single-quoted scalar's `''` for a literal `'`: the
+    host reclaim step quotes its in-container `sh -c` script that way (#2765).
+    """
     value = _strip_inline_comment(raw).strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        return value[1:-1]
+        inner = value[1:-1]
+        return inner.replace("''", "'") if value[0] == "'" else inner
     return value
 
 

@@ -176,7 +176,7 @@ jobs:
       # hands the files back to the runner user. `|| true`: checkout names a workspace this
       # cannot repair.
       - name: Reclaim any root-owned leftovers from a container job
-        run: '[ "$RUNNER_ENVIRONMENT" != self-hosted ] || docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || echo "::warning::could not hand root-owned workspace files back to the runner user; checkout may fail to clean them"'
+        run: '[ "$RUNNER_ENVIRONMENT" != self-hosted ] || docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c ''read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t'' sh "$(id -u):$(id -g)" || echo "::warning::could not hand root-owned workspace files back to the runner user; checkout may fail to clean them"'
       # Shallow (#2466): HEAD only. The baseline step below fetches the one other commit it
       # needs, at depth 1. A full-history clone took about 4 to 6 min of this job.
       - uses: actions/checkout@v4
@@ -380,7 +380,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # --- the composition harness, EXECUTED (audit pass only) -----------------------
   # bench/run_compose.sh is the two-process, delivery-counted composition harness (#568).
@@ -407,7 +407,7 @@ jobs:
       # 10g is the per-job memory budget.
       # The trusted route also mounts the persistent compiler cache (core-ci.yml's
       # COMPILER CACHE header); the guard is the `runs-on` one verbatim.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /home/github-runner/ccache:/ccache -v /sys/fs/cgroup/runners.slice/runners-ci.slice:/ci-slice:ro' || '--memory 10g' }}
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
     # One of the two jobs the wedge report names. Measured healthy max 1.35 min, p50
     # 1.22; the 4.60 max is 2026-08-19 with 3.42 min of it inside `Install strace`.
     # 20 = ~4.3x the worst observed and ~15x healthy — generous because the risk here is
@@ -433,8 +433,8 @@ jobs:
       - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            n=$(ls -d /ci-slice/docker-*.scope 2>/dev/null | wc -l)
-            echo "CI containers running in runners-ci.slice (this one included): $n"
+            n=$(ls -d /host-cgroup/runners.slice/runners-ci.slice/docker-*.scope /host-cgroup/user.slice/user-*.slice/user@*.service/runners.slice/runners-ci.slice/docker-*.scope 2>/dev/null | wc -l)
+            echo "CI containers running in runners-ci.slice, rootful and rootless (this one included): $n"
             if [ "$n" -ge 1 ] && [ "$n" -le 3 ]; then jobs=4; else jobs=2; fi
           else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
@@ -511,7 +511,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # --- main push + nightly: no-pullback ratchet (HEAD vs last benched; 1 replica, 3 nightly) --
   # Each replica is a complete same-runner experiment: build HEAD, build the last benched
@@ -573,7 +573,7 @@ jobs:
       # Same self-heal as gate-pr (#1538): the bench host shares `_work` with root-run
       # container jobs.
       - name: Reclaim any root-owned leftovers from a container job
-        run: '[ "$RUNNER_ENVIRONMENT" != self-hosted ] || docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || echo "::warning::could not hand root-owned workspace files back to the runner user; checkout may fail to clean them"'
+        run: '[ "$RUNNER_ENVIRONMENT" != self-hosted ] || docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c ''read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t'' sh "$(id -u):$(id -g)" || echo "::warning::could not hand root-owned workspace files back to the runner user; checkout may fail to clean them"'
       # Shallow (#2466): HEAD only; the baseline step fetches the baseline commit alone.
       - uses: actions/checkout@v4
       - name: Build HEAD's benchmark (Release)
@@ -758,7 +758,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # --- main push: persist the build-to-build history --------------------------------
   # Aggregates whatever replicas produced transcripts (if: always() — a failing
@@ -794,7 +794,7 @@ jobs:
         # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
         run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
       - name: Reclaim any root-owned leftovers from a container job
-        run: '[ "$RUNNER_ENVIRONMENT" != self-hosted ] || docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || echo "::warning::could not hand root-owned workspace files back to the runner user; checkout may fail to clean them"'
+        run: '[ "$RUNNER_ENVIRONMENT" != self-hosted ] || docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$RUNNER_TEMP:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c ''read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t'' sh "$(id -u):$(id -g)" || echo "::warning::could not hand root-owned workspace files back to the runner user; checkout may fail to clean them"'
       - uses: actions/checkout@v4
       - name: Download the replicas' transcripts
         uses: actions/download-artifact@v4
@@ -867,4 +867,4 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d chown -R "$(id -u):$(id -g)" /w /t || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; if [ "$(id -u)" != 0 ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then docker run --rm -v "$w/..:/w" -v "$t:/t" ghcr.io/avatarsd-llc/libtracer-ci:noble-c24fa6268d1d sh -c 'read -r a h b </proc/self/uid_map; [ "$h" = 0 ] || set -- 0:0; chown -R "$1" /w /t' sh "$(id -u):$(id -g)" || r=1; fi; find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"

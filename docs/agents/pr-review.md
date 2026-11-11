@@ -437,9 +437,14 @@ that breaks one of them is a finding; cite the rule.
   merged on its own checks.
 - **No `sudo` in any workflow.** Container jobs are root inside their container. A
   host job that has to reclaim root-owned files does it through a throwaway
-  container.
+  container, which reads its own `/proc/self/uid_map` to pick the owner: the
+  runner user's uid under a rootful daemon, its own root (which is the runner
+  user) under a rootless one (#2765). The fleet may mix both modes.
 - **Container jobs run in `runners-ci.slice`** (`--cgroup-parent`), so the slice's
-  CPU and memory limits bound them.
+  CPU and memory limits bound them. Under a rootless daemon that slice lives in the
+  runner user's systemd manager; the `BUILD_JOBS` count reads both trees through the
+  host cgroup tree mounted read-only at `/host-cgroup`, and the shared compiler cache
+  is `/srv/libtracer-ccache` (#2765).
 - **Three runners take libtracer's `ci-local` jobs** (studio-ci-1, studio-lt-7,
   studio-lt-8). **`BUILD_JOBS` is adaptive:** 4 while three or fewer CI containers
   are running in that slice, this one included, otherwise 2 (more than three happens
