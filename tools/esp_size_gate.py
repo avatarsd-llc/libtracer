@@ -67,7 +67,9 @@ TRANSPORT_ROWS = (
     ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9446, None),
     # 8,896 -> 9,080 B (#2147): the poll loops give way to turn functions, the write-interest
     # arm and disarm, and the thread-per-link fallback's block (maintainer ruling 60).
-    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9080, None),
+    # 9,080 -> 9,262 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys back
+    # ~110 B. Ruled at 9,264; pinned at the 9,262 measured on the rebased batch.
+    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9262, None),
     ("CAN (transport_can + TWAI link)", ("transport_can", "twai_link", "socketcan_link_stub"),
      None, "compiled, not linked: full_node creates no CAN connection, so --gc-sections drops it"),
     ("WebSocket (httpd server + client link)", ("httpd_ws_link", "esp_ws_client_link"),
@@ -84,8 +86,12 @@ FOOTPRINT_IMAGE = "transport_footprint"
 FOOTPRINT_PINS = {
     # 14,248 B at this PR's first base; +20 B from #2704 (CAN egress sends through the native
     # gather path), which landed first. Measured on the serial run at 119d76e6.
-    "CAN (transport_can + TWAI link)": 14268,
-    "WebSocket (httpd server + client link)": 33387,
+    # 14,268 -> 14,290 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys
+    # back ~110 B.
+    "CAN (transport_can + TWAI link)": 14290,
+    # 33,387 -> 33,513 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys
+    # back ~110 B.
+    "WebSocket (httpd server + client link)": 33513,
 }
 
 
