@@ -37,7 +37,7 @@
  * is its own @ref tr::net::wait_source_t::next, in the record its link owns, so each peer is
  * paid by the link it arrived on. The module draws no memory and never grows, on either
  * adapter, so an attach is never refused for want of it (#2147). The link exists only in a
- * build that compiles that adapter (@ref tr::net::kListedWaitSources); an `epoll` build
+ * build that compiles that adapter (`%tr::net::kListedWaitSources`); an `epoll` build
  * carries none.
  *
  * **A detach waits for its own source only.** The driving thread holds no lock while a callback
@@ -69,7 +69,7 @@
 namespace tr::net {
 
 /** @brief The empty stand-in for @ref tr::net::wait_source_t::next on a build whose adapter
- *         keeps no list (@ref tr::net::kListedWaitSources false). */
+ *         keeps no list (`%tr::net::kListedWaitSources` false). */
 struct unlisted_t {};
 
 /** @brief The readiness bits a @ref tr::net::wait_source_t callback is handed. */
@@ -130,7 +130,7 @@ struct wait_source_t {
     /** @brief The next source in the lwIP adapter's list: the receiving link pays for its own
      *         entry, so the module holds no table. Written under the module's lock; the driver
      *         reads it with none, under the source's firing mark. An empty member, taking no
-     *         space, in a build without that adapter (@ref kListedWaitSources). */
+     *         space, in a build without that adapter (`%tr::net::kListedWaitSources`). */
     [[no_unique_address]] std::conditional_t<kListedWaitSources, std::atomic<wait_source_t*>,
                                              unlisted_t> next{};
 };
