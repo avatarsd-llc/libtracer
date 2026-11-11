@@ -39,23 +39,15 @@
  * peer arrived on. Slice 3 MUST draw it from the receiving link's source instead (receiver
  * pays).
  *
- * **Detach under a lock deadlocks (slice 1).** The driving thread holds the module's dispatch
- * lock for a whole batch of callbacks, and a @ref tr::net::wait_module_t::detach from any other
- * thread takes that lock, so it waits out the batch. So does the poll adapter's
- * @ref tr::net::wait_module_t::attach, which grows the table the driver walks; the epoll
- * adapter's attach takes no lock (a source the set does not hold yet is in no batch), so a link
- * built under a lock on the WIDE host never waits on a callback. Neither call takes the lock
- * once the module is stopped and its driver has left @ref tr::net::wait_module_t::run, so a
- * link on a private module (no config `wait`) joins its driver first and its teardown takes no
- * module lock; the join itself still waits out a callback in flight, as a link's own receive
- * thread always did. If the caller holds a lock that
- * one of the batch's callbacks takes (a sink's or the application's lock, reached from a delivery),
- * the callback blocks on the caller and the caller on the callback: both threads stop for good. A
- * link's teardown detaches, so stopping or destroying a link counts. The caller must not attach,
- * detach, stop or destroy a link on a module while holding any lock a callback on that module can
- * take, and must not do so from inside a callback of a second module whose own callbacks reach back
- * into the first. From inside a callback on the same module both calls return at once and are safe.
- * This must be designed out, or every caller audited, before slice 3 (ruling 44).
+ * **A detach waits for its own source only.** The driving thread holds no lock while a callback
+ * runs. A @ref tr::net::wait_module_t::detach from another thread waits only for the callback
+ * of the source it detaches, if one is in flight, never for the rest of the batch, so a link
+ * torn down under a lock that another link's callback takes does not stop either thread. What
+ * remains is the wait a link's own receive thread always had: tearing a link down while
+ * holding a lock that THAT link's own callback takes still stops both threads, so a caller
+ * must not do that. From inside a callback on the same module both calls return at once.
+ * Neither call waits once the module is stopped and its driver has left
+ * @ref tr::net::wait_module_t::run.
  *
  * **One slow sink delays every link on the module** (ADR-0087 §Consequences): delivery runs
  * inline on the driving thread. A callback that blocks is an application bug the module makes
@@ -69,6 +61,7 @@
 
 #include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/park.hpp"
 #include "libtracer/sync.hpp"
 #include "libtracer/thread_id.hpp"
 
@@ -120,10 +113,10 @@ struct wait_source_t {
     std::atomic<bool> write{false};
     /** @brief True while attached. Set by @ref wait_module_t::attach before it registers the
      *         socket (with no lock on the epoll adapter: a callback reads it only once the kernel
-     *         reports the socket); cleared only under the module's dispatch lock. Atomic
-     *         (relaxed) because the epoll adapter's attach reads and sets it with no lock while
-     *         a detach may clear it under one; every other ordering comes from the lock or the
-     *         kernel's registration. */
+     *         reports the socket); cleared only under the module's lock. Atomic (relaxed)
+     *         because the epoll adapter's attach reads and sets it with no lock while a detach
+     *         may clear it under one; every other ordering comes from the lock or the kernel's
+     *         registration. */
     std::atomic<bool> attached{false};
 };
 
@@ -132,12 +125,11 @@ struct wait_source_t {
  *        timeout.
  *
  * Thread safety: @ref attach, @ref detach, @ref want_write and @ref stop may be called from any
- * thread, and from inside a callback. A @ref detach from another thread waits out the callbacks
- * the driver is running, so once it returns the source's callback never runs again. A
- * @ref detach, or the poll adapter's @ref attach, from another thread must not be called
- * holding a lock a callback takes: that deadlocks (see the file's "Detach under a lock
- * deadlocks"). The epoll adapter's @ref attach takes no lock. @ref run is called by
- * one thread at a time.
+ * thread, and from inside a callback. A @ref detach from another thread waits for that
+ * source's callback if it is in flight, and for nothing else, so once it returns the source's
+ * callback never runs again. It must not be called holding a lock that the detached source's
+ * own callback takes (see the file's "A detach waits for its own source only"). @ref run is
+ * called by one thread at a time.
  */
 class wait_module_t {
    public:
@@ -173,8 +165,9 @@ class wait_module_t {
     /**
      * @brief Stop waiting on @p s . A no-op for a detached source.
      *
-     * From another thread it waits for the callbacks in flight to finish; from inside a
-     * callback it returns at once, and the rest of that batch is redelivered next pass.
+     * From another thread it waits for @p s 's own callback, if it is in flight, and for no
+     * other; from inside a callback it returns at once, and the rest of that batch is
+     * redelivered next pass.
      */
     void detach(wait_source_t& s) noexcept;
 
@@ -199,9 +192,9 @@ class wait_module_t {
     void stop() noexcept;
 
    private:
-    /** @brief Run @p op under the dispatch lock, or straight away on the driving thread,
-     *         which already holds it, or once the module is stopped and no thread is in
-     *         @ref run (a stopped module dispatches nothing again). */
+    /** @brief Run @p op under the module's lock, or straight away once the module is stopped
+     *         and no thread is in @ref run (a stopped module dispatches nothing again). The
+     *         driver holds the lock only between callbacks, never across one. */
     template <class Op>
     void locked(Op&& op) noexcept {
         // Sequentially consistent, as are run()'s and stop()'s stores and run()'s stop check:
@@ -210,14 +203,43 @@ class wait_module_t {
         // would see "stopped, no driver" and skip the lock while a driver that missed the stop
         // still dispatches.
         const bool stopped = stopping_.load();
-        const detail::thread_id_t driver = driver_.load();
-        if (driver == detail::this_thread_id() ||
-            (stopped && driver == detail::unowned_thread_id())) {
+        if (stopped && driver_.load() == detail::unowned_thread_id()) {
             op();
             return;
         }
         const std::lock_guard lock(m_);
         op();
+    }
+    /**
+     * @brief The driver's one fire: mark @p s firing, then fire it unless a detach (or, on the
+     *        poll adapter, an attach) was made since the batch's generation @p seen .
+     * @return False when one was, and the rest of the batch is left for the next pass.
+     *
+     * The mark is in the module's own memory, never in the source, and it is stored before the
+     * generation is re-read, as a detach bumps the generation before it reads the mark (all
+     * sequentially consistent): either this sees the detach and never touches @p s , or the
+     * detach sees the mark and waits for this one callback. A detach that waits is woken by a
+     * notify, sent only while one is waiting.
+     */
+    bool fire_marked(wait_source_t& s, std::uint8_t ready, std::uint32_t seen) noexcept {
+        firing_.store(&s);
+        const bool live = gen_.load() == seen;
+        if (live) s.fire(s.ctx, s, ready);
+        firing_.store(nullptr);
+        if (waiters_.load() != 0) park_wake(firing_);
+        return live;
+    }
+    /** @brief After a detach of @p s : block until its callback is not running, unless the
+     *         caller is the driver, whose own callback this is. A blocking wait, never a spin,
+     *         so a caller above the driver's priority on one core does not starve it; parked
+     *         through `%tr::park_wait`, as `std::atomic::wait` costs an MCU libstdc++'s 2 KB
+     *         waiter table (#2507). */
+    void await_quiet(const wait_source_t& s) noexcept {
+        if (driver_.load() == detail::this_thread_id()) return;
+        waiters_.fetch_add(1);
+        for (const wait_source_t* f = firing_.load(); f == &s; f = firing_.load())
+            park_wait(firing_, f, std::memory_order_seq_cst);
+        waiters_.fetch_sub(1);
     }
     /** @brief Wake a blocked @ref run (the stop and, on the poll adapter, a set change). */
     void ring() noexcept;
@@ -228,10 +250,18 @@ class wait_module_t {
     /** @brief Bumped by every detach (and, on the poll adapter, every attach): a batch taken
      *         before a bump may name a source that is gone, so it is dropped. */
     std::atomic<std::uint32_t> gen_{0};
+    /** @brief The source whose callback the driver is running, or about to: what a detach
+     *         from another thread waits on, so it waits for that source alone. Kept in the
+     *         module, never in the source, so the driver never writes to a source a finished
+     *         detach may have freed. Null between callbacks. */
+    std::atomic<const wait_source_t*> firing_{nullptr};
+    /** @brief Detaches blocked waiting for a callback: the driver notifies only while one is. */
+    std::atomic<std::uint32_t> waiters_{0};
     std::atomic<bool> stopping_{false}; /**< @brief Set by @ref stop. */
     /** @brief The thread inside @ref run, or none. */
     std::atomic<detail::thread_id_t> driver_{detail::unowned_thread_id()};
-    tr::mutex_t m_; /**< @brief Held while a batch is dispatched. */
+    tr::mutex_t m_; /**< @brief Serializes attach and detach; the poll adapter's driver holds it
+                         while it rebuilds its set, never across a callback. */
     /** @brief The poll adapter's attached sources, drawn from its source; empty on epoll. */
     mem::block_array_t<wait_source_t*> sources_;
     struct state_t;  // the adapter's own state, defined in its translation unit

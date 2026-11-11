@@ -111,8 +111,9 @@ void wait_module_t::detach(wait_source_t& s) noexcept {
         if (!s.attached.load(std::memory_order_relaxed)) return;
         ::epoll_ctl(fd_[0], EPOLL_CTL_DEL, s.fd.load(std::memory_order_relaxed), nullptr);
         s.attached.store(false, std::memory_order_relaxed);
-        gen_.fetch_add(1, std::memory_order_acq_rel);
+        gen_.fetch_add(1);  // seq_cst: the other half of fire_marked's handshake
     });
+    await_quiet(s);
 }
 
 void wait_module_t::want_write(wait_source_t& s, bool on) noexcept {
@@ -127,14 +128,15 @@ void wait_module_t::run() noexcept {
     driver_.store(detail::this_thread_id());  // seq_cst: see wait_module_t::locked
     std::array<epoll_event, kBatch> ev;
     while (!stopping_.load()) {
-        const std::uint32_t seen = gen_.load(std::memory_order_acquire);
+        const std::uint32_t seen = gen_.load();
         const int n = ::epoll_wait(fd_[0], ev.data(), kBatch, -1);
-        const std::lock_guard lock(m_);
-        // A detach since `seen` may have freed a source this batch names: stop at the first
-        // bump, and the sources still ready come back next pass.
-        for (int i = 0; i < n && gen_.load(std::memory_order_acquire) == seen; ++i) {
+        // No lock across a callback; a detach since `seen` stops the batch, and the sources
+        // still ready come back next pass.
+        for (int i = 0; i < n; ++i) {
             auto* const s = static_cast<wait_source_t*>(ev[static_cast<std::size_t>(i)].data.ptr);
-            if (s != nullptr) s->fire(s->ctx, *s, ready_of(ev[static_cast<std::size_t>(i)].events));
+            if (s != nullptr &&
+                !fire_marked(*s, ready_of(ev[static_cast<std::size_t>(i)].events), seen))
+                break;
         }
     }
     driver_.store(detail::unowned_thread_id());
