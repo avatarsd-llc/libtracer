@@ -19,7 +19,7 @@
  * | Target | TU | Wait | Wake |
  * | --- | --- | --- | --- |
  * | Linux host | `wait_epoll.cpp` | one `epoll` set, level-triggered | an `eventfd` |
- * | lwIP sockets (ESP-IDF chip) | `wait_poll.cpp` | `poll(2)` over the registered sockets | a
+ * | lwIP sockets (ESP-IDF chip) | `wait_poll.cpp` | `select(2)` over the registered sockets | a
  * loopback datagram socket |
  *
  * Both run one conformance suite (`wait_module_test`). The lwIP-callback adapter of ADR-0087
@@ -33,11 +33,12 @@
  * some links still lack the node module; once every link has it, the fallback becomes a
  * compile-time policy (ADR-0071 §Amendment, ruling 44).
  *
- * **Who pays for the table (slice 1).** The poll adapter's table of attached sources and its
- * descriptor sets grow by one entry per peer the links attach, and that growth is drawn from
- * the module's own source, the one the shared module was built with, not from the link the
- * peer arrived on. Slice 3 MUST draw it from the receiving link's source instead (receiver
- * pays).
+ * **Who pays for the table: the receiving link.** A source's place in the lwIP adapter's list
+ * is its own @ref tr::net::wait_source_t::next, in the record its link owns, so each peer is
+ * paid by the link it arrived on. The module draws no memory and never grows, on either
+ * adapter, so an attach is never refused for want of it (#2147). The link exists only in a
+ * build that compiles that adapter (`%tr::net::kListedWaitSources`); an `epoll` build
+ * carries none.
  *
  * **A detach waits for its own source only.** The driving thread holds no lock while a callback
  * runs. A @ref tr::net::wait_module_t::detach from another thread waits only for the callback
@@ -58,21 +59,28 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
-#include "libtracer/mem_poly_ptr.hpp"
-#include "libtracer/mem_source.hpp"
+#include "libtracer/config.hpp"
 #include "libtracer/park.hpp"
 #include "libtracer/sync.hpp"
 #include "libtracer/thread_id.hpp"
 
 namespace tr::net {
 
+/** @brief The empty stand-in for @ref tr::net::wait_source_t::next on a build whose adapter
+ *         keeps no list (`%tr::net::kListedWaitSources` false). */
+struct unlisted_t {};
+
 /** @brief The readiness bits a @ref tr::net::wait_source_t callback is handed. */
 enum class ready_t : std::uint8_t {
     NONE = 0,   /**< @brief Nothing. */
     READ = 1,   /**< @brief Readable, or a listening socket has a connection to accept. */
     WRITE = 2,  /**< @brief Writable, reported only while write interest is armed. */
-    HANGUP = 4, /**< @brief The peer hung up or the socket failed: a read reports which. */
+    HANGUP = 4, /**< @brief The peer hung up or the socket failed: a read reports which. The
+                     `epoll` adapter reports it from the kernel; the lwIP adapter, whose
+                     `select` folds a hang-up into READ, only for a socket closed while still
+                     attached. */
 };
 
 /** @brief True when @p set says a read is due: readable, or hung up (the read reports it). */
@@ -90,7 +98,8 @@ enum class ready_t : std::uint8_t {
  * @brief One socket registered with a @ref tr::net::wait_module_t, as the `{fire, ctx}`
  *        waiter of ADR-0084 §3 plus the descriptor.
  *
- * The link that owns the socket owns this record and pays for it (24 B on a 64-bit host). Set @ref
+ * The link that owns the socket owns this record and pays for it (24 B on a 64-bit host),
+ * and on the lwIP adapter its place in the list too (@ref next, one pointer more). Set @ref
  * fire, @ref ctx and @ref fd before
  * @ref wait_module_t::attach, and keep the record alive and unmoved until
  * @ref wait_module_t::detach returns.
@@ -118,6 +127,14 @@ struct wait_source_t {
      *         may clear it under one; every other ordering comes from the lock or the kernel's
      *         registration. */
     std::atomic<bool> attached{false};
+    /** @brief The next source in the lwIP adapter's list: the receiving link pays for its own
+     *         entry, so the module holds no table. Written under the module's lock; the driver
+     *         reads it with none, under the source's firing mark, so both go through
+     *         `std::atomic_ref`. Left unset until @ref wait_module_t::attach writes it, as
+     *         nothing reads it before: a link's constructor spends no store on it. An empty
+     *         member, taking no space, in a build without that adapter
+     *         (`%tr::net::kListedWaitSources`). */
+    [[no_unique_address]] std::conditional_t<kListedWaitSources, wait_source_t*, unlisted_t> next;
 };
 
 /**
@@ -133,15 +150,8 @@ struct wait_source_t {
  */
 class wait_module_t {
    public:
-    /**
-     * @brief Opens the wait and its wake. @ref ok reports whether both opened.
-     * @param src Where the poll adapter draws its table of attached sources and its two
-     *            descriptor sets (one entry per source plus the wake, grown at attach). Every
-     *            link's peers are paid from it in slice 1, not from the receiving link's
-     *            source. The epoll adapter draws nothing. Must outlive the module.
-     */
-    explicit wait_module_t(mem::block_source_t& src) noexcept;
-    /** @brief Opens with the poll adapter's set drawn from the process net sub-pool. */
+    /** @brief Opens the wait and its wake; @ref ok reports whether both opened. Draws no
+     *         memory: each attached source carries its own entry. */
     wait_module_t() noexcept;
     /** @brief Closes the wait and its wake. Every source must have been detached and
      *         @ref run must have returned. */
@@ -155,10 +165,10 @@ class wait_module_t {
 
     /**
      * @brief Start waiting on @p s : read interest, plus write interest when `s.write` is set.
-     * @retval false The platform refused the registration, or the poll adapter's table or
-     *         spare set could not be grown to hold it; nothing was attached, and nobody already
-     *         attached was evicted. Attach is the only place the poll adapter grows, so a
-     *         dispatch pass never fails for want of memory.
+     * @retval false The platform refused the registration, or, on the poll adapter, the socket
+     *         is numbered past `FD_SETSIZE`; nothing was attached, and nobody already attached
+     *         was evicted. Neither adapter draws memory, so neither attach nor a dispatch pass
+     *         fails for want of it.
      */
     [[nodiscard]] bool attach(wait_source_t& s) noexcept;
 
@@ -211,8 +221,9 @@ class wait_module_t {
         op();
     }
     /**
-     * @brief The driver's one fire: mark @p s firing, then fire it unless a detach (or, on the
-     *        poll adapter, an attach) was made since the batch's generation @p seen .
+     * @brief The driver's one fire: mark @p s firing, then run @p fire (which may read @p s
+     *        and calls its callback) unless a detach was made since the batch's generation
+     *        @p seen .
      * @return False when one was, and the rest of the batch is left for the next pass.
      *
      * The mark is in the module's own memory, never in the source, and it is stored before the
@@ -221,10 +232,11 @@ class wait_module_t {
      * detach sees the mark and waits for this one callback. A detach that waits is woken by a
      * notify, sent only while one is waiting.
      */
-    bool fire_marked(wait_source_t& s, std::uint8_t ready, std::uint32_t seen) noexcept {
+    template <class Fire>
+    bool fire_marked(wait_source_t& s, std::uint32_t seen, Fire&& fire) noexcept {
         firing_.store(&s);
         const bool live = gen_.load() == seen;
-        if (live) s.fire(s.ctx, s, ready);
+        if (live) fire();
         firing_.store(nullptr);
         if (waiters_.load() != 0) park_wake(firing_);
         return live;
@@ -247,8 +259,8 @@ class wait_module_t {
     /** @brief The adapter's two descriptors: the `epoll` set and its `eventfd`, or the poll
      *         adapter's loopback doorbell socket twice (its sending and receiving end). */
     int fd_[2] = {-1, -1};
-    /** @brief Bumped by every detach (and, on the poll adapter, every attach): a batch taken
-     *         before a bump may name a source that is gone, so it is dropped. */
+    /** @brief Bumped by every detach: a batch taken before a bump may name a source that is
+     *         gone, so it is dropped. */
     std::atomic<std::uint32_t> gen_{0};
     /** @brief The source whose callback the driver is running, or about to: what a detach
      *         from another thread waits on, so it waits for that source alone. Kept in the
@@ -262,12 +274,9 @@ class wait_module_t {
     std::atomic<detail::thread_id_t> driver_{detail::unowned_thread_id()};
     tr::mutex_t m_; /**< @brief Serializes attach and detach; the poll adapter's driver holds it
                          while it rebuilds its set, never across a callback. */
-    /** @brief The poll adapter's attached sources, drawn from its source; empty on epoll. */
-    mem::block_array_t<wait_source_t*> sources_;
-    struct state_t;  // the adapter's own state, defined in its translation unit
-    /** @brief The poll adapter's descriptor sets, drawn from its source when it opens; none on
-     *         epoll. */
-    mem::poly_ptr_t<state_t> state_;
+    /** @brief The poll adapter's list of attached sources, linked through their own
+     *         @ref wait_source_t::next (null on epoll). Under `m_`. */
+    wait_source_t* head_ = nullptr;
 };
 
 }  // namespace tr::net

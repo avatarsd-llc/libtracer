@@ -4,22 +4,25 @@
  */
 /**
  * @file
- * @brief The poll adapter's refusal at attach (#2147, the #2156 rule on the wait module): a
- *        newcomer the module's table or spare set cannot hold is refused, and nobody attached
- *        is evicted.
+ * @brief The lwIP adapter's one refusal at attach (#2147, the #2156 rule on the wait module):
+ *        a socket numbered past `FD_SETSIZE` is refused, and nobody attached is evicted; and a
+ *        socket closed while still attached is reported to its source as a hang-up.
  *
- * The poll adapter grows its table of sources and its descriptor sets only at attach, from
- * the module's own source, so attach is the one place a refusal lands. This suite draws the
- * module from a source that, once armed, refuses every block, fills the module until an
- * attach is refused, and then connects a newcomer to a TCP server on that module: the server's
- * refused registration must close the newcomer, keep the first peer open and enumerated, and
- * admit the next peer once the refusal lifts. Built with `wait_poll.cpp` ahead of the archive,
- * so the archive's own adapter is never pulled in.
+ * The receiving link pays for its own place in the adapter's list, and the descriptor sets
+ * are fixed `fd_set`s, so the module draws no memory and an attach is never refused for it.
+ * This suite raises the descriptor limit, fills the numbers below `FD_SETSIZE`, and connects
+ * a newcomer to a TCP server on the module: the newcomer's socket lands past the set, and the
+ * server's refused registration must close it, keep the first peer open and enumerated, and
+ * admit the next peer once low numbers are free again. Built against a library with the lwIP
+ * adapter and `kListedWaitSources` bound, as a chip build is.
  */
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <sys/resource.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -34,7 +37,6 @@
 #include <thread>
 #include <vector>
 
-#include "libtracer/mem_heap.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/wait.hpp"
 #include "test_support.hpp"
@@ -43,24 +45,6 @@ namespace {
 
 using tr::testing::check;
 using namespace std::chrono_literals;
-
-/** @brief The process heap, refusing every block while @ref refuse is set. */
-class refusing_source_t final : public tr::mem::block_source_t {
-   public:
-    refusing_source_t() noexcept : block_source_t("refusing") {}
-    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
-        if (refuse.load(std::memory_order_relaxed)) {
-            refused.fetch_add(1, std::memory_order_relaxed);
-            return nullptr;
-        }
-        return tr::mem::heap_source().try_alloc(bytes, align);
-    }
-    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
-        tr::mem::heap_source().release(p, bytes, align);
-    }
-    std::atomic<bool> refuse{false};     /**< @brief Refuse every block while set. */
-    std::atomic<std::size_t> refused{0}; /**< @brief Blocks refused so far. */
-};
 
 /** @brief An idle socketpair end registered with no work to do. */
 struct idle_t {
@@ -72,7 +56,7 @@ struct idle_t {
         src.fire = [](void*, tr::net::wait_source_t&, std::uint8_t) {};
     }
     ~idle_t() {
-        ::close(pair[0]);
+        if (pair[0] >= 0) ::close(pair[0]);
         ::close(pair[1]);
     }
 };
@@ -99,11 +83,18 @@ bool eventually(Pred done) {
     return done();
 }
 
+/** @brief Raise the soft descriptor limit past `FD_SETSIZE`; false when the hard one is lower. */
+bool room_past_the_set() {
+    rlimit r{};
+    if (::getrlimit(RLIMIT_NOFILE, &r) != 0 || r.rlim_max < FD_SETSIZE + 64) return false;
+    r.rlim_cur = FD_SETSIZE + 64;
+    return ::setrlimit(RLIMIT_NOFILE, &r) == 0;
+}
+
 void test_refused_attach_refuses_the_newcomer() {
-    std::printf("-- a refused attach refuses the newcomer and evicts nobody\n");
-    refusing_source_t src;
-    tr::net::wait_module_t module(src);
-    check(module.ok(), "the module opened");
+    std::printf("-- a socket past the set is refused, and nobody is evicted\n");
+    tr::net::wait_module_t module;
+    check(module.ok(), "the module opened, drawing no memory");
     std::thread driver([&module] { module.run(); });
     {
         tr::net::tcp_server_config_t cfg;
@@ -118,17 +109,16 @@ void test_refused_attach_refuses_the_newcomer() {
         const int first = tcp_connect(server.local_port());
         check(first >= 0 && eventually([&] { return peers() == 1; }), "the first peer is admitted");
 
-        // Fill the module to the end of what it holds, then refuse every growth.
-        src.refuse.store(true, std::memory_order_relaxed);
-        std::vector<std::unique_ptr<idle_t>> idle;
-        bool full = false;
-        for (int i = 0; i < 4096 && !full; ++i) {
-            auto s = std::make_unique<idle_t>();
-            full = !module.attach(s->src);
-            if (!full) idle.push_back(std::move(s));
-        }
-        check(full && src.refused.load() >= 1,
-              "an attach the table or spare set cannot hold is refused");
+        // Every number below the set taken, so the next accepted socket lands past it.
+        std::vector<int> fill;
+        for (int fd = ::dup(0); fd >= 0 && fd < FD_SETSIZE; fd = ::dup(0)) fill.push_back(fd);
+        idle_t past;
+        const int high = ::fcntl(past.pair[0], F_DUPFD, FD_SETSIZE);
+        ::close(past.pair[0]);
+        past.pair[0] = high;
+        past.src.fd.store(high);
+        check(high >= FD_SETSIZE && !module.attach(past.src),
+              "a socket numbered past FD_SETSIZE is refused at attach");
 
         const int newcomer = tcp_connect(server.local_port());
         pollfd p{newcomer, POLLIN, 0};
@@ -139,11 +129,10 @@ void test_refused_attach_refuses_the_newcomer() {
         check(::recv(first, &byte, 1, MSG_DONTWAIT) < 0 && errno == EAGAIN,
               "the first peer's connection is still open");
 
-        src.refuse.store(false, std::memory_order_relaxed);
+        for (const int fd : fill) ::close(fd);
         const int next = tcp_connect(server.local_port());
         check(next >= 0 && eventually([&] { return peers() == 2; }),
-              "once the refusal lifts the same server admits the next peer");
-        for (auto& s : idle) module.detach(s->src);
+              "once low numbers are free the same server admits the next peer");
         for (const int fd : {first, newcomer, next})
             if (fd >= 0) ::close(fd);
         module.stop();
@@ -151,10 +140,37 @@ void test_refused_attach_refuses_the_newcomer() {
     }
 }
 
+/** @brief A source whose socket is closed while still attached hears a hang-up. */
+void test_closed_while_attached_hears_a_hangup() {
+    std::printf("-- a socket closed while attached is reported as a hang-up, not spun on\n");
+    tr::net::wait_module_t module;
+    std::thread driver([&module] { module.run(); });
+    std::atomic<unsigned> hangups{0};
+    idle_t lost;
+    lost.src.ctx = &hangups;
+    lost.src.fire = [](void* ctx, tr::net::wait_source_t&, std::uint8_t ready) {
+        if ((ready & static_cast<std::uint8_t>(tr::net::ready_t::HANGUP)) != 0)
+            static_cast<std::atomic<unsigned>*>(ctx)->fetch_add(1);
+    };
+    check(module.attach(lost.src), "the source is attached");
+    ::close(lost.pair[0]);              // breaks the detach-before-close rule on purpose
+    module.want_write(lost.src, true);  // rings the doorbell, so the next wait sees the bad socket
+    check(eventually([&] { return hangups.load() != 0; }),
+          "the failed wait reports a hang-up to the source whose socket is gone");
+    module.detach(lost.src);
+    lost.pair[0] = -1;
+    module.stop();
+    driver.join();
+}
+
 }  // namespace
 
 int main() {
     std::printf("== #2147: the poll adapter refuses at attach ==\n");
+    if (!room_past_the_set())
+        return tr::testing::skipped("wait_poll_refusal_test",
+                                    "the hard descriptor limit is below FD_SETSIZE");
     test_refused_attach_refuses_the_newcomer();
+    test_closed_while_attached_hears_a_hangup();
     return tr::testing::summary("wait_poll_refusal_test");
 }

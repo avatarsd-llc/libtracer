@@ -5,17 +5,16 @@
 /**
  * @file
  * @brief The wait-module adapter for a target with BSD sockets and no `epoll` (lwIP on an
- *        ESP-IDF chip, ADR-0071): one `poll(2)` over the attached sockets with no timeout,
+ *        ESP-IDF chip, ADR-0071): one `select(2)` over the attached sockets with no timeout,
  *        woken by a loopback datagram doorbell (#2147).
  *
- * The table of attached sources and the descriptor sets rebuilt from it are all drawn from the
- * module's own source and grown, never shrunk. Every growth happens at attach, so attach is the
- * one place a refusal lands: a newcomer the table or a set cannot hold is refused there, and
- * nobody attached is ever evicted for it. There are two sets: the driver polls the live one
- * with the lock released, so an attach grows the spare, and the driver swaps the spare in
- * when the live one is too small. A pass therefore never fails to rebuild. Every change to the
- * table or to a write interest rings the doorbell, so a pass in flight is rebuilt before it
- * can wait on a stale set.
+ * Receiver pays (#2147): every attached source carries its own link in the module's list
+ * (`wait_source_t::next`), in the record its link owns, and the descriptor sets are the
+ * fixed-size `fd_set`s of `select(2)`. The module draws nothing and grows nothing, so an attach
+ * is never refused for memory; a socket numbered past `FD_SETSIZE` is refused instead, which an
+ * lwIP socket never is (its numbers start below it). `select` is lwIP's own wait: its `poll`
+ * is built on the same scan. Every change to the list or to a write interest rings the
+ * doorbell, so a pass in flight is rebuilt before it can wait on a stale set.
  *
  * lwIP has no `eventfd` and no pipe, so the doorbell is a UDP socket bound to the loopback
  * address and connected to itself (lwIP's loopback interface, `LWIP_NETIF_LOOPBACK`): it costs
@@ -23,26 +22,44 @@
  */
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
-#include <poll.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <mutex>
 
-#include "libtracer/mem_heap.hpp"
 #include "libtracer/wait.hpp"
 
 namespace tr::net {
 
+// The adapter gate, the shape self_heal_link.cpp states for kSelfHealLinks: this adapter links
+// its sources through their own records, so a build that compiles it binds the member that
+// gives them the link.
+static_assert(kListedWaitSources,
+              "wait_poll.cpp (the lwIP select adapter) is compiled on a build whose config binds "
+              "kListedWaitSources = false. Bind `static constexpr bool kListedWaitSources = "
+              "true;` in libtracer/config_override.hpp (the ESP-IDF component does so for every "
+              "chip target).");
+
 namespace {
+/** @brief @p s 's list link, as the atomic both the lock holder and the driver use. */
+std::atomic_ref<wait_source_t*> link_of(wait_source_t& s) noexcept {
+    return std::atomic_ref<wait_source_t*>(s.next);
+}
+
 #ifndef MSG_NOSIGNAL
 constexpr int MSG_NOSIGNAL = 0;
 #endif
 
-/** @brief A UDP socket on the loopback address, connected to itself, or -1. */
+/** @brief A UDP socket on the loopback address, connected to itself, or -1: also when its
+ *         number is past `FD_SETSIZE`, which an lwIP socket never is but a busy host's may be,
+ *         so the wait never sets a bit past its set and the module reports itself not ok. */
 int open_doorbell() noexcept {
     const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return -1;
@@ -52,66 +69,46 @@ int open_doorbell() noexcept {
     socklen_t len = sizeof(a);
     if (::bind(fd, reinterpret_cast<sockaddr*>(&a), len) != 0 ||
         ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len) != 0 ||
-        ::connect(fd, reinterpret_cast<sockaddr*>(&a), len) != 0) {
+        ::connect(fd, reinterpret_cast<sockaddr*>(&a), len) != 0 || fd >= FD_SETSIZE) {
         ::close(fd);
         return -1;
     }
     return fd;
 }
 
-/** @brief The @ref ready_t bits of the `poll(2)` result @p e . */
-std::uint8_t ready_of(short e) noexcept {
+/** @brief @ref ready_t::HANGUP when @p fd is no open socket, else nothing: what a failed
+ *         `select` reports to each source, as `poll` reported `POLLNVAL`. */
+std::uint8_t hangup_of(int fd) noexcept {
+    return (::fcntl(fd, F_GETFL) < 0 && errno == EBADF) ? static_cast<std::uint8_t>(ready_t::HANGUP)
+                                                        : 0U;
+}
+
+/** @brief The @ref ready_t bits @p fd holds in @p rd and @p wr . A failed or hung-up socket
+ *         is readable to `select`, and the read that follows reports which. */
+std::uint8_t ready_of(int fd, const fd_set& rd, const fd_set& wr) noexcept {
     return static_cast<std::uint8_t>(
-        ((e & POLLIN) != 0 ? static_cast<unsigned>(ready_t::READ) : 0U) |
-        ((e & POLLOUT) != 0 ? static_cast<unsigned>(ready_t::WRITE) : 0U) |
-        ((e & (POLLHUP | POLLERR | POLLNVAL)) != 0 ? static_cast<unsigned>(ready_t::HANGUP) : 0U));
+        (FD_ISSET(fd, &rd) ? static_cast<unsigned>(ready_t::READ) : 0U) |
+        (FD_ISSET(fd, &wr) ? static_cast<unsigned>(ready_t::WRITE) : 0U));
 }
 }  // namespace
 
-/** @brief The poll adapter's two descriptor sets: the live one the driver polls, and the spare
- *         an attach grows while that poll is in flight. Each set has its sources beside it,
- *         copied at the rebuild, so the driver fires a batch without the lock. */
-struct wait_module_t::state_t {
-    /** @brief Both sets, and both copies of the sources, draw from @p src . */
-    explicit state_t(mem::block_source_t& src) noexcept
-        : set{mem::block_array_t<pollfd>(src), mem::block_array_t<pollfd>(src)},
-          who{mem::block_array_t<wait_source_t*>(src), mem::block_array_t<wait_source_t*>(src)} {}
-    mem::block_array_t<pollfd> set[2]; /**< @brief The two sets. */
-    /** @brief The source behind each of a set's entries after the doorbell (`set[i][k + 1]` is
-     *         `who[i][k]`'s socket). Only the driver reads them, and only the live one. */
-    mem::block_array_t<wait_source_t*> who[2];
-    unsigned live = 0; /**< @brief The one the driver polls. Driver, under the lock. */
-    /** @brief The generation the live set's sources were copied at: while it holds, the table
-     *         is unchanged, so the copy is current and the live set still fits. Driver. */
-    std::uint32_t copied_at = 0;
-};
-
-wait_module_t::wait_module_t(mem::block_source_t& src) noexcept : sources_(src) {
-    // The live set holds the doorbell from the start, so a module with no source still waits
-    // on its wake.
-    state_ = mem::make_poly<state_t>(src, src);
-    if (!state_ || !state_->set[0].reserve(1)) return;
-    fd_[0] = fd_[1] = open_doorbell();
-}
-
-wait_module_t::wait_module_t() noexcept : wait_module_t(mem::net_source()) {}
+wait_module_t::wait_module_t() noexcept : fd_{open_doorbell(), -1} { fd_[1] = fd_[0]; }
 
 wait_module_t::~wait_module_t() {
     if (fd_[0] >= 0) ::close(fd_[0]);
 }
 
 bool wait_module_t::attach(wait_source_t& s) noexcept {
+    const int fd = s.fd.load(std::memory_order_relaxed);
     bool done = false;
     locked([&] {
-        // Grow the spare set to the table plus the newcomer and the doorbell, its copy of the
-        // sources to match, then the table: a refusal of any refuses the newcomer, and nobody
-        // attached is evicted.
-        const unsigned spare = state_->live ^ 1U;
-        done = !s.attached.load(std::memory_order_relaxed) &&
-               state_->set[spare].reserve(sources_.size() + 2) &&
-               state_->who[spare].reserve(sources_.size() + 1) && sources_.push_back(&s);
-        if (done) s.attached.store(true, std::memory_order_relaxed);
-        gen_.fetch_add(1, std::memory_order_acq_rel);
+        // In at the head: a pass in flight walks from the head it took, so it never meets the
+        // newcomer and needs no generation bump to stay sound; the doorbell rebuilds it.
+        done = !s.attached.load(std::memory_order_relaxed) && fd >= 0 && fd < FD_SETSIZE;
+        if (!done) return;
+        link_of(s).store(head_, std::memory_order_relaxed);
+        head_ = &s;
+        s.attached.store(true, std::memory_order_relaxed);
     });
     ring();
     return done;
@@ -120,9 +117,14 @@ bool wait_module_t::attach(wait_source_t& s) noexcept {
 void wait_module_t::detach(wait_source_t& s) noexcept {
     locked([&] {
         if (!s.attached.load(std::memory_order_relaxed)) return;
-        std::size_t i = 0;
-        while (sources_[i] != &s) ++i;
-        sources_.erase_at(i);
+        // Unlinked, but its own link is left as it was: a pass that already holds `s` reads it
+        // only after this bump, which stops that pass first.
+        wait_source_t* at = nullptr;
+        for (wait_source_t* p = head_; p != &s; p = link_of(*p).load(std::memory_order_relaxed))
+            at = p;
+        wait_source_t* const after = link_of(s).load(std::memory_order_relaxed);
+        if (at == nullptr) head_ = after;
+        if (at != nullptr) link_of(*at).store(after, std::memory_order_relaxed);
         s.attached.store(false, std::memory_order_relaxed);
         gen_.fetch_add(1);  // seq_cst: the other half of fire_marked's handshake
     });
@@ -138,46 +140,51 @@ void wait_module_t::run() noexcept {
     driver_.store(detail::this_thread_id());  // seq_cst: see wait_module_t::locked
     std::unique_lock lock(m_);
     while (!stopping_.load()) {
-        // Rebuild under the lock. The table changes only under it, and every change bumps the
-        // generation, so only a moved generation can outgrow the live set or stale its copy of
-        // the sources. Then the spare, grown by the last attach to hold the whole table, is
-        // swapped in when the live set is too small, and every push below fits.
+        // Rebuild under the lock, where the list changes: the sets are the doorbell and every
+        // attached socket, with write interest where it is armed.
         const std::uint32_t seen = gen_.load();
-        if (state_->copied_at != seen) {
-            const std::size_t k = sources_.size();
-            const unsigned live = state_->live;
-            if (state_->set[live].capacity() < k + 1 || state_->who[live].capacity() < k)
-                state_->live ^= 1U;
-            mem::block_array_t<wait_source_t*>& copy = state_->who[state_->live];
-            copy.clear();
-            for (wait_source_t* const s : sources_) (void)copy.push_back(s);
-            state_->copied_at = seen;
-        }
-        mem::block_array_t<pollfd>& set = state_->set[state_->live];
-        const mem::block_array_t<wait_source_t*>& who = state_->who[state_->live];
-        set.clear();
-        (void)set.push_back(pollfd{fd_[0], POLLIN, 0});
-        for (wait_source_t* const s : sources_) {
-            const short ev = static_cast<short>(
-                POLLIN | (s->write.load(std::memory_order_acquire) ? POLLOUT : 0));
-            (void)set.push_back(pollfd{s->fd.load(std::memory_order_relaxed), ev, 0});
+        wait_source_t* const first = head_;
+        fd_set rd;
+        fd_set wr;
+        FD_ZERO(&rd);
+        FD_ZERO(&wr);
+        FD_SET(fd_[0], &rd);
+        int top = fd_[0];
+        for (wait_source_t* s = first; s != nullptr;
+             s = link_of(*s).load(std::memory_order_relaxed)) {
+            const int fd = s->fd.load(std::memory_order_relaxed);
+            FD_SET(fd, &rd);
+            if (s->write.load(std::memory_order_acquire)) FD_SET(fd, &wr);
+            top = std::max(top, fd);
         }
         lock.unlock();
-        int left = ::poll(set.data(), static_cast<nfds_t>(set.size()), -1);
-        if (left > 0 && set[0].revents != 0) {
+        int left = ::select(top + 1, &rd, &wr, nullptr, nullptr);
+        // A socket closed while still attached fails the whole wait (EBADF): each source then
+        // hears whether its own socket is the bad one, as a hang-up its read reports, so a
+        // link that broke the detach-before-close rule is told rather than spun on.
+        const bool failed = left < 0 && errno != EINTR;
+        if (left > 0 && FD_ISSET(fd_[0], &rd)) {
             --left;
             char drain[16];
             while (::recv(fd_[0], drain, sizeof(drain), MSG_DONTWAIT) > 0) {
             }
         }
-        // No lock across a callback; a detach or attach since `seen` stops the batch, and the
-        // sources still ready come back next pass. The live set and its sources stay put
-        // without the lock: an attach grows only the spare. `poll` counted the ready entries,
-        // so the walk ends at the last one.
-        for (std::size_t i = 1; left > 0; ++i) {
-            if (set[i].revents == 0) continue;
-            --left;
-            if (!fire_marked(*who[i - 1], ready_of(set[i].revents), seen)) break;
+        // No lock across a callback; a detach since `seen` stops the batch, and the sources
+        // still ready come back next pass. Each source is read only under its firing mark, so
+        // a detach of it has either stopped this walk or waits for it; its successor is taken
+        // before its callback runs, which may detach it. `select` counted the ready bits, so the
+        // walk ends at the last one.
+        for (wait_source_t* s = first; s != nullptr && (left > 0 || failed);) {
+            wait_source_t* next = nullptr;
+            const bool live = fire_marked(*s, seen, [&] {
+                next = link_of(*s).load(std::memory_order_relaxed);
+                const int fd = s->fd.load(std::memory_order_relaxed);
+                const std::uint8_t ready = failed ? hangup_of(fd) : ready_of(fd, rd, wr);
+                left -= (ready & 1U) + ((ready >> 1U) & 1U);  // READ and WRITE bits count one each
+                if (ready != 0) s->fire(s->ctx, *s, ready);
+            });
+            if (!live) break;
+            s = next;
         }
         lock.lock();
     }

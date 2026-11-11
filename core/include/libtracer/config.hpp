@@ -1010,6 +1010,23 @@ struct default_config_t {
     static constexpr std::size_t kSelfHealWorkerStackBytes = 0;
 
     /**
+     * @brief Whether every `tr::net::wait_source_t` carries its own link in the lwIP wait
+     *        adapter's list (#2147, receiver pays).
+     *
+     * The lwIP adapter (`wait_poll.cpp`, `select(2)`) keeps no table: each attached source is
+     * linked through a pointer in the record its link owns, so a peer is paid by the link it
+     * arrived on and the module draws nothing. The `epoll` adapter needs no such link, so a
+     * build that compiles it leaves the pointer out and pays nothing for it.
+     *
+     * **Default `false`**, the `epoll` adapter of a Linux host. A build that compiles
+     * `wait_poll.cpp` sets it `true`: the ESP-IDF component does so for every chip target, and
+     * a non-Linux host build (whose CMake picks the same adapter) does so in its override
+     * fragment: `static constexpr bool kListedWaitSources = true;`. The two adapters each
+     * refuse to compile under the other binding, so the TU list and this knob cannot disagree.
+     */
+    static constexpr bool kListedWaitSources = false;
+
+    /**
      * @brief The largest `max_frame` a UDP link receives on its thread's STACK when its sink
      *        borrows (#2142); `0` = never, the default.
      *
@@ -1510,6 +1527,14 @@ inline constexpr bool kBusLinks = tr::graph::config_t::kBusLinks;
  * the one place every knob is set.
  */
 inline constexpr bool kSelfHealLinks = tr::graph::config_t::kSelfHealLinks;
+
+/**
+ * @brief Whether every `wait_source_t` carries its link in the lwIP wait adapter's list.
+ *
+ * The transport plane's spelling of @ref tr::graph::default_config_t::kListedWaitSources.
+ * Derived from @ref tr::graph::config_t exactly as @ref kBusLinks is.
+ */
+inline constexpr bool kListedWaitSources = tr::graph::config_t::kListedWaitSources;
 
 /**
  * @brief Whether a connection SPEC may carry the dial-side `insecure` key.
