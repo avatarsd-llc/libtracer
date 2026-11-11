@@ -57,9 +57,12 @@ custom_libtracer_bus_links = yes        ; CAN/TWAI, peer-named tcp listeners
 custom_libtracer_self_heal_links = yes  ; self-healing udp/tcp DIAL connections
 ```
 
-Both default to `no`. A `libtracer/config_override.hpp` of your own still works: the generated
-one includes it instead of binding its own, and `static_assert`s that it binds the two members
-the way these options say.
+Both default to `no`. The generated fragment also binds `kListedWaitSources = true` on every
+platform: the package always compiles the wait module's lwIP adapter (`wait_poll.cpp`, never the
+`epoll` one), which keeps its list link in each source and refuses to compile without it
+(#2147). A `libtracer/config_override.hpp` of your own still works: the generated one includes
+it instead of binding its own, and `static_assert`s that it binds the two link modules the way
+these options say and binds `kListedWaitSources = true`.
 
 This glue is gated at **compile + link** by the `pio-esp32-can` workflow, which packs
 the package and `pio run`s the `framework = espidf` consumer in
