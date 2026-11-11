@@ -1,0 +1,8 @@
+ok  noise/ws-fragmented: 15 frames
+ok  noise/ws-handshake-transcript: 6 frames
+ok  noise/ws-oversize-fragments: 9 frames
+ok  noise/ws-oversize-single: 6 frames
+ok  noise/ws-ping-between-continuations: 5 frames
+ok  noise/ws-preproof-bound: 5 frames
+ok  noise/ws-text-opcode: 1 frames
+all 47 frames parse as recorded (websockets frame parser)

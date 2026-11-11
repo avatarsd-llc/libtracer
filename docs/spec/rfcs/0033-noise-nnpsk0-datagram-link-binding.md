@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0033 |
 | **Title** | A minimal Noise link binding: NNpsk0 over a datagram carrier |
-| **Status** | **accepted** (2026-10-10; proposed 2026-10-09). The maintainer approved the direction on 2026-10-09 (issue [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063)) and ruled **"all rec"** on every §15 question on 2026-10-10. Q7 was ruled as (a) together with (b), with three refinements, which §5.4 carries. The comment window was waived by default and not invoked. **The binding's normative text lives in [reference/23](../../reference/23-noise-link-binding.md)** (slice S1, [#2071](https://github.com/avatarsd-llc/libtracer/issues/2071)), which `docs/spec/v1.md` §3 incorporates as an annex for a link that uses the binding (§10.1). Where that page and this record disagree, the page wins. **Amendment 1 (2026-10-10, ruled)** moves §6.8's two MUST clauses (constant-time primitives; no ephemeral key reuse, in either role) into §5.2, so that they bind an implementation ([#2084](https://github.com/avatarsd-llc/libtracer/issues/2084)). **Erratum (2026-10-10)**: Appendix A.4 no longer says the generator prints all of A.3. **Erratum (2026-10-11)**: Appendix A.3 now shows the responder's empty acknowledgement at n = 0 and `pang` at n = 1, as §5.4 step 7 requires. **Amendment 2 (proposed 2026-11-09, not accepted)** would add a WebSocket carrier for browser peers, leaving the UDP wire unchanged ([#2296](https://github.com/avatarsd-llc/libtracer/issues/2296)). |
+| **Status** | **accepted** (2026-10-10; proposed 2026-10-09). The maintainer approved the direction on 2026-10-09 (issue [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063)) and ruled **"all rec"** on every §15 question on 2026-10-10. Q7 was ruled as (a) together with (b), with three refinements, which §5.4 carries. The comment window was waived by default and not invoked. **The binding's normative text lives in [reference/23](../../reference/23-noise-link-binding.md)** (slice S1, [#2071](https://github.com/avatarsd-llc/libtracer/issues/2071)), which `docs/spec/v1.md` §3 incorporates as an annex for a link that uses the binding (§10.1). Where that page and this record disagree, the page wins. **Amendment 1 (2026-10-10, ruled)** moves §6.8's two MUST clauses (constant-time primitives; no ephemeral key reuse, in either role) into §5.2, so that they bind an implementation ([#2084](https://github.com/avatarsd-llc/libtracer/issues/2084)). **Erratum (2026-10-10)**: Appendix A.4 no longer says the generator prints all of A.3. **Erratum (2026-10-11)**: Appendix A.3 now shows the responder's empty acknowledgement at n = 0 and `pang` at n = 1, as §5.4 step 7 requires. **Amendment 2 (2026-11-10, ruled)** adds a WebSocket carrier for browser peers, leaving the UDP wire unchanged ([#2296](https://github.com/avatarsd-llc/libtracer/issues/2296), ruling 69); reference/23 §13 carries it. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-10-09 |
 | **Comment window** | Waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"). Invoke it explicitly if outside input is wanted. At drafting, `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |
@@ -1137,11 +1137,13 @@ conformance case `tests/conformance/vectors/v1/noise/nnpsk0-appendix-a` carry th
 
 ---
 
-## Amendment 2 (proposed 2026-11-09) — the binding over a WebSocket carrier
+## Amendment 2 (2026-11-10, ruled) — the binding over a WebSocket carrier
 
-**Status: proposed; not accepted.** This text binds nothing until the maintainer approves it
-([#2296](https://github.com/avatarsd-llc/libtracer/issues/2296)). Questions the maintainer has not
-ruled are marked **(open)** and are collected in A2.13.
+**Status: accepted 2026-11-10** (maintainer ruling 69,
+[#2296](https://github.com/avatarsd-llc/libtracer/issues/2296)): every question of A2.13 is ruled as
+recommended. The questions are marked **(ruled)** where they arise. As ruled at §15 Q1, the
+normative text is carried by [reference/23](../../reference/23-noise-link-binding.md) §13, and this
+record stays the change record.
 
 **Instrument.** Amendment, not erratum. It adds an optional carrier with MUST clauses that a peer
 can observe, which GOVERNANCE.md reserves for an amendment. The comment window is **waived by
@@ -1213,7 +1215,7 @@ mask from a client.
 
 - Whether a link uses Noise is **configuration on each side**. It is never negotiated. §5.1's rule
   holds: a Noise link MUST NOT fall back to the plain carrier.
-- **(open: Q5)** The client offers the subprotocol `tracer-noise-v1` in `Sec-WebSocket-Protocol`,
+- **(ruled: Q5)** The client offers the subprotocol `tracer-noise-v1` in `Sec-WebSocket-Protocol`,
   which the browser `WebSocket` constructor can set, and the server selects it. A browser fails the
   connection if a subprotocol it offered is not selected, so the echo is required. A Noise link MUST
   close a connection on which the subprotocol was not agreed, and MUST NOT serve it. A plain link
@@ -1239,7 +1241,7 @@ address** rules do not apply: a connection has no source address, and a responde
 connection the first message arrived on. Roles never swap (§5.4). An initiator sends its first
 message as its first data message after the upgrade.
 
-**(open: Q8)** The Noise role comes from the link's connection role, as §4 says, and a WebSocket
+**(ruled: Q8)** The Noise role comes from the link's connection role, as §4 says, and a WebSocket
 client is normally a DIAL link. A node that dials out to an intermediary and waits there for a peer
 is configured as a **LISTEN link whose carrier is an outbound connection** (a dial-out responder).
 How an intermediary pairs two connections is outside this binding.
@@ -1271,7 +1273,7 @@ messages. The binding therefore treats ordering as the common case and never as 
   same check order and `W` at least 64. A receiver MUST NOT tighten it to strict in-order delivery,
   because concurrent senders draw nonces and write them as separate steps. A nonce gap is not a
   failure, and a sender that sealed a frame and then dropped it at the carrier leaves one.
-- **(open: Q4) No retransmission at this layer.** On this carrier, an initiator MUST NOT retransmit
+- **(ruled: Q4) No retransmission at this layer.** On this carrier, an initiator MUST NOT retransmit
   a first message and MUST NOT resend an empty confirmation (§5.4 initiator steps 2 and 7). The
   retry deadline of §5.7 is never armed. Each attempt sends its first message once. No frame is
   acknowledged or retransmitted.
@@ -1291,7 +1293,7 @@ messages. The binding therefore treats ordering as the common case and never as 
 
 ### A2.6 Session boundaries
 
-A session is scoped to the WebSocket connection that carried its handshake. **(open: Q3)**
+A session is scoped to the WebSocket connection that carried its handshake. **(ruled: Q3)**
 
 **Normative.**
 
@@ -1370,11 +1372,11 @@ unexpired pending session. An accepted connection that is not live MUST be close
   never passes `now` has only the event-driven closes, so its connections stay until their peers
   leave. They remain bounded by the server's admission limit, which refuses newcomers. A listener
   reachable beyond its own administrative domain SHOULD pass `now`.
-- **Failure stays silent. (open: Q6)** §5.9 applies: a failed first message is dropped and counted,
+- **Failure stays silent. (ruled: Q6)** §5.9 applies: a failed first message is dropped and counted,
   and is answered by nothing, including a Close frame. The connection stays open until
   `first_message`. Its close uses the same status as any other.
 
-**The counter mark. (open: Q7, Q10)**
+**The counter mark. (ruled: Q7, Q10)**
 
 - A responder keeps one mark per PSK across the connections of an endpoint (A2.4), and advances it
   atomically. It SHOULD persist it (§5.4). NNpsk0 has nothing else to scope it to.
@@ -1443,7 +1445,7 @@ The browser `WebSocket` API fixes what an initiator can do. These rules are the 
   intermediary, which is not a Tracer node. A frame forwarded onward by the far node leaves this
   session there.
 - **The PSK** is still one per link pair (§6.4). A browser holds the PSK that the application gives
-  it, and A2.8 states what sharing one means. **(open: Q1)**
+  it, and A2.8 states what sharing one means. **(ruled: Q1)**
 
 ### A2.11 Identity patterns
 
@@ -1451,7 +1453,7 @@ The browser `WebSocket` API fixes what an initiator can do. These rules are the 
 same handshake, pattern and identity as the rest of the binding, including XX and IK from #1993, and
 describes the text as an amendment to the #1993 RFC. Maintainer ruling 62 of 2026-11-09 placed it as
 an amendment to this RFC, first. Because #1993 is not yet specified, this text differs from the
-issue in one respect: **only NNpsk0 is conforming on this carrier until #1993 lands. (open: Q1)**
+issue in one respect: **only NNpsk0 is conforming on this carrier until #1993 lands. (ruled: Q1)**
 
 A2.2–A2.7 do not depend on the pattern, and §7's attachment rules apply to them unchanged. A2.8 does
 depend on it. XX's first message has no PSK and no tag, and IK and KK reach their tag only after
@@ -1517,7 +1519,7 @@ after the PSK proof. The mark is 8 B per PSK instead of per link.
 
 ### A2.13 Questions for the maintainer
 
-Each one carries a recommendation. None is settled until ruled.
+Each one carries a recommendation. **Ruled 2026-11-10 (ruling 69): all ten as recommended.**
 
 1. **Lift "Blocked by #1993" for this text?** Recommend yes for A2.2–A2.7 and an NNpsk0-only A2.8.
    XX and IK on this carrier stay blocked by #1993.

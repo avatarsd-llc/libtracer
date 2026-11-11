@@ -1,0 +1,169 @@
+{
+  "case": "noise/ws-fragmented",
+  "source": "RFC-0033 Amendment 2 A2.12; reference/23 \u00a713.12",
+  "based_on": "noise/nnpsk0-appendix-a",
+  "summary": "the same transcript, every message split into continuation frames",
+  "subprotocol": "tracer-noise-v1",
+  "inputs": {
+    "cuts": {
+      "msg1": [
+        1,
+        33
+      ],
+      "msg2": [
+        25
+      ],
+      "confirmation": [
+        9
+      ],
+      "datagram_i2r": [
+        1,
+        9,
+        25
+      ],
+      "acknowledgement": [
+        12
+      ],
+      "datagram_r2i": [
+        16
+      ]
+    }
+  },
+  "frames": [
+    {
+      "dir": "c2s",
+      "fin": false,
+      "opcode": 2,
+      "mask": "a1b1c1d1",
+      "payload": "01",
+      "bytes": "0281a1b1c1d1a0"
+    },
+    {
+      "dir": "c2s",
+      "fin": false,
+      "opcode": 0,
+      "mask": "a2b2c2d2",
+      "payload": "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254",
+      "bytes": "00a0a2b2c2d29732b00494ea42030c58f0487d23e3ea9ae32ff3003cf9a74bd712006fa4a086"
+    },
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 0,
+      "mask": "a3b3c3d3",
+      "payload": "305dfcc173612b651604ae630d4c171a9f19e1d41b12b973f2",
+      "bytes": "8099a3b3c3d393ee3f12d0d2e8b6b5b76db0aeffd4c93caa2207b8a17aa051"
+    },
+    {
+      "dir": "s2c",
+      "fin": false,
+      "opcode": 2,
+      "mask": "",
+      "payload": "0279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88c",
+      "bytes": "02190279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88c"
+    },
+    {
+      "dir": "s2c",
+      "fin": true,
+      "opcode": 0,
+      "mask": "",
+      "payload": "c846ec89af85a51a945968a975a98d942d263ea658be0b1b91",
+      "bytes": "8019c846ec89af85a51a945968a975a98d942d263ea658be0b1b91"
+    },
+    {
+      "dir": "c2s",
+      "fin": false,
+      "opcode": 2,
+      "mask": "a4b4c4d4",
+      "payload": "040000000000000000",
+      "bytes": "0289a4b4c4d4a0b4c4d4a4b4c4d4a4"
+    },
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 0,
+      "mask": "a5b5c5d5",
+      "payload": "b215c81b607068db3638292cc0825965",
+      "bytes": "8090a5b5c5d517a00dcec5c5ad0e938decf965379cb0"
+    },
+    {
+      "dir": "c2s",
+      "fin": false,
+      "opcode": 2,
+      "mask": "a6b6c6d6",
+      "payload": "04",
+      "bytes": "0281a6b6c6d6a2"
+    },
+    {
+      "dir": "c2s",
+      "fin": false,
+      "opcode": 0,
+      "mask": "a7b7c7d7",
+      "payload": "0100000000000000",
+      "bytes": "0088a7b7c7d7a6b7c7d7a7b7c7d7"
+    },
+    {
+      "dir": "c2s",
+      "fin": false,
+      "opcode": 0,
+      "mask": "a8b8c8d8",
+      "payload": "843c7ef02f4b31848add30c2b08aa1ee",
+      "bytes": "0090a8b8c8d82c84b62887f3f95c2265f81a18326936"
+    },
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 0,
+      "mask": "a9b9c9d9",
+      "payload": "f0985b2201f08621",
+      "bytes": "8088a9b9c9d9592192fba8494ff8"
+    },
+    {
+      "dir": "s2c",
+      "fin": false,
+      "opcode": 2,
+      "mask": "",
+      "payload": "0400000000000000004a9861",
+      "bytes": "020c0400000000000000004a9861"
+    },
+    {
+      "dir": "s2c",
+      "fin": true,
+      "opcode": 0,
+      "mask": "",
+      "payload": "11144b7702d0a867a37da80f23",
+      "bytes": "800d11144b7702d0a867a37da80f23"
+    },
+    {
+      "dir": "s2c",
+      "fin": false,
+      "opcode": 2,
+      "mask": "",
+      "payload": "040100000000000000d4df8a687acd1c",
+      "bytes": "0210040100000000000000d4df8a687acd1c"
+    },
+    {
+      "dir": "s2c",
+      "fin": true,
+      "opcode": 0,
+      "mask": "",
+      "payload": "a414ed6223ec12519b15a8e6edc0328c18",
+      "bytes": "8011a414ed6223ec12519b15a8e6edc0328c18"
+    }
+  ],
+  "expected": {
+    "c2s_messages": [
+      "01358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254305dfcc173612b651604ae630d4c171a9f19e1d41b12b973f2",
+      "040000000000000000b215c81b607068db3638292cc0825965",
+      "040100000000000000843c7ef02f4b31848add30c2b08aa1eef0985b2201f08621"
+    ],
+    "s2c_messages": [
+      "0279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a945968a975a98d942d263ea658be0b1b91",
+      "0400000000000000004a986111144b7702d0a867a37da80f23",
+      "040100000000000000d4df8a687acd1ca414ed6223ec12519b15a8e6edc0328c18"
+    ],
+    "k_i2r": "810cde8f99b1a2a5a863e41b93fd1c11b29ab8fee3f3edcb662e163b245164ca",
+    "k_r2i": "f8ca9cf382ec15ac3609fa976595baafec96af6729b05edab8e41839ed09f6cd",
+    "handshake_hash": "37f20e686b103bcec0394595c60564fa5eebe6daab15de29ca2fc0c289802e80"
+  }
+}

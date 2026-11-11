@@ -1,0 +1,73 @@
+{
+  "case": "noise/ws-handshake-transcript",
+  "source": "RFC-0033 Amendment 2 A2.12; reference/23 \u00a713.12",
+  "based_on": "noise/nnpsk0-appendix-a",
+  "summary": "Appendix A over WebSocket: each datagram is one binary frame, client frames masked",
+  "subprotocol": "tracer-noise-v1",
+  "inputs": {},
+  "frames": [
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 2,
+      "mask": "a1b1c1d1",
+      "payload": "01358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254305dfcc173612b651604ae630d4c171a9f19e1d41b12b973f2",
+      "bytes": "82baa1b1c1d1a08441a377879951701f2be33b6e50f09989903c80134fead458a401737cd7b3f5819c2d60c2a0fac4a7c57fc2bc8dc6bb2ed83075aad368d243"
+    },
+    {
+      "dir": "s2c",
+      "fin": true,
+      "opcode": 2,
+      "mask": "",
+      "payload": "0279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a945968a975a98d942d263ea658be0b1b91",
+      "bytes": "82320279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a945968a975a98d942d263ea658be0b1b91"
+    },
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 2,
+      "mask": "a2b2c2d2",
+      "payload": "040000000000000000b215c81b607068db3638292cc0825965",
+      "bytes": "8299a2b2c2d2a6b2c2d2a2b2c2d2a200d71ab9d2b2ba7984fafb8e72408bc7"
+    },
+    {
+      "dir": "c2s",
+      "fin": true,
+      "opcode": 2,
+      "mask": "a3b3c3d3",
+      "payload": "040100000000000000843c7ef02f4b31848add30c2b08aa1eef0985b2201f08621",
+      "bytes": "82a1a3b3c3d3a7b2c3d3a3b3c3d3a337ffad539c88e227391ee3610349724d435b8881b2335582"
+    },
+    {
+      "dir": "s2c",
+      "fin": true,
+      "opcode": 2,
+      "mask": "",
+      "payload": "0400000000000000004a986111144b7702d0a867a37da80f23",
+      "bytes": "82190400000000000000004a986111144b7702d0a867a37da80f23"
+    },
+    {
+      "dir": "s2c",
+      "fin": true,
+      "opcode": 2,
+      "mask": "",
+      "payload": "040100000000000000d4df8a687acd1ca414ed6223ec12519b15a8e6edc0328c18",
+      "bytes": "8221040100000000000000d4df8a687acd1ca414ed6223ec12519b15a8e6edc0328c18"
+    }
+  ],
+  "expected": {
+    "c2s_messages": [
+      "01358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254305dfcc173612b651604ae630d4c171a9f19e1d41b12b973f2",
+      "040000000000000000b215c81b607068db3638292cc0825965",
+      "040100000000000000843c7ef02f4b31848add30c2b08aa1eef0985b2201f08621"
+    ],
+    "s2c_messages": [
+      "0279a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a945968a975a98d942d263ea658be0b1b91",
+      "0400000000000000004a986111144b7702d0a867a37da80f23",
+      "040100000000000000d4df8a687acd1ca414ed6223ec12519b15a8e6edc0328c18"
+    ],
+    "k_i2r": "810cde8f99b1a2a5a863e41b93fd1c11b29ab8fee3f3edcb662e163b245164ca",
+    "k_r2i": "f8ca9cf382ec15ac3609fa976595baafec96af6729b05edab8e41839ed09f6cd",
+    "handshake_hash": "37f20e686b103bcec0394595c60564fa5eebe6daab15de29ca2fc0c289802e80"
+  }
+}
