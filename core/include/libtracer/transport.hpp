@@ -703,10 +703,18 @@ class read_census_t {
         return (run & kCount) >= 2 && (tally.word & kCount) > budget;
     }
     /** @brief Close the run: the next stamp, no session counted; stamp 0 is skipped, because a
-     *         fresh tally (word 0) must never look like a member of the open run. */
+     *         fresh tally (word 0) must never look like a member of the open run.
+     *
+     * A compare-and-swap from the word it read, so the stamp only moves forward: a closer that
+     * stalled between its load and its store cannot put back a stamp that sessions still carry
+     * and revive their old counts uncounted. Each close advances the stamp by exactly one. */
     void close() noexcept {
-        const std::uint32_t next = (word_.load(std::memory_order_relaxed) | kCount) + 1;
-        word_.store(next != 0 ? next : kCount + 1, std::memory_order_relaxed);
+        std::uint32_t run = word_.load(std::memory_order_relaxed);
+        std::uint32_t next = 0;
+        do {
+            next = (run | kCount) + 1;
+            next = next != 0 ? next : kCount + 1;
+        } while (!word_.compare_exchange_weak(run, next, std::memory_order_relaxed));
     }
 
    private:

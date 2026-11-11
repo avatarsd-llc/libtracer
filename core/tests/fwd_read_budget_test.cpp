@@ -17,7 +17,7 @@
  *   a second session puts the first one's surplus under the budget.
  * - Under contention, with both sessions over budget: a WRITE, a SUBSCRIBE, a REPLY, a READ
  *   this node forwards and a READ through the public by-name door are never refused.
- * - `close_read_run` is safe from another thread: closing runs without pause while two
+ * - `close_read_run` is safe from other threads: two closers racing each other while two
  *   sessions READ on their own threads leaves every READ answered exactly once (run under TSan).
  * - The session is the stream server's SLOT: two real TCP clients of one listener are two
  *   sessions, each counted in its own slot, on the flat tier and (where the build carries the
@@ -263,19 +263,22 @@ void never_refused(std::size_t n) {
 }
 
 void concurrent_close() {
-    std::printf("close_read_run from another thread while two sessions READ\n");
+    std::printf("close_read_run from two other threads while two sessions READ\n");
     node_t node;
     constexpr std::size_t kReads = 4000;
     std::atomic<int> readers_left{2};
     std::atomic<std::size_t> closes{0};
     // Each session's READs come from its own thread, as each link's receive thread delivers
-    // them; a third thread closes runs without pause until both have finished.
-    std::thread closer([&] {
+    // them; two more threads close runs without pause until both have finished, so closes
+    // also race each other.
+    const auto close_loop = [&] {
         do {
             node.router.close_read_run();
             closes.fetch_add(1, std::memory_order_relaxed);
         } while (readers_left.load(std::memory_order_acquire) != 0);
-    });
+    };
+    std::thread closer(close_loop);
+    std::thread closer2(close_loop);
     std::thread ta([&] {
         node.a.reads(kReads);
         readers_left.fetch_sub(1, std::memory_order_release);
@@ -287,7 +290,8 @@ void concurrent_close() {
     ta.join();
     tb.join();
     closer.join();
-    check(closes.load() >= 1, "  the closer ran");
+    closer2.join();
+    check(closes.load() >= 2, "  the closers ran");
     check(node.a.got.result + node.a.got.backpressure == kReads && node.a.got.other == 0,
           "  a: every READ answered once, with a result or BACKPRESSURE");
     check(node.b.got.result + node.b.got.backpressure == kReads && node.b.got.other == 0,

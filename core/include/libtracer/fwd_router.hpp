@@ -888,11 +888,11 @@ class fwd_router_t {
      * calls this from any task or timer on its own clock, e.g. every 100 ms; a starved idle
      * task stretches the run, and the budget with it. The library reads no clock.
      *
-     * O(1) whatever the session count: a close is one relaxed load and one store of one atomic
-     * word, takes no lock and touches no session, so it is safe from any thread, concurrently
-     * with READs on every receive thread. Two closes that race may land as one, which only
-     * shortens a run. When the budget is off it does nothing, so application code need not test
-     * the build.
+     * O(1) whatever the session count: a close is a compare-and-swap loop on one atomic word
+     * that advances the run stamp by exactly one, takes no lock and touches no session, so it is
+     * safe from any thread and from several closers at once, concurrently with READs on every
+     * receive thread; the stamp never moves backwards. When the budget is off it does nothing, so
+     * application code need not test the build.
      */
     void close_read_run() noexcept { read_run_.close(); }
 
