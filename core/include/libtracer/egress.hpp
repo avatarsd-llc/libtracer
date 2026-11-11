@@ -398,6 +398,13 @@ class egress_t {
     egress_t(const egress_t&) = delete;
     egress_t& operator=(const egress_t&) = delete;
 
+    /** @brief The @p arm of a caller with no waiter to arm, and of the waiter's own turns: an
+     *         empty call the compiler drops, so such a caller pays nothing for the seam. */
+    struct no_arm_t {
+        /** @brief Arm nothing. */
+        constexpr void operator()() const noexcept {}
+    };
+
     /**
      * @brief Put one record on the wire toward @p p, or queue it on its vertex's lane behind
      *        the write in flight.
@@ -426,10 +433,10 @@ class egress_t {
      *               @ref egress_peer_t::wants_write reports the frame (#2775): a waiter that
      *               disarms and then looks again either sees the frame or is re-armed here.
      */
-    template <class Direct, class Write>
+    template <class Direct, class Write, class Arm = no_arm_t>
     egress_result_t send(egress_peer_t& p, const graph::delivery_lane_t& lane,
                          function_ref_t<egress_frame_t*()> frame, Direct&& direct, Write&& write,
-                         function_ref_t<void()> condemn, function_ref_t<void()> arm = no_arm) {
+                         function_ref_t<void()> condemn, Arm&& arm = Arm{}) {
         egress_result_t r;
         // The role first, by try-lock and no mutex (#2145): only its holder may read wire_.
         // A closed peer refuses the claim, so it is told apart before anything is built.
@@ -459,7 +466,8 @@ class egress_t {
                 }
             }
             if (s.moved != 0) p.strikes_ = 0;
-            drain_owned(p, std::forward<Write>(write), condemn, arm, r, held, 0, true);
+            drain_owned(p, std::forward<Write>(write), condemn, std::forward<Arm>(arm), r, held, 0,
+                        true);
             return r;
         }
         egress_frame_t* const f = frame();
@@ -481,7 +489,8 @@ class egress_t {
         // go yet drains it. Either way it leaves. The claimed turn
         // resumes a held frame first: this offer is the event a peer's strike counts.
         if (own || claim(p))
-            drain_owned(p, std::forward<Write>(write), condemn, arm, r, false, lost);
+            drain_owned(p, std::forward<Write>(write), condemn, std::forward<Arm>(arm), r, false,
+                        lost);
         return r;
     }
 
@@ -493,7 +502,7 @@ class egress_t {
     template <class Write>
     egress_result_t flush(egress_peer_t& p, Write&& write, function_ref_t<void()> condemn) {
         egress_result_t r;
-        if (claim(p)) drain_owned(p, std::forward<Write>(write), condemn, no_arm, r);
+        if (claim(p)) drain_owned(p, std::forward<Write>(write), condemn, no_arm_t{}, r);
         return r;
     }
 
@@ -513,7 +522,7 @@ class egress_t {
         r.condemn = p.wire_ != nullptr;
         drain_owned(
             p, [](const egress_frame_t&, std::size_t) { return egress_step_t{0, true, false}; },
-            condemn, no_arm, r, r.condemn);
+            condemn, no_arm_t{}, r, r.condemn);
         return r.condemn;
     }
 
@@ -719,10 +728,10 @@ class egress_t {
      * wrote its own record. A frame pushed since is found by the re-check after the role is
      * let go, so the pass would only take the lane lock to find nothing.
      */
-    template <class Write>
-    void drain_owned(egress_peer_t& p, Write&& write, function_ref_t<void()> condemn,
-                     function_ref_t<void()> arm, egress_result_t& r, bool held = false,
-                     std::uint16_t lost = 0, bool drained = false) {
+    template <class Write, class Arm>
+    void drain_owned(egress_peer_t& p, Write&& write, function_ref_t<void()> condemn, Arm&& arm,
+                     egress_result_t& r, bool held = false, std::uint16_t lost = 0,
+                     bool drained = false) {
         for (;;) {
             std::size_t moved = 0;
             while (!held && !std::exchange(drained, false) &&
@@ -771,9 +780,6 @@ class egress_t {
             if (p.tail_.load(std::memory_order_seq_cst) == nullptr || !claim(p)) return;
         }
     }
-
-    /** @brief The @p arm of a caller with no waiter to arm, and of the waiter's own turns. */
-    static void no_arm() noexcept {}
 
     mem::block_source_t* src_; /**< @brief Where the lanes come from. */
     std::uint8_t strike_cap_;  /**< @brief Strikes before condemnation. */
