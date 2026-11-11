@@ -209,24 +209,9 @@ bool posix_endpoint_t::start(std::size_t stack_size, mem::block_source_t& src) {
     return false;
 }
 
-void posix_endpoint_t::stop_driver(bool join) {
-    if (fallback_ == nullptr) return;
-    fallback_->module.stop();
-    // Not joined on a deferred teardown: the thread may be this one, or be inside a callback
-    // that waits on this one. Once its callback returns its run() sees the stop and the thread
-    // ends; the destructor joins it.
-    if (join) fallback_->thread.join();
-}
-
 void posix_endpoint_t::stop_and_join() {
     assert(!on_callback_thread() && "a link's destructor runs off every callback thread");
-    wait_module_t* const w = wait_.load(std::memory_order_acquire);
-    if (w == nullptr) return;
-    // A private module's driver goes first: once it is joined no callback can run, so the
-    // detach takes no lock and waits on nobody, and a teardown made under the caller's lock
-    // (a transport vertex's control plane) cannot cross a callback that takes that lock.
-    stop_driver(true);
-    w->detach(src_);
+    (void)stop_for_shut_down();
 }
 
 bool posix_endpoint_t::stop_for_shut_down() {
@@ -235,7 +220,16 @@ bool posix_endpoint_t::stop_for_shut_down() {
     if (deferred) shut_.store(true, std::memory_order_seq_cst);
     wait_module_t* const w = wait_.load(std::memory_order_acquire);
     if (w == nullptr) return deferred;
-    stop_driver(!deferred);
+    // A private module's driver goes first: once it is joined no callback can run, so the
+    // detach takes no lock and waits on nobody, and a teardown made under the caller's lock
+    // (a transport vertex's control plane) cannot cross a callback that takes that lock. Not
+    // joined on a deferred teardown: the thread may be this one, or be inside a callback that
+    // waits on this one. Once its callback returns its run() sees the stop and the thread
+    // ends; the destructor joins it.
+    if (fallback_ != nullptr) {
+        fallback_->module.stop();
+        if (!deferred) fallback_->thread.join();
+    }
     w->detach(src_);
     return deferred;
 }
@@ -899,21 +893,17 @@ void slot_server_t::shut_down_slots() {
 }
 
 void slot_server_t::stop_and_join() {
-    // The fallback thread and the listener first, for the reason posix_endpoint_t gives:
-    // `slots_` grows only in the listener's callback, so the table is then still.
-    stream_endpoint_t::stop_and_join();
-    detach_slots();
+    assert(!on_callback_thread() && "a link's destructor runs off every callback thread");
+    (void)stop_for_shut_down();
 }
 
 bool slot_server_t::stop_for_shut_down() {
+    // The fallback thread and the listener first, for the reason posix_endpoint_t gives:
+    // `slots_` grows only in the listener's callback, so the table is then still.
     const bool deferred = stream_endpoint_t::stop_for_shut_down();
-    detach_slots();
-    return deferred;
-}
-
-void slot_server_t::detach_slots() {
     if (wait_module_t* const w = waiting())
         for (std::size_t i = 0; session_base_t* const s = slot_at(i); ++i) w->detach(*s);
+    return deferred;
 }
 
 slot_server_t::session_base_t* slot_server_t::slot_at(std::size_t i) {

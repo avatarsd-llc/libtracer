@@ -113,8 +113,8 @@ struct wait_source_t {
      */
     using fire_t = void (*)(void* ctx, wait_source_t& self, std::uint8_t ready);
 
-    fire_t fire = nullptr; /**< @brief The callback. */
-    void* ctx = nullptr;   /**< @brief Its context: the owning link. */
+    fire_t fire; /**< @brief The callback: unset until its owner names it, before an attach. */
+    void* ctx = nullptr; /**< @brief Its context: the owning link. */
     /** @brief The socket; -1 for none. Changed only while the record is detached. Atomic
      *         because a link's senders read it too (a server session's fd is this one). */
     std::atomic<int> fd{-1};

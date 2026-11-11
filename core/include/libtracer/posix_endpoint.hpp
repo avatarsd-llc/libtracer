@@ -260,7 +260,8 @@ class posix_endpoint_t {
     /**
      * @brief Stop waiting (idempotent): stop and join the fallback thread, then detach
      *        @ref src_ . MUST be the FIRST act of every derived destructor, and always joins:
-     *        a destructor runs off every callback thread (asserted).
+     *        a destructor runs off every callback thread (asserted), where this is
+     *        @ref stop_for_shut_down.
      *
      * The fallback's driver is joined before the detach, so on a private module the detach
      * takes no lock and a teardown made under a lock a callback takes cannot deadlock on the
@@ -274,13 +275,9 @@ class posix_endpoint_t {
      *        the link shut. A shut link's descriptors are shut down and stay open; its
      *        destructor closes them after its join.
      * @retval true The teardown is deferred: the link is shut, and nothing was joined.
+     * @note Out of line (`noinline`): every destructor and `shut_down` calls this one body.
      */
-    [[nodiscard]] bool stop_for_shut_down();
-
-    /** @brief Stop the fallback's thread, and join it when @p join (idempotent); a no-op on
-     *         the node's module, whose driver is the application's.
-     *  @param join False only on a deferred teardown (@ref stop_for_shut_down). */
-    void stop_driver(bool join);
+    [[nodiscard, gnu::noinline]] bool stop_for_shut_down();
 
     /** @brief Give a socket @p fd back that @p slot held: closed, unless the link is shut,
      *         when it stays open in @p slot for the destructor to close. */
@@ -970,15 +967,13 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     [[nodiscard]] bool serve(std::size_t stack_size, mem::block_source_t& stack_src);
 
     /** @brief Stop waiting on the listener and on every session (idempotent): the FIRST act
-     *         of a derived destructor, which hides @ref posix_endpoint_t::stop_and_join. */
+     *         of a derived destructor, which hides @ref posix_endpoint_t::stop_and_join.
+     *         Always joins: a destructor runs off every callback thread (asserted). */
     void stop_and_join();
 
-    /** @brief @ref posix_endpoint_t::stop_for_shut_down for the listener and every session.
+    /** @brief @ref posix_endpoint_t::stop_for_shut_down for the listener, then every session.
      *  @retval true The teardown is deferred. */
     [[nodiscard]] bool stop_for_shut_down();
-
-    /** @brief Take every session off the wait (after the listener). */
-    void detach_slots();
 
     /** @brief Session @p i of the table, or null past its end. Read under @ref peers_m_ ,
      *         which the accept grows the table under, so a walk by index is safe against a
