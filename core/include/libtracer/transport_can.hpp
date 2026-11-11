@@ -471,11 +471,13 @@ class can_transport_t final : public transport_t, public bus_link_t {
      *
      * Does not wait for a sender: the owner quiesces them first.
      *
-     * @pre No send into this transport remains: the owner has shut it down and destroys it
-     *      only where no send can still be on its way in, per the @ref transport_t::shut_down
-     *      contract. A build with asserts on checks that no group is still being sent (#2403).
-     *      The receive thread may still run until the destructor releases the link; the
-     *      destructor detaches the receivers before that.
+     * @pre No send of the owner's into this transport remains: the owner has shut it down and
+     *      destroys it only where no send can still be on its way in, per the
+     *      @ref transport_t::shut_down contract. The receive thread may still run until the
+     *      destructor releases the link, and a delivery on it may still be sending (a router
+     *      answering the frame it got); the destructor detaches the receivers, releases the
+     *      link, which waits that delivery out, and only then checks, in a build with asserts
+     *      on, that no group is still being sent (#2403, #2783).
      */
     ~can_transport_t();
 
