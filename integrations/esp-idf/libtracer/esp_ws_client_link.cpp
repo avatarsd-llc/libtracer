@@ -1146,11 +1146,12 @@ void esp_ws_client_link_t::recv_loop() {
         // a burst's tail leaves once the peer reads again even when nothing more is
         // published. No new wait, this is the loop's own poll cadence. On the turn that finds
         // the connection down it drains what waited, so nothing of the old connection is
-        // written to the next one. Those losses are not counted: `tx_drops` is per
-        // connection, and the next one starts it at 0.
+        // written to the next one. Those losses are counted like a send to a link that is
+        // down, so `stats()` read during a backoff says what was lost.
         {
             resume_t resume{*this};
-            (void)egress_.flush(peer_, resume, [] {});
+            tx_drops_.fetch_add(egress_.flush(peer_, resume, [] {}).shed,
+                                std::memory_order_relaxed);
         }
         if (!connected_.load(std::memory_order_acquire)) {
             // A new connection is a new stream: nothing of the old one's frame or message
