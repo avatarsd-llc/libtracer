@@ -79,10 +79,11 @@
       "source": "measured",
       "arm": "tcp-remote-sub",
       "metric": "per_sub",
-      "value": 526,
+      "value": 542,
       "goal": null,
-      "moved_by": "#1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)",
-      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it."
+      "moved_by": "#2673 (the vertex's own-subs count moves into the edge block: edge_block_t 48 -> 56 B, charged at slab class 64, drawn on a vertex's first subscription; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone))",
+      "waiver": "Ruling 74 (2026-11-11): net 0 B per subscribed vertex (edge_block_t 48->56 = slab 64, vertex_t 72->64), -16 B per plain vertex; total graph RAM holds or falls in every census row.",
+      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it. This row prices ONLY a subscribe on a vertex that already exists (the arm registers its vertices before the window opens), so it carries the edge block's +16 B (#2673) but not the vertex header's -16 B; the census subscribed-leaf row prices both and is unchanged."
     },
     {
       "id": "ws remote subscription",
@@ -90,10 +91,11 @@
       "source": "measured",
       "arm": "ws-remote-sub",
       "metric": "per_sub",
-      "value": 526,
+      "value": 542,
       "goal": null,
-      "moved_by": "#1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)",
-      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it."
+      "moved_by": "#2673 (the vertex's own-subs count moves into the edge block: edge_block_t 48 -> 56 B, charged at slab class 64, drawn on a vertex's first subscription; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone))",
+      "waiver": "Ruling 74 (2026-11-11): net 0 B per subscribed vertex (edge_block_t 48->56 = slab 64, vertex_t 72->64), -16 B per plain vertex; total graph RAM holds or falls in every census row.",
+      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it. This row prices ONLY a subscribe on a vertex that already exists (the arm registers its vertices before the window opens), so it carries the edge block's +16 B (#2673) but not the vertex header's -16 B; the census subscribed-leaf row prices both and is unchanged."
     },
     {
       "id": "udp remote subscription",
@@ -101,10 +103,11 @@
       "source": "measured",
       "arm": "udp-remote-sub",
       "metric": "per_sub",
-      "value": 526,
+      "value": 542,
       "goal": null,
-      "moved_by": "#1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)",
-      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it."
+      "moved_by": "#2673 (the vertex's own-subs count moves into the edge block: edge_block_t 48 -> 56 B, charged at slab class 64, drawn on a vertex's first subscription; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone))",
+      "waiver": "Ruling 74 (2026-11-11): net 0 B per subscribed vertex (edge_block_t 48->56 = slab 64, vertex_t 72->64), -16 B per plain vertex; total graph RAM holds or falls in every census row.",
+      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it. This row prices ONLY a subscribe on a vertex that already exists (the arm registers its vertices before the window opens), so it carries the edge block's +16 B (#2673) but not the vertex header's -16 B; the census subscribed-leaf row prices both and is unchanged."
     },
     {
       "id": "tcp remote subscription, blocks",
