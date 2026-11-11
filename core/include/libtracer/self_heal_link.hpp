@@ -207,8 +207,8 @@ class self_heal_link_t final : public transport_t {
      * locks are released. After it returns @ref send drops everything, and a liveness
      * publish still in flight finds the connection gone. A dial attempt in flight is waited
      * for (the factory's own connect deadline bounds the wait). On a thread that runs link
-     * callbacks (`on_callback_thread`) it waits for nothing: it stops the worker and shuts
-     * the sockets down, and the destructor joins and frees them.
+     * callbacks (`%tr::net::on_callback_thread`) it waits for nothing: it stops the worker and
+     * shuts the sockets down, and the destructor joins and frees them.
      */
     void stop();
 

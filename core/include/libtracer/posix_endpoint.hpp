@@ -270,7 +270,7 @@ class posix_endpoint_t {
 
     /**
      * @brief Stop waiting for a `shut_down`: as @ref stop_and_join, except on a thread that
-     *        runs link callbacks (@ref on_callback_thread), where it joins nothing and marks
+     *        runs link callbacks (`%tr::net::on_callback_thread`), where it joins nothing and marks
      *        the link shut. A shut link's descriptors are shut down and stay open; its
      *        destructor closes them after its join.
      * @retval true The teardown is deferred: the link is shut, and nothing was joined.

@@ -1569,7 +1569,7 @@ class graph_t {
      * keeps the pre-#576 behaviour — the park grows without bound — which @ref
      * parked_seam_count makes observable. Called from inside a router frame, it frees
      * nothing that frame could reach: the calling thread is itself still inside a bracket.
-     * Called on a thread that runs link callbacks (`tr::net::on_callback_thread`), it returns
+     * Called on a thread that runs link callbacks (`%tr::net::on_callback_thread`), it returns
      * at once and frees nothing, leaving everything parked for the next call. Links removed
      * from a callback are joined and freed at the next collect() or at graph destruction.
      *

@@ -954,7 +954,7 @@ class transport_t {
      *
      * When this returns, no inbound frame is delivered any more and the link's own threads
      * have been joined, unless it was called on a thread that runs link callbacks
-     * (`tr::net::on_callback_thread`): there it waits for nothing and closes nothing, the
+     * (`%tr::net::on_callback_thread`): there it waits for nothing and closes nothing, the
      * link's threads end as soon as their callbacks return, and the destructor joins them and
      * closes the link's descriptors, which stay owned and open until then. Destructors always
      * join, and run outside every callback, as the graph's `collect()` does. The object itself

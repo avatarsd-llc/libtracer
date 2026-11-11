@@ -152,7 +152,7 @@ inline thread_local unsigned g_callback_depth = 0;
 [[nodiscard]] inline bool on_callback_thread() noexcept { return g_callback_depth != 0; }
 
 /**
- * @brief Marks the calling thread as one that runs link callbacks (@ref on_callback_thread)
+ * @brief Marks the calling thread as one that runs link callbacks (`%tr::net::on_callback_thread`)
  *        for its lifetime. Every thread that delivers a link's callbacks holds one while it
  *        delivers: a wait module's `run`, a CAN receive thread, the self-heal worker's
  *        liveness publish.
@@ -269,7 +269,7 @@ class wait_module_t {
         return live;
     }
     /** @brief After a detach of @p s : block until its callback is not running, unless the
-     *         caller runs link callbacks itself (@ref on_callback_thread), the driver
+     *         caller runs link callbacks itself (`%tr::net::on_callback_thread`), the driver
      *         included, whose own callback this may be. A blocking wait, never a spin, so a
      *         caller above the driver's priority on one core does not starve it; parked
      *         through `%tr::park_wait`, as `std::atomic::wait` costs an MCU libstdc++'s 2 KB
