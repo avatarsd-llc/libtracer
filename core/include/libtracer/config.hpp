@@ -673,8 +673,9 @@ struct default_config_t {
      * READ in that run. A session alone in a run is never refused, and neither is a WRITE, a
      * subscribe, an AWAIT, a REPLY, or a frame this node forwards.
      *
-     * The application closes a run by calling `%fwd_router_t::close_read_run`, for example from
-     * its idle task every 100 ms: the library reads no clock (no timers in libtracer). A session
+     * The application closes a run by calling `%fwd_router_t::close_read_run` from any task or
+     * timer on its own clock, e.g. every 100 ms; a starved idle task stretches the run, and the
+     * budget with it. The library reads no clock (no timers in libtracer). A session
      * is one slot of a stream server (TCP, WS, the ESP-IDF WS link) or a whole link otherwise,
      * and its count lives in that slot (receiver pays). At 0, every tally member is an empty
      * `[[no_unique_address]]` type and the check is not compiled: 0 bytes, no branch.
