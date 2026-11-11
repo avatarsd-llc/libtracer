@@ -199,6 +199,7 @@ The maintainer took every recommendation below.
 4. **Q4.** No flatten helper.
 5. **Q5.** Steps 1 and 2 ship in v0.23.0 (#2679, #2680). Step 3, the breaking switch-over, ships in the next release, after #2617 (#2681). In step 1 loopback makes only the 2 -> 1 cut, and #2266 (loopback: three copies per frame) stays open.
 6. **Q6.** UDP's `sendto` body is deleted, and single spans go through a one-entry `sendmsg`, with a bench in the PR.
+   *2026-11-11:* single spans use `sendto` again inside the one body, because #2723 measured the one-entry `sendmsg` 35-45 ns slower per send (+3.4 to +4.4%).
 
 ## Open questions as posed (answered in §Rulings)
 

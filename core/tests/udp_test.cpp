@@ -603,11 +603,14 @@ void test_tx_drop_counted() {
     const std::span<const std::byte> one[1] = {frame};
     peerless.send(std::span<const std::span<const std::byte>>(one));
     check(peerless.drop_stats().dropped_tx == 2, "both sends with no peer are counted, not silent");
+    peerless.send(std::span<const std::span<const std::byte>>{});
+    check(peerless.drop_stats().dropped_tx == 3,
+          "an empty send with no peer is counted too (#2723)");
 
     // The point of the hoist: a generic transport_t* holder sees the same number.
     tr::net::transport_t* generic = &peerless;
     const tr::net::transport_drop_stats_t s = generic->drop_stats();
-    check(s.dropped_tx == 2, "drop_stats() carries dropped_tx across the interface");
+    check(s.dropped_tx == 3, "drop_stats() carries dropped_tx across the interface");
     check(s.dropped_rx == 0 && s.malformed_rx == 0, "and the RX counters are still zero");
 }
 
@@ -635,15 +638,18 @@ void test_refused_sendto_counted() {
     a.send(std::span<const std::byte>(huge));
     check(a.drop_stats().dropped_tx == 1, "send(span): a refused sendto is counted");
     a.send(std::span<const std::span<const std::byte>>(one));
-    check(a.drop_stats().dropped_tx == 2, "send(iov): a refused sendmsg is counted");
+    check(a.drop_stats().dropped_tx == 2, "send(iov) of one span: a refused sendto is counted");
     a.send_to(a.peer_address(), std::span<const std::span<const std::byte>>(one));
-    check(a.drop_stats().dropped_tx == 3, "send_to: a refused sendmsg is counted");
+    check(a.drop_stats().dropped_tx == 3, "send_to of one span: a refused sendto is counted");
+    const std::span<const std::byte> two[2] = {huge, fits};  // a gather leaves through sendmsg
+    a.send(std::span<const std::span<const std::byte>>(two));
+    check(a.drop_stats().dropped_tx == 4, "send(iov) of two spans: a refused sendmsg is counted");
 
     a.shut_down();
     a.send(std::span<const std::byte>(fits));
-    check(a.drop_stats().dropped_tx == 4,
+    check(a.drop_stats().dropped_tx == 5,
           "after shut_down a send the socket refuses is counted too");
-    check(a.drop_stats().dropped_tx == 4, "and drop_stats() carries it across the interface");
+    check(a.drop_stats().dropped_tx == 5, "and drop_stats() carries it across the interface");
 }
 
 }  // namespace
