@@ -12,8 +12,9 @@
  * frame codec/masking over lwIP BSD sockets — which does not reliably complete on
  * ESP32 silicon (an lwIP/handshake interaction observed dropping board-to-board
  * dials; #948 found the cause, `sendmsg(MSG_NOSIGNAL)`, which lwIP rejects). This link
- * instead rides `esp_transport_tcp`: ESP-IDF's transport stack owns the socket, and every
- * byte goes through `esp_transport_write` / `esp_transport_read`. Since #2484 the link does
+ * instead rides `esp_transport_tcp`: ESP-IDF's transport stack owns the socket, the dial
+ * and every read go through it, and a frame is one non-blocking `send()` on its socket
+ * (#2787). Since #2484 the link does
  * the rest itself on core's code: the opening handshake (the Upgrade request for the
  * configured `ws_path`, and the `101` + Sec-WebSocket-Accept check, `ws::upgrade_accepted`),
  * and the receive side, which reads raw bytes and frames them with core's
@@ -111,11 +112,11 @@
  *     thread, a reply on the recv thread itself). Writes are serialized by one small
  *     mutex, `write_m_`, held only for the write. The READ takes no lock (#2265): only
  *     the recv thread reads the TCP transport, a writer only writes it, and lwIP sockets
- *     are full-duplex. The write is not prompt — the caller's timeout
- *     bounds the poll and the `send()` inside one `esp_transport_write` — so that mutex
- *     IS held blocking, for a bound derived from the task-watchdog period rather than the
- *     4 s literal it used to be (#952). The graph/router lock-stripes below are
- *     unchanged — this link adds no lock beyond that write serializer.
+ *     are full-duplex. The write is prompt: one `send()` with `MSG_DONTWAIT` (#2787), so
+ *     that mutex is never held across a wait. What a full peer window will not take stays
+ *     on the wire for the next turn, and frames behind it wait in the egress rings or are
+ *     shed, counted. The graph/router lock-stripes below are unchanged — this link adds no
+ *     lock beyond that write serializer.
  *   - A TEARDOWN THAT LANDS MID-DIAL COSTS NO DIAL (#1058). `esp_transport_connect` takes
  *     no cancellation — that is IDF's documented signature, `(handle, host, port,
  *     timeout_ms)`, and there is no second entry point — so the dial cannot be stopped.
@@ -123,10 +124,10 @@
  *     in-flight dial under the dial slot's own mutex and DETACHES the recv thread instead
  *     of joining it, and the orphaned dial releases its own transport pair when the call
  *     finally resolves (success ⇒ close then destroy; failure ⇒ destroy). The worst-case
- *     teardown is therefore `kPollMs + kWriteBudgetMs` — one recv-loop poll turn plus one
- *     write budget — where it used to be `kDialTimeoutMs + kWriteBudgetMs`; at the 5 s
- *     watchdog fallback that is 1448 ms rather than 3748 ms, and the mid-dial case
- *     specifically costs two uncontended mutex acquires instead of up to 2500 ms.
+ *     teardown is therefore `kPollMs` — one recv-loop poll turn, since no write waits
+ *     either (#2787) — where it used to be `kDialTimeoutMs` plus a write budget, and the
+ *     mid-dial case specifically costs two uncontended mutex acquires instead of up to
+ *     2500 ms.
  *     THE COST, stated because it is real: a condemned link's recv thread outlives the
  *     destructor by up to `kDialTimeoutMs`, holding the stack it was already given (no new
  *     thread is created, and the peak thread count per link is unchanged). N links
@@ -174,11 +175,11 @@
  *     error within tens of seconds and takes the drop path above.
  *   - `send()` builds the whole frame in a block drawn from `memory.io` (#2265): the header,
  *     then the payload gathered and masked in ONE pass (RFC 6455 client rule), written as one
- *     `esp_transport_write` on the TCP parent. A delivered frame may be shared with the
- *     concurrent server link, so the caller's (const, possibly shared) bytes are only
- *     read. RX is zero-copy; the one TX pass is the irreducible cost of client masking
- *     on shared bytes. IDF's `_ws_write`, which masked in place, wrote header and payload
- *     separately and unmasked back, is no longer on the path.
+ *     non-blocking `send()` on the TCP parent's socket (#2787). A delivered frame may be shared
+ * with the concurrent server link, so the caller's (const, possibly shared) bytes are only read. RX
+ * is zero-copy; the one TX pass is the irreducible cost of client masking on shared bytes. IDF's
+ * `_ws_write`, which masked in place, wrote header and payload separately and unmasked back, is no
+ * longer on the path.
  *   - NO CALLBACK INTO THE EMBEDDER EVER RUNS UNDER `write_m_` or `st_m_`. Deliveries
  *     are made with both released; the counter bumps and @ref stats only touch this
  *     object's own fields. That is the invariant a host relies on when it holds its
@@ -371,10 +372,9 @@ class esp_ws_client_link_t final : public transport_t {
      * destructor returns is not. Both are the embedder's lifetime problem; nothing
      * inside the object can close them.
      *
-     * WORST CASE, derived: `kPollMs + kWriteBudgetMs` — one recv-loop poll turn (how fast
-     * the recv thread can observe `stop_`) plus one write budget (a quarter of the
-     * task-watchdog period, which is what a sender inside `esp_transport_write` may still
-     * be spending). 1448 ms at the 5 s host fallback. The DIAL term is gone (#1058): a
+     * WORST CASE, derived: `kPollMs` — one recv-loop poll turn (how fast the recv thread
+     * can observe `stop_`); a sender inside the transport is in one non-blocking `send()`
+     * (#2787). The DIAL term is gone (#1058): a
      * teardown landing mid-dial condemns the in-flight dial and detaches the recv thread
      * rather than joining it, because `esp_transport_connect` takes no cancellation and
      * the only thing left to fix was who pays for it. What that buys is paid for by the
@@ -397,11 +397,13 @@ class esp_ws_client_link_t final : public transport_t {
      * the lane's arm and counts it in `tx_drops`. So no task ever waits on another task's
      * write (#1619).
      *
-     * The writing task itself is BOUNDED: a peer whose TCP window has closed costs it one
-     * write budget (a quarter of the task-watchdog period, split across the poll and the
-     * `send()` of the frame's one write) and then drops the frame, tearing the connection down
-     * for the recv thread to re-dial. It used to cost up to three times a 4 s literal,
-     * which is a watchdog panic rather than a dropped frame (#952).
+     * The writing task itself never waits (#2787): its write is one `send()` with
+     * `MSG_DONTWAIT`. A peer whose TCP window has closed takes some of the frame or none;
+     * the rest stays on the wire and leaves on the next turn (the next send, or the recv
+     * thread's next poll turn), and frames sent meanwhile wait in their lane's ring or are
+     * shed by its arm, counted in `tx_drops`. The connection stays up: only a transport error
+     * the recv thread reads tears it down, and a peer that never reads again is the application's
+     * frozen-peer check to close, on its own clock.
      */
     void send(std::span<const std::byte> frame) override;
 
@@ -456,7 +458,7 @@ class esp_ws_client_link_t final : public transport_t {
      * may still be on its way into it calls this at removal, and the destructor — at the
      * graph's next `collect()` — returns the memory (the dial slot). A
      * `send()` after this is shed without touching a handle and without counting a drop.
-     * Its cost is the destructor's worst case, `kPollMs + kWriteBudgetMs`; a dial in flight
+     * Its cost is the destructor's worst case, `kPollMs`; a dial in flight
      * is condemned rather than waited out, as there. IDEMPOTENT, and safe to follow with
      * the destructor. On a thread that runs link callbacks (the recv thread among them) it
      * only shuts down: the destructor joins the recv thread and releases the connection.
@@ -668,8 +670,9 @@ class esp_ws_client_link_t final : public transport_t {
     struct timing_t {
         int dial_timeout_ms = 0;      /**< @brief DERIVED: half the watchdog window. */
         int write_timeout_ms = 0;     /**< @brief DERIVED: the per-leg share of a quarter
-                                       *          window (a frame's one write spends it
-                                       *          twice: the poll and the `send()`). */
+                                       *          window, for the opening handshake's one
+                                       *          write (its poll and its `send()`). A frame
+                                       *          never waits (#2787). */
         int read_timeout_ms = 0;      /**< @brief Kconfig: read after a positive poll. */
         int poll_ms = 0;              /**< @brief Kconfig: one recv-loop poll turn. */
         int reconnect_backoff_ms = 0; /**< @brief Kconfig: spacing before a re-dial, on
@@ -712,7 +715,7 @@ class esp_ws_client_link_t final : public transport_t {
     /** @brief The recv thread's entry: `recv_loop()` on the link @p self. */
     static void recv_entry(void* self);
     /** @brief One dial attempt: build the TCP transport, connect, do the opening handshake,
-     *         apply the per-socket policy (Nagle off, bounded write, keepalive probes), mark
+     *         apply the per-socket policy (Nagle off, keepalive probes), mark
      *         up — or release all of it on the failure path (#1606).
      *         @return which of the three outcomes it reached (@ref dial_outcome_t). */
     dial_outcome_t connect_once();
@@ -722,33 +725,32 @@ class esp_ws_client_link_t final : public transport_t {
     void drop();
     /**
      * @brief The one send path: frame @p iov, then put it on the wire or in @p lane's ring
-     *        through the egress module. Drops oversize and empty frames, counted.
+     *        through the egress module. Drops oversize frames, counted.
+     *
+     * @param op The frame's RFC 6455 opcode: BINARY (2) for a send, PONG or CLOSE for the
+     *           recv thread's control replies, which ride the control lane (#2787).
      */
     void send_on(std::span<const std::span<const std::byte>> iov,
-                 const graph::delivery_lane_t& lane);
+                 const graph::delivery_lane_t& lane, std::uint8_t op = 2);
+    /** @brief The egress's write step, @ref write_locked from an offset. Defined in the .cpp. */
+    struct resume_t;
     /**
-     * @brief Write ONE record to the peer under the syscall serializer — the writer's step.
+     * @brief Write ONE record, or the rest of it, to the peer under the syscall serializer —
+     *        the writer's step.
      *
-     * Called by the sender holding the egress writer role (#1619), once for its own frame
-     * and once per frame it drains, and by the recv thread for a control reply. Leaves without
-     * touching a handle once `stop_` is set, drops and counts toward a peer that is down, and tears
-     * the connection down on an error or a short write.
+     * Called by the egress writer-role holder (#1619): a sender, once for its own frame and
+     * once per frame it drains, or the recv thread's turn. One `send()` with `MSG_DONTWAIT`
+     * (#2787): it never waits. Leaves without touching a handle once `stop_` is set, fails
+     * (a counted drop) toward a peer that is down or for the rest of a frame begun on a dead
+     * connection, and holds what the socket did not take, error or not: the read side drops
+     * a dead connection.
      *
-     * @param wire A whole masked frame (the writer's own, a waiting one or a control reply),
-     *             written as it is in one `esp_transport_write`.
+     * @param f   A whole masked frame.
+     * @param off Bytes of @p f already on the wire.
+     * @return The bytes moved; held when the socket took less than the rest; failed when the
+     *         peer is down.
      */
-    void write_locked(std::span<const std::byte> wire);
-    /**
-     * @brief Write one masked BINARY frame to @p dst: the header, then the @p len payload
-     *        bytes of @p iov gathered and masked in one pass (#2265).
-     *
-     * @param dst At least `ws::detail::client_frame_bytes(len)` bytes, sized by the caller.
-     * @param iov The payload's spans, in order.
-     * @param len The bytes in @p iov.
-     * @return The frame's size, `ws::detail::client_frame_bytes(len)`.
-     */
-    static std::size_t frame_into(std::byte* dst, std::span<const std::span<const std::byte>> iov,
-                                  std::size_t len) noexcept;
+    tr::net::egress_step_t write_locked(const tr::net::egress_frame_t& f, std::size_t off);
 
     /**
      * @brief The dial slot (#1058) — drawn from `memory.state` in the ctor, shared with the
@@ -857,9 +859,9 @@ class esp_ws_client_link_t final : public transport_t {
     };
     held_budget_t held_;
     /** @brief The shared egress module (ADR-0087 §2, #1619): the writer role, and the rings
-     *         frames wait in while a write is in flight, drawn from @ref tx_src_. Every write
-     *         step reports its frame moved (a failed write tears the connection down here,
-     *         not through a strike), so the strike cap never comes into play. */
+     *         frames wait in while a write is in flight or cut short, drawn from @ref tx_src_.
+     *         No write tears the connection down and the strike verdict closes nothing:
+     *         liveness is the read side's and the application's frozen-peer check (#2787). */
     tr::net::egress_t egress_;
     /** @brief The one peer's egress state, opened by the constructor and closed by the
      *         destructor once every sender has left. */
@@ -906,13 +908,11 @@ class esp_ws_client_link_t final : public transport_t {
      * @brief Guards @ref traffic_ below, and NOTHING else. Exists only with
      *        `CONFIG_LIBTRACER_LINK_TRAFFIC_STATS` (#1663).
      *
-     * Deliberately not `write_m_`: that one is held across `esp_transport_write` for
-     * up to `kWriteTimeoutMs` (4 s) on a stalled socket, so counters riding it would
-     * make @ref stats block for seconds on a peer with a zero window — and a host
-     * that holds its own mutex across `stats()` would drag that lock into the wait
-     * too. This mutex is only ever taken for a bump or the snapshot copy, so it is
-     * uncontended and syscall-free from any task. Nesting is always
-     * `write_m_ -> st_m_`, never the reverse. `mutable` for the const snapshot.
+     * Deliberately not `write_m_`: that one serializes the socket calls, so counters
+     * riding it would queue @ref stats behind them — and a host that holds its own mutex
+     * across `stats()` would drag that lock into the queue too. This mutex is only ever taken for a
+     * bump or the snapshot copy, so it is uncontended and syscall-free from any task. Nesting is
+     * always `write_m_ -> st_m_`, never the reverse. `mutable` for the const snapshot.
      */
     mutable tr::mutex_t st_m_;
     /** @brief Per-connection traffic counters — st_m_. Reset at every handshake. */
@@ -958,6 +958,11 @@ class esp_ws_client_link_t final : public transport_t {
     /** @brief @ref shut_down condemned a dial in flight, so that dial — not the destructor
      *         — returns the dial slot. Owner thread only. */
     bool dial_orphaned_ = false;
+    /** @brief The socket took only part of the last frame written on THIS connection (#2787):
+     *         its rest may follow. Cleared when a connection is released, so the rest of a
+     *         frame begun on a dead one is refused. Guarded by `write_m_`; it sits in the
+     *         padding after the flag above. */
+    bool cut_ = false;
     /** @brief The receive path's shed-frame counters (#2482), read through @ref drop_stats:
      *         `dropped_rx` (a refused segment) and `malformed_rx` (a frame that closed its
      *         connection). Written only by the recv thread, read by anyone, relaxed. The send

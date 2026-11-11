@@ -63,6 +63,8 @@
  * its own callers.
  */
 
+#include <sys/socket.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -143,8 +145,9 @@ constexpr long long kHostWdtMs = 5000;
 /** @brief Rx/tx buffer size every case here builds its link with. */
 constexpr std::size_t kBufBytes = 256;
 
-/** @brief A frame's ONE esp_transport_write on the TCP parent spends the write timeout on
- *         two legs: the poll and the send `SO_SNDTIMEO` bounds (`tcp_write`, #2265). */
+/** @brief The opening handshake's ONE esp_transport_write on the TCP parent spends the write
+ *         timeout on two legs: the poll and the send (`tcp_write`). A frame never waits
+ *         (#2787). */
 constexpr long long kIdfWriteLegs = 2;
 
 /** @brief A small outbound frame — the size of the control TLVs this link carries. */
@@ -186,18 +189,29 @@ tr::mem::poly_ptr_t<esp_ws_client_link_t> dialing_link() {
  */
 bool drained_fake(std::chrono::milliseconds limit = 5s) { return fake_ws::wait_drained(limit); }
 
+/** @brief Build a link with a @p tx_bytes send ceiling and wait for it to come up. */
+tr::mem::poly_ptr_t<esp_ws_client_link_t> up_link_tx(std::size_t tx_bytes) {
+    auto link = tr::mem::make_poly<esp_ws_client_link_t>(
+        tr::mem::net_source(), "127.0.0.1", 8080,
+        tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = tx_bytes});
+    link->start_receiving();
+    check(wait_until([&] { return link->link_up(); }, 2s), "the link came up");
+    return link;
+}
+
 /**
- * @brief The headline (defect 3): teardown must not destroy the handles under a sender.
+ * @brief The headline (defect 3, #2787): a peer that stopped reading parks no sender, and
+ *        teardown neither waits on one nor destroys the handles under it.
  *
- * Two senders are staged against a peer that has stopped accepting bytes: one INSIDE
- * `esp_transport_write` (holding the send serializer for the whole call) and one queued
- * behind it on that serializer. Pre-fix the destructor joined the recv thread and then
- * destroyed both handles with the serializer held nowhere, so it returned while the
- * first sender was still inside the transport and the second woke up to write through a
- * destroyed (or freshly nulled) handle.
+ * Two senders against a peer whose TCP window is full. Pre-#952 the destructor destroyed the
+ * handles under a sender still inside the transport; until #2787 the first sender sat in the
+ * write for a whole write budget and the connection was torn down when it expired. Now each
+ * write is one `send()` with `MSG_DONTWAIT`: both senders return at once, the link stays up,
+ * and a teardown has nothing to wait out. A writer that IS inside the transport at teardown
+ * is the next case's (`fake_ws::pin_writes`).
  */
 void test_teardown_does_not_destroy_handles_under_a_sender() {
-    std::printf("teardown does not destroy the handles under a sender:\n");
+    std::printf("a full peer window parks no sender, and teardown touches no handle:\n");
     fake_ws::reset();
     fake_ws::hold_writes(true);
 
@@ -211,45 +225,33 @@ void test_teardown_does_not_destroy_handles_under_a_sender() {
     // under TSan). The link object itself is safe to hold — that is the contract staged.
     esp_ws_client_link_t* const under_test = link.get();
 
-    std::thread a([&] { under_test->send(frame); });
-    check(wait_until([] { return fake_ws::writers_inside() >= 1; }, 2s),
-          "sender A is parked INSIDE the transport, holding the send serializer");
+    std::atomic<int> returned{0};
+    std::thread a([&] {
+        under_test->send(frame);
+        returned.fetch_add(1);
+    });
+    std::thread b([&] {
+        under_test->send(frame);
+        returned.fetch_add(1);
+    });
+    check(wait_until([&] { return returned.load() == 2; }, 1s),
+          "both senders returned with the window full");
+    check(fake_ws::writers_inside() == 0, "and neither is inside the transport");
+    check(fake_ws::last_send_flags() >= 0 && (fake_ws::last_send_flags() & MSG_DONTWAIT) != 0,
+          "every frame write is non-blocking");
+    check(under_test->link_up() && fake_ws::connect_count() == 1, "the connection stayed up");
 
-    std::thread b([&] { under_test->send(frame); });
-    // B cannot announce itself from inside the link, so it is placed by time and then
-    // pinned by what the fake did NOT see: A holds the serializer, so a B that has
-    // reached the transport would show up as a second entered write. Short, because
-    // every millisecond spent here is a millisecond of A's park already gone.
-    std::this_thread::sleep_for(50ms);
-    check(fake_ws::writes_started() == 1,
-          "sender B is queued on the serializer, not in the transport");
-
-    // Nothing releases the peer: A leaves when the LINK's OWN write bound expires, which
-    // is the whole point. Post-fix that is ~416 ms (case 4 pins the derivation) and the
-    // destructor must sit through the remainder of it; pre-fix it was 4000 ms, and the
-    // destructor sailed past it at the join (a ~200 ms poll turn) and destroyed the
-    // handles with A still inside the transport.
     const auto start = std::chrono::steady_clock::now();
     link.reset();
-    // The oracle is the fake's, read the moment the destructor returns. A sender stamps
-    // nothing between the tally drop that releases the drain and its return from `send()`,
-    // so a stamp it took after that return could land after the destructor's (#2338).
-    const int inside_at_return = fake_ws::writers_inside();
     const long long elapsed = ms_since(start);
     a.join();
     b.join();
 
     std::printf("       teardown %lld ms\n", elapsed);
-    check(inside_at_return == 0,
-          "the destructor did not return while a sender was inside the transport");
     check(fake_ws::handle_misuse() == 0,
           "and no operation touched a destroyed, foreign or null handle");
-    check(fake_ws::writes_started() == 1,
-          "the queued sender left without writing through the torn-down handle");
-    // Waiting for a sender is not licence to wait forever: what the destructor inherits
-    // is one write bound, and that bound is now a quarter of a watchdog window.
-    check_under_ms(elapsed, kHostWdtMs / 2,
-                   "and the wait it inherited was one write bound, not an open one");
+    check(fake_ws::frames_written() == 0, "nothing reached a peer that was not reading");
+    check_under_ms(elapsed, kHostWdtMs / 4, "and teardown had no write to wait out");
 }
 
 /**
@@ -578,15 +580,16 @@ void test_send_during_a_redial_reads_no_handle() {
 }
 
 /**
- * @brief Defect 1: both blocking bounds are derived from the task-watchdog period.
+ * @brief Defect 1: both blocking bounds are derived from the task-watchdog period, and a
+ *        frame's write has none at all (#2787).
  *
  * The numbers the link hands IDF are the whole observable — no wait has to be spent to
  * read them. Pre-fix they were bare literals: 4000 ms per write leg (12 s of stall on a
- * closed TCP window) and 5000 ms per dial, against a 5 s watchdog.
+ * closed TCP window) and 5000 ms per dial, against a 5 s watchdog. The one bounded write
+ * left is the opening handshake's; a frame is one `send()` with `MSG_DONTWAIT`.
  *
- * The ordinary send is the control: bounding the write must not stop the bytes getting
- * out, and the re-check the fix added after the lock (`stop_`, then the `connected_`
- * gate) must not swallow a frame on a live link.
+ * The ordinary send is the control: the re-check after the lock (`stop_`, then the
+ * `connected_` gate) must not swallow a frame on a live link.
  */
 void test_the_blocking_bounds_are_derived_from_the_watchdog() {
     std::printf("the blocking bounds are derived from the watchdog period:\n");
@@ -600,15 +603,16 @@ void test_the_blocking_bounds_are_derived_from_the_watchdog() {
 
     const long long write_ms = fake_ws::last_write_timeout_ms();
     const long long dial_ms = fake_ws::last_connect_timeout_ms();
-    std::printf("       write %lld ms x %lld legs, dial %lld ms, watchdog %lld ms\n", write_ms,
-                kIdfWriteLegs, dial_ms, kHostWdtMs);
+    std::printf("       handshake write %lld ms x %lld legs, dial %lld ms, watchdog %lld ms\n",
+                write_ms, kIdfWriteLegs, dial_ms, kHostWdtMs);
 
     check(write_ms > 0 && dial_ms > 0, "both bounds are real waits, not zero");
     check_le(write_ms * kIdfWriteLegs, kHostWdtMs / 2,
-             "one send's TOTAL write bound is at most half a watchdog window");
+             "the handshake's TOTAL write bound is at most half a watchdog window");
     check_le(dial_ms, kHostWdtMs / 2, "one dial is at most half a watchdog window");
     check_le(dial_ms + write_ms * kIdfWriteLegs, kHostWdtMs,
-             "and a teardown that pays a dial AND a stalled write still fits in one");
+             "and a dial with its handshake write fits in one");
+    check((fake_ws::last_send_flags() & MSG_DONTWAIT) != 0, "a frame's write never waits");
 
     check(fake_ws::last_write_payload() == frame,
           "the ordinary send still reached the transport, byte for byte");
@@ -616,17 +620,17 @@ void test_the_blocking_bounds_are_derived_from_the_watchdog() {
 }
 
 /**
- * @brief RFC 0028 slice 2 (#1619): a second sender never waits on the first one's write.
+ * @brief RFC 0028 slice 2 (#1619), #2787: a full peer window costs neither sender a wait,
+ *        and what it held leaves, in order, once the peer reads again.
  *
- * Sender A is parked inside `esp_transport_write` on a peer whose window has closed. Before
- * enqueue-then-write, sender B queued on `write_m_` behind it for the rest of A's write — up
- * to a whole write budget — and delivery is in-call, so B is whatever unrelated task
- * published. Now B leaves its frame in its lane's egress ring and returns at once, and A,
- * still the writer, sends it as soon as its own write completes (#2277). The bound asserted is a
- * small fraction of one write leg, so it does not depend on the write budget.
+ * Sender A's frame finds the window full: the socket takes nothing, the frame stays on the
+ * wire and A returns. Sender B's turn tries A's frame first, finds the window still full and
+ * leaves its own frame in its lane. Nobody waited, and the connection is up. The peer opens
+ * its window and nothing more is sent: the recv thread's next poll turn writes A's frame and
+ * then B's.
  */
 void test_a_second_sender_does_not_wait_on_a_parked_write() {
-    std::printf("a second sender returns at once while the first is parked in a write:\n");
+    std::printf("a full peer window costs no sender a wait, and the frames leave later:\n");
     fake_ws::reset();
     fake_ws::hold_writes(true);
 
@@ -638,50 +642,128 @@ void test_a_second_sender_does_not_wait_on_a_parked_write() {
     std::vector<std::byte> second = payload();
     second[0] = std::byte{0x5A};
 
-    std::thread a([&] { under_test->send(first); });
-    check(wait_until([] { return fake_ws::writers_inside() >= 1; }, 2s),
-          "sender A is parked INSIDE the transport");
-
     const auto start = std::chrono::steady_clock::now();
+    under_test->send(first);
     under_test->send(second);
     const long long took = ms_since(start);
-    const bool a_still_parked = fake_ws::writers_inside() >= 1;
-    std::printf("       second send took %lld ms\n", took);
-    check_under_ms(took, 50, "sender B returned at once instead of waiting out A's write");
-    check(a_still_parked, "and it returned while A was still inside the transport");
-    check(fake_ws::writes_started() == 1, "B did not reach the transport itself");
+    std::printf("       two sends took %lld ms\n", took);
+    check_under_ms(took, 50, "both senders returned at once");
+    check(fake_ws::writes_started() >= 2, "each tried the held frame, and B's frame queued");
+    check(fake_ws::frames_written() == 0, "nothing reached the peer yet");
+    check(under_test->stats().c.tx_drops == 0, "and nothing was lost");
+    check(under_test->link_up() && fake_ws::connect_count() == 1, "the connection stayed up");
 
-    // Release the peer: A finishes its own write and then drains B's queued frame.
+    // The peer reads again; nothing else is sent, so the recv thread's turn drains them.
     fake_ws::hold_writes(false);
-    a.join();
-    check(fake_ws::writes_started() == 2, "the writer sent the queued frame after its own");
+    check(wait_until([] { return fake_ws::frames_written() == 2; }, 2s),
+          "the held frame, then the queued one, left on the recv thread's turn");
     check(fake_ws::last_write_payload() == second, "byte for byte, and in admission order");
     check(fake_ws::handle_misuse() == 0, "with no handle misuse anywhere in the case");
     link.reset();
     check(drained_fake(), "and the link drained");
 }
+
 /**
- * @brief #2277: the frames waiting behind a stalled write are charged to `tx_bytes`.
+ * @brief #2787, the ticket's acceptance: with the peer's window held full, the dialler's sends
+ *        are counted drops and the link stays up; once the peer reads, it carries on.
  *
- * Sender A is parked inside `esp_transport_write`. Every later send builds a frame that has
- * to wait, and each waiting frame is a private masked copy, so a peer that never drains
- * could pin one per lane slot. The budget caps their total at `tx_bytes`: a frame that would
- * pass it is dropped and counted in `tx_drops`, never held. Released, the writer sends A's
- * frame and then exactly the frames that were admitted, in order, and the budget is empty.
- * The queue's peaks (#2464) still read what waited, in frames and in bytes.
+ * Until #2787 a write that overran its bound tore the connection down, losing every wire on
+ * it (2-3 teardowns per 20 s under four busy followers). Now the frames past the lane's
+ * depth are shed by its arm, counted in `tx_drops`, and nothing else happens.
+ */
+void test_a_full_window_is_counted_drops_not_a_teardown() {
+    std::printf("#2787 a full window is counted drops, never a teardown:\n");
+    fake_ws::reset();
+    fake_ws::hold_writes(true);
+    auto link = up_link_tx(16384);
+    constexpr int kSends = 64;
+    for (int i = 0; i < kSends; ++i) {
+        std::vector<std::byte> f = payload();
+        f[0] = static_cast<std::byte>(i);
+        link->send(f);
+    }
+    const std::uint32_t drops = link->stats().c.tx_drops;
+    std::printf("       %d sends, %u counted drops\n", kSends, static_cast<unsigned>(drops));
+    check(drops > 0 && drops < static_cast<std::uint32_t>(kSends),
+          "the sends past the lane's depth are counted drops");
+    check(link->link_up() && fake_ws::connect_count() == 1, "and the link stayed up");
+    check(fake_ws::frames_written() == 0, "nothing went out while the window was full");
+    fake_ws::hold_writes(false);
+    check(wait_until([&] { return fake_ws::frames_written() == kSends - static_cast<int>(drops); },
+                     2s),
+          "every frame not counted as a drop went out once the peer read again");
+    std::vector<std::byte> last = payload();
+    last[0] = static_cast<std::byte>(kSends - 1);
+    check(fake_ws::last_write_payload() == last, "the newest frame last (drop-oldest)");
+    check(fake_ws::connect_count() == 1 && fake_ws::handle_misuse() == 0,
+          "on the same connection, with no handle misuse");
+    link.reset();
+    check(drained_fake(), "and the link drained");
+}
+
+/**
+ * @brief #2787: a window with room for part of a frame never desyncs the stream, and a
+ *        frame cut short on a connection that dies does not finish on the next one.
+ */
+void test_a_frame_cut_short_resumes_and_never_crosses_a_redial() {
+    std::printf("#2787 a frame cut short resumes whole, and never on the next connection:\n");
+    fake_ws::reset();
+    auto link = up_link_tx(kBufBytes);
+    std::vector<std::byte> big(100);
+    for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(i * 3 + 1);
+    fake_ws::cap_writes(40);  // the window takes 40 bytes per send
+    link->send(big);
+    check(fake_ws::frames_written() == 0, "the window took only part of the frame");
+    check(wait_until([] { return fake_ws::frames_written() == 1; }, 5s),
+          "the rest left over the recv thread's next turns");
+    check(fake_ws::last_write_payload() == big, "and the peer read ONE whole frame");
+    check(fake_ws::handle_misuse() == 0, "with no desync and no handle misuse");
+
+    // Cut a frame short, then lose the connection before the rest goes.
+    const int dials = fake_ws::connect_count();
+    fake_ws::cap_writes(7);
+    link->send(big);  // 7 bytes out, the rest held
+    fake_ws::hold_writes(true);
+    fake_ws::cap_writes(0);
+    check(fake_ws::frames_written() == 1, "the second frame is cut short");
+    fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::CLOSE, true, 2, 0x03)});
+    check(wait_until([&] { return !link->link_up(); }, 2s), "the peer closed the connection");
+    fake_ws::hold_writes(false);
+    check(fake_ws::sweep_until(
+              *link, [&] { return fake_ws::connect_count() > dials && link->link_up(); }, 5s),
+          "and the link re-dialed");
+    std::vector<std::byte> after = payload();
+    after[0] = std::byte{0x77};
+    link->send(after);
+    check(wait_until([&] { return fake_ws::last_write_payload() == after; }, 2s),
+          "the new connection's first frame arrives whole");
+    check(fake_ws::frames_written() == 2, "and nothing else of the old one arrived");
+    check(fake_ws::handle_misuse() == 0, "nothing of the old frame reached the new stream");
+    link.reset();
+    check(drained_fake(), "and the link drained");
+}
+
+/**
+ * @brief #2277: the frames waiting behind a held write are charged to `tx_bytes`.
+ *
+ * Sender A's frame finds the peer's window full and stays on the wire. Every later send
+ * builds a frame that has to wait, and each waiting frame is a private masked copy, so a peer
+ * that never drains could pin one per lane slot. The budget caps their total at `tx_bytes`: a
+ * frame that would pass it is dropped and counted in `tx_drops`, never held. Released, A's
+ * frame and then exactly the frames that were admitted leave, in order, and the budget is
+ * empty. The queue's peaks (#2464) still read what waited, in frames and in bytes.
  */
 void test_waiting_frames_are_bounded_by_tx_bytes() {
-    std::printf("#2277 frames waiting behind a stalled write never exceed tx_bytes:\n");
+    std::printf("#2277 frames waiting behind a held write never exceed tx_bytes:\n");
     fake_ws::reset();
     fake_ws::hold_writes(true);
     auto link = dialing_link();
     check(wait_until([&] { return link->link_up(); }, 2s), "and came up connected");
     esp_ws_client_link_t* const under_test = link.get();
 
-    const std::vector<std::byte> first = payload();
-    std::thread a([&] { under_test->send(first); });
-    check(wait_until([] { return fake_ws::writers_inside() >= 1; }, 2s),
-          "sender A is parked INSIDE the transport");
+    under_test->send(payload());
+    check(fake_ws::writes_started() >= 1 && fake_ws::frames_written() == 0,
+          "sender A's frame is held on the wire");
 
     // One waiting frame's block: the egress header, then the masked frame.
     const std::size_t block =
@@ -707,12 +789,11 @@ void test_waiting_frames_are_bounded_by_tx_bytes() {
     check(peak == fit * block, "the budget filled with whole frames");
     check(under_test->stats().c.tx_drops - drops_before == kSends - fit,
           "every frame past the budget is a counted drop");
-    check(fake_ws::writes_started() == 1, "no waiting sender reached the transport");
+    check(fake_ws::frames_written() == 0, "no frame reached the full window");
 
     fake_ws::hold_writes(false);
-    a.join();
-    check(fake_ws::writes_started() == static_cast<int>(1 + fit),
-          "the writer sent its own frame, then every admitted one");
+    check(wait_until([&] { return fake_ws::frames_written() == static_cast<int>(1 + fit); }, 2s),
+          "the held frame left, then every admitted one");
     check(fake_ws::last_write_payload() == last, "the admitted frames left in order");
     check(under_test->tx_held_bytes() == 0, "and the budget is empty once they are written");
     // The queue peaks (#2464) keep the high-water mark after the queue drained.
@@ -1006,7 +1087,7 @@ void test_one_send_costs_one_write_and_one_mask_pass() {
         const std::size_t wire = fake_ws::wire_bytes();
         const std::size_t want_wire = len + (len < 126 ? 2 : len <= 0xFFFF ? 4 : 10) + 4;
         std::printf("       %5zu B: %d lwIP calls, %zu B on the wire\n", len, calls, wire);
-        check(calls == 2, "2 lwIP calls per send: one poll, one send");
+        check(calls == 1, "1 lwIP call per send: one non-blocking send (#2787)");
         check(wire == want_wire, "the wire carries exactly one frame: header, key, payload");
         check(fake_ws::last_write_masked() && fake_ws::last_write_op() == 0x2,
               "a masked BINARY frame");
@@ -1032,10 +1113,10 @@ void test_control_frames_are_answered_through_the_write_path() {
     const fake_ws::frame_t ping = fake_ws::make_frame(tr::net::ws::opcode_t::PING, true, 4, 0x40);
     check(fake_ws::last_write_masked() && fake_ws::last_write_payload() == ping.payload,
           "masked, echoing the PING's payload");
-    check(fake_ws::lwip_calls() == 2, "as one write on the TCP parent");
+    check(fake_ws::lwip_calls() == 1, "as one write on the TCP parent");
 
     fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::PING, true, 0, 0)});
-    check(wait_until([] { return fake_ws::lwip_calls() == 4; }, 2s),
+    check(wait_until([] { return fake_ws::lwip_calls() == 2; }, 2s),
           "an empty PING, which reads as 0 bytes, is answered too");
     check(fake_ws::last_write_op() == 0xA && fake_ws::last_write_payload().empty(),
           "with an empty PONG");
@@ -1136,6 +1217,8 @@ int main() {
     test_the_blocking_bounds_are_derived_from_the_watchdog();
     test_a_second_sender_does_not_wait_on_a_parked_write();
     test_waiting_frames_are_bounded_by_tx_bytes();
+    test_a_full_window_is_counted_drops_not_a_teardown();
+    test_a_frame_cut_short_resumes_and_never_crosses_a_redial();
     test_the_dial_slot_returns_to_its_store_on_both_arms();
     test_an_unconnected_link_holds_no_connection_memory();
     test_a_refused_scratch_is_a_failed_dial();

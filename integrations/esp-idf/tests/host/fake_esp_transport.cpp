@@ -10,8 +10,11 @@
 #include "fake_esp_transport.hpp"
 
 #include <pthread.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -81,16 +84,24 @@ struct state_t {
                                          *          fake_ws::release_connects. */
     bool connect_succeed = false;       /**< @brief What that release makes them report. */
     int connect_timeout_ms = 0;         /**< @brief The last dial's requested bound. */
-    bool hold_write = false;            /**< @brief Park writers instead of completing them. */
-    bool pin_write = false;             /**< @brief Park writers past their own timeout,
-                                         *          until fake_ws::pin_writes(false). */
-    std::condition_variable write_cv;   /**< @brief Wakes parked writers. */
-    int writers = 0;                    /**< @brief Writers parked right now. */
-    int writes = 0;                     /**< @brief Writes entered since the reset. */
-    int write_timeout_ms = 0;           /**< @brief The last write's requested bound. */
-    std::vector<std::byte> last_write;  /**< @brief The last completed write's payload. */
-    int last_write_op = -1;             /**< @brief Its WS opcode; -1 = none yet. */
-    bool last_write_masked = false;     /**< @brief Its MASK bit. */
+    bool hold_write = false;            /**< @brief The peer's window is full: a send takes
+                                         *          nothing (EAGAIN). */
+    std::size_t write_cap = 0;          /**< @brief Bytes one send takes at most; 0 = all. */
+    int send_flags = -1;                /**< @brief The last frame send's flags. */
+    int frames = 0;                     /**< @brief Whole frames the peer has decoded. */
+    /** @brief The handle whose socket the link resolved last: what a send writes to. */
+    esp_transport_handle_t sock = nullptr;
+    /** @brief Bytes of a frame the peer has only part of, on the stream connection. */
+    std::vector<std::byte> tx;
+    bool pin_write = false;            /**< @brief Park writers past their own timeout,
+                                        *          until fake_ws::pin_writes(false). */
+    std::condition_variable write_cv;  /**< @brief Wakes parked writers. */
+    int writers = 0;                   /**< @brief Writers parked right now. */
+    int writes = 0;                    /**< @brief Writes entered since the reset. */
+    int write_timeout_ms = 0;          /**< @brief The last write's requested bound. */
+    std::vector<std::byte> last_write; /**< @brief The last completed write's payload. */
+    int last_write_op = -1;            /**< @brief Its WS opcode; -1 = none yet. */
+    bool last_write_masked = false;    /**< @brief Its MASK bit. */
     int lwip_calls = 0;                /**< @brief lwIP calls the writes made — see lwip_calls. */
     std::size_t wire_bytes = 0;        /**< @brief Bytes handed to lwIP's send. */
     bool hold_read = false;            /**< @brief Park readers instead of serving them. */
@@ -190,6 +201,7 @@ bool answer_handshake(esp_transport_handle_t t, std::string_view req) {
     c.resp_off = 0;
     c.upgraded = true;
     st().stream = t;
+    st().tx.clear();
     return true;
 }
 
@@ -232,6 +244,11 @@ void reset() {
     st().dialers = 0;
     st().connect_timeout_ms = 0;
     st().hold_write = false;
+    st().write_cap = 0;
+    st().send_flags = -1;
+    st().frames = 0;
+    st().sock = nullptr;
+    st().tx.clear();
     st().pin_write = false;
     st().writers = 0;
     st().writes = 0;
@@ -388,6 +405,18 @@ int writes_started() {
     const std::lock_guard<std::mutex> lk(st().m);
     return st().writes;
 }
+void cap_writes(std::size_t bytes) {
+    const std::lock_guard<std::mutex> lk(st().m);
+    st().write_cap = bytes;
+}
+int frames_written() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().frames;
+}
+int last_send_flags() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().send_flags;
+}
 
 int last_write_timeout_ms() {
     const std::lock_guard<std::mutex> lk(st().m);
@@ -516,6 +545,7 @@ int esp_transport_close(esp_transport_handle_t t) {
         st().wire.clear();
         st().wire_off = 0;
         st().stream = nullptr;
+        st().tx.clear();  // a frame cut off by the close dies with the stream
     }
     c = state_t::conn_t{};
     return 0;
@@ -536,6 +566,7 @@ int esp_transport_get_socket(esp_transport_handle_t t) {
         st().socket_cv.wait(lk, [] { return !st().park_socket; });
         st().socket_parked = false;
     }
+    st().sock = t;  // what the link's next send() writes to (see __wrap_send)
     return st().socket_fd;
 }
 
@@ -583,59 +614,84 @@ int esp_transport_read(esp_transport_handle_t t, char* buffer, int len, int time
 
 int esp_transport_write(esp_transport_handle_t t, const char* buffer, int len, int timeout_ms) {
     std::unique_lock<std::mutex> lk(st().m);
-    if (handle_usable(t) && !st().live[t].upgraded) {
-        // A connection's first write is its opening-handshake request: answered, and not a
-        // frame, so no write counter or lever below applies to it.
-        return answer_handshake(
-                   t, std::string_view(buffer, static_cast<std::size_t>(len > 0 ? len : 0)))
-                   ? len
-                   : -1;
-    }
-    ++st().writes;  // counted on ENTRY, before the handle check: a call on a dead
-                    // handle is still a call the link decided to make
     st().write_timeout_ms = timeout_ms;
+    // The link's one `esp_transport_write` is a connection's opening-handshake request:
+    // answered, and not a frame, so no write counter or lever applies to it. A frame is a
+    // non-blocking send() on the socket (#2787, see __wrap_send); one through here is misuse.
     if (!handle_usable(t)) return -1;
+    if (!st().live[t].upgraded &&
+        answer_handshake(t, std::string_view(buffer, static_cast<std::size_t>(len > 0 ? len : 0))))
+        return len;
+    ++st().misuse;
+    return -1;
+}
+
+/**
+ * @brief The socket call a frame is (#2787): lwIP's `send()` on the TCP parent's socket, as
+ *        the peer's end of the connection whose socket the link resolved last.
+ *
+ * Linked with `--wrap=send` by every client target, so nothing reaches the kernel. The bytes
+ * are a stream, not a frame per call: they are appended to what the peer already holds and
+ * every whole frame is decoded off the front, so a frame written across several calls is
+ * one frame to the peer, and a remainder written onto another connection is a header that
+ * is not a client's (no MASK bit) and counts as misuse. The levers: @ref fake_ws::hold_writes
+ * (a full window: `MSG_DONTWAIT` takes nothing, EAGAIN), @ref fake_ws::cap_writes (a window
+ * with room for a few bytes) and @ref fake_ws::pin_writes (a writer parked inside the call,
+ * released as a failure).
+ */
+extern "C" ssize_t __wrap_send(int fd, const void* buf, std::size_t len, int flags) {
+    (void)fd;
+    std::unique_lock<std::mutex> lk(st().m);
+    ++st().writes;  // counted on ENTRY, before the handle check
+    st().send_flags = flags;
+    const esp_transport_handle_t t = st().sock;
+    if (!handle_usable(t)) {
+        errno = EBADF;
+        return -1;
+    }
     if (st().pin_write) {
-        // Parked until the TEST lets go, whatever the caller's timeout: the state a test
-        // checks against is then held, not raced against the link's own write bound. The
-        // release stands for that bound expiring, so the write fails as it would have.
+        // Parked until the TEST lets go: the state a test checks against is then held, not
+        // raced. The release stands for a broken connection, so the send fails.
         ++st().writers;
         st().write_cv.wait(lk, [] { return !st().pin_write; });
         --st().writers;
         (void)handle_usable(t);  // a handle destroyed under the parked writer is misuse
+        errno = EPIPE;
         return -1;
     }
     if (st().hold_write) {
-        // A peer whose TCP window has closed. The caller is holding the link's send
-        // serializer for the whole of this, which is the state the pre-#952 destructor
-        // ignored. Bounded by the timeout the caller asked for, as the real write is.
-        ++st().writers;
-        st().write_cv.wait_for(lk, std::chrono::milliseconds(timeout_ms),
-                               [] { return !st().hold_write; });
-        --st().writers;
-        // Re-checked on the way out, not on the way in: the real esp_transport_write
-        // dereferences the handle throughout the call, so a handle destroyed while a
-        // writer was parked here is a use-after-free even though it was live on entry.
-        if (!handle_usable(t)) return -1;
-        if (st().hold_write) return -1;  // the wait expired: a torn connection
-    }
-    const std::span<const std::byte> bytes(reinterpret_cast<const std::byte*>(buffer),
-                                           static_cast<std::size_t>(len > 0 ? len : 0));
-    // A frame write is `tcp_write` (transport_ssl.c): a poll, then one send.
-    // The bytes are a whole client frame; decode it as the peer would, unmasking a copy.
-    st().lwip_calls += 2;
-    st().wire_bytes += bytes.size();
-    const tr::net::ws::header_t h = tr::net::ws::detail::decode_header(
-        bytes, /*fail_on_violation=*/false, tr::net::ws::kNoPayloadCap);
-    if (h.size + h.len != bytes.size()) {
-        ++st().misuse;  // not exactly one frame: the peer's stream would desync
+        errno = EAGAIN;  // lwIP, MSG_DONTWAIT on a full send buffer: nothing written
         return -1;
     }
-    st().last_write.assign(bytes.begin() + static_cast<std::ptrdiff_t>(h.size), bytes.end());
-    if (h.masked) tr::net::ws::detail::xor_mask(st().last_write, h.mask_key);
-    st().last_write_op = static_cast<int>(h.op);
-    st().last_write_masked = h.masked;
-    return len;
+    const std::size_t take = st().write_cap != 0 ? std::min(len, st().write_cap) : len;
+    const auto* const bytes = static_cast<const std::byte*>(buf);
+    ++st().lwip_calls;
+    st().wire_bytes += take;
+    if (st().stream != t) return static_cast<ssize_t>(take);  // a closed stream swallows them
+    std::vector<std::byte>& tx = st().tx;
+    tx.insert(tx.end(), bytes, bytes + take);
+    while (tx.size() >= 2) {
+        const tr::net::ws::header_t h = tr::net::ws::detail::decode_header(
+            tx, /*fail_on_violation=*/false, tr::net::ws::kNoPayloadCap);
+        const bool ours =
+            h.masked && h.fin &&
+            (h.op == tr::net::ws::opcode_t::BINARY || h.op == tr::net::ws::opcode_t::PONG ||
+             h.op == tr::net::ws::opcode_t::CLOSE);
+        if (h.status == tr::net::ws::decode_status_t::OK && !ours) {
+            ++st().misuse;  // not a header this link writes: the peer's stream has desynced
+            tx.clear();
+            break;
+        }
+        if (h.status != tr::net::ws::decode_status_t::OK || tx.size() < h.size + h.len) break;
+        st().last_write.assign(tx.begin() + static_cast<std::ptrdiff_t>(h.size),
+                               tx.begin() + static_cast<std::ptrdiff_t>(h.size + h.len));
+        tr::net::ws::detail::xor_mask(st().last_write, h.mask_key);
+        st().last_write_op = static_cast<int>(h.op);
+        st().last_write_masked = h.masked;
+        ++st().frames;
+        tx.erase(tx.begin(), tx.begin() + static_cast<std::ptrdiff_t>(h.size + h.len));
+    }
+    return static_cast<ssize_t>(take);
 }
 
 /** @} */
