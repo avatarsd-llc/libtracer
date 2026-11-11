@@ -87,6 +87,11 @@ env.Replace(SRC_FILTER=["+<*>"] + _deny(DENY_BASELINE))  # noqa: F821
 #   custom_libtracer_bus_links = yes        ; CAN (+ TWAI on espressif32), peer-named listeners
 #   custom_libtracer_self_heal_links = yes  ; engine-managed udp/tcp/ws DIAL connections
 #
+# The wait module's adapter is not a switch: this package denies the epoll one on every
+# platform (DENY_BASELINE), so it always compiles wait_poll.cpp, and the fragment always binds
+# `kListedWaitSources = true`, the link that adapter keeps in each source (#2147, as the
+# ESP-IDF component binds it for a chip target).
+#
 # The member half is a generated `libtracer/config_override.hpp`, put FIRST on the include
 # path. It YIELDS to a fragment the consumer supplies later on the path (the pattern
 # core/tests/instrumented uses): it includes that one instead and static_asserts that it binds
@@ -129,6 +134,9 @@ static_assert(tr::graph::config_t::kBusLinks == {_bus},
 static_assert(tr::graph::config_t::kSelfHealLinks == {_heal},
               "libtracer: your config_override.hpp binds kSelfHealLinks differently from "
               "platformio.ini's custom_libtracer_self_heal_links; make the two agree.");
+static_assert(tr::graph::config_t::kListedWaitSources,
+              "libtracer: this package's wait module is the lwIP adapter (wait_poll.cpp), "
+              "which needs kListedWaitSources = true in your config_override.hpp.");
 #else
 namespace tr::graph {{
 
@@ -136,6 +144,7 @@ namespace tr::graph {{
 struct pio_config_t : default_config_t {{
     static constexpr bool kBusLinks = {_bus};
     static constexpr bool kSelfHealLinks = {_heal};
+    static constexpr bool kListedWaitSources = true;  // wait_poll.cpp, the lwIP adapter (#2147)
 }};
 
 using config_t = pio_config_t;
