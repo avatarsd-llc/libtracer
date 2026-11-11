@@ -129,10 +129,12 @@ struct wait_source_t {
     std::atomic<bool> attached{false};
     /** @brief The next source in the lwIP adapter's list: the receiving link pays for its own
      *         entry, so the module holds no table. Written under the module's lock; the driver
-     *         reads it with none, under the source's firing mark. An empty member, taking no
-     *         space, in a build without that adapter (`%tr::net::kListedWaitSources`). */
-    [[no_unique_address]] std::conditional_t<kListedWaitSources, std::atomic<wait_source_t*>,
-                                             unlisted_t> next{};
+     *         reads it with none, under the source's firing mark, so both go through
+     *         `std::atomic_ref`. Left unset until @ref wait_module_t::attach writes it, as
+     *         nothing reads it before: a link's constructor spends no store on it. An empty
+     *         member, taking no space, in a build without that adapter
+     *         (`%tr::net::kListedWaitSources`). */
+    [[no_unique_address]] std::conditional_t<kListedWaitSources, wait_source_t*, unlisted_t> next;
 };
 
 /**

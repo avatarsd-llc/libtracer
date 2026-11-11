@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <mutex>
@@ -47,6 +48,11 @@ static_assert(kListedWaitSources,
               "chip target).");
 
 namespace {
+/** @brief @p s 's list link, as the atomic both the lock holder and the driver use. */
+std::atomic_ref<wait_source_t*> link_of(wait_source_t& s) noexcept {
+    return std::atomic_ref<wait_source_t*>(s.next);
+}
+
 #ifndef MSG_NOSIGNAL
 constexpr int MSG_NOSIGNAL = 0;
 #endif
@@ -100,7 +106,7 @@ bool wait_module_t::attach(wait_source_t& s) noexcept {
         // newcomer and needs no generation bump to stay sound; the doorbell rebuilds it.
         done = !s.attached.load(std::memory_order_relaxed) && fd >= 0 && fd < FD_SETSIZE;
         if (!done) return;
-        s.next.store(head_, std::memory_order_relaxed);
+        link_of(s).store(head_, std::memory_order_relaxed);
         head_ = &s;
         s.attached.store(true, std::memory_order_relaxed);
     });
@@ -113,12 +119,12 @@ void wait_module_t::detach(wait_source_t& s) noexcept {
         if (!s.attached.load(std::memory_order_relaxed)) return;
         // Unlinked, but its own link is left as it was: a pass that already holds `s` reads it
         // only after this bump, which stops that pass first.
-        std::atomic<wait_source_t*>* at = nullptr;
-        for (wait_source_t* p = head_; p != &s; p = p->next.load(std::memory_order_relaxed))
-            at = &p->next;
-        wait_source_t* const after = s.next.load(std::memory_order_relaxed);
+        wait_source_t* at = nullptr;
+        for (wait_source_t* p = head_; p != &s; p = link_of(*p).load(std::memory_order_relaxed))
+            at = p;
+        wait_source_t* const after = link_of(s).load(std::memory_order_relaxed);
         if (at == nullptr) head_ = after;
-        if (at != nullptr) at->store(after, std::memory_order_relaxed);
+        if (at != nullptr) link_of(*at).store(after, std::memory_order_relaxed);
         s.attached.store(false, std::memory_order_relaxed);
         gen_.fetch_add(1);  // seq_cst: the other half of fire_marked's handshake
     });
@@ -144,7 +150,8 @@ void wait_module_t::run() noexcept {
         FD_ZERO(&wr);
         FD_SET(fd_[0], &rd);
         int top = fd_[0];
-        for (wait_source_t* s = first; s != nullptr; s = s->next.load(std::memory_order_relaxed)) {
+        for (wait_source_t* s = first; s != nullptr;
+             s = link_of(*s).load(std::memory_order_relaxed)) {
             const int fd = s->fd.load(std::memory_order_relaxed);
             FD_SET(fd, &rd);
             if (s->write.load(std::memory_order_acquire)) FD_SET(fd, &wr);
@@ -170,7 +177,7 @@ void wait_module_t::run() noexcept {
         for (wait_source_t* s = first; s != nullptr && (left > 0 || failed);) {
             wait_source_t* next = nullptr;
             const bool live = fire_marked(*s, seen, [&] {
-                next = s->next.load(std::memory_order_relaxed);
+                next = link_of(*s).load(std::memory_order_relaxed);
                 const int fd = s->fd.load(std::memory_order_relaxed);
                 const std::uint8_t ready = failed ? hangup_of(fd) : ready_of(fd, rd, wr);
                 left -= (ready & 1U) + ((ready >> 1U) & 1U);  // READ and WRITE bits count one each
