@@ -2368,6 +2368,15 @@ if(LIBTRACER_TRANSPORT_WS)
     target_link_libraries(ws_mask_seed_test PRIVATE libtracer)
     libtracer_test_warnings(ws_mask_seed_test)
     add_test(NAME ws_mask_seed COMMAND ws_mask_seed_test)
+
+    # #2781 — a server session's first frame (the 101) that the socket cuts short is finished
+    # on writability: the link-time wrap of send(2) lets the server's first write move one
+    # byte, and the raw client still reads the whole 101 rather than waiting for a next send.
+    add_executable(ws_first_frame_short_test ws_first_frame_short_test.cpp)
+    target_link_libraries(ws_first_frame_short_test PRIVATE libtracer)
+    target_link_options(ws_first_frame_short_test PRIVATE "-Wl,--wrap=send")
+    libtracer_test_warnings(ws_first_frame_short_test)
+    add_test(NAME ws_first_frame_short COMMAND ws_first_frame_short_test)
 endif()
 
 if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_WS)

@@ -554,8 +554,8 @@ class stream_endpoint_t : protected posix_endpoint_t {
      */
     void flush_one(int fd);
 
-    /** @brief After a flush, disarm write interest on @p s once @p peer holds nothing, then
-     *         re-arm it if a sender held a frame meanwhile (driving thread). */
+    /** @brief After a flush, set write interest on @p s to whether @p peer still holds a
+     *         frame, then re-arm it if a sender held one meanwhile (driving thread). */
     void disarm_flushed(wait_source_t& s, const egress_peer_t& peer);
 
     /**
