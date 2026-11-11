@@ -25,8 +25,9 @@
  * 1. Revert `set_link_state_locked` to publish inside phase 1 —
  *    `txn.publish(…)` → `return graph_.write(it->second.vertex, link_state_value(state));`
  *    Sections 1 and 2 go RED (`the publish returned`, `the creation returned`).
- * 2. Restore `remove_connection_locked`'s in-line `it->second.engine->stop()` in place of
- *    `txn.stop_engine(…)`. Section 3 goes RED (`the teardown returned`).
+ * 2. Call `entry.value.engine->stop()` in-line in `remove_connection_locked`, under
+ *    `ctl_m_`, instead of leaving it to the link's shut down in phase 2. Section 3 goes RED
+ *    (`the teardown returned`).
  *
  * Neither hangs the suite: the watchdog reports and the process exits non-zero. In a
  * `-DNDEBUG` build those are the whole diagnosis; in an assertive one the `ctl_txn_t`

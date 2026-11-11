@@ -120,6 +120,33 @@ struct wait_source_t {
     std::atomic<bool> attached{false};
 };
 
+/** @brief Nonzero while this thread is inside a @ref wait_module_t::run . */
+inline thread_local unsigned g_callback_depth = 0;
+
+/**
+ * @brief True on a thread that runs link callbacks: one inside a wait module's `run` (a
+ *        link's own thread, or the node module's driver).
+ *
+ * A teardown made here waits for nothing, neither a thread's end nor a callback: such a wait
+ * could be for a callback that is itself waiting on this one, here or on another link. It stops
+ * the link and leaves the joins to the destructors, which the graph's `collect()` runs
+ * outside every callback.
+ */
+[[nodiscard]] inline bool on_callback_thread() noexcept { return g_callback_depth != 0; }
+
+/**
+ * @brief Marks the calling thread as one that runs link callbacks (@ref on_callback_thread)
+ *        for its lifetime. Every thread that delivers a link's callbacks holds one while it
+ *        delivers: a wait module's `run`, a CAN receive thread, the self-heal worker's
+ *        liveness publish.
+ */
+struct callback_thread_scope_t {
+    callback_thread_scope_t() noexcept { ++g_callback_depth; }
+    ~callback_thread_scope_t() { --g_callback_depth; }
+    callback_thread_scope_t(const callback_thread_scope_t&) = delete;
+    callback_thread_scope_t& operator=(const callback_thread_scope_t&) = delete;
+};
+
 /**
  * @brief The node's one wait module (ADR-0087 §3): every socket wait on the node, with no
  *        timeout.
@@ -230,12 +257,13 @@ class wait_module_t {
         return live;
     }
     /** @brief After a detach of @p s : block until its callback is not running, unless the
-     *         caller is the driver, whose own callback this is. A blocking wait, never a spin,
-     *         so a caller above the driver's priority on one core does not starve it; parked
+     *         caller runs link callbacks itself (@ref on_callback_thread), the driver
+     *         included, whose own callback this may be. A blocking wait, never a spin, so a
+     *         caller above the driver's priority on one core does not starve it; parked
      *         through `%tr::park_wait`, as `std::atomic::wait` costs an MCU libstdc++'s 2 KB
      *         waiter table (#2507). */
     void await_quiet(const wait_source_t& s) noexcept {
-        if (driver_.load() == detail::this_thread_id()) return;
+        if (on_callback_thread()) return;
         waiters_.fetch_add(1);
         for (const wait_source_t* f = firing_.load(); f == &s; f = firing_.load())
             park_wait(firing_, f, std::memory_order_seq_cst);

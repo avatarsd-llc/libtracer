@@ -40,6 +40,7 @@
 #include "freertos/task.h"
 #include "libtracer/egress.hpp"
 #include "libtracer/sync.hpp"
+#include "libtracer/wait.hpp"
 #include "libtracer/ws_assembler.hpp"
 
 namespace tr::net {
@@ -120,6 +121,9 @@ class serving_scope_t {
 
    private:
     const httpd_ws_link_t* prev_; /**< @brief What this task was serving on entry. */
+    /** @brief A handler frame delivers the link's callbacks: a teardown made here waits for
+     *         nothing, and a `collect()` from here frees nothing. */
+    callback_thread_scope_t delivering_;
 };
 
 /**

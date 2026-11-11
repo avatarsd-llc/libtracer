@@ -136,6 +136,7 @@ void wait_module_t::want_write(wait_source_t& s, bool on) noexcept {
 
 void wait_module_t::run() noexcept {
     driver_.store(detail::this_thread_id());  // seq_cst: see wait_module_t::locked
+    const callback_thread_scope_t delivering;
     std::unique_lock lock(m_);
     while (!stopping_.load()) {
         // Rebuild under the lock. The table changes only under it, and every change bumps the

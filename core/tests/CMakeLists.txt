@@ -331,6 +331,15 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_TCP A
     add_test(NAME link_memory_default COMMAND link_memory_default_test)
 endif()
 
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
+    # #2751 — a link's teardown never waits for one of its callbacks while holding a lock that
+    # callback can take, and a link removed from its own callback leaves no thread behind.
+    add_executable(link_teardown_wait_test link_teardown_wait_test.cpp)
+    target_link_libraries(link_teardown_wait_test PRIVATE libtracer)
+    libtracer_test_warnings(link_teardown_wait_test)
+    add_test(NAME link_teardown_wait COMMAND link_teardown_wait_test)
+endif()
+
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_CAN)
     # ADR-0044 — stateless transport-peer enumeration + transparent per-peer FWD over
     # the CAN bus binding: join hellos -> synthesized /net/can0:children[], directed
