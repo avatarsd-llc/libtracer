@@ -125,7 +125,7 @@ Departure follows the same split. A **peer-named** server evicts exactly the dep
 (`notify_peer_down(name)`); a **flat** server has one routing identity for every peer it
 carries — the registered child NAME — so its only seam is the whole link
 (`transport_t::notify_down`), and it therefore waits until the **last** open session departs
-(`posix_endpoint.cpp:slot_server_t::any_open_session`). Firing it on a mid-life close would evict the surviving peers'
+(`posix_endpoint.cpp:slot_server_t::teardown_slot`). Firing it on a mid-life close would evict the surviving peers'
 edges along with the departed one's.
 
 The library invents no path text. The one name it mints itself is the creatorless-session fallback `p<slot>~<gen>` (the slot and its tenancy generation, so a reused slot gets a fresh name), which identifies a **session**, not a device; a device-stable identity is a named link.

@@ -978,14 +978,11 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      */
     [[nodiscard]] bool serve(std::size_t stack_size, mem::block_source_t& stack_src);
 
-    /** @brief Stop waiting on the listener and on every session (idempotent): the FIRST act
+    /** @brief Stop waiting on the listener and on every session and release the listen
+     *         socket (idempotent; @ref shut_down_slots without the teardown): the FIRST act
      *         of a derived destructor, which hides @ref posix_endpoint_t::stop_and_join.
      *         Always joins: a destructor runs off every callback thread (asserted). */
     void stop_and_join();
-
-    /** @brief @ref posix_endpoint_t::stop_for_shut_down for the listener, then every session.
-     *  @retval true The teardown is deferred. */
-    [[nodiscard]] bool stop_for_shut_down();
 
     /** @brief Session @p i of the table, or null past its end. Read under @ref peers_m_ ,
      *         which the accept grows the table under, so a walk by index is safe against a
@@ -995,9 +992,12 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     /**
      * @brief Tear one slot down and free it for reuse (driving thread only).
      *
-     * Two phases: stop name resolution under @ref peers_m_ (so no new sender targets the
-     * dying slot), then clear `open`, shut the fd down and close the session's egress —
-     * which waits out a writer in flight — BEFORE resetting the fd and `close(2)`ing it.
+     * Off the wait first, so no callback of the slot runs after. Then, under @ref peers_m_ ,
+     * stop name resolution (so no new sender targets the dying slot), clear `open` and ask
+     * whether any other session is still open, in one critical section so that of
+     * concurrent teardowns exactly one closes the last open session. Then shut the fd down and
+     * close the session's egress — which waits out a writer in flight — BEFORE resetting the fd and
+     * `close(2)`ing it.
      * @ref on_slot_reset clears the protocol buffers, except on a shut link, whose session
      * buffers live until its destructor. The egress close and the departure seam run once
      * per session, whichever of concurrent teardowns gets there first. The departure seam
@@ -1015,8 +1015,14 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *        every session down exactly as a remote close does (@ref teardown_slot), and close
      *        the listen socket. Idempotent. A deferred teardown joins nothing and closes
      *        nothing: the sockets are shut down, and the destructor closes them.
+     *
+     * ONE walk of the table: each slot comes off the wait and, with @p tear_down, is torn
+     * down at once (@ref teardown_slot detaches it first), so a session still waiting may
+     * depart on its own callback while an earlier one is torn down.
+     *
+     * @param tear_down False for @ref stop_and_join : every slot is only detached.
      */
-    void shut_down_slots();
+    void shut_down_slots(bool tear_down = true);
 
     /**
      * @brief Fan one already-encoded gathered record to EVERY open peer through its egress
@@ -1245,13 +1251,6 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *         when @p s is idle, else the shared frame @p frame builds, in @p lane. */
     void send_one(session_base_t& s, function_ref_t<egress_frame_t*()> frame,
                   std::span<const ::iovec> rec, const graph::delivery_lane_t& lane);
-
-    /**
-     * @brief True while ANY slot is still open — the flat mode's "is the link still up"
-     *        question (#889), asked by @ref teardown_slot after the departing slot has
-     *        already been closed, so it never counts itself.
-     */
-    [[nodiscard]] bool any_open_session() const;
 };
 
 /**
