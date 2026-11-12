@@ -399,13 +399,18 @@ egress_frame_t* stream_endpoint_t::frame_of(std::span<const ::iovec> rec,
 
 std::uint64_t stream_endpoint_t::sweep_one(std::uint64_t now, std::uint64_t deadline) {
     sweep_t sw{.now = now, .deadline = deadline};
-    const bool moved = tx_moved_.exchange(false, std::memory_order_relaxed);
-    const bool owing = peer_.wants_write();
-    if (!sw.frozen(owing, !moved && owing, live_since_)) return sw.next;
+    // The slot server's rule (#2812): each direction is owed and moved on its own.
+    const bool tx = tx_moved_.exchange(false, std::memory_order_relaxed);
+    const bool rx = rx_moved_.exchange(false, std::memory_order_relaxed);
+    const bool tx_owed = peer_.wants_write();
+    const bool rx_owed = rx_owed_.load(std::memory_order_relaxed);
+    if (!sw.frozen(tx_owed || rx_owed, (!tx && tx_owed) || (!rx && rx_owed), live_since_))
+        return sw.next;
     // Inside the writer role, so the fd it shuts down is still the peer's; a role somebody
     // holds is a write in progress, and the check one window on asks again.
-    if (!egress_.condemn_held(peer_,
-                              [this] { condemn_fd(conn_fd_.load(std::memory_order_acquire)); }))
+    if (!egress_.condemn_held(
+            peer_, [this] { condemn_fd(conn_fd_.load(std::memory_order_acquire)); },
+            !rx && rx_owed))
         return now + (now - deadline) + 1;
     live_since_ = now;
     frozen_closed_.fetch_add(1, std::memory_order_relaxed);
@@ -457,6 +462,7 @@ void stream_endpoint_t::teardown_peer(int fd) {
     // then is the fd reset and closed (never a write to a closed or reused fd).
     ::shutdown(fd, SHUT_RDWR);
     egress_.close(peer_);
+    rx_owed_.store(false, std::memory_order_relaxed);  // a gone peer owes nothing (#2812)
     release_fd(conn_fd_, fd);
 }
 
@@ -478,6 +484,7 @@ void stream_endpoint_t::accept_one(int listen_fd, function_ref_t<bool(int)> on_a
     }
     conn_fd_.store(fd, std::memory_order_relaxed);
     tx_moved_.store(true, std::memory_order_relaxed);  // a new peer starts alive (#2198)
+    rx_moved_.store(true, std::memory_order_relaxed);
     // The listener's source carries the connection now: nobody else is accepted until the
     // peer departs and `relisten` puts it back. The egress opens only once the source is on
     // the connection, so no sender can arm write interest on the listening socket.

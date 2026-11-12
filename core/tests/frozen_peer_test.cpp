@@ -15,7 +15,9 @@
  * as plain numbers.
  *
  * Per transport, three arms: a frozen peer is closed past the deadline and counted, never
- * before it; a draining peer is not; an idle peer, owing nothing, is not.
+ * before it; a draining peer is not; an idle peer, owing nothing, is not. Each direction is
+ * its own row, on the dialers as on the servers (#2812): a server that begins a frame and
+ * stops is closed by the dialer, and a self-healing link over it redials.
  */
 
 #include <arpa/inet.h>
@@ -24,6 +26,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -37,6 +40,7 @@
 #include <thread>
 #include <vector>
 
+#include "libtracer/self_heal_link.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
@@ -140,6 +144,17 @@ std::size_t judge(Link& link) {
     return link.frozen_closed() - before;
 }
 
+/** @brief Wait (bounded) until @p link reports its connection gone. */
+template <class Link>
+bool goes_down(const Link& link) {
+    for (int i = 0; i < 200 && link.link_up(); ++i) std::this_thread::sleep_for(10ms);
+    return !link.link_up();
+}
+
+/** @brief The u32-LE length prefix of a 16-byte frame. */
+constexpr std::array<std::byte, 4> kPrefix16{std::byte{16}, std::byte{0}, std::byte{0},
+                                             std::byte{0}};
+
 const std::vector<std::byte> kBig(8 * 1024 * 1024, std::byte{0x5a});
 /** @brief A record a draining peer takes in a moment, well inside every receive cap. */
 const std::vector<std::byte> kSmall(256 * 1024, std::byte{0x5b});
@@ -175,6 +190,40 @@ void test_tcp_dialer() {
         stop = true;
         reader.join();
         check(link.frozen_closed() == 0 && link.link_up(), "a draining peer is never closed");
+        ::close(peer);
+    }
+    // RX owed (#2812): the server begins a frame, part of its prefix or part of its body,
+    // and stops, its socket open; the dialer's own TX is idle.
+    for (const std::size_t sent : {std::size_t{2}, kPrefix16.size() + 5}) {
+        listener_t l;
+        tr::net::tcp_transport_t link("127.0.0.1", l.port, {});
+        link.start_receiving();
+        const int peer = ::accept(l.fd, nullptr, nullptr);
+        std::array<std::byte, 9> part{};
+        std::copy(kPrefix16.begin(), kPrefix16.end(), part.begin());
+        (void)::send(peer, part.data(), sent, MSG_NOSIGNAL);
+        std::this_thread::sleep_for(200ms);  // the driving thread reads the partial frame
+        check(judge(link) == 1, sent == 2 ? "a server frozen mid-prefix is closed"
+                                          : "a server frozen mid-body is closed");
+        check(link.frozen_closed() == 1 && goes_down(link), "  counted, and the link goes down");
+        check(sees_close(peer), "  the server sees the connection go");
+        ::close(peer);
+    }
+    {
+        // A server that sends a frame one byte a window moves bytes in every window: kept.
+        listener_t l;
+        tr::net::tcp_transport_t link("127.0.0.1", l.port, {});
+        link.start_receiving();
+        const int peer = ::accept(l.fd, nullptr, nullptr);
+        (void)::send(peer, kPrefix16.data(), kPrefix16.size(), MSG_NOSIGNAL);
+        for (std::uint64_t now = 1; now <= 12; ++now) {
+            const std::byte b{0};
+            (void)::send(peer, &b, 1, MSG_NOSIGNAL);
+            std::this_thread::sleep_for(20ms);
+            (void)link.sweep(now * 10, now * 10 - 5);
+        }
+        check(link.frozen_closed() == 0 && link.link_up(),
+              "a server that keeps sending slowly is never closed");
         ::close(peer);
     }
 }
@@ -261,25 +310,31 @@ void test_ws_server() {
     check(server.frozen_closed() == 1, "the one close is counted");
 }
 
+/** @brief Accept one WS client on @p l, answer its handshake with a 101 followed by
+ *         @p tail, and return the server's end; it never reads again. */
+int ws_accept(const listener_t& l, std::string_view tail) {
+    const int peer = ::accept(l.fd, nullptr, nullptr);
+    std::string req;
+    char c;
+    while (req.find("\r\n\r\n") == std::string::npos && ::recv(peer, &c, 1, 0) == 1) req += c;
+    const std::size_t k = req.find("Sec-WebSocket-Key: ") + 19;
+    const std::string key = req.substr(k, req.find("\r\n", k) - k);
+    std::string head =
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+        "Sec-WebSocket-Accept: ";
+    head += tr::net::ws::accept_key(key);
+    head += "\r\n\r\n";
+    head += tail;
+    (void)::send(peer, head.data(), head.size(), MSG_NOSIGNAL);
+    return peer;
+}
+
 void test_ws_client() {
     std::printf("ws client:\n");
     listener_t l;
     // A server that answers the handshake and then never reads.
     int peer = -1;
-    std::thread srv([&] {
-        peer = ::accept(l.fd, nullptr, nullptr);
-        std::string req;
-        char c;
-        while (req.find("\r\n\r\n") == std::string::npos && ::recv(peer, &c, 1, 0) == 1) req += c;
-        const std::size_t k = req.find("Sec-WebSocket-Key: ") + 19;
-        const std::string key = req.substr(k, req.find("\r\n", k) - k);
-        std::string head =
-            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-            "Sec-WebSocket-Accept: ";
-        head += tr::net::ws::accept_key(key);
-        head += "\r\n\r\n";
-        (void)::send(peer, head.data(), head.size(), MSG_NOSIGNAL);
-    });
+    std::thread srv([&] { peer = ws_accept(l, {}); });
     tr::net::ws_client_transport_t client("127.0.0.1", l.port, {});
     client.start_receiving();
     srv.join();
@@ -291,6 +346,71 @@ void test_ws_client() {
     check(client.frozen_closed() == 1, "and the close is counted");
     check(sees_close(peer), "the server sees the connection go");
     ::close(peer);
+    // RX owed (#2812): the server sends the first byte of a binary frame behind its 101 and
+    // stops, its socket open; the client's own TX is idle.
+    listener_t l2;
+    std::thread srv2([&] { peer = ws_accept(l2, std::string_view("\x82", 1)); });
+    tr::net::ws_client_transport_t stuck("127.0.0.1", l2.port, {});
+    stuck.start_receiving();
+    srv2.join();
+    std::this_thread::sleep_for(200ms);  // the driving thread feeds the partial frame
+    check(stuck.ok() && judge(stuck) == 1, "a server frozen mid-frame is closed");
+    check(stuck.frozen_closed() == 1 && goes_down(stuck), "  counted, and the link goes down");
+    check(sees_close(peer), "  the server sees the connection go");
+    ::close(peer);
+}
+
+/**
+ * @brief A self-healing link forwards the check to its current socket (#2812): a server
+ *        frozen mid-frame is closed through it, and the link redials on the app's `now`.
+ */
+template <bool kOn = tr::net::kSelfHealLinks>
+void test_self_heal_redials() {
+    if constexpr (kOn) {
+        std::printf("self-heal over a tcp dialer:\n");
+        listener_t l;
+        const timeval tv{.tv_sec = 5, .tv_usec = 0};  // bounds an accept that never comes
+        ::setsockopt(l.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        tr::net::conn_settings_t settings;
+        settings.addr = "127.0.0.1";
+        settings.port = l.port;
+        settings.backoff_ms = 1;
+        std::atomic<int> ups{0};
+        tr::net::self_heal_link_t engine(
+            [](const tr::net::conn_settings_t& c, const tr::wire::tlv_node_t*,
+               tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
+                return tr::mem::make_poly<tr::net::tcp_transport_t>(src, c.addr, c.port,
+                                                                    tr::net::tcp_config_t{});
+            },
+            settings, std::span<const std::byte>{}, false, tr::mem::default_root());
+        engine.set_liveness_publisher([&ups](tr::net::link_state_t s) {
+            if (s == tr::net::link_state_t::UP) ups.fetch_add(1);
+        });
+        engine.born();
+        engine.acquire();
+        const int first = ::accept(l.fd, nullptr, nullptr);
+        for (int i = 0; i < 500 && ups.load() == 0; ++i) std::this_thread::sleep_for(10ms);
+        check(first >= 0 && ups.load() == 1, "the link dialed and came up");
+        (void)::send(first, kPrefix16.data(), 2, MSG_NOSIGNAL);
+        std::this_thread::sleep_for(200ms);
+        (void)engine.sweep(1, 0);
+        (void)engine.sweep(2, 1);
+        (void)engine.sweep(10, 5);
+        check(sees_close(first), "the frozen server is closed through the self-healing link");
+        ::close(first);
+        // The heal waits `backoff` on the app's clock: keep calling until it redials.
+        listener_t* const lp = &l;
+        int second = -1;
+        std::thread acc([&] { second = ::accept(lp->fd, nullptr, nullptr); });
+        for (std::uint64_t now = 11; now < 600 && ups.load() < 2; ++now) {
+            (void)engine.sweep(now, now - 1);
+            std::this_thread::sleep_for(10ms);
+        }
+        acc.join();
+        check(ups.load() == 2 && second >= 0, "the link redialed and came up again");
+        ::close(second);
+        engine.release();
+    }
 }
 
 }  // namespace
@@ -301,5 +421,6 @@ int main() {
     test_tcp_server();
     test_ws_server();
     test_ws_client();
+    test_self_heal_redials();
     return tr::testing::summary("frozen_peer_test");
 }

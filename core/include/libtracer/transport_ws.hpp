@@ -539,8 +539,9 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
     }
 
     /** @brief The application's liveness check (#2198, @ref transport_t::sweep):
-     *         a frame held on the wire that moved no byte since @p deadline shuts the
-     *         connection down, counted in @ref frozen_closed. A dialer owes TX only. */
+     *         a frame held on the wire, or a frame of the peer's begun and not finished
+     *         (#2812), that moved no byte since @p deadline shuts the connection down,
+     *         counted in @ref frozen_closed. */
     std::uint64_t sweep(std::uint64_t now, std::uint64_t deadline) override {
         return sweep_one(now, deadline);
     }
