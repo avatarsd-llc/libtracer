@@ -16,7 +16,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Created** | 2026-07-09 |
 | **Comment window closes** | 2026-07-31 (≥ 14 days per GOVERNANCE.md §Spec changes) |
 | **Tracking issue** | [#411](https://github.com/avatarsd-llc/libtracer/issues/411) |
-| **Amendments** | [1](#amendment-1-2026-08-22--the-node-scoped-seam-census-a-reserved-stats-field-namespace-1503-step-5) (2026-08-22, `:stats` census); [2](#amendment-2-2026-08-23--the-net-plane-seam-sampler-router-labels-and-link-join-the-census-1503-residual) (2026-08-23, net-plane seams); [3](#amendment-3-2026-10-03--three-statsmem-seam-names-for-the-graphs-sub-pools) (2026-10-03, `:stats.mem` sub-pools); [4](#amendment-4-2026-10-06--a-named-app-field-read-serves-the-owners-current-value-when-the-owner-answers-it-1878) (2026-10-06, owner-answered app-field reads); [5](#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105) (2026-10-12, `:schema` carries a maker's intent document; `:description` retired) |
+| **Amendments** | [1](#amendment-1-2026-08-22--the-node-scoped-seam-census-a-reserved-stats-field-namespace-1503-step-5) (2026-08-22, `:stats` census); [2](#amendment-2-2026-08-23--the-net-plane-seam-sampler-router-labels-and-link-join-the-census-1503-residual) (2026-08-23, net-plane seams); [3](#amendment-3-2026-10-03--three-statsmem-seam-names-for-the-graphs-sub-pools) (2026-10-03, `:stats.mem` sub-pools); [4](#amendment-4-2026-10-06--a-named-app-field-read-serves-the-owners-current-value-when-the-owner-answers-it-1878) (2026-10-06, owner-answered app-field reads); [5](#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105) (2026-10-12, `:schema` carries a maker's intent document; `:description` retired); [6](#amendment-6-2026-11-12--statslinkchild-names-why-a-link-last-dropped-an-outbound-frame-2788) (2026-11-12, `:stats.link.<child>` gains `dropped_tx_cause`) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 | **Roadmap item** | this RFC is the specification of the **"field descriptor table"** item of the 2026-07-08 architecture-review backlog (the vertex-verbs / lazy-validation / field-descriptor-table cluster; item 2 of that backlog — the `vertex_t` verb seam — shipped as [#338](https://github.com/avatarsd-llc/libtracer/pull/338), and is the seam §D slots behind) |
 
@@ -980,6 +980,9 @@ The reserved seam classes and the nouns each publishes:
 | `:stats.labels.table` | the RFC-0027 label plane — the mint table's refusals (`route_handle_t`) beside the router's dereference tallies | `labels_exhausted`, `refused_bindings`, `label_not_found`, `label_resolves` |
 | `:stats.link.<child>` | ONE registered transport child, by its `child_registry_t` NAME — the same key its `/net/<module>/<name>` connection vertex carries | `dropped_rx`, `malformed_rx`, `dropped_tx` (`transport_drop_stats_t`), plus `labels_used` when this node mints labels |
 
+> **Extended 2026-11-12 by Amendment 6 ([#2788](https://github.com/avatarsd-llc/libtracer/issues/2788)).**
+> A link that names the cause of its outbound drops adds `dropped_tx_cause` after `dropped_tx`.
+
 `<child>` is an ordinary NAME step, so the whole spelling stays inside §D.1's `:field.sub`
 tail and nothing about the path grammar moves. A bare `:stats.router`, `:stats.labels` or
 `:stats.link` names nothing, exactly as §D.2 already requires of every bare class.
@@ -1432,3 +1435,53 @@ is reworded the same way. Neither rule changes.
 
 **Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
 wire surface moves.** No frame, type code, error identity or conformance vector changes.
+
+## Amendment 6 (2026-11-12) — `:stats.link.<child>` names why a link last dropped an outbound frame ([#2788](https://github.com/avatarsd-llc/libtracer/issues/2788))
+
+**Status:** accepted on merge (maintainer ruling 84 put #2788 on v0.23.0; the 14-day window is
+waived per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the solo-maintainer default, as on
+Amendments 1–5).
+
+**Scope.** This amendment extends **§D.4's `:stats.link.<child>` row only**, in the way
+Amendments 2 and 3 extended the table. §D.1, §D.2, §D.3, §D.5 and §D.6 are untouched and govern
+the new noun verbatim: one READ is still one seam is one whole counter block, every value is a
+fixed-width `u64`, and the surface is readable, never writable, never awaitable. **No frame
+shape, type code, grammar rule or error identity changes.**
+
+**Instrument: amendment, not erratum.** A reader can observe the new member, and its values are
+new codes a monitor has to be able to read. [reference/05](../../reference/05-protocol-tlvs.md)
+is a normative annex of [v1.md §3](../v1.md), so its `:stats` seam-table edit is part of this
+amendment.
+
+**Why.** `dropped_tx` says that a link lost outbound frames, not why. A send can be dropped for a
+frame past the link's ceiling, a connection that is down, the link's own bound shedding it, or a
+failed write, and each points an operator at a different fix. A link that counts its drops per
+connection also loses them at the reconnect they caused.
+
+### D.4 (extended) — the fourth link noun
+
+A link that can name the cause of its outbound drops adds one noun to its block, after
+`dropped_tx`:
+
+| noun | value |
+| --- | --- |
+| `dropped_tx_cause` | the cause of the last frame counted in `dropped_tx`, as one of the codes below |
+
+| code | name | the last outbound frame was dropped because |
+| --- | --- | --- |
+| 0 | `NONE` | no outbound frame has been dropped since the link was constructed |
+| 1 | `OVERSIZE` | it was larger than the link's per-frame ceiling |
+| 2 | `LINK_DOWN` | no connection stood to write it to, or the connection went down while it waited |
+| 3 | `SHED` | the link's own bound shed it: a full queue, a byte budget for waiting frames, or a store that refused its memory |
+| 4 | `TRANSPORT_ERROR` | the transport failed the write |
+
+A reader MUST treat a code it does not know as "a cause this reader cannot name", never as an
+error: like a noun, a code may be added. A link that does not name causes omits the noun, as
+§D.3 already lets a seam name only the nouns it has; a reader MUST NOT read the absence as
+`NONE`.
+
+A link that publishes `dropped_tx_cause` counts it and `dropped_tx` since the link was
+constructed, and MUST NOT reset either at a reconnect: the drops that preceded a connection loss
+are what explains it.
+The cause is a hint sampled under the snapshot-coherence clause of Amendment 1 §D.3: a reader
+racing a drop may see the new count with the previous cause.

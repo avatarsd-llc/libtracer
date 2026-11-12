@@ -269,7 +269,8 @@ struct esp_ws_client_config_t {
     /**
      * @brief Largest outbound payload a send admits (one frame). A larger outbound frame
      *        is DROPPED whole — counted on `stats().c.tx_drops` and LOGGED with both sizes
-     *        (#959), since the same counter also moves when the peer is down.
+     *        (#959), since the same counter also moves when the peer is down; its cause reads
+     *        `OVERSIZE` in `drop_stats().dropped_tx_cause` (#2788).
      */
     std::size_t tx_bytes = 2048;
     /** @brief Recv-thread stack in bytes, HONORED (#900): the recv thread runs in-call
@@ -627,12 +628,18 @@ class esp_ws_client_link_t final : public transport_t {
      * after each. Since the link frames its own stream it does classify a frame as
      * protocol-malformed.
      *
-     * `dropped_tx`: `stats().c.tx_drops`, the send side's per-connection count.
+     * `dropped_tx`: every frame lost toward the peer since construction, the same number as
+     * `stats().c.tx_drops`. It survives a reconnect (#2788), so the drops that preceded a
+     * connection loss are still there after the re-dial.
+     *
+     * `dropped_tx_cause`: why the last of them was lost (#2788). `OVERSIZE`: past `tx_bytes`.
+     * `LINK_DOWN`: no connection stood, or the frame still waited when it went down. `SHED`:
+     * a full lane ring, the `tx_bytes` budget for waiting frames, or a refused `memory.io`
+     * block. `TRANSPORT_ERROR`: the socket failed the write. No write here waits (#2787), so
+     * there is no write-timeout cause to report.
      */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-        transport_drop_stats_t d = drops_.snapshot();
-        d.dropped_tx = tx_drops_.load(std::memory_order_relaxed);
-        return d;
+        return drops_.snapshot();
     }
 
     /**
@@ -923,9 +930,6 @@ class esp_ws_client_link_t final : public transport_t {
      *         on RV32, which is fine here: it is touched once per connect and once per
      *         @ref stats, never per frame. */
     std::atomic<std::int64_t> connected_at_us_{-1};
-    /** @brief Frames dropped toward the peer since the current connection came up. Bumped
-     *         only on a drop, from any sending task; reset at every handshake. */
-    std::atomic<std::uint32_t> tx_drops_{0};
     /** @brief Completed handshakes since construction; recv thread writes. */
     std::atomic<std::uint32_t> reconnects_{0};
     /** @brief Last successful dial's handshake duration in ms; recv thread writes. */
@@ -963,11 +967,12 @@ class esp_ws_client_link_t final : public transport_t {
      *         frame begun on a dead one is refused. Guarded by `write_m_`; it sits in the
      *         padding after the flag above. */
     bool cut_ = false;
-    /** @brief The receive path's shed-frame counters (#2482), read through @ref drop_stats:
+    /** @brief The link's shed-frame counters (#2482), read through @ref drop_stats:
      *         `dropped_rx` (a refused segment) and `malformed_rx` (a frame that closed its
-     *         connection). Written only by the recv thread, read by anyone, relaxed. The send
-     *         side's drops stay in `tx_drops_`, which resets per connection. */
-    drop_tally_t<drop_classes_t{.dropped_tx = false}> drops_;
+     *         connection), written by the recv thread; `dropped_tx` and its last cause, written
+     *         on a drop by any sending task (#2788). Relaxed, and never reset: they outlive
+     *         every connection. */
+    drop_tally_t<drop_classes_t{.dropped_tx_cause = true}> drops_;
     /** @brief The recv thread: a static task drawn from `tr::mem::default_root()` (#2288),
      *         never the link's own source, because @ref shut_down may DETACH it mid-dial and
      *         a detached thread's block is released only after this link is gone. */

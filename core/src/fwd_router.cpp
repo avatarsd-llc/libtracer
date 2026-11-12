@@ -1702,6 +1702,8 @@ bool fwd_router_t::sample_stats(std::string_view seam_class, std::string_view se
     out->add("dropped_rx", d.dropped_rx);
     out->add("malformed_rx", d.malformed_rx);
     out->add("dropped_tx", d.dropped_tx);
+    if (d.dropped_tx_cause)  // only a link that names its drops' cause has the noun (#2788)
+        out->add("dropped_tx_cause", static_cast<std::uint64_t>(*d.dropped_tx_cause));
     link->kind_stats(*out);  // the kind's own nouns, if any (RFC-0033 §5.11)
     // A seam names only the nouns it HAS (RFC-0010 Am. 1 §D.3).
     return true;
