@@ -555,7 +555,8 @@ class stream_endpoint_t : protected posix_endpoint_t {
         const bool in = readable(ready);
         if (in) rx_moved_.store(true, std::memory_order_relaxed);
         const bool alive = !in || std::forward<Read>(read)(fd);
-        rx_owed_.store(std::forward<Owed>(owed)(), std::memory_order_relaxed);
+        // Release: published after rx_moved_, so a check that sees the debt sees the progress.
+        rx_owed_.store(std::forward<Owed>(owed)(), std::memory_order_release);
         return alive;
     }
 

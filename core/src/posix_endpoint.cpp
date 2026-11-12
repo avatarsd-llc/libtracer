@@ -399,11 +399,14 @@ egress_frame_t* stream_endpoint_t::frame_of(std::span<const ::iovec> rec,
 
 std::uint64_t stream_endpoint_t::sweep_one(std::uint64_t now, std::uint64_t deadline) {
     sweep_t sw{.now = now, .deadline = deadline};
-    // The slot server's rule (#2812): each direction is owed and moved on its own.
+    // The slot server's rule (#2812): each direction is owed and moved on its own. What is
+    // owed is read FIRST, with acquire: each writer marks its progress before it publishes
+    // what it still owes (release), so a turn that lands between the reads is seen as moved
+    // whenever its debt is seen, and never closes a live peer.
+    const bool tx_owed = peer_.wants_write();
+    const bool rx_owed = rx_owed_.load(std::memory_order_acquire);
     const bool tx = tx_moved_.exchange(false, std::memory_order_relaxed);
     const bool rx = rx_moved_.exchange(false, std::memory_order_relaxed);
-    const bool tx_owed = peer_.wants_write();
-    const bool rx_owed = rx_owed_.load(std::memory_order_relaxed);
     if (!sw.frozen(tx_owed || rx_owed, (!tx && tx_owed) || (!rx && rx_owed), live_since_))
         return sw.next;
     // Inside the writer role, so the fd it shuts down is still the peer's; a role somebody
@@ -645,10 +648,12 @@ std::uint64_t slot_server_t::sweep(std::uint64_t now, std::uint64_t deadline) {
         // published also shows its fresh progress flags, never a reused slot's stale ones.
         const int fd = s->fd.load(std::memory_order_acquire);
         if (fd < 0 || s->name[0] == '\0') continue;
+        // Owed first, with acquire (the order sweep_one explains, #2812): progress marked
+        // before a debt was published is then never missed.
+        const bool tx_owed = s->egress.wants_write();
+        const bool rx_owed = s->rx_owed.load(std::memory_order_acquire);
         const bool tx = s->tx_moved.exchange(false, std::memory_order_relaxed);
         const bool rx = s->rx_moved.exchange(false, std::memory_order_relaxed);
-        const bool tx_owed = s->egress.wants_write();
-        const bool rx_owed = s->rx_owed.load(std::memory_order_relaxed);
         if (!sw.frozen(tx_owed || rx_owed, (!tx && tx_owed) || (!rx && rx_owed), s->live_since))
             continue;
         condemn_fd(fd);  // the driving thread's next pass runs the remote-FIN teardown
@@ -772,7 +777,7 @@ void slot_server_t::accept_peer() {
     // A new peer starts alive (#2198): the next liveness check stamps its record.
     slot->tx_moved.store(true, std::memory_order_relaxed);
     slot->rx_moved.store(true, std::memory_order_relaxed);
-    slot->rx_owed.store(mid_frame(*slot), std::memory_order_relaxed);
+    slot->rx_owed.store(mid_frame(*slot), std::memory_order_release);
     // Publish the fd FIRST, then open the session: "open ⇒ fd valid" is the invariant (#891).
     // A sender reads the fd only inside the session's egress role, and the role cannot be
     // claimed until the egress opens — a release a claim's acquire pairs with — so no sender
@@ -846,7 +851,8 @@ void slot_server_t::service_peer(session_base_t& s) {
     s.rx_moved.store(true, std::memory_order_relaxed);
     on_readable(s, fd);
     // What the peer still owes after the read, for the liveness check (#2198).
-    s.rx_owed.store(mid_frame(s), std::memory_order_relaxed);
+    // Release: published after rx_moved, so a check that sees the debt sees the progress.
+    s.rx_owed.store(mid_frame(s), std::memory_order_release);
 }
 
 void slot_server_t::teardown_slot(session_base_t& s) {
