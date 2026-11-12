@@ -13,7 +13,6 @@
 #include <netinet/tcp.h>
 #include <sys/random.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 
 #include <algorithm>
 #include <array>
@@ -86,10 +85,8 @@ constexpr int kWatchdogMs = static_cast<int>((kTaskWdtSeconds != 0 ? kTaskWdtSec
  * It is no longer a teardown term (#1058). It used to be the dominant one: the recv
  * thread parked in `esp_transport_connect` and the destructor joined it, so a teardown
  * landing mid-dial paid the whole of this. The destructor now CONDEMNS an in-flight dial
- * and detaches the recv thread, so a destroying task's worst case is @ref kPollMs (how
- * fast the recv thread observes `stop_`) plus ONE full write bound (a sender inside
- * `esp_transport_write`, or the destructor's own handle teardown queued behind one) —
- * `kPollMs + kWriteBudgetMs`, well inside a single watchdog window.
+ * and detaches the recv thread, and since #2787 no sender waits inside a write, so a
+ * destroying task's worst case is @ref kPollMs: how fast the recv thread observes `stop_`.
  *
  * What this bound still sizes is the DIAL: how long a recv thread may sit on an
  * unreachable peer before it backs off and re-dials, and hence how long a CONDEMNED
@@ -102,27 +99,22 @@ constexpr int kWatchdogMs = static_cast<int>((kTaskWdtSeconds != 0 ? kTaskWdtSec
 constexpr int kDialTimeoutMs = kWatchdogMs / 2;
 
 /**
- * @brief How many times ONE frame's write can spend the write timeout.
+ * @brief How many times the opening handshake's write can spend the write timeout.
  *
- * A frame is one `esp_transport_write` on the TCP parent (#2265): `tcp_write`
+ * The handshake request is the one `esp_transport_write` this link still makes, on the dial's
+ * own thread before the connection is adopted: `tcp_write`
  * (components/tcp_transport/transport_ssl.c) polls for writability with the caller's
- * timeout, then `send()`s, which `SO_SNDTIMEO` bounds at the same timeout (see
- * connect_once). So the caller's number is a per-leg bound, never a total. It used to be
- * three legs, when the frame went through the WS transport's `_ws_write` (a poll, then a
- * header write, then a payload write); the old 4000 ms literal was a 12 s stall on a peer
- * with a closed TCP window, against a 5 s watchdog (#952).
+ * timeout, then `send()`s, so the caller's number is a per-leg bound, never a total. A frame
+ * never waits at all (#2787): it is one `send()` with `MSG_DONTWAIT`, see write_locked.
  */
 constexpr int kIdfWriteLegs = 2;
 
-/** @brief What ONE `send()` may spend in total, all legs (ms) — a quarter of the watchdog
- *  window, and (with @ref kPollMs) the whole of what a teardown can now cost. */
+/** @brief What the handshake's write may spend in total, all legs (ms) — a quarter of the
+ *  watchdog window. */
 constexpr int kWriteBudgetMs = kWatchdogMs / 4;
 
-/** @brief Write timeout handed to IDF (ms): the total budget divided by the legs IDF
- *  spends it on, so `kIdfWriteLegs * kWriteTimeoutMs == kWriteBudgetMs` is what a
- *  stalled peer can actually cost a sending task. Still several times the read timeout,
- *  so momentary TX congestion does not tear the connection down (a 100 ms write timeout
- *  thrashes) — it just stops being unbounded in practice. */
+/** @brief Write timeout handed to IDF for the handshake (ms): the total budget divided by the
+ *  legs IDF spends it on, so `kIdfWriteLegs * kWriteTimeoutMs == kWriteBudgetMs`. */
 constexpr int kWriteTimeoutMs = kWriteBudgetMs / kIdfWriteLegs;
 
 /**
@@ -152,7 +144,7 @@ constexpr int kReadTimeoutMs = 100;
  * turn of this, and a node that wakes its recv thread five times a second is paying for
  * that responsiveness in a power budget only the embedder can see. Since #1058 it is the
  * DOMINANT teardown term rather than one of two — the dial no longer contributes at all,
- * so the worst case is this plus @ref kWriteBudgetMs.
+ * and since #2787 neither does a write.
  */
 #ifdef CONFIG_LIBTRACER_WS_CLIENT_POLL_MS
 constexpr int kPollMs = CONFIG_LIBTRACER_WS_CLIENT_POLL_MS;
@@ -441,13 +433,14 @@ struct esp_ws_client_link_t::framing_end_t {
     void closing(std::span<const std::byte> payload) const { reply(ws::opcode_t::CLOSE, payload); }
 
     /**
-     * @brief A masked control reply, built on the stack and written through the one write
-     *        path (#2265). The header rules held @p payload to 125 bytes (§5.5), so it fits.
+     * @brief A masked control reply, sent on the control lane like any frame from no vertex
+     *        (#2787): a write may have left part of a frame on the wire, so a reply written
+     *        around the egress would land inside it. The header rules held @p payload to
+     *        125 bytes (§5.5).
      */
     void reply(ws::opcode_t op, std::span<const std::byte> payload) const {
-        std::array<std::byte, ws::kMaxClientControlFrame> out{};
-        const std::size_t len = ws::encode_client_control(out, op, payload, mask_key());
-        link.write_locked(std::span<const std::byte>(out.data(), len));
+        const std::span<const std::byte> one[1] = {payload};
+        link.send_on(one, graph::delivery_lane_t{}, static_cast<std::uint8_t>(op));
     }
 
     /**
@@ -638,8 +631,7 @@ esp_ws_client_link_t::~esp_ws_client_link_t() {
     // this would deadlock — that is the lock they are queued on — so the wait is here,
     // after it. Each one wakes, sees the disarmed link, and leaves; only then is it safe
     // for `write_m_` itself (and the buffers) to be destroyed under them. The wait is
-    // bounded by one write budget: the sender that was INSIDE the transport is the only
-    // one that can be slow, and its call is now bounded by kWriteBudgetMs.
+    // short: a sender inside the transport is in one non-blocking `send()` (#2787).
     //
     // The tally, not `send()`'s first instruction, is the boundary — see sender_exit_t.
     // A caller that entered `send()` but whose raise lands after the last load below is
@@ -771,20 +763,6 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
         const int nodelay = 1;
         if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) != 0)
             ESP_LOGW(kTag, "TCP_NODELAY not applied fd=%d", fd);
-        // Bound the BLOCKING leg of the write, which the transport's own timeout does
-        // not reach: after a positive poll_write, tcp_transport calls a plain write()
-        // on this socket, and lwIP parks in it until the peer's window opens. Without
-        // SO_SNDTIMEO the poll timeout is the only bound there is (#952). Expiring
-        // here surfaces as a short write, which send() already treats as a torn
-        // connection. Best-effort like NODELAY above, and the same shape the server
-        // sibling applies to its accepted sockets (httpd_ws_link_t::bound_socket): a
-        // stack that refuses the option keeps the poll bound for this link rather than
-        // failing the dial.
-        struct timeval snd = {};
-        snd.tv_sec = static_cast<time_t>(kWriteTimeoutMs / 1000);
-        snd.tv_usec = static_cast<suseconds_t>((kWriteTimeoutMs % 1000) * 1000);
-        if (::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd)) != 0)
-            ESP_LOGW(kTag, "SO_SNDTIMEO not applied fd=%d (%d ms)", fd, kWriteTimeoutMs);
         // Notice a peer that vanishes WITHOUT a FIN — a Wi-Fi drop, a power cut, a NAT
         // rebind (#957). Nothing else in this loop notices one: esp_transport_poll_read
         // keeps reporting "no data this turn" forever, so `connected_` stays true,
@@ -846,10 +824,9 @@ esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
     stats_t out;
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     {
-        // st_m_, NOT write_m_. write_m_ is held across esp_transport_write for up to
-        // kWriteTimeoutMs (4 s) on a stalled socket, so a snapshot taken under it
-        // would drag any caller — the embedder's periodic publisher, which may hold
-        // its own lock across this call — into that wait. This mutex is only ever
+        // st_m_, NOT write_m_: write_m_ serializes the socket calls, and a snapshot
+        // taken under it would queue any caller — the embedder's periodic publisher,
+        // which may hold its own lock across this call — behind them. This mutex is only ever
         // held for a counter bump or this copy, so the snapshot is bounded-brief.
         const std::lock_guard<tr::mutex_t> lk(st_m_);
         out.c.rx_frames = traffic_.rx_frames;
@@ -930,14 +907,26 @@ void esp_ws_client_link_t::drop() {
     // The departure REPORT is not made here, and deliberately: this is called with
     // `write_m_` about to be taken, and `notify_down` re-enters the routing plane (the
     // notifier takes graph locks), which the transport contract forbids doing under an
-    // internal lock. It is also not the only way down — `send()` clears `connected_` on
-    // a failed or short write without ever calling this. The one place that observes
+    // internal lock. It is also not the only way down — shut_down() clears `connected_`
+    // without ever calling this. The one place that observes
     // EVERY transition to down is the recv loop's own `!connected_` arm, so that is
     // where the report is made (see recv_loop, #957).
     const std::lock_guard<tr::mutex_t> lk(write_m_);
     if (tcp_ != nullptr) esp_transport_close(tcp_);
     connected_.store(false, std::memory_order_release);
 }
+
+/**
+ * @brief The egress's write step (#2787): one frame from @p off, through write_locked. One
+ *        type for a sender's turn and the recv loop's, so both share one drain.
+ */
+struct esp_ws_client_link_t::resume_t {
+    esp_ws_client_link_t& link; /**< @brief The link written to. */
+    /** @brief Write @p f from byte @p off. */
+    tr::net::egress_step_t operator()(const tr::net::egress_frame_t& f, std::size_t off) const {
+        return link.write_locked(f, off);
+    }
+};
 
 void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
     // One span through the gathered path — the one implementation (#1620 (a)).
@@ -967,29 +956,25 @@ void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> head
 }
 
 void esp_ws_client_link_t::send_on(std::span<const std::span<const std::byte>> iov,
-                                   const graph::delivery_lane_t& lane) {
+                                   const graph::delivery_lane_t& lane, std::uint8_t op) {
     std::size_t total = 0;
     for (const std::span<const std::byte>& part : iov) total += part.size();
-    // A drop is a relaxed atomic bump, never a lock: write_m_ is held across the transport
-    // write below for up to kWriteTimeoutMs, and a counter that rode it would make every
-    // stats() snapshot inherit that wait (#1663 took the drop half off st_m_ as well).
+    // A drop is a relaxed atomic bump, never a lock (#1663 took the drop half off st_m_).
     // This early-out stays AHEAD of the sender tally and of write_m_ (#952 ordering): it
-    // reads nothing the destructor can be racing. Counted without any lock held.
-    if (total == 0 || total > tx_bytes_) {  // drop oversize/empty
-        // The oversize half is the `tx_bytes` CEILING, and this is the only place that can
+    // reads nothing the destructor can be racing. Counted without any lock held. An empty
+    // payload is a frame like any other (a PONG to an empty PING is one).
+    if (total > tx_bytes_) {  // drop oversize
+        // This is the `tx_bytes` CEILING, and this is the only place that can
         // name it. `transport_t::send` returns void, so the router cannot be told the frame
-        // died; `tx_drops_` says one did, but the `!connected_` arm and the short-write
-        // arm below bump that same counter, so a bump alone does not even say WHICH drop
+        // died; `tx_drops_` says one did, but a send to a peer that is down and a frame a
+        // full ring sheds bump that same counter, so a bump alone does not even say WHICH drop
         // this was, let alone which knob was too small. A per-frame ceiling nobody can see
         // is how a blob-carrying value or a composed reply vanishes with clean logs on both
         // ends (#959). Logged every time, exactly like the
         // rx-buffer arm in recv_loop: this firing means the link emits NOTHING at this
-        // frame size, which is a misconfiguration to fix, not a rate to live with. The
-        // empty half needs no log — there is nothing to put on the wire and no knob to
-        // name — but it is the same drop and is counted the same way.
-        if (total != 0)
-            ESP_LOGW(kTag, "outbound frame %u B exceeds %u B tx buffer — dropped",
-                     static_cast<unsigned>(total), static_cast<unsigned>(tx_bytes_));
+        // frame size, which is a misconfiguration to fix, not a rate to live with.
+        ESP_LOGW(kTag, "outbound frame %u B exceeds %u B tx buffer — dropped",
+                 static_cast<unsigned>(total), static_cast<unsigned>(tx_bytes_));
         tx_drops_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
@@ -1021,28 +1006,26 @@ void esp_ws_client_link_t::send_on(std::span<const std::span<const std::byte>> i
     tr::net::egress_once_t once([&] {
         return tr::net::egress_frame_t::make(
             direct ? *tx_src_ : static_cast<mem::block_source_t&>(held_),
-            ws::detail::client_frame_bytes(total),
-            [&](std::span<std::byte> out) { return frame_into(out.data(), iov, total); });
+            ws::detail::client_frame_bytes(total), [&](std::span<std::byte> out) {
+                // The header, then the payload gathered and masked in one pass (#2265).
+                return ws::detail::put_client_frame(out, static_cast<ws::opcode_t>(op), iov,
+                                                    mask_key(), /*fin=*/true);
+            });
     });
-    // Every step reports its frame moved: write_locked counts a failed or short write itself
-    // and tears the connection down for the recv loop to re-dial, so the egress has no
-    // strike or condemn of its own to make.
-    const auto wrote = [this](std::span<const std::byte> wire) {
-        write_locked(wire);
-        return tr::net::egress_step_t{wire.size(), false, false};
-    };
+    // A write never waits (#2787): what the socket will not take now stays on the wire for the
+    // next turn (the next send, or the recv loop's), and the connection is the read side's to
+    // drop. The egress's strike verdict has nothing to close: liveness is the application's
+    // frozen-peer check, on its own clock.
+    resume_t resume{*this};
     const tr::net::egress_result_t r = egress_.send(
         peer_, lane, once,
         [&] {
             direct = true;
             const tr::net::egress_frame_t* const f = once();
-            return f != nullptr ? wrote(f->head()) : tr::net::egress_step_t{0, false, true};
+            return f != nullptr ? resume(*f, 0) : tr::net::egress_step_t{0, false, true};
         },
-        [&](const tr::net::egress_frame_t& f, std::size_t off) {
-            return wrote(f.head().subspan(off));
-        },
-        [] {});
-    if (r.shed != 0) tx_drops_.fetch_add(r.shed, std::memory_order_relaxed);
+        resume, [] {});
+    tx_drops_.fetch_add(r.shed, std::memory_order_relaxed);
     // A send on a link that is down is the event that ends a backoff no app clock drives
     // (#2337). Inside the sender tally, so the destructor cannot have destroyed the mutex.
     if (connected_.load(std::memory_order_acquire)) return;
@@ -1055,64 +1038,64 @@ void esp_ws_client_link_t::send_on(std::span<const std::span<const std::byte>> i
     if (woke) backoff_cv_.notify_all();
 }
 
-std::size_t esp_ws_client_link_t::frame_into(std::byte* dst,
-                                             std::span<const std::span<const std::byte>> iov,
-                                             std::size_t len) noexcept {
-    return ws::detail::put_client_frame(
-        std::span<std::byte>(dst, ws::detail::client_frame_bytes(len)), ws::opcode_t::BINARY, iov,
-        mask_key(), /*fin=*/true);
-}
-
-void esp_ws_client_link_t::write_locked(std::span<const std::byte> wire) {
+tr::net::egress_step_t esp_ws_client_link_t::write_locked(const tr::net::egress_frame_t& f,
+                                                          std::size_t off) {
+    const std::span<const std::byte> frame = f.head();
     const std::lock_guard<tr::mutex_t> lk(write_m_);
     // Re-checked, not re-read for tidiness: teardown may have run while this record waited,
     // and it disarms `stop_` BEFORE it takes this very lock to null the handles, so a writer
     // that sees a set `stop_` leaves without touching either handle. NOT counted as a drop:
     // the link is being destroyed, which is not a loss toward the peer, and a teardown that
     // bumped a counter would make every clean shutdown look like a failure.
-    if (stop_.load(std::memory_order_acquire)) return;
-    // THE handle gate, and the reason nothing above it may read `ws_`. `write_m_` does
-    // NOT order a handle read against a re-dial: connect_once() adopts a fresh ws_/tcp_
+    if (stop_.load(std::memory_order_acquire)) return {frame.size() - off, false, false};
+    // THE handle gate, and the reason nothing above it may read `tcp_`. `write_m_` does
+    // NOT order a handle read against a re-dial: connect_once() adopts a fresh tcp_
     // holding no lock at all. What orders them is this
     // acquire pairing with the release store connect_once makes only AFTER the adoption —
-    // and `connected_` is cleared only under this lock (drop(), a failed write, the
+    // and `connected_` is cleared only under this lock (drop(), the
     // shut_down() release) or at shut_down()'s top, whose store the recv loop answers by
-    // breaking rather than re-dialing. The pair is destroyed only under
+    // breaking rather than re-dialing. The handle is destroyed only under
     // this lock with `connected_` false: the departure arm, or shut_down() (#1606). So an observed
     // `true` here is a happens-before edge with the writes that built the handle this
     // call is about to use, and a handle check placed AHEAD of this line is read against
     // an unsynchronised rewrite — the same unsynchronised handle read #952 is about,
     // seen from the sender's side (TSan: send() vs connect_once, on a failing re-dial).
     //
-    // This one IS a drop: the push vanishes toward a peer that is simply down, and it is
-    // the loss that used to be completely invisible.
-    if (!connected_.load(std::memory_order_acquire)) {  // best-effort, like UDP
-        tx_drops_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    // The frame goes out as ONE write on the TCP parent (#2265): header and masked payload
-    // are contiguous, so it is one `send()`, not IDF's poll plus two writes.
-    const int n = esp_transport_write(tcp_, reinterpret_cast<const char*>(wire.data()),
-                                      static_cast<int>(wire.size()), kWriteTimeoutMs);
-    if (n < 0 || n < static_cast<int>(wire.size())) {
-        // Error or short write (a partial WS frame would desync the peer) — tear the
-        // connection down so the recv loop rebuilds it; the frame is best-effort-lost.
-        tx_drops_.fetch_add(1, std::memory_order_relaxed);
-        connected_.store(false, std::memory_order_release);
-        return;
-    }
+    // This one IS a drop, counted by the egress: the push vanishes toward a peer that is
+    // simply down, and it is the loss that used to be completely invisible. So is the rest of
+    // a frame begun on a connection that has since died (`off` past 0 and `cut_` cleared by
+    // the departure arm): written to the new stream, it would desync it (#2787).
+    if (!connected_.load(std::memory_order_acquire) || (off != 0 && !cut_)) return {0, false, true};
+    // ONE non-blocking `send()` on the TCP parent's socket (#2787), the frame's header and
+    // masked payload contiguous (#2265). A full peer window takes some bytes or none, and the
+    // rest stays on the wire for the egress's next turn, so no producer waits on this peer and
+    // a slow reader costs counted drops behind it, never the connection. A failed call is
+    // held the same way, not judged here: a socket that is really dead fails its next poll
+    // or read on the recv thread too, which drops the connection (drop()), and keepalive
+    // finds one that died silently. So the link goes down on the read side's transport
+    // error, the application's frozen-peer check, or teardown, never on a write.
+    const std::span<const std::byte> rest = frame.subspan(off);
+    const ssize_t n =
+        ::send(esp_transport_get_socket(tcp_), rest.data(), rest.size(), MSG_DONTWAIT);
+    const std::size_t moved = n < 0 ? 0 : static_cast<std::size_t>(n);
+    cut_ = moved < rest.size();
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     // The success path counts only when the application asked for traffic counters
-    // (#1663). Nesting is write_m_ -> st_m_, never the reverse.
-    const std::lock_guard<tr::mutex_t> st_lk(st_m_);
-    ++traffic_.tx_frames;
-    // Payload bytes, as every kind counts them. A client frame's header is 6, 8 or 14 bytes,
-    // and its second byte's length code (126, 127, or the length itself) says which (#2265).
-    const unsigned code = static_cast<unsigned>(wire[1]) & 0x7FU;
-    traffic_.tx_bytes += static_cast<std::uint32_t>(wire.size() - (code < 126    ? 6U
-                                                                   : code == 126 ? 8U
-                                                                                 : 14U));
+    // (#1663), once per frame, on its last byte. Nesting is write_m_ -> st_m_, never the
+    // reverse.
+    if (!cut_) {
+        const std::lock_guard<tr::mutex_t> st_lk(st_m_);
+        ++traffic_.tx_frames;
+        // Payload bytes, as every kind counts them. A client frame's header is 6, 8 or 14
+        // bytes, and its second byte's length code (126, 127, or the length itself) says which
+        // (#2265).
+        const unsigned code = static_cast<unsigned>(frame[1]) & 0x7FU;
+        traffic_.tx_bytes += static_cast<std::uint32_t>(frame.size() - (code < 126    ? 6U
+                                                                        : code == 126 ? 8U
+                                                                                      : 14U));
+    }
 #endif
+    return {moved, cut_, false};  // held: the rest waits for the egress's next turn
 }
 
 void esp_ws_client_link_t::recv_loop() {
@@ -1159,6 +1142,17 @@ void esp_ws_client_link_t::recv_loop() {
     // No dial latch is waited here: an unarmed link has no recv thread at all
     // (#1606), and this thread only exists once start_receiving() armed the link.
     while (!stop_.load(std::memory_order_relaxed)) {
+        // What waits for the socket goes on every turn too, not only on the next send (#2787):
+        // a burst's tail leaves once the peer reads again even when nothing more is
+        // published. No new wait, this is the loop's own poll cadence. On the turn that finds
+        // the connection down it drains what waited, so nothing of the old connection is
+        // written to the next one. Those losses are counted like a send to a link that is
+        // down, so `stats()` read during a backoff says what was lost.
+        {
+            resume_t resume{*this};
+            tx_drops_.fetch_add(egress_.flush(peer_, resume, [] {}).shed,
+                                std::memory_order_relaxed);
+        }
         if (!connected_.load(std::memory_order_acquire)) {
             // A new connection is a new stream: nothing of the old one's frame or message
             // survives into it.
@@ -1186,16 +1180,18 @@ void esp_ws_client_link_t::recv_loop() {
                 // never-connected one holds. Under `write_m_`, because a writer reads the
                 // handle only under it, past the `connected_` gate — and `connected_` is
                 // already false. Before notify_down: no transport lock may be held across it.
+                // `cut_` goes with it (#2787): a frame the dead socket cut short is then
+                // refused by write_locked, so its rest never lands on the next connection.
                 {
                     const std::lock_guard<tr::mutex_t> lk(write_m_);
                     release_tcp(tcp_);
+                    cut_ = false;
                 }
                 // The departure seam (RFC-0009 §D extended to peer departure), and the
                 // reason it is reported at all (#957). This arm is downstream of all
-                // three sites that clear `connected_` — drop() (peer CLOSE, a poll
-                // error, a read error), send()'s failed/short-write arm, and the
-                // destructor — so ONE report here covers every way this link goes down,
-                // with no transport lock held, exactly as the contract asks.
+                // sites that clear `connected_` — drop() (peer CLOSE, a poll
+                // error, a read error) and the destructor — so ONE report here covers every way
+                // this link goes down, with no transport lock held, exactly as the contract asks.
                 //
                 // It fires on a blip too, and that is the choice, not an oversight. The
                 // link cannot tell a blip from a peer that REBOOTED: the reconnect

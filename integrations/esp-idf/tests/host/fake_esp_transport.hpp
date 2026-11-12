@@ -43,7 +43,9 @@
  * wrong thing. `esp_transport_get_socket` therefore answers -1 unless a suite opts in
  * with @ref set_socket_fd, which hands back a descriptor NUMBER — enough to reach the
  * link's best-effort socket-option block (#957), with `setsockopt` interposed on the
- * opting-in target so no option reaches the kernel either.
+ * opting-in target so no option reaches the kernel either. A frame is one non-blocking
+ * `send()` on that socket (#2787); every client target wraps `send` into this fake, which
+ * writes it to the connection whose socket the link resolved last, whatever the number.
  */
 #pragma once
 
@@ -207,38 +209,47 @@ void release_connects(bool succeed);
 [[nodiscard]] int last_connect_timeout_ms();
 
 /**
- * @brief Park every frame `esp_transport_write` for the timeout the caller asked for,
- *        modelling a peer whose TCP window has closed. Passing false releases whoever
- *        is parked, as a peer that starts accepting again would.
+ * @brief Fill the peer's TCP window (#2787): every frame `send()` takes nothing and fails
+ *        with EAGAIN, as lwIP's does under `MSG_DONTWAIT`. Passing false opens it again.
  *
- * This is what makes "the send serializer is held across the write" observable: while a
- * writer is parked here it is holding the link's `write_m_`, which is exactly the state
- * the destructor used to ignore. The park honours the caller's timeout, so how long a
- * held write can hold that serializer is the LINK's own bound — pre-#952, three times a
- * 4 s literal. A handshake request is never parked: it is not a frame, no sender holds the
- * serializer across it, and a parked one would only keep the link from coming up.
+ * Nothing parks: a link whose write waited on the window would show up as a sender that
+ * does not return, which is what #2787 removed. A handshake request is not a frame and is
+ * never held.
  */
 void hold_writes(bool on);
 
 /**
- * @brief Park every `esp_transport_write` until this is called with false, IGNORING the
- *        caller's timeout (#2338). The released write fails, as one whose bound expired.
+ * @brief Let one frame `send()` take at most @p bytes (0 = all, the reset), modelling a
+ *        window with room for only part of a frame (#2787).
+ */
+void cap_writes(std::size_t bytes);
+
+/**
+ * @brief Park every frame `send()` until this is called with false (#2338). The released
+ *        send fails (EPIPE), as one on a connection that broke.
  *
- * @ref hold_writes honours the link's own write bound, so a test that has to see a writer
- * STILL parked at some later point races that bound. This holds the writer for as long as
- * the test needs it held, so "still inside the transport" is a fact, not a timing.
+ * A writer that is INSIDE the transport while a test tears the link down: what makes "the
+ * handles were destroyed under a sender" a measurement rather than a timing.
  */
 void pin_writes(bool on);
 
-/** @brief How many callers are parked inside `esp_transport_write` right now. */
+/** @brief How many callers are parked inside a frame `send()` right now. */
 [[nodiscard]] int writers_inside();
 
-/** @brief How many `esp_transport_write` calls have been ENTERED since the reset —
+/** @brief How many frame `send()` calls have been ENTERED since the reset —
  *         counted before any handle check, so a call on a dead handle still counts. */
 [[nodiscard]] int writes_started();
 
-/** @brief The `timeout_ms` the last write asked for — IDF spends it up to three times
- *         over inside one call, which is the multiplier the link's bound must respect. */
+/** @brief Whole frames the peer has decoded off the stream since the reset, however many
+ *         `send()` calls each took. */
+[[nodiscard]] int frames_written();
+
+/** @brief The flags of the last frame `send()`, -1 before the first: `MSG_DONTWAIT` is how a
+ *         write never waits (#2787). */
+[[nodiscard]] int last_send_flags();
+
+/** @brief The `timeout_ms` the last `esp_transport_write` asked for: the opening
+ *         handshake's, the one write the link still bounds. */
 [[nodiscard]] int last_write_timeout_ms();
 
 /**
@@ -252,7 +263,7 @@ void pin_writes(bool on);
  */
 [[nodiscard]] int handle_misuse();
 
-/** @brief Payload bytes the last completed frame write carried, for the ordinary-path
+/** @brief Payload bytes the last whole frame carried, for the ordinary-path
  *         control — unmasked, as the peer would read them. A handshake request is not a
  *         frame, and none of the write counters below count one. */
 [[nodiscard]] std::vector<std::byte> last_write_payload();
@@ -260,15 +271,15 @@ void pin_writes(bool on);
 /** @name The per-frame write cost (#2265). */
 /** @{ */
 
-/** @brief The WS opcode of the last completed write's frame, -1 before the first. */
+/** @brief The WS opcode of the last whole frame, -1 before the first. */
 [[nodiscard]] int last_write_op();
 
 /** @brief Whether that frame carried the MASK bit, as every client frame must. */
 [[nodiscard]] bool last_write_masked();
 
 /**
- * @brief lwIP calls the frame writes made since the reset, as the real transport would: a
- *        write on the TCP transport is `tcp_write`, a poll and one send — 2 calls.
+ * @brief lwIP calls the frame writes made since the reset: one `send()` each (#2787), where
+ *        `tcp_write` was a poll and a send.
  */
 [[nodiscard]] int lwip_calls();
 

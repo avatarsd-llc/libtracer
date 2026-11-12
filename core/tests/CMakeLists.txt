@@ -883,9 +883,9 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # Those are the two IDF facilities the contracts rest on — a `recv_stack` that never
     # reaches esp_pthread_set_cfg never reaches the FreeRTOS task, and a read capped at
     # the offered buffer is what splits ONE oversized frame across reads that each report
-    # the same fin. NO socket is interposed or opened here (contrast the httpd targets
-    # above, which wrap ::send): the fake's esp_transport_get_socket answers -1, keeping
-    # the suite faithful to the ruling that this plane never uses POSIX sockets (#947).
+    # the same fin. NO socket is opened here: the fake's esp_transport_get_socket answers -1,
+    # and a frame's one non-blocking send() (#2787) is wrapped into the fake (--wrap=send on
+    # every client target), which writes it to the connection whose socket the link resolved.
     add_executable(esp_ws_client_recv_test
         "${LIBTRACER_ESP_DIR}/tests/host/esp_ws_client_recv_test.cpp"
         "${LIBTRACER_ESP_DIR}/tests/host/fake_esp_transport.cpp"
@@ -896,6 +896,7 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
         "${LIBTRACER_ESP_DIR}/libtracer"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(esp_ws_client_recv_test PRIVATE libtracer)
+    target_link_options(esp_ws_client_recv_test PRIVATE "-Wl,--wrap=send")
     libtracer_test_warnings(esp_ws_client_recv_test)
     add_test(NAME esp_ws_client_recv COMMAND esp_ws_client_recv_test)
 
@@ -921,6 +922,7 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
         "${LIBTRACER_ESP_DIR}/libtracer"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(esp_ws_client_teardown_test PRIVATE libtracer)
+    target_link_options(esp_ws_client_teardown_test PRIVATE "-Wl,--wrap=send")
     libtracer_test_warnings(esp_ws_client_teardown_test)
     add_test(NAME esp_ws_client_teardown COMMAND esp_ws_client_teardown_test)
     # Three cases spend a real wait on purpose (a 600 ms held write, a 2.5 s hung dial,
@@ -946,7 +948,8 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
         "${LIBTRACER_ESP_DIR}/libtracer"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(esp_ws_client_liveness_test PRIVATE libtracer)
-    target_link_options(esp_ws_client_liveness_test PRIVATE "-Wl,--wrap=setsockopt")
+    target_link_options(esp_ws_client_liveness_test PRIVATE "-Wl,--wrap=setsockopt"
+        "-Wl,--wrap=send")
     libtracer_test_warnings(esp_ws_client_liveness_test)
     add_test(NAME esp_ws_client_liveness COMMAND esp_ws_client_liveness_test)
     # Two cases spend real reconnect backoffs on purpose (1.5 s each, twice over for the
@@ -973,6 +976,7 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
         "${LIBTRACER_ESP_DIR}/libtracer"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(esp_ws_client_dial_test PRIVATE libtracer)
+    target_link_options(esp_ws_client_dial_test PRIVATE "-Wl,--wrap=send")
     libtracer_test_warnings(esp_ws_client_dial_test)
     add_test(NAME esp_ws_client_dial COMMAND esp_ws_client_dial_test)
     # One case spends a real reconnect backoff on purpose (1.5 s), to make the second dial
@@ -994,6 +998,7 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     target_compile_definitions(esp_ws_client_dial_stats_test PRIVATE
         CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS=1)
     target_link_libraries(esp_ws_client_dial_stats_test PRIVATE libtracer)
+    target_link_options(esp_ws_client_dial_stats_test PRIVATE "-Wl,--wrap=send")
     libtracer_test_warnings(esp_ws_client_dial_stats_test)
     add_test(NAME esp_ws_client_dial_stats COMMAND esp_ws_client_dial_stats_test)
     set_tests_properties(esp_ws_client_dial_stats PROPERTIES TIMEOUT 60)
@@ -1011,6 +1016,7 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     target_compile_definitions(esp_ws_client_traffic_stats_test PRIVATE
         CONFIG_LIBTRACER_LINK_TRAFFIC_STATS=1)
     target_link_libraries(esp_ws_client_traffic_stats_test PRIVATE libtracer)
+    target_link_options(esp_ws_client_traffic_stats_test PRIVATE "-Wl,--wrap=send")
     libtracer_test_warnings(esp_ws_client_traffic_stats_test)
     add_test(NAME esp_ws_client_traffic_stats COMMAND esp_ws_client_traffic_stats_test)
     set_tests_properties(esp_ws_client_traffic_stats PROPERTIES TIMEOUT 60)

@@ -212,7 +212,8 @@ void test_dial_arms_keepalive() {
         // The pre-existing per-socket policy is unchanged by #957 — the keepalive group
         // was ADDED to it, not substituted for it.
         check(opt_value(IPPROTO_TCP, TCP_NODELAY) == 1, "and TCP_NODELAY is still applied");
-        check(opt_value(SOL_SOCKET, SO_SNDTIMEO) != -1, "and the bounded write is still applied");
+        // A frame's write never waits (#2787, MSG_DONTWAIT), so no send bound is set.
+        check(opt_value(SOL_SOCKET, SO_SNDTIMEO) == -1, "and no send bound: a write never waits");
     }
     check_drained();
 }
