@@ -47,6 +47,10 @@ static_assert(kListedWaitSources,
               "true;` in libtracer/config_override.hpp (the ESP-IDF component does so for every "
               "chip target).");
 
+// std::atomic_ref on a plain member is defined only when the member meets the ref's alignment.
+static_assert(alignof(wait_source_t*) >= std::atomic_ref<wait_source_t*>::required_alignment,
+              "the list link must meet std::atomic_ref's required alignment");
+
 namespace {
 /** @brief @p s 's list link, as the atomic both the lock holder and the driver use. */
 std::atomic_ref<wait_source_t*> link_of(wait_source_t& s) noexcept {

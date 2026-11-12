@@ -13,7 +13,8 @@
  *
  *  1. **Removed by its own write.** A removal of B's link `srv` arrives on `srv` itself.
  *     The teardown runs on `srv`'s own callback, so it cannot wait for that callback: it
- *     completes, and once B's graph frees the link no thread of it is left.
+ *     completes, and once B's graph frees the link no thread of it is left. Checked with the
+ *     link on a thread of its own and on the node's wait module.
  *  2. **Removed by another link's write while its own callback waits for the control plane.**
  *     A removal of B's link `x` arrives on B's link `y` while a creation that arrived on `x`
  *     is waiting for the same control plane (both queued behind a creation the test holds
@@ -32,6 +33,10 @@
  *     connection state; collect() gives back all of it.
  *  8. **A stream listener removed by another link's write while a peer arrives**: the
  *     teardown's walk of the sessions is ordered after the accept that grew them (TSan).
+ *  9. **A transport shut down by its own callback while it shares one `.wait` module** with
+ *     other links (the transport alone, no vertex): the shut-down completes without a
+ *     deadlock, the module keeps delivering to the other links, and the destructor, off the
+ *     callback thread, closes the socket.
  *
  * A teardown made on a thread that runs link callbacks waits for nothing and closes nothing;
  * the joins and closes happen at the graph's collect(), outside every callback.
@@ -54,6 +59,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -62,7 +68,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -203,8 +211,8 @@ struct node_b_t {
     tr::graph::graph_t g;
     tr::net::fwd_router_t router{g};
     tr::net::transport_vertex_t net;
-    explicit node_b_t(const tr::net::link_memory_t* memory = nullptr)
-        : net(g, router, "/net", &tr::mem::net_backend(), &tr::mem::net_source(), memory) {
+    explicit node_b_t(tr::net::wait_module_t* wait, const tr::net::link_memory_t* memory = nullptr)
+        : net(g, router, "/net", &tr::mem::net_backend(), &tr::mem::net_source(), memory, wait) {
         (void)net.register_module(std::string(tr::net::kUdpServerSuggestedModule), "udp",
                                   conn_role_t::LISTEN);
         (void)net.register_module(std::string(tr::net::kTcpServerSuggestedModule), "tcp",
@@ -272,10 +280,14 @@ struct node_a_t {
     }
 };
 
-void test_removed_by_its_own_write() {
-    std::printf("-- a link removed by a write that arrived on it\n");
+void test_removed_by_its_own_write(bool on_module) {
+    std::printf("-- a link removed by a write that arrived on it (%s)\n",
+                on_module ? "node wait module" : "a thread of its own");
+    tr::net::wait_module_t module;
+    std::thread driver;
+    if (on_module) driver = std::thread([&] { module.run(); });
     {
-        node_b_t b;
+        node_b_t b(on_module ? &module : nullptr);
         node_a_t a;
         const std::uint16_t port = free_port();
         // A first, so the census below counts B's link alone (a UDP dial needs no listener).
@@ -294,11 +306,15 @@ void test_removed_by_its_own_write() {
               }),
               "once B frees it, the removed link leaves no thread behind");
     }
+    if (on_module) {
+        module.stop();
+        driver.join();
+    }
 }
 
 void test_removed_while_its_callback_waits_for_the_control_plane() {
     std::printf("-- a link removed by another link's write while its own callback waits\n");
-    node_b_t b;
+    node_b_t b(nullptr);
     node_a_t a;
     const std::uint16_t px = free_port();
     const std::uint16_t py = free_port();
@@ -335,7 +351,7 @@ void test_removed_while_its_callback_waits_for_the_control_plane() {
 
 void test_two_links_removing_each_other() {
     std::printf("-- two links whose callbacks remove each other\n");
-    node_b_t b;
+    node_b_t b(nullptr);
     node_a_t a;
     const std::uint16_t px = free_port();
     const std::uint16_t py = free_port();
@@ -377,7 +393,7 @@ struct removed_by_its_own_write_t {
     counting_source_t state;  // B's links' connection state: sessions and their buffers
     tr::net::link_memory_t memory{.state = &state};
     std::size_t state_before = 0;  // B's connection state just before the removal
-    node_b_t b{&memory};
+    node_b_t b{nullptr, &memory};
     node_a_t a;
     std::uint16_t port = 0;
     std::vector<long> link_threads;  // B's link's own
@@ -536,7 +552,7 @@ void test_listener_removed_by_another_link_while_peers_arrive() {
 
     counting_source_t state;
     tr::net::link_memory_t memory{.state = &state};
-    node_b_t b(&memory);
+    node_b_t b(nullptr, &memory);
     node_a_t a;
     const std::uint16_t pctl = free_port();
     check(a.dial("toctl", pctl), "A dials B's control link");
@@ -591,11 +607,52 @@ void test_listener_removed_by_another_link_while_peers_arrive() {
     ::close(peer);
 }
 
+void test_transport_shut_down_by_its_own_callback_on_a_shared_module() {
+    std::printf("-- a transport shut down by its own callback, sharing one .wait module\n");
+    tr::net::wait_module_t module;
+    std::thread driver([&] { module.run(); });
+    const std::uint16_t pa = free_port();
+    const std::uint16_t pb = free_port();
+    const std::uint16_t pc = free_port();
+    const std::vector<long> before = thread_ids();
+    {
+        tr::net::udp_transport_t a(pa, "127.0.0.1", pb, tr::net::udp_config_t{.wait = &module});
+        auto b = std::make_unique<tr::net::udp_transport_t>(pb, "127.0.0.1", pa,
+                                                            tr::net::udp_config_t{.wait = &module});
+        tr::net::udp_transport_t c(pc, "127.0.0.1", pa, tr::net::udp_config_t{.wait = &module});
+        check(a.ok() && b->ok() && c.ok(), "three UDP links up on one wait module");
+        std::atomic<bool> shut{false};
+        auto b_rx = [&](std::span<const std::byte>) {
+            if (!shut.exchange(true)) b->shut_down();  // from b's own callback, on the module
+        };
+        b->set_receiver(b_rx);
+        std::atomic<int> to_a{0};
+        auto a_rx = [&](std::span<const std::byte>) { to_a.fetch_add(1); };
+        a.set_receiver(a_rx);
+        check(spawned_since(before) == 0, "the links spawned no thread");
+        const std::array<std::byte, 4> frame{};
+        a.send(std::span<const std::byte>(frame));
+        check_or_exit(eventually([&] { return shut.load(); }),
+                      "b shut itself down from its own callback without a deadlock");
+        c.send(std::span<const std::byte>(frame));
+        check_or_exit(eventually([&] { return to_a.load() == 1; }),
+                      "the shared module still delivers to the other links");
+        b.reset();  // off the callback thread, with the module still running
+        check(sockets_on(pb) == 0, "b's destructor closed its socket");
+        check(spawned_since(before) == 0, "the teardown spawned no thread");
+        a.shut_down();
+        c.shut_down();
+    }
+    module.stop();
+    driver.join();
+}
+
 }  // namespace
 
 int main() {
     std::printf("== #2751: link teardown never waits on a callback holding the lock it needs ==\n");
-    test_removed_by_its_own_write();
+    test_removed_by_its_own_write(false);
+    test_removed_by_its_own_write(true);
     test_removed_while_its_callback_waits_for_the_control_plane();
     test_two_links_removing_each_other();
     test_deferred_teardown_keeps_the_descriptor_open_until_the_destructor();
@@ -603,6 +660,7 @@ int main() {
     test_removal_from_a_callback_then_collect_leaves_nothing_behind();
     test_a_shut_sessions_buffers_live_until_the_destructor();
     test_listener_removed_by_another_link_while_peers_arrive();
+    test_transport_shut_down_by_its_own_callback_on_a_shared_module();
     std::printf("link_teardown_wait_test: %s (%d failures)\n",
                 g_failures == 0 ? "ALL PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
