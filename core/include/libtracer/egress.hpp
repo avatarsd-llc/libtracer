@@ -531,11 +531,14 @@ class egress_t {
      *        frame and every lane. Teardown's half of the role handoff.
      *
      * The caller makes the in-flight write return first — `shutdown(2)` on the socket — and
-     * never calls this from inside a write callback on the same peer. The wait is on the
+     * never calls this from inside a write callback on the same peer. It runs once per open:
+     * a close of a closed peer returns at once. The wait is on the
      * writer leaving the role (`%tr::park_wait`, #2507), not on a clock.
      */
     void close(egress_peer_t& p) noexcept {
         std::uint8_t r = p.role_.fetch_or(egress_peer_t::kClosed, std::memory_order_acq_rel);
+        // Once per open: a second close, concurrent or later, finds it closed and leaves.
+        if ((r & egress_peer_t::kClosed) != 0) return;
         while ((r & egress_peer_t::kWriter) != 0) {
             park_wait(p.role_, r, std::memory_order_acquire);
             r = p.role_.load(std::memory_order_acquire);

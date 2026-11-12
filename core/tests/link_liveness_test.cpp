@@ -40,6 +40,7 @@
 #include "libtracer/self_heal_link.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_tcp.hpp"
+#include "libtracer/wait.hpp"
 #include "test_await.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
@@ -1039,9 +1040,18 @@ struct gated_sock_t final : tr::net::transport_t {
     bool open = false;    /**< @brief The gate: sends return once it is set. */
     bool shut = false;    /**< @brief shut_down() has run (the receive side is joined). */
     std::atomic<bool>* alive = nullptr;
+    std::atomic<bool>* died_on_callback = nullptr; /**< @brief Set when destroyed on a thread
+                                                               that runs link callbacks. */
 
-    explicit gated_sock_t(std::atomic<bool>* a) : alive(a) { alive->store(true); }
-    ~gated_sock_t() { alive->store(false); }
+    explicit gated_sock_t(std::atomic<bool>* a, std::atomic<bool>* d = nullptr)
+        : alive(a), died_on_callback(d) {
+        alive->store(true);
+    }
+    ~gated_sock_t() {
+        if (died_on_callback != nullptr && tr::net::on_callback_thread())
+            died_on_callback->store(true);
+        alive->store(false);
+    }
     gated_sock_t(const gated_sock_t&) = delete;
     gated_sock_t& operator=(const gated_sock_t&) = delete;
 
@@ -1067,6 +1077,7 @@ struct gated_sock_t final : tr::net::transport_t {
 struct gate_rig_t {
     gated_sock_t* sock = nullptr;
     std::atomic<bool> alive{false};
+    std::atomic<bool> died_on_callback{false};
 };
 
 }  // namespace
@@ -1127,6 +1138,80 @@ void test_socket_ref_outlives_engine() {
     }
 }
 
+/**
+ * @brief The last hold on a self-heal socket is never a send's on a callback thread: a send
+ *        made on a thread that runs link callbacks still holds the socket when the engine
+ *        retires it, and the socket is destroyed by the engine, not by that send's release.
+ */
+template <bool kOn = tr::net::kSelfHealLinks>
+void test_last_socket_hold_is_never_a_callback_send() {
+    if constexpr (kOn) {
+        std::printf("a socket retired while a callback's send holds it:\n");
+        gate_rig_t rig;
+        gate_rig_t* const r = &rig;
+        tr::net::conn_settings_t settings;
+        settings.addr = "203.0.113.1";
+        settings.port = 9;
+        auto engine = std::make_unique<tr::net::self_heal_link_t>(
+            [r](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*,
+                tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
+                auto sock = tr::mem::make_poly<gated_sock_t>(src, &r->alive, &r->died_on_callback);
+                r->sock = sock.get();
+                return sock;
+            },
+            settings, std::span<const std::byte>{}, false, tr::mem::default_root());
+        struct publish_t {
+            std::promise<void> up;
+            std::atomic<bool> fired{false};
+            std::atomic<bool> on_callback{false};
+        } pub;
+        publish_t* const p = &pub;
+        engine->set_liveness_publisher([p](link_state_t s) {
+            if (s == link_state_t::UP && !p->fired.exchange(true)) {
+                p->on_callback.store(tr::net::on_callback_thread());
+                p->up.set_value();
+            }
+        });
+        engine->born();
+        engine->acquire();
+        check(pub.up.get_future().wait_for(10s) == std::future_status::ready,
+              "the engine reached UP");
+        check(pub.on_callback.load(), "the worker's liveness publish runs as a callback thread");
+
+        const std::byte frame[1] = {std::byte{0x01}};
+        std::thread sender([&] {
+            const tr::net::callback_thread_scope_t delivering;  // as a wait module's run does
+            engine->send(std::span<const std::byte>(frame));
+        });
+        gated_sock_t* const sock = rig.sock;
+        {
+            std::unique_lock l(sock->m);
+            check(sock->cv.wait_for(l, 10s, [&] { return sock->entered; }),
+                  "a send on a callback thread holds the socket");
+        }
+        engine->release();  // the last standing hold: the engine retires the UP socket
+        bool shut = false;
+        for (int i = 0; i < 5000 && !shut; ++i) {
+            {
+                const std::lock_guard l(sock->m);
+                shut = sock->shut;
+            }
+            if (!shut) std::this_thread::sleep_for(1ms);
+        }
+        check(shut, "the engine's worker shut the retired socket down");
+        {
+            const std::lock_guard l(sock->m);
+            sock->open = true;
+            sock->cv.notify_all();
+        }
+        sender.join();
+        check(rig.alive.load(), "the send's release was not the last hold");
+        engine.reset();
+        check(!rig.alive.load(), "the engine's destructor destroyed the socket");
+        check(!rig.died_on_callback.load(), "no socket was destroyed on a callback thread");
+    }
+}
+
 int main() {
     // The subject is a MODULE (#1470): with `kSelfHealLinks = false` the engine is not in
     // this image and `register_transport_type` refuses the `self_heal_dial` kind every case
@@ -1153,5 +1238,6 @@ int main() {
     test_builtin_tcp_kind_runs_through_the_engine();
     test_conformance_vectors();
     test_socket_ref_outlives_engine();
+    test_last_socket_hold_is_never_a_callback_send();
     return tr::testing::summary("link_liveness");
 }

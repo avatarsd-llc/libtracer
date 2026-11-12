@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <charconv>
 #include <cstdint>
 #include <cstring>
@@ -38,6 +39,7 @@
 #include "libtracer/mem_string.hpp"
 #include "libtracer/park.hpp"
 #include "libtracer/sync.hpp"
+#include "libtracer/wait.hpp"
 #include "libtracer/ws.hpp"
 #include "libtracer/ws_assembler.hpp"
 #include "libtracer/ws_framing.hpp"
@@ -559,37 +561,41 @@ void esp_ws_client_link_t::shut_down() {
     // gets `write_m_` — so from here on no NEW work reaches the handles. Clearing
     // `connected_` makes link_up() honest for the rest of teardown; the recv loop's own
     // stop_ re-check keeps it from reading that as "re-dial" (see recv_loop). The exchange
-    // makes a second call — the destructor after an owner's shut_down — a no-op.
-    if (stop_.exchange(true, std::memory_order_acq_rel)) return;
-    connected_.store(false, std::memory_order_release);
-    {
-        // Taking the backoff mutex before notifying is what makes the wakeup safe
-        // against a recv thread that has evaluated the predicate but not yet parked:
-        // either it is already waiting (and this notify reaches it), or it evaluates
-        // the predicate after this store and never waits at all.
-        const std::lock_guard<tr::mutex_t> lk(backoff_m_);
-    }
-    backoff_cv_.notify_all();
-    // CONDEMN an in-flight dial rather than wait for it (#1058). `esp_transport_connect`
-    // takes no cancellation, so the dial cannot be stopped — but the destroying task does
-    // not have to pay for it. Taking `dial_->m` is the LINEARIZATION POINT of the whole
-    // scheme, and it has no window on either side: `stop_` was stored above, BEFORE this
-    // lock, and connect_once() publishes `in_flight` under this same lock only after
-    // re-reading `stop_` under it. So either the recv thread gets here first and this sees
-    // an in-flight dial to condemn, or this gets here first and that dial never starts.
-    //
-    // A condemned dial owns its transport pair (the members are null for the whole of a
-    // dial) and releases it when the call resolves, so detaching leaks nothing: what it
-    // costs is one recv-thread stack — the one already allocated, no new thread — held for
-    // the remainder of kDialTimeoutMs. That is the price of not charging this task for a
-    // blocking call it cannot interrupt, and it is stated in the header's threading note.
-    {
-        const std::lock_guard<tr::mutex_t> lk(dial_->m);
-        if (dial_->in_flight) {
-            dial_->condemned = true;
-            dial_orphaned_ = true;
+    // makes a second disarm — the destructor after an owner's shut_down — a no-op.
+    if (!stop_.exchange(true, std::memory_order_acq_rel)) {
+        connected_.store(false, std::memory_order_release);
+        {
+            // Taking the backoff mutex before notifying is what makes the wakeup safe
+            // against a recv thread that has evaluated the predicate but not yet parked:
+            // either it is already waiting (and this notify reaches it), or it evaluates
+            // the predicate after this store and never waits at all.
+            const std::lock_guard<tr::mutex_t> lk(backoff_m_);
+        }
+        backoff_cv_.notify_all();
+        // CONDEMN an in-flight dial rather than wait for it (#1058). `esp_transport_connect`
+        // takes no cancellation, so the dial cannot be stopped — but the destroying task does
+        // not have to pay for it. Taking `dial_->m` is the LINEARIZATION POINT of the whole
+        // scheme, and it has no window on either side: `stop_` was stored above, BEFORE this
+        // lock, and connect_once() publishes `in_flight` under this same lock only after
+        // re-reading `stop_` under it. So either the recv thread gets here first and this sees
+        // an in-flight dial to condemn, or this gets here first and that dial never starts.
+        //
+        // A condemned dial owns its transport pair (the members are null for the whole of a
+        // dial) and releases it when the call resolves, so detaching leaks nothing: what it
+        // costs is one recv-thread stack — the one already allocated, no new thread — held for
+        // the remainder of kDialTimeoutMs. That is the price of not charging this task for a
+        // blocking call it cannot interrupt, and it is stated in the header's threading note.
+        {
+            const std::lock_guard<tr::mutex_t> lk(dial_->m);
+            if (dial_->in_flight) {
+                dial_->condemned = true;
+                dial_orphaned_ = true;
+            }
         }
     }
+    // Deferred on a thread that runs link callbacks (the recv thread among them): it only
+    // shuts down. The destructor joins the recv thread and releases the connection.
+    if (on_callback_thread()) return;
     if (dial_orphaned_ && recv_thread_.joinable()) {
         ESP_LOGI(kTag, "torn down mid-dial: the dial is orphaned, not waited out");
         recv_thread_.detach();
@@ -620,8 +626,10 @@ void esp_ws_client_link_t::shut_down() {
 
 esp_ws_client_link_t::~esp_ws_client_link_t() {
     // Shut down now, free here (#1606): an owner that already called shut_down() at the
-    // link's removal finds this a no-op, and the destructor — at the graph's collect() —
-    // only waits out the senders and returns the memory.
+    // link's removal finds the disarm done, and the destructor — at the graph's collect() —
+    // joins the recv thread if that shut_down was deferred, waits out the senders and
+    // returns the memory. Destructors always join, off every callback thread.
+    assert(!on_callback_thread() && "a link's destructor runs off every callback thread");
     shut_down();
     // The slot has exactly one owner left (#1880): a condemned dial returns it itself as it
     // resolves, so only a slot with no dial in flight is this destructor's to return.
@@ -1108,6 +1116,7 @@ void esp_ws_client_link_t::write_locked(std::span<const std::byte> wire) {
 }
 
 void esp_ws_client_link_t::recv_loop() {
+    const callback_thread_scope_t delivering;  // a teardown made here waits for nothing
     // The connection's framing (#2484): core's RFC 6455 receive rules over the raw TCP bytes,
     // on this thread's stack. Every body is received into a segment of its exact length drawn
     // from the link's own source — `memory.rx` when the application named one (#1661),

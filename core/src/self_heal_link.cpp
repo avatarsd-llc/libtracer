@@ -12,11 +12,13 @@
 
 #include "libtracer/self_heal_link.hpp"
 
+#include <cassert>
 #include <optional>
 #include <utility>
 
 #include "libtracer/frame.hpp"
 #include "libtracer/sync.hpp"
+#include "libtracer/wait.hpp"
 
 namespace tr::net {
 
@@ -52,9 +54,18 @@ self_heal_link_t::self_heal_link_t(transport_factory_t factory, conn_settings_t 
       src_(src),
       stack_(stack) {}
 
-self_heal_link_t::~self_heal_link_t() { stop(); }
+self_heal_link_t::~self_heal_link_t() {
+    assert(!on_callback_thread() && "a link's destructor runs off every callback thread");
+    halt(false);
+    // A send routed by a frame has returned by now (the engine is freed where no frame can
+    // reach it); one made directly and still in flight frees its socket through the
+    // socket's own source (#2288).
+    (void)drop_corpses(std::exchange(corpses_, nullptr), true);
+}
 
 void self_heal_link_t::shut_down() { stop(); }
+
+void self_heal_link_t::stop() { halt(on_callback_thread()); }
 
 void self_heal_link_t::set_liveness_publisher(liveness_publish_fn_t fn) {
     const std::lock_guard l(m_);
@@ -80,17 +91,37 @@ void self_heal_link_t::park_locked(sock_ref_t dead) noexcept {
     if (s == nullptr) return;
     s->next_corpse = corpses_;
     corpses_ = s;
+    reap_due_ = true;
 }
 
-void self_heal_link_t::drop_corpses(sock_t* head) noexcept {
+self_heal_link_t::sock_t* self_heal_link_t::drop_corpses(sock_t* head, bool all) noexcept {
+    sock_t* kept = nullptr;
     while (head != nullptr) {
         sock_t* const next = head->next_corpse;
-        // Shut down BEFORE the list lets go: a send in flight may hold the socket past the
-        // engine, and the join here is what stops its receive thread reaching the engine
-        // (#2288). The last hold, wherever it drops, then frees through `sock_t::src`.
+        // Shut down before the list lets go, so its receive thread stops reaching the engine
+        // (#2288).
         head->link->shut_down();
-        sock_ref_t{head}.reset();  // the list's hold; the last one destroys the socket
+        // The list's hold is the last one to go. A corpse is out of `inner_`, so no new hold
+        // is taken on it: when the count is one, this release destroys it, here. Otherwise a
+        // send still holds it, and the list keeps it for a later reap or the destructor.
+        if (all || head->refs.load(std::memory_order_acquire) == 1) {
+            sock_ref_t{head}.reset();
+        } else {
+            head->next_corpse = kept;
+            kept = head;
+        }
         head = next;
+    }
+    return kept;
+}
+
+void self_heal_link_t::keep_corpses(sock_t* kept) noexcept {
+    // Back on the list without `reap_due_`: the worker retries them at its next reap.
+    while (kept != nullptr) {
+        sock_t* const next = kept->next_corpse;
+        kept->next_corpse = corpses_;
+        corpses_ = kept;
+        kept = next;
     }
 }
 
@@ -171,15 +202,19 @@ void self_heal_link_t::release() {
     cv_.notify_all();
 }
 
-void self_heal_link_t::stop() {
+void self_heal_link_t::halt(bool defer) {
+    // Deferred (a teardown on a thread that runs link callbacks) nothing here waits: the
+    // worker could be reaping a socket whose callback is this one, and a socket's own thread
+    // could be the one asking. The stop is still made; the destructor joins and frees what is
+    // left.
     bool started = false;
     {
         const std::lock_guard l(m_);
         stop_ = true;
         // Claim the worker under the lock and clear the flag, so a second `stop()` (the
         // destructor after an explicit one) joins nothing rather than joining twice.
-        started = worker_started_;
-        worker_started_ = false;
+        started = worker_started_ && !defer;
+        if (!defer) worker_started_ = false;
         cv_.notify_all();
     }
     if (started) worker_.join();
@@ -195,7 +230,20 @@ void self_heal_link_t::stop() {
         live_gen_ = 0;
         state_ = link_state_t::DORMANT;  // terminal resting value; nothing publishes it
     }
-    drop_corpses(dead);
+    if (!defer) {
+        // A corpse a send still holds stays on the list, for the destructor.
+        sock_t* const kept = drop_corpses(dead);
+        const std::lock_guard l(m_);
+        keep_corpses(kept);
+        return;
+    }
+    // Deferred: shut down (which waits for nothing here), and kept for the destructor.
+    for (sock_t* s = dead; s != nullptr; s = s->next_corpse) s->link->shut_down();
+    const std::lock_guard l(m_);
+    sock_t** tail = &dead;
+    while (*tail != nullptr) tail = &(*tail)->next_corpse;
+    *tail = corpses_;  // a socket the worker parked meanwhile
+    corpses_ = dead;
 }
 
 void self_heal_link_t::send(std::span<const std::byte> frame) {
@@ -272,15 +320,22 @@ void self_heal_link_t::publish_unlocked(std::unique_lock<tr::mutex_t>& l, link_s
     // re-enters `send` (which takes `m_`).
     const liveness_publish_fn_t fn = publish_;
     l.unlock();
-    if (fn) fn(s);
+    if (fn) {
+        // The publish delivers the link's callbacks (liveness subscribers): a removal made
+        // from one waits for nothing, and the worker never joins itself.
+        const callback_thread_scope_t delivering;
+        fn(s);
+    }
     l.lock();
 }
 
 void self_heal_link_t::reap_locked(std::unique_lock<tr::mutex_t>& l) {
     sock_t* const dead = std::exchange(corpses_, nullptr);
+    reap_due_ = false;
     l.unlock();
-    drop_corpses(dead);  // joins each dead socket's receive thread — hence outside `m_`
+    sock_t* const kept = drop_corpses(dead);  // joins receive threads — hence outside `m_`
     l.lock();
+    keep_corpses(kept);
 }
 
 bool self_heal_link_t::wire_socket(sock_t& sock) {
@@ -384,11 +439,11 @@ void self_heal_link_t::worker_main() {
         // wakeup at all (#2304). An attempt is released by a demand (`demand_locked`), by a
         // loss, or by the app's `now` passing `retry_at_` (`sweep`).
         cv_.wait(l, [&] {
-            return stop_ || corpses_ != nullptr || publish_pending_ || attempt_due_ ||
+            return stop_ || reap_due_ || publish_pending_ || attempt_due_ ||
                    (state_ == link_state_t::RECONNECTING && refs_ == 0);
         });
         if (stop_) break;
-        if (corpses_ != nullptr) {
+        if (reap_due_) {
             reap_locked(l);
             continue;  // re-evaluate: state may have moved while unlocked
         }

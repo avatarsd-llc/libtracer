@@ -458,7 +458,8 @@ class esp_ws_client_link_t final : public transport_t {
      * `send()` after this is shed without touching a handle and without counting a drop.
      * Its cost is the destructor's worst case, `kPollMs + kWriteBudgetMs`; a dial in flight
      * is condemned rather than waited out, as there. IDEMPOTENT, and safe to follow with
-     * the destructor.
+     * the destructor. On a thread that runs link callbacks (the recv thread among them) it
+     * only shuts down: the destructor joins the recv thread and releases the connection.
      */
     void shut_down() override;
 
