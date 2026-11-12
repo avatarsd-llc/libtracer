@@ -772,16 +772,12 @@ void slot_server_t::accept_peer() {
     slot->write.store(false, std::memory_order_relaxed);
     slot->fd.store(fd, std::memory_order_release);
     // On the wait before it opens, so a first frame the socket holds can arm writability. A
-    // refused registration refuses the peer, as the cap does.
-    if (!waiter().attach(*slot)) {
-        teardown_slot(*slot);
-        return;
-    }
-    // A slot taken before a deferred teardown walked the table may be attached after it: on a
-    // shut link the session is torn down here. Read after the attach (seq_cst, against the
-    // mark the teardown stores before its walk), so either this sees the link shut or the
-    // walk's detach follows the attach.
-    if (shut_seq()) {
+    // refused registration refuses the peer, as the cap does. A slot taken before a deferred
+    // teardown walked the table may be attached after it: on a shut link the session is torn
+    // down the same way. That read comes after the attach (seq_cst, against the mark the
+    // teardown stores before its walk), so either it sees the link shut or the walk's detach
+    // follows the attach.
+    if (!waiter().attach(*slot) || shut_seq()) {
         teardown_slot(*slot);
         return;
     }
@@ -789,12 +785,14 @@ void slot_server_t::accept_peer() {
     // broadcast that lands here must skip the slot rather than write to fd -1 (`tcp_test`,
     // the accept-publish race).
     on_slot_publishing();
-    if (opens_now) open_session(*slot);
     // Arrival seam (#1223), fired LAST and with no transport lock held — the mirror image of
     // teardown_slot's departure seam, in every respect including the `open` condition: only a
     // session that reached `open` can flow frames, so only one gets an identity. A WS slot is
     // NOT open here (it opens at its 101), and announces itself from that site instead.
-    if (opens_now) publish_peer_up(*slot);
+    if (opens_now) {
+        open_session(*slot);
+        publish_peer_up(*slot);
+    }
 }
 
 void slot_server_t::open_session(session_base_t& s, std::span<const std::byte> first) {
