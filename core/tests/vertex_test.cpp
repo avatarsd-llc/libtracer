@@ -326,6 +326,9 @@ void test_bookkeeping_counters() {
     std::printf("RFC-0005 listener bookkeeping counters:\n");
     vertex_t v{role_t::STORED_VALUE, key_of({0x07}), {}};
     check(v.own_subs() == 0 && v.listeners_above() == 0, "counters start at zero");
+    check(!v.has_edges() && v.own_subs_ordered() == 0, "no edge block, so the gate reads zero");
+    check(v.reserve_edges(tr::mem::table_source()), "the count's edge block is reserved");
+    check(v.own_subs_ordered() == 0, "a reserved block alone still reads zero");
     v.bump_own_subs(+1);
     v.bump_own_subs(+1);
     v.bump_own_subs(-1);
