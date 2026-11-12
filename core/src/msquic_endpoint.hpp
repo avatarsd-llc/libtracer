@@ -55,6 +55,7 @@
 #include <msquic.h>
 
 #include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -75,6 +76,7 @@
 #include "libtracer/status.hpp"
 #include "libtracer/tls_profile.hpp"
 #include "libtracer/transport.hpp"
+#include "libtracer/wait.hpp"
 
 #if defined(__SANITIZE_THREAD__)
 #define LIBTRACER_TSAN 1
@@ -454,10 +456,11 @@ class msquic_endpoint_t {
      * receiver_slot.hpp. A malformed (oversize) prefix cannot be re-framed:
      * it is counted and the connection is shut down.
      *
-     * @return False when the connection was shut down — the caller stops
-     *         consuming this event's remaining chunks.
+     * @return False when the connection was shut down, or the link is shut — the caller
+     *         stops consuming this event's remaining chunks.
      */
     bool on_rx_chunk(const std::uint8_t* p, std::size_t n) {
+        if (stopping.load(std::memory_order_relaxed)) return false;  // shut: delivers nothing
         const auto res = framer_.feed(
             *backend, max_frame, reinterpret_cast<const std::byte*>(p), n,
             [this](view::segment_ptr_t seg, std::size_t len) {
@@ -732,6 +735,18 @@ class msquic_endpoint_t {
     /** @} */
 
     /**
+     * @brief The deferred teardown, for a `shut_down` on a thread that runs link callbacks:
+     *        it only shuts down; it closes nothing. Stops delivery and departures, refuses
+     *        new peers, and shuts the live connection down (which waits for nothing). Every
+     *        handle stays owned and open until the destructor's @ref teardown.
+     */
+    void shut() noexcept {
+        if (api == nullptr) return;
+        stopping.store(true, std::memory_order_relaxed);
+        shutdown_conn(0);
+    }
+
+    /**
      * @brief The 5-step teardown (the msquic contract, ASan-audited — see the
      *        file header). MUST be called by the derived impl_t destructor as
      *        its FIRST act: step 2/3's stream harvest dispatches to the
@@ -739,6 +754,9 @@ class msquic_endpoint_t {
      */
     void teardown() noexcept {
         if (api == nullptr) return;  // MsQuicOpen2 failed — nothing to unwind
+        // Each Close below waits for that handle's callbacks, so it runs off every callback
+        // thread: from the destructor, or a shut_down made on an application thread.
+        assert(!on_callback_thread() && "a QUIC teardown runs off every callback thread");
         // Our own teardown: latch the departure guard BEFORE any Close, so a
         // shutdown callback draining under the Closes below cannot fire the
         // link-down notifier into a routing plane being disposed (the
@@ -820,7 +838,8 @@ class msquic_endpoint_t {
      *         hooks, and dispatch to the stream-adoption virtual. */
     static QUIC_STATUS QUIC_API conn_cb(HQUIC conn_h, void* ctx, QUIC_CONNECTION_EVENT* ev) {
         auto* self = static_cast<msquic_endpoint_t*>(ctx);
-        const tsan_cb_guard_t guard(self);  // msquic serializes callbacks (see file top)
+        const tsan_cb_guard_t guard(self);         // msquic serializes callbacks (see file top)
+        const callback_thread_scope_t delivering;  // a teardown made here waits for nothing
         switch (ev->Type) {
             case QUIC_CONNECTION_EVENT_CONNECTED:
                 // The hook first: a dialer's frame stream is in place before link_up() says
@@ -858,7 +877,9 @@ class msquic_endpoint_t {
                                             QUIC_LISTENER_EVENT* ev) {
         auto* self = static_cast<msquic_endpoint_t*>(ctx);
         const tsan_cb_guard_t guard(self);  // msquic serializes callbacks (see file top)
+        const callback_thread_scope_t delivering;
         if (ev->Type != QUIC_LISTENER_EVENT_NEW_CONNECTION) return QUIC_STATUS_SUCCESS;
+        if (self->stopping.load(std::memory_order_relaxed)) return QUIC_STATUS_CONNECTION_REFUSED;
 
         // ONE peer at a time (the tcp_transport_t / ws_server_transport_t
         // model): refuse a second while the first is up; a DEPARTED peer's

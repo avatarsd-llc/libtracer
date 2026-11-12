@@ -51,6 +51,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_webtransport.hpp"
+#include "libtracer/wait.hpp"
 #include "raw_wt_client.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
@@ -1645,6 +1646,52 @@ void test_start_receiving_is_inert_where_it_must_be() {
 
 }  // namespace
 
+/**
+ * @brief A session shut down from its own callback: a `shut_down` made on a thread that runs
+ *        link callbacks only shuts down and waits for nothing; it delivers nothing after; the
+ *        destructor, on an application thread, closes every handle.
+ */
+void test_shut_down_from_its_own_callback() {
+    std::printf("WebTransport — shut down from its own receive callback:\n");
+    std::atomic<int> delivered{0};
+    std::atomic<bool> on_callback{false};
+    std::atomic<bool> shut_returned{false};
+    webtransport_transport_t* listener_p = nullptr;
+    auto listener_rx = [&](std::span<const std::byte>) {
+        if (delivered.fetch_add(1) != 0) return;
+        on_callback.store(tr::net::on_callback_thread());
+        listener_p->shut_down();  // the removal, delivered on the link's own callback
+        shut_returned.store(true);
+    };
+    {
+        webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+        listener_p = &listener;
+        listener.set_receiver(listener_rx);
+        webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
+        check(wait_session(dialer), "the dialed session comes up");
+        const auto deadline = std::chrono::steady_clock::now() + 3s;
+        while (!listener.session_up() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(5ms);
+        check(listener.session_up(), "server reports the session up");
+        dialer.send(test_frame(5, 0x10));
+        bool returned = false;
+        for (int i = 0; i < 2500 && !returned; ++i) {
+            returned = shut_returned.load();
+            if (!returned) std::this_thread::sleep_for(2ms);
+        }
+        check(returned, "the shut_down made on its own callback returned");
+        if (!returned) {
+            std::printf("webtransport: FAIL (stuck; exiting)\n");
+            std::fflush(stdout);
+            std::_Exit(1);
+        }
+        check(on_callback.load(), "msquic's callback runs as a callback thread");
+        dialer.send(test_frame(7, 0x20));
+        std::this_thread::sleep_for(200ms);
+        check(delivered.load() == 1, "the shut session delivers nothing after");
+    }  // destroyed here, on this thread: the destructor's teardown closes every handle
+}
+
 int main() {
     // Generate the self-signed dev pair once (tools/gen-dev-cert.sh) — the
     // LISTEN-side credential every test below serves.
@@ -1695,5 +1742,6 @@ int main() {
     test_peer_stream_cycling_is_bounded();
     test_push_on_session_waits_for_start_receiving();
     test_start_receiving_is_inert_where_it_must_be();
+    test_shut_down_from_its_own_callback();
     return tr::testing::summary("webtransport");
 }

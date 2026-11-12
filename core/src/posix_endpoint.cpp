@@ -772,8 +772,12 @@ void slot_server_t::accept_peer() {
     slot->write.store(false, std::memory_order_relaxed);
     slot->fd.store(fd, std::memory_order_release);
     // On the wait before it opens, so a first frame the socket holds can arm writability. A
-    // refused registration refuses the peer, as the cap does.
-    if (!waiter().attach(*slot)) {
+    // refused registration refuses the peer, as the cap does. A slot taken before a deferred
+    // teardown walked the table may be attached after it: on a shut link the session is torn
+    // down the same way. That read comes after the attach (seq_cst, against the mark the
+    // teardown stores before its walk), so either it sees the link shut or the walk's detach
+    // follows the attach.
+    if (!waiter().attach(*slot) || shut_seq()) {
         teardown_slot(*slot);
         return;
     }
@@ -781,12 +785,14 @@ void slot_server_t::accept_peer() {
     // broadcast that lands here must skip the slot rather than write to fd -1 (`tcp_test`,
     // the accept-publish race).
     on_slot_publishing();
-    if (opens_now) open_session(*slot);
     // Arrival seam (#1223), fired LAST and with no transport lock held — the mirror image of
     // teardown_slot's departure seam, in every respect including the `open` condition: only a
     // session that reached `open` can flow frames, so only one gets an identity. A WS slot is
     // NOT open here (it opens at its 101), and announces itself from that site instead.
-    if (opens_now) publish_peer_up(*slot);
+    if (opens_now) {
+        open_session(*slot);
+        publish_peer_up(*slot);
+    }
 }
 
 void slot_server_t::open_session(session_base_t& s, std::span<const std::byte> first) {
@@ -856,6 +862,9 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     // to a closed or reused descriptor. A stalled peer's frames and strikes die with its
     // session and are never inherited by whoever next claims this slot (#838).
     const bool was_open = s.open.exchange(false, std::memory_order_acq_rel);
+    if constexpr (graph::kFaultInjection) {
+        if (detail::slot_teardown_hook != nullptr) detail::slot_teardown_hook();
+    }
     if (wait_module_t* const w = waiting()) w->detach(s);  // no callback for it runs after
     const int fd = s.fd.load(std::memory_order_seq_cst);
     if (fd >= 0) ::shutdown(fd, SHUT_RDWR);

@@ -575,6 +575,13 @@ void test_listener_removed_by_another_link_while_peers_arrive() {
     check_or_exit(eventually([&] { return !b.has("net/tcp-server/srv"); }),
                   "the listener's teardown completes while its accept is parked");
     g_accept_park.released.store(true, std::memory_order_relaxed);
+    // Released, the accept attaches the session it took before the walk; on the shut link it
+    // tears it down at once, so the peer reads end-of-stream before any collect().
+    timeval tv{.tv_sec = 2, .tv_usec = 0};
+    (void)::setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    char byte = 0;
+    check(::recv(peer, &byte, 1, 0) == 0,
+          "the session the accept attached after the teardown is shut down at once");
     (void)a.router.cancel(slot);
     check(eventually([&] {
               b.g.collect();

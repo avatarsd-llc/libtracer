@@ -63,6 +63,7 @@ struct quic_transport_t::impl_t : msquic_endpoint_t {
     static QUIC_STATUS QUIC_API stream_cb(HQUIC /*stream*/, void* ctx, QUIC_STREAM_EVENT* ev) {
         auto* self = static_cast<impl_t*>(ctx);
         const tsan_cb_guard_t guard(self);  // msquic serializes callbacks (see the base header)
+        const callback_thread_scope_t delivering;
         switch (ev->Type) {
             case QUIC_STREAM_EVENT_RECEIVE:
                 for (std::uint32_t i = 0; i < ev->RECEIVE.BufferCount; ++i) {
@@ -222,7 +223,14 @@ quic_transport_t::~quic_transport_t() = default;  // ~impl_t runs the base teard
 // such a link is inert — never ok(), never up, sends nothing, counts nothing.
 
 void quic_transport_t::shut_down() {
-    if (impl_) impl_->teardown();  // idempotent; the destructor's own teardown is then a no-op
+    if (!impl_) return;
+    // Deferred on a thread that runs link callbacks: it only shuts down, and the destructor
+    // closes every handle. Otherwise the teardown runs here, idempotent, and the destructor's
+    // own is then a no-op.
+    if (on_callback_thread())
+        impl_->shut();
+    else
+        impl_->teardown();
 }
 
 void quic_transport_t::send(std::span<const std::byte> frame) {
