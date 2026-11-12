@@ -777,7 +777,8 @@ void slot_server_t::accept_peer() {
     // A new peer starts alive (#2198): the next liveness check stamps its record.
     slot->tx_moved.store(true, std::memory_order_relaxed);
     slot->rx_moved.store(true, std::memory_order_relaxed);
-    slot->rx_owed.store(mid_frame(*slot), std::memory_order_release);
+    // Relaxed: the fd's release below publishes all three, and the check acquires the fd.
+    slot->rx_owed.store(mid_frame(*slot), std::memory_order_relaxed);
     // Publish the fd FIRST, then open the session: "open ⇒ fd valid" is the invariant (#891).
     // A sender reads the fd only inside the session's egress role, and the role cannot be
     // claimed until the egress opens — a release a claim's acquire pairs with — so no sender
