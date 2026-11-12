@@ -922,7 +922,7 @@ struct inbound_probe_t {
         cv.notify_all();
     }
     /** @brief The `{fn, ctx}` link-down notifier: record the answer outside a delivery. */
-    static void on_down(void* ctx) {
+    static void on_down(void* ctx, bool /*up*/) {
         auto* self = static_cast<inbound_probe_t*>(ctx);
         {
             const std::lock_guard lock(self->m);
@@ -954,7 +954,7 @@ void test_flat_server_inbound_peer_only_inside_a_delivery() {
     check(server.ok(), "flat server bound");
     probe.link = &server;
     server.set_receiver(probe);
-    server.set_down_notifier(&inbound_probe_t::on_down, &probe);
+    server.set_link_state_notifier(&inbound_probe_t::on_down, &probe);
 
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client connected + 101 handshake");
@@ -1492,7 +1492,7 @@ std::vector<std::byte> oversize_server_control(ws::opcode_t op, std::size_t decl
 /**
  * @brief The link-down seam, latched.
  *
- * `%transport_t::set_down_notifier` is how the routing plane learns a point-to-point link
+ * `%transport_t::set_link_state_notifier` is how the routing plane learns a point-to-point link
  * died (RFC-0009 §D extended to peer departure). It is the client's OWN report that it
  * failed the connection, which is a strictly different observable from the peer's socket
  * going away: a client that dropped the fd without taking the teardown path would satisfy
@@ -1503,8 +1503,8 @@ struct down_latch_t {
     std::condition_variable cv;
     bool fired = false;
 
-    /** @brief The `%transport_t::down_fn_t` entry point; @p ctx is the latch. */
-    static void notify(void* ctx) {
+    /** @brief The `%transport_t::link_state_fn_t` entry point; @p ctx is the latch. */
+    static void notify(void* ctx, bool /*up*/) {
         auto* self = static_cast<down_latch_t*>(ctx);
         {
             const std::lock_guard lock(self->m);
@@ -1600,7 +1600,7 @@ control_breach_outcome_t drive_control_breach(std::span<const std::byte> breach)
         out.link_up_before = client.link_up();
         out.malformed_before = client.drop_stats().malformed_rx;
         client.set_receiver(sink);
-        client.set_down_notifier(&down_latch_t::notify, &latch);
+        client.set_link_state_notifier(&down_latch_t::notify, &latch);
         client.start_receiving();
         armed.set_value();
 
@@ -1697,7 +1697,7 @@ void test_client_answers_a_control_frame_at_the_bound_masked() {
         tr::net::ws_client_transport_t client("127.0.0.1", port);
         check(client.ok(), "the client completed its opening handshake");
         client.set_receiver(sink);
-        client.set_down_notifier(&down_latch_t::notify, &latch);
+        client.set_link_state_notifier(&down_latch_t::notify, &latch);
         client.start_receiving();
         armed.set_value();
 

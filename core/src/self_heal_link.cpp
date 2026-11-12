@@ -359,8 +359,9 @@ bool self_heal_link_t::wire_socket(sock_t& sock) {
             },
             &sock);
     }
-    const bool went_down = sock.link->set_down_notifier(
-        [](void* c) {
+    const bool went_down = sock.link->set_link_state_notifier(
+        [](void* c, bool up) {
+            if (up) return;  // the socket is UP when this attempt returns; only a loss heals
             auto* const s = static_cast<sock_t*>(c);
             s->self->on_socket_down(*s);
         },

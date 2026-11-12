@@ -755,7 +755,7 @@ class fwd_router_t {
      * filed under it is released (ADR-0084).
      *
      * `add_child` installs this automatically behind every child's departure notifier
-     * (`transport_t::set_down_notifier` with the child's registered NAME; the bus facet's
+     * (`transport_t::set_link_state_notifier` with the child's registered NAME; the bus facet's
      * `bus_link_t::set_peer_down_notifier` with the departed PEER's name — the same name
      * inbound frames were tagged with, hence the name subscriber edges stored). A host
      * that learns of a departure out-of-band (its own session manager) may call it
@@ -766,7 +766,7 @@ class fwd_router_t {
      *
      * Runs on the calling thread (typically a transport receive/close thread) and takes
      * graph locks — callers must hold no transport-internal locks (the
-     * `set_down_notifier` calling discipline).
+     * `set_link_state_notifier` calling discipline).
      * @param link_name The routing plane's inbound NAME for the departed link/peer.
      */
     void link_down(std::string_view link_name);

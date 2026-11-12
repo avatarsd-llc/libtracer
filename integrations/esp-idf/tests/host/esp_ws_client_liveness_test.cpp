@@ -24,7 +24,7 @@
  *      ordinary poll/read error. What is pinned here is that the four options are applied
  *      on the dialed socket, with the enable present — the tunables alone are inert.
  *
- *   2. REPORTING. `transport_t::set_down_notifier` is the one departure seam a
+ *   2. REPORTING. `transport_t::set_link_state_notifier` is the one departure seam a
  *      point-to-point link has (`fwd_router_t::add_child` wires it to the eviction of
  *      that child's subscriber edges). This link used to fire it from
  *      NOWHERE: peer CLOSE, a read error, a poll error and a failed write were all
@@ -148,8 +148,8 @@ int opt_value(int level, int optname) {
  *         assertion can compare an after against a before. */
 class down_counter_t {
    public:
-    /** @brief The `transport_t::down_fn_t` body — fired on the link's recv thread. */
-    static void fire(void* ctx) {
+    /** @brief The `transport_t::link_state_fn_t` body — fired on the link's recv thread. */
+    static void fire(void* ctx, bool /*up*/) {
         static_cast<down_counter_t*>(ctx)->n_.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -227,7 +227,7 @@ void test_peer_close_reports_down() {
     down_counter_t down;
     {
         auto link = dialed_link();
-        link->set_down_notifier(&down_counter_t::fire, &down);
+        link->set_link_state_notifier(&down_counter_t::fire, &down);
         const int before = down.count();
         const int dials_before = fake_ws::connect_count();
         fake_ws::push_frames({close_frame()});
@@ -249,7 +249,7 @@ void test_second_death_reports_again() {
     down_counter_t down;
     {
         auto link = dialed_link();
-        link->set_down_notifier(&down_counter_t::fire, &down);
+        link->set_link_state_notifier(&down_counter_t::fire, &down);
         // Sampled BEFORE the first death: the report is made on the way to the re-dial,
         // so a sample taken after it has been observed can already include that re-dial.
         const int dials_before = fake_ws::connect_count();
@@ -275,7 +275,7 @@ void test_destructor_reports_nothing() {
     down_counter_t down;
     {
         auto link = dialed_link();
-        link->set_down_notifier(&down_counter_t::fire, &down);
+        link->set_link_state_notifier(&down_counter_t::fire, &down);
         check(link->link_up(), "the link is up before the teardown");
     }
     // Destroyed while CONNECTED: the destructor clears `connected_`, which is the same
@@ -296,7 +296,7 @@ void test_failed_dials_report_nothing() {
         auto link = tr::mem::make_poly<tr::net::esp_ws_client_link_t>(
             tr::mem::net_source(), "127.0.0.1", 8080,
             tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
-        link->set_down_notifier(&down_counter_t::fire, &down);
+        link->set_link_state_notifier(&down_counter_t::fire, &down);
         link->start_receiving();
         check(fake_ws::sweep_until(
                   *link, [] { return fake_ws::connect_count() >= 2; }, 6s),

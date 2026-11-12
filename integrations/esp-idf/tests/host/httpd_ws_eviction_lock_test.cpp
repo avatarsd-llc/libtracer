@@ -263,8 +263,10 @@ void test_dtor_joins_the_notification() {
 // #889 — a FLAT link reports the whole link down only on the LAST departure.
 // ---------------------------------------------------------------------------
 
-/** @brief The `transport_t::down_fn_t` thunk: counts WHOLE-LINK down notifications. */
-void on_link_down(void* ctx) { static_cast<std::atomic<unsigned>*>(ctx)->fetch_add(1); }
+/** @brief The `transport_t::link_state_fn_t` thunk: counts WHOLE-LINK down notifications. */
+void on_link_down(void* ctx, bool /*up*/) {
+    static_cast<std::atomic<unsigned>*>(ctx)->fetch_add(1);
+}
 
 /**
  * @brief #889 — the flat half of the same departure seam the two halves above pin.
@@ -287,7 +289,7 @@ void test_flat_link_down_only_on_last_session() {
     auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws");
     check(link->ok(), "the adopting link registered its URI");
     check(link->bus() == nullptr, "a flat link exposes no bus facet");
-    link->set_down_notifier(&on_link_down, &downs);
+    link->set_link_state_notifier(&on_link_down, &downs);
 
     // Both sessions provably claimed before anything closes — an assertion about "the last
     // session" is vacuous if the second peer never got admitted.

@@ -670,7 +670,7 @@ void refusals() {
 }
 
 /** @brief The link-down notifier as a counter. */
-void count_down(void* ctx) { ++*static_cast<int*>(ctx); }
+void count_down(void* ctx, bool /*up*/) { ++*static_cast<int*>(ctx); }
 
 /** @brief Bring pair @p n up: a handshake and one request and reply. */
 void bring_up(mem_pair_t& n) {
@@ -692,8 +692,8 @@ void rekey_under_traffic() {
     check(n.a.state() == link_state_t::UP, "  (setup: the link is up)");
     int downs_a = 0;
     int downs_b = 0;
-    (void)n.a.set_down_notifier(&count_down, &downs_a);
-    (void)n.b.set_down_notifier(&count_down, &downs_b);
+    (void)n.a.set_link_state_notifier(&count_down, &downs_a);
+    (void)n.b.set_link_state_notifier(&count_down, &downs_b);
     const std::size_t a_base = n.sink_a.frames.size();
     const std::size_t b_base = n.sink_b.frames.size();
     const std::size_t old_type_at = n.wire.log.size();
@@ -740,7 +740,7 @@ void session_deadlines() {
     mem_pair_t n(cfg, noise_config_t{mem_config()});
     bring_up(n);
     int downs = 0;
-    (void)n.a.set_down_notifier(&count_down, &downs);
+    (void)n.a.set_link_state_notifier(&count_down, &downs);
     check(n.a.sweep(1, 0) == 51, "  a session's age counts from the first sweep that sees it");
     const std::size_t sent = n.wire.log.size();
     const auto old_phase = n.wire.log[3].bytes;  // B's reply, under the first session
@@ -770,7 +770,7 @@ void nonce_limits() {
     mem_pair_t n;
     bring_up(n);
     int downs = 0;
-    (void)n.a.set_down_notifier(&count_down, &downs);
+    (void)n.a.set_link_state_notifier(&count_down, &downs);
     const auto transport = n.wire.log[2].bytes;
 
     tr::net::noise_link_test_door_t::set_send_nonce(n.a, noise::kRekeyNonce);
@@ -805,7 +805,7 @@ void responder_lost_the_session() {
     mem_pair_t n;
     bring_up(n);
     int downs = 0;
-    (void)n.a.set_down_notifier(&count_down, &downs);
+    (void)n.a.set_link_state_notifier(&count_down, &downs);
     test_host_t restarted_host;
     mem_link_t restarted(conn_role_t::LISTEN, restarted_host, mem_config(), n.wire, 1);
     sink_t restarted_sink;
@@ -838,8 +838,8 @@ void generation_rule() {
     mem_pair_t n;
     int downs_a = 0;
     int downs_b = 0;
-    (void)n.a.set_down_notifier(&count_down, &downs_a);
-    (void)n.b.set_down_notifier(&count_down, &downs_b);
+    (void)n.a.set_link_state_notifier(&count_down, &downs_a);
+    (void)n.b.set_link_state_notifier(&count_down, &downs_b);
     bring_up(n);
     check(downs_a == 1 && downs_b == 1, "  the first session is from a fresh peer, on both sides");
     n.a.rekey();
