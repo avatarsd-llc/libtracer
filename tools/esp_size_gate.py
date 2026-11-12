@@ -69,7 +69,9 @@ TRANSPORT_ROWS = (
     # arm and disarm, and the thread-per-link fallback's block (maintainer ruling 60).
     # 9,080 -> 9,262 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys back
     # ~110 B. Ruled at 9,264; pinned at the 9,262 measured on the rebased batch.
-    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9262, None),
+    # 9,262 -> 9,184 B (#2801): one shut-down walk of the sessions, the flat "any session
+    # open" read folded into the teardown's own lock, one shut_down override for both servers.
+    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9184, None),
     ("CAN (transport_can + TWAI link)", ("transport_can", "twai_link", "socketcan_link_stub"),
      None, "compiled, not linked: full_node creates no CAN connection, so --gc-sections drops it"),
     ("WebSocket (httpd server + client link)", ("httpd_ws_link", "esp_ws_client_link"),
