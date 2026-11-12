@@ -843,8 +843,13 @@ void slot_server_t::service_peer(session_base_t& s) {
 }
 
 void slot_server_t::teardown_slot(session_base_t& s) {
+    // Off the wait first: no callback for this slot runs after, so a shut-down walk never
+    // tears down a session under its own callback, and this is that walk's only detach.
+    if (wait_module_t* const w = waiting()) w->detach(s);
     char departed[kPeerNameChars];
     peer_handle_t departed_handle;
+    bool was_open = false;
+    bool open_left = false;
     {
         // Stop peer_link/enumerate resolution FIRST, so no new sender targets the dying
         // slot by name. Keep the name: it identifies the departed session to the eviction
@@ -857,17 +862,22 @@ void slot_server_t::teardown_slot(session_base_t& s) {
         // session's identity. `gen_seq` survives, so the next accept mints a fresh one.
         departed_handle = s.handle;
         s.handle = peer_handle_t{};
+        // Clear `open` and ask whether any session is still open in ONE critical section, so
+        // of concurrent teardowns (a shut-down walk and a peer's own departure) exactly one
+        // closes the last open session; the departing slot is already closed, so it never
+        // counts itself (#889). The lock also orders the table read after every growth.
+        was_open = s.open.exchange(false, std::memory_order_acq_rel);
+        for (const mem::poly_ptr_t<session_base_t>& o : slots_)
+            open_left |= o->open.load(std::memory_order_acquire);
     }
-    // The stream teardown-under-role invariant, per slot: clear `open`, shut the fd down so
-    // a write in flight returns, close the egress (which waits its writer out and releases
-    // every waiting frame), and only THEN reset and close the fd — so no sender ever writes
-    // to a closed or reused descriptor. A stalled peer's frames and strikes die with its
-    // session and are never inherited by whoever next claims this slot (#838).
-    const bool was_open = s.open.exchange(false, std::memory_order_acq_rel);
+    // The stream teardown-under-role invariant, per slot: shut the fd down so a write in
+    // flight returns, close the egress (which waits its writer out and releases every
+    // waiting frame), and only THEN reset and close the fd — so no sender ever writes to a
+    // closed or reused descriptor. A stalled peer's frames and strikes die with its session
+    // and are never inherited by whoever next claims this slot (#838).
     if constexpr (graph::kFaultInjection) {
         if (detail::slot_teardown_hook != nullptr) detail::slot_teardown_hook();
     }
-    if (wait_module_t* const w = waiting()) w->detach(s);  // no callback for it runs after
     const int fd = s.fd.load(std::memory_order_seq_cst);
     if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
     egress_.close(s.egress);  // once per open
@@ -884,37 +894,33 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     // FLAT link has ONE routing identity for every peer it carries — the registered child
     // NAME — so its only seam is the whole link. Firing that on a mid-life close evicts the
     // SURVIVING peers' edges too, which is why it waits for the last open session to go.
-    // The check runs on the driving thread with both transport locks released: `open` is
-    // mutated only here and in accept_peer, both on this thread, so no session can appear
-    // or vanish between the answer and the notification.
     if (was_open && departed[0] != '\0') {
         if (bus_mode())
             announce_peer_down(departed_handle, departed);
-        else if (!any_open_session())
+        else if (!open_left)
             notify_down();
     }
 }
 
-void slot_server_t::shut_down_slots() {
-    // Off the wait first: once it returns no callback tears a slot down or reads the listen
-    // socket, so both are this call's alone. Deferred, the sockets are only shut down.
+void slot_server_t::shut_down_slots(bool tear_down) {
+    // The fallback thread and the listener first, for the reason posix_endpoint_t gives:
+    // `slots_` grows only in the listener's callback, so the table is then still, except
+    // against an accept already past its shut check on a deferred teardown (see
+    // accept_peer). Then ONE walk: each slot off the wait, and torn down for a shut_down.
     (void)stop_for_shut_down();
-    for (std::size_t i = 0; session_base_t* const s = slot_at(i); ++i) teardown_slot(*s);
+    for (std::size_t i = 0; session_base_t* const s = slot_at(i); ++i)
+        if (tear_down)
+            teardown_slot(*s);  // its first act is the slot's detach
+        else if (wait_module_t* const w = waiting())
+            w->detach(*s);
     release_listen(listen_fd_);
 }
 
+void slot_server_t::shut_down() { shut_down_slots(true); }
+
 void slot_server_t::stop_and_join() {
     assert(!on_callback_thread() && "a link's destructor runs off every callback thread");
-    (void)stop_for_shut_down();
-}
-
-bool slot_server_t::stop_for_shut_down() {
-    // The fallback thread and the listener first, for the reason posix_endpoint_t gives:
-    // `slots_` grows only in the listener's callback, so the table is then still.
-    const bool deferred = stream_endpoint_t::stop_for_shut_down();
-    if (wait_module_t* const w = waiting())
-        for (std::size_t i = 0; session_base_t* const s = slot_at(i); ++i) w->detach(*s);
-    return deferred;
+    shut_down_slots(false);
 }
 
 slot_server_t::session_base_t* slot_server_t::slot_at(std::size_t i) {
@@ -922,15 +928,6 @@ slot_server_t::session_base_t* slot_server_t::slot_at(std::size_t i) {
     // session, never removed once added, stays valid after it.
     const std::lock_guard lock(peers_m_);
     return i < slots_.size() ? slots_[i].get() : nullptr;
-}
-
-bool slot_server_t::any_open_session() const {
-    // Under the lock the accept grows the table under: a deferred teardown runs this off the
-    // driving thread.
-    const std::lock_guard lock(peers_m_);
-    for (const mem::poly_ptr_t<session_base_t>& s : slots_)
-        if (s->open.load(std::memory_order_acquire)) return true;
-    return false;
 }
 
 bool slot_server_t::serve(std::size_t stack_size, mem::block_source_t& stack_src) {

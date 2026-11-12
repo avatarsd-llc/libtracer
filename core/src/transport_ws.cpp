@@ -223,8 +223,6 @@ ws_server_transport_t::~ws_server_transport_t() {
     stop_and_join();
 }
 
-void ws_server_transport_t::shut_down() { shut_down_slots(); }
-
 mem::poly_ptr_t<slot_server_t::session_base_t> ws_server_transport_t::make_session() {
     mem::poly_ptr_t<session_t> slot =
         mem::make_poly<session_t>(slots_.source(), slots_.source(), *backend_);
