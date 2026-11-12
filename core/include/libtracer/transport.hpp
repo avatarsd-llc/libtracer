@@ -490,9 +490,9 @@ struct link_memory_t {
 };
 
 /**
- * @brief Why a link last dropped an outbound frame (#2788): the value of
- *        @ref transport_drop_stats_t::dropped_tx_cause and of the `dropped_tx_cause` noun of
- *        `:stats.link.<child>` (RFC-0010 Amendment 6). One byte, stored on the drop arm only.
+ * @brief Why a link last dropped an outbound frame (#2788): the value a drop snapshot's
+ *        `dropped_tx_cause` holds, and the `dropped_tx_cause` noun of `:stats.link.<child>`
+ *        (RFC-0010 Amendment 6). One byte, stored on the drop arm only.
  */
 enum class drop_cause_t : std::uint8_t {
     NONE = 0,            /**< @brief No outbound frame dropped since the link was constructed. */
