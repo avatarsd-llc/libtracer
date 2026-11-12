@@ -109,8 +109,12 @@ jobs:
       - name: Did anything a counted row is built from change?
         id: scope
         env:
+          # A dispatch has no `github.event.before`: it compares the dispatched ref with its
+          # merge base with origin/main, as a PR compares with its base (#2803).
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          EVENT: ${{ github.event_name }}
         run: |
+          if [ "$EVENT" = workflow_dispatch ]; then BASE=$(git merge-base origin/main HEAD 2>/dev/null || true); fi
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
              || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"; echo "base=" >> "$GITHUB_OUTPUT"
