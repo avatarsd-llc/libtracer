@@ -436,10 +436,12 @@ void stream_endpoint_t::flush_one(int fd) {
 }
 
 void stream_endpoint_t::disarm_flushed(wait_source_t& s, const egress_peer_t& peer) {
-    // Disarm once nothing is held, then look again: a sender that held a frame after the
-    // first look armed it, and this disarm may have landed after that arm.
-    if (peer.wants_write()) return;
-    waiter().want_write(s, false);
+    // Interest follows the held frame, armed here too: a session's first frame is flushed
+    // before any writability event, and one the socket cut short would otherwise wait for
+    // the next send (#2781). Then look again: a sender that held a frame after the first
+    // look armed it, and a disarm here may have landed after that arm.
+    const bool held = peer.wants_write();
+    waiter().want_write(s, held);
     if (peer.wants_write()) waiter().want_write(s, true);
 }
 
