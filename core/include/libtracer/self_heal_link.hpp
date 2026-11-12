@@ -149,7 +149,9 @@ class self_heal_link_t final : public transport_t {
                      std::span<const std::byte> raw_config, bool inner_delivers_ropes,
                      mem::block_source_t& src, mem::block_source_t& stack = mem::stack_source());
 
-    /** @brief Stops the engine (see @ref stop) and destroys any remaining socket. */
+    /** @brief Stops the engine (see @ref stop) and destroys any remaining socket. Runs off
+     *         every callback thread. A send made directly on the engine (not routed by a
+     *         frame) must be quiesced before the engine is destroyed. */
     ~self_heal_link_t();
 
     /** @brief See @ref transport_t::shut_down. */
@@ -201,10 +203,12 @@ class self_heal_link_t final : public transport_t {
     /**
      * @brief Stop the engine: join the worker, tear down every socket. Idempotent.
      *
-     * `transport_vertex_t::remove_connection` calls this BEFORE retiring the connection
-     * vertex, so no liveness write can land on a retired vertex; after it returns the
-     * engine publishes nothing and @ref send drops everything. A dial attempt in flight
-     * is waited for (the factory's own connect deadline bounds the wait).
+     * `transport_vertex_t::remove_connection` runs this through @ref shut_down once its own
+     * locks are released. After it returns @ref send drops everything, and a liveness
+     * publish still in flight finds the connection gone. A dial attempt in flight is waited
+     * for (the factory's own connect deadline bounds the wait). On a thread that runs link
+     * callbacks (`%tr::net::on_callback_thread`) it waits for nothing: it stops the worker and
+     * shuts the sockets down, and the destructor joins and frees them.
      */
     void stop();
 
@@ -290,8 +294,9 @@ class self_heal_link_t final : public transport_t {
     /**
      * @brief One counted hold on a `sock_t` — what `inner_` and an in-flight send keep.
      *        The last hold to go destroys the socket (joining its receive thread) and
-     *        returns its block, on whichever thread drops it, as the `std::shared_ptr` it
-     *        replaces did.
+     *        returns its block. That last hold is always the corpse list's, dropped by the
+     *        worker or the destructor, never a send's: the list lets go only of a corpse no
+     *        one else holds.
      */
     class sock_ref_t {
        public:
@@ -375,11 +380,22 @@ class self_heal_link_t final : public transport_t {
      *         link, or on a `RECONNECTING` one that no app clock drives. Caller holds `m_`. */
     void demand_locked();
 
+    /** @brief The body of @ref stop and of the destructor: stop the worker and tear every
+     *         socket down. @p defer (a teardown on a callback thread only, never the
+     *         destructor) joins nothing and shuts the sockets down, keeping them for the
+     *         destructor. */
+    void halt(bool defer);
+
     /** @brief Park @p dead on the corpse list (it adopts the hold); caller holds `m_`. */
     void park_locked(sock_ref_t dead) noexcept;
 
-    /** @brief Drop the list's hold on every corpse from @p head; call with `m_` RELEASED. */
-    static void drop_corpses(sock_t* head) noexcept;
+    /** @brief Shut every corpse from @p head down and drop the list's hold on each one that
+     *         no send still holds (every one when @p all); call with `m_` RELEASED.
+     *  @return The corpses kept, for `keep_corpses`. */
+    static sock_t* drop_corpses(sock_t* head, bool all = false) noexcept;
+
+    /** @brief Put corpses `drop_corpses` kept back on the list; caller holds `m_`. */
+    void keep_corpses(sock_t* kept) noexcept;
 
     /** @brief Serializes every engine transition. Ordering: `m_` is taken AFTER the
      *         owner's control mutex (acquire/release under `ctl_m_`) and never before it;
@@ -412,6 +428,7 @@ class self_heal_link_t final : public transport_t {
     bool stop_ = false;                          /**< @brief Terminal; set by @ref stop. */
     bool born_ = false;                          /**< @brief @ref born has run: the worker may
                                                              start (#2353). */
+    bool reap_due_ = false; /**< @brief A corpse was parked since the last reap. */
 
     sock_ref_t inner_;          /**< @brief The live socket (UP only). */
     sock_t* corpses_ = nullptr; /**< @brief Dead sockets awaiting reap — an intrusive list

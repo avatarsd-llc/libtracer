@@ -665,8 +665,12 @@ class transport_vertex_t {
      * note); only the routing entry and the vertex go.
      *
      * A node whose connections are removed must therefore call `graph_t::collect()` from time
-     * to time (any thread, any point: a frame still inside the link keeps it), or every
-     * removed link is kept until the graph is destroyed.
+     * to time (any thread outside a link callback; a frame still inside the link keeps it), or
+     * every removed link is kept until the graph is destroyed. Links removed from a callback
+     * are joined and freed at the next collect() or at graph destruction.
+     *
+     * An application liveness subscriber must not create or remove any connection from inside
+     * the liveness callback.
      *
      * This is the owner-internal operation the RFC-0014 `NAME`-write removal dispatch
      * (S2b) will call; it is not itself reachable from the wire.
@@ -816,14 +820,17 @@ class transport_vertex_t {
      * `%publish` is a `graph_t::write` that fans out to subscribers (a routing-plane
      * subscriber of a connection's own liveness is what S6 wires, and it drives
      * @ref transport_vertex_t::acquire_link — straight back into `ctl_m_`), and
-     * `%stop_engine` / `%destroy_link` JOIN a thread that may be inside such a
+     * `%destroy_link` JOINS threads that may be inside such a
      * fan-out. Held across `ctl_m_`, either one deadlocks a non-recursive mutex.
      *
      * An `OPERATION` keeps `ops_m_` for the WHOLE of both phases, which is what preserves
      * ADR-0063 §3's serialization promise now that the discharge is outside `ctl_m_`: two
      * mutations cannot interleave, so a deferred publish can no longer land on a vertex a
      * concurrent teardown is retiring. `ops_m_` is safe to hold there precisely because the
-     * doors a fan-out reaches never take it.
+     * doors a fan-out reaches never take it. A link's own callbacks can take it, though: an
+     * operation that arrived on a link runs on that link's receive path. So a teardown drops
+     * `ops_m_` too before it waits on the link it removes (its shut down and join), once the
+     * mutation itself is done; nothing it changes is left for a concurrent operation to see.
      *
      * A `LOOKUP` that collects nothing is a plain scoped lock — which is the point: every
      * acquisition of either mutex in this class goes through this type, so the re-entrancy
@@ -855,9 +862,6 @@ class transport_vertex_t {
         /** @brief Collect `fwd_router_t::remove_child(name)` — the un-route, first in phase 2. */
         void unroute(mem::string_t name);
 
-        /** @brief Collect `self_heal_link_t::stop()` on @p engine — JOINS its worker. */
-        void stop_engine(self_heal_link_t* engine);
-
         /** @brief Collect `self_heal_link_t::born()` on @p engine: it runs after the publish,
          *         so its worker cannot report a state the birth write would overwrite (#2353). */
         void born_engine(self_heal_link_t* engine);
@@ -879,7 +883,8 @@ class transport_vertex_t {
          *        park it, publish, let a new engine's worker run.
          *
          * `ops_m_`, if this is an `OPERATION`, is NOT dropped here: it is the destructor's,
-         * so the whole mutation stays one serialized step.
+         * so the whole mutation stays one serialized step, except before a teardown's waits on
+         * its link, whose callbacks may need it.
          *
          * Idempotent (a second call has nothing left to do), so the destructor may run it
          * again harmlessly after an explicit call.
@@ -893,12 +898,13 @@ class transport_vertex_t {
        private:
         /** @brief End phase 1: clear the `ctl_m_` stamp, then unlock it. Idempotent. */
         void release_lock();
+        /** @brief Clear the `ops_m_` stamp, then unlock it, if this holds it. Idempotent. */
+        void release_ops();
 
         const transport_vertex_t& owner_;
         std::unique_lock<tr::mutex_t> ops_lock_;    /**< @brief Engaged for an `OPERATION`. */
         std::unique_lock<tr::mutex_t> lock_;        /**< @brief `ctl_m_`; dropped by phase 2. */
         mem::string_t unroute_{mem::null_source()}; /**< @brief Empty = no un-route. */
-        self_heal_link_t* stop_ = nullptr;          /**< @brief Null = no engine to stop. */
         self_heal_link_t* born_ = nullptr;          /**< @brief Null = no engine to release. */
         transport_ptr_t destroy_;                   /**< @brief Null = nothing to destroy. */
         /** @brief The destroyed connection's config bytes; released after `destroy_`. */
@@ -1033,6 +1039,16 @@ class transport_vertex_t {
      */
     [[nodiscard]] graph::result_t<void> set_link_state_locked(ctl_txn_t& txn, std::string_view name,
                                                               link_state_t state);
+
+    /**
+     * @brief A self-healing connection's liveness transition, published by its engine's
+     *        worker: resolve the connection whose engine is @p engine and write @p state to
+     *        its vertex, or nothing once it is removed.
+     *
+     * An `OPERATION` of its own, so a publish and a teardown of the same connection never
+     * interleave, and no publish lands on a retired vertex.
+     */
+    graph::result_t<void> publish_engine_state(const self_heal_link_t* engine, link_state_t state);
 
     /**
      * @brief Serializes every CONTROL-PLANE mutation here (ADR-0063 §3).
