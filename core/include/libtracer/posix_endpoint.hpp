@@ -826,6 +826,11 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      */
     std::uint64_t sweep(std::uint64_t now, std::uint64_t deadline) override;
 
+    /** @brief See @ref transport_t::shut_down : every session torn down in one walk and the
+     *         listen socket released (@ref shut_down_slots). One override for both stream
+     *         servers. */
+    void shut_down() override;
+
     /** @brief Peers the application's liveness check closed as frozen, summed over every
      *         peer this server has carried (#2198). */
     [[nodiscard]] std::size_t frozen_closed() const noexcept {
@@ -1022,7 +1027,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *
      * @param tear_down False for @ref stop_and_join : every slot is only detached.
      */
-    void shut_down_slots(bool tear_down = true);
+    void shut_down_slots(bool tear_down);
 
     /**
      * @brief Fan one already-encoded gathered record to EVERY open peer through its egress

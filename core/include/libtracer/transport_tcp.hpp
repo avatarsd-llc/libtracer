@@ -385,9 +385,6 @@ class tcp_server_transport_t final : public stream_server_base_t {
     /** @brief Stop waiting and close all sockets. */
     ~tcp_server_transport_t();
 
-    /** @brief See @ref transport_t::shut_down. */
-    void shut_down() override;
-
     tcp_server_transport_t(const tcp_server_transport_t&) = delete;
     tcp_server_transport_t& operator=(const tcp_server_transport_t&) = delete;
 

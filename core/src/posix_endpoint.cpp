@@ -916,6 +916,8 @@ void slot_server_t::shut_down_slots(bool tear_down) {
     release_listen(listen_fd_);
 }
 
+void slot_server_t::shut_down() { shut_down_slots(true); }
+
 void slot_server_t::stop_and_join() {
     assert(!on_callback_thread() && "a link's destructor runs off every callback thread");
     shut_down_slots(false);
