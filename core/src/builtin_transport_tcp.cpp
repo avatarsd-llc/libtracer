@@ -56,11 +56,14 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // (`self_heal_link_t::wire_socket`), exactly as `make_connection` does. The LISTEN arm never
     // reaches the engine.
     // #2574: `node` is the vertex's node-wide link memory default, or null; every link this
-    // thunk builds draws its io, state and stack from it (`builtin_link_memory`).
+    // thunk builds draws its io, state and stack from it (`builtin_link_memory`). #2147:
+    // `wait` is the node's wait module, or null; every link this thunk builds puts its
+    // sockets on it and owns no thread of its own.
     vertex.register_transport_type(
         "tcp",
         [rx_backend, egress = builtin_egress(egress_src, vertex.link_memory()),
-         node = vertex.link_memory()](const conn_settings_t& s, const wire::tlv_node_t* raw_config,
+         node = vertex.link_memory(),
+         wait = vertex.wait_module()](const conn_settings_t& s, const wire::tlv_node_t* raw_config,
                                       mem::block_source_t& src) {
             const wire::config_reader_t cfg(raw_config);
             const bool peer_named = cfg.flag("peer_named").value_or(false);
@@ -85,7 +88,8 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                     return make_checked<tcp_transport_t>(
                         src, s.addr, s.port,
                         tcp_config_t{.memory = builtin_link_memory(rx_backend, egress, node),
-                                     .max_frame = s.max_frame});
+                                     .max_frame = s.max_frame,
+                                     .wait = wait});
                 },
                 [&] {
                     return make_checked<tcp_server_transport_t>(
@@ -93,7 +97,8 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                         tcp_server_config_t{.memory = builtin_link_memory(rx_backend, egress, node),
                                             .max_frame = s.max_frame,
                                             .max_peers = max_peers,
-                                            .peer_named = peer_named});
+                                            .peer_named = peer_named,
+                                            .wait = wait});
                 });
             // The ADR-0079 egress store, wired before the link is handed to the router (#873).
             return with_egress_source(std::move(link), egress);

@@ -413,7 +413,7 @@ bool transport_vertex_t::ops_held_by_this_thread() const noexcept {
 transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
                                        std::string_view net_root, mem::mem_backend_t* rx_backend,
                                        slim_net_t, mem::block_source_t* egress_src,
-                                       const link_memory_t* link_memory)
+                                       const link_memory_t* link_memory, wait_module_t* wait)
     : graph_(graph),
       router_(router),
       rx_backend_(rx_backend),
@@ -424,6 +424,7 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
       // otherwise, so the accessor lied about that node's store.
       egress_src_(egress_src != nullptr ? egress_src : &mem::net_source()),
       link_memory_(link_memory),
+      wait_(wait),
       net_root_(*egress_src_),
       pending_links_(*egress_src_),
       conns_(*egress_src_),
@@ -528,8 +529,9 @@ void transport_vertex_t::link_hold_thunk(void* ctx, graph::link_pair_t link, boo
 transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
                                        std::string_view net_root, mem::mem_backend_t* rx_backend,
                                        mem::block_source_t* egress_src,
-                                       const link_memory_t* link_memory)
-    : transport_vertex_t(graph, router, net_root, rx_backend, slim_net, egress_src, link_memory) {
+                                       const link_memory_t* link_memory, wait_module_t* wait)
+    : transport_vertex_t(graph, router, net_root, rx_backend, slim_net, egress_src, link_memory,
+                         wait) {
     // The ADR-0079 net-plane egress store (#873 family 1) is now set by the delegated ctor —
     // the nullptr guard lives there, so a SLIM node gets the same treatment this one does
     // and `egress_source()` answers for both. All that is left here is the builtin catalog.

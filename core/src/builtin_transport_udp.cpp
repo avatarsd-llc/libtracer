@@ -44,27 +44,26 @@ void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // ephemeral source port, which no peer depends on: a udp DIAL socket is peer-addressed,
     // never peer-known). The LISTEN arm never reaches the engine at all.
     // #2574: `node` is the vertex's node-wide link memory default, or null; every link this
-    // thunk builds draws its io, state and stack from it (`builtin_link_memory`).
+    // thunk builds draws its io, state and stack from it (`builtin_link_memory`). #2147:
+    // `wait` is the node's wait module, or null; every link this thunk builds puts its
+    // sockets on it and owns no thread of its own.
     vertex.register_transport_type(
         "udp",
         [rx_backend, egress = builtin_egress(egress_src, vertex.link_memory()),
-         node = vertex.link_memory()](const conn_settings_t& s,
-                                      const wire::tlv_node_t* /*raw_config*/,
-                                      mem::block_source_t& src) {
-            auto link = dial_or_listen(
-                s,
-                [&] {
-                    return make_checked<udp_transport_t>(
-                        src, 0, s.addr, s.port,
-                        udp_config_t{.memory = builtin_link_memory(rx_backend, egress, node),
-                                     .max_frame = s.max_frame});
-                },
-                [&] {
-                    return make_checked<udp_transport_t>(
-                        src, s.port, s.addr, 0,
-                        udp_config_t{.memory = builtin_link_memory(rx_backend, egress, node),
-                                     .max_frame = s.max_frame});
-                });
+         node = vertex.link_memory(), wait = vertex.wait_module()](
+            const conn_settings_t& s, const wire::tlv_node_t* /*raw_config*/,
+            mem::block_source_t& src) {
+            // One construction serves both roles: a dial binds an ephemeral port and names the
+            // peer's, a listen binds its own and learns the peer from the first datagram.
+            const bool dial = s.role == conn_role_t::DIAL;
+            const udp_config_t config{.memory = builtin_link_memory(rx_backend, egress, node),
+                                      .max_frame = s.max_frame,
+                                      .wait = wait};
+            const auto build = [&] {
+                return make_checked<udp_transport_t>(src, dial ? std::uint16_t{0} : s.port, s.addr,
+                                                     dial ? s.port : std::uint16_t{0}, config);
+            };
+            auto link = dial_or_listen(s, build, build);
             // The ADR-0079 egress store, wired before the link is handed to the router
             // (#873).
             return with_egress_source(std::move(link), egress);
