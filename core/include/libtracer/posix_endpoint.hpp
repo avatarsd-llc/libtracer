@@ -479,9 +479,11 @@ class stream_endpoint_t : protected posix_endpoint_t {
 
     /**
      * @brief The one-peer @ref transport_t::sweep (#2198, #2481): a dialer's, or a one-peer
-     *        listener's. Only the TX direction is owed here: a frame held on the wire that
-     *        moved no byte since the last check. A frozen peer is shut down inside its writer
-     *        role, so the driving thread runs the ordinary teardown, and counted in
+     *        listener's, under the slot server's rule. The peer owes TX while a frame of ours
+     *        is held on the wire, and RX while a frame of its own is begun and not finished
+     *        (@ref rx_owed_, #2812); one that owed a direction and moved no byte in it since
+     *        the last check is frozen. A frozen peer is shut down inside its writer role, so
+     *        the driving thread runs the ordinary teardown, and counted in
      *        @ref frozen_closed_.
      * @return When the peer is next due, 0 when it owes nothing or was closed.
      */
@@ -537,15 +539,25 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *        record the socket cut short finishes without waiting for a later send (#2144);
      *        readability (or a hangup) runs @p read on the socket.
      *
+     * Every turn records what the liveness check reads of the read side (#2812): a readable
+     * turn is RX progress (@ref rx_moved_), and @p owed after the turn is whether the peer
+     * still owes the rest of a frame (@ref rx_owed_).
+     *
      * @tparam Read Callable `bool(int fd)`: read what the socket has; false when the
      *              connection must close.
+     * @tparam Owed Callable `bool()`: the link's ingress is mid-frame.
      * @return False when the peer is gone: the caller runs @ref depart.
      */
-    template <class Read>
-    [[nodiscard]] bool peer_turn(std::uint8_t ready, Read&& read) {
+    template <class Read, class Owed>
+    [[nodiscard]] bool peer_turn(std::uint8_t ready, Read&& read, Owed&& owed) {
         const int fd = src_.fd.load(std::memory_order_relaxed);
         if (writable(ready)) flush_one(fd);
-        return !readable(ready) || std::forward<Read>(read)(fd);
+        const bool in = readable(ready);
+        if (in) rx_moved_.store(true, std::memory_order_relaxed);
+        const bool alive = !in || std::forward<Read>(read)(fd);
+        // Release: published after rx_moved_, so a check that sees the debt sees the progress.
+        rx_owed_.store(std::forward<Owed>(owed)(), std::memory_order_release);
+        return alive;
     }
 
     /**
@@ -608,6 +620,13 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *         the hole after @ref conn_fd_. Set by the writer, taken by @ref sweep_one; a new
      * session sets it. */
     std::atomic<bool> tx_moved_{true};
+    /** @brief The ONE peer's socket was readable since the last liveness check (#2812), in the
+     *         same hole. Set by @ref peer_turn, taken by @ref sweep_one; a new session sets it. */
+    std::atomic<bool> rx_moved_{true};
+    /** @brief The ONE peer has begun a frame and not finished it, as of the driving thread's
+     *         last turn (#2812), in the same hole. Set by @ref peer_turn, cleared by
+     *         @ref teardown_peer. */
+    std::atomic<bool> rx_owed_{false};
     /** @brief Write turns that found the peer's socket full and moved nothing (#838, #2144)
      *         — the "how often did a stalled peer refuse us" counter, each one a strike.
      *         Relaxed: a diagnostic tally, not a synchronizer. Word-wide, not 64-bit

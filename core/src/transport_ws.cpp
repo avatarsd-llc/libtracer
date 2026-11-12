@@ -745,9 +745,14 @@ void ws_client_transport_t::on_conn(void* ctx, wait_source_t& self, std::uint8_t
     link.pipelined_ = mem::bytes_t(link.pipelined_.source());
     // False for a peer that closed, a read error, a CLOSE, or an RFC 6455 breach (§7.1.7),
     // which is what stops the server we dialled from naming our memory budget (#872).
-    alive = alive && link.peer_turn(ready, [&](int fd) {
-        return link.rx_state_->ingress.read(fd, *link.backend_, framing);
-    });
+    alive = alive &&
+            link.peer_turn(
+                ready,
+                [&](int fd) { return link.rx_state_->ingress.read(fd, *link.backend_, framing); },
+                [&link] {
+                    return link.rx_state_->ingress.mid_frame() ||
+                           link.rx_state_->assembler.assembling();
+                });
     if (alive) return;
     link.depart();  // off the wait, then close the egress, reset and close
     // Liveness (#1059): every death of the one connection lands here — peer CLOSE, remote

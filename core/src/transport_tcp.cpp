@@ -298,8 +298,9 @@ void tcp_transport_t::on_conn(void* ctx, wait_source_t& self, std::uint8_t ready
     auto framing = prefix_framing(link.max_frame_, link.drops_, [&link](view::view_t frame) {
         link.rx_.deliver(std::move(frame));
     });
-    if (link.peer_turn(ready,
-                       [&](int fd) { return link.ingress_.read(fd, *link.backend_, framing); }))
+    if (link.peer_turn(
+            ready, [&](int fd) { return link.ingress_.read(fd, *link.backend_, framing); },
+            [&link] { return link.ingress_.mid_frame(); }))
         return;
     // Departure seam (RFC-0009 §D extended): the one connection died under us, so report the
     // link down, after the teardown and with no lock held. A listener waits for the next peer.
