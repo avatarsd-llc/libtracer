@@ -71,7 +71,9 @@ TRANSPORT_ROWS = (
     # ~110 B. Ruled at 9,264; pinned at the 9,262 measured on the rebased batch.
     # 9,262 -> 9,184 B (#2801): one shut-down walk of the sessions, the flat "any session
     # open" read folded into the teardown's own lock, one shut_down override for both servers.
-    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9184, None),
+    # 9,184 -> 9,298 B: ruling 76 (2026-11-12), #2812: the one-peer liveness check owes RX
+    # too (a dialer closes a server frozen mid-frame); two atomic flag calls in sweep_one.
+    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9298, None),
     ("CAN (transport_can + TWAI link)", ("transport_can", "twai_link", "socketcan_link_stub"),
      None, "compiled, not linked: full_node creates no CAN connection, so --gc-sections drops it"),
     ("WebSocket (httpd server + client link)", ("httpd_ws_link", "esp_ws_client_link"),
