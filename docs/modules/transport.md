@@ -234,8 +234,8 @@ class transport_t {
     template <typename F> void set_rope_receiver(F& sink) noexcept;  // lvalue only
 
     virtual bool delivers_ropes() const;                // false by default
-    using down_fn_t = void (*)(void* ctx);
-    void set_down_notifier(down_fn_t fn, void* ctx) noexcept;
+    using link_state_fn_t = void (*)(void* ctx, bool up);
+    bool set_link_state_notifier(link_state_fn_t fn, void* ctx) noexcept;  // true: went down first
     virtual bus_link_t* bus();                          // nullptr = point-to-point
 };
 

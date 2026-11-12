@@ -964,7 +964,8 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
     publish_ctx(ctx);
     // Departure seam (RFC-0009 §D extended): the same stable ctx carries the child's
     // NAME to link_down when the transport reports its one connection dead.
-    constexpr transport_t::down_fn_t gone = [](void* c) {
+    constexpr transport_t::link_state_fn_t gone = [](void* c, bool up) {
+        if (up) return;  // an up evicts nothing; the edges come back on the next subscribe
         auto* const cc = static_cast<child_rx_ctx_t*>(c);
         cc->self->link_gone(cc->name, {.conn = cc->entry->conn_slot});
         // The eviction released this child's index slot, so the cached token is spent
@@ -976,7 +977,7 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
     // A link that went down before this install (a QUIC dial whose handshake failed at
     // once, #2306) is evicted below, once the control lock is let go: the eviction takes
     // graph locks, the notifier's own discipline.
-    const bool gone_already = link.set_down_notifier(gone, &ctx);
+    const bool gone_already = link.set_link_state_notifier(gone, &ctx);
     if (link.delivers_ropes()) {
         link.set_rope_receiver(
             [](void* c, view::rope_t frame) {
