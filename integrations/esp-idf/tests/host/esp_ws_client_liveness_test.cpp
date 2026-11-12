@@ -267,6 +267,40 @@ void test_second_death_reports_again() {
 }
 
 // ---------------------------------------------------------------------------
+// 3b — COUNTING: the send side's drops and their last cause outlive a connection (#2788).
+// ---------------------------------------------------------------------------
+void test_drops_survive_a_reconnect() {
+    std::printf("#2788 the drop count and its last cause survive a reconnect:\n");
+    fake_ws::reset();
+    using tr::net::drop_cause_t;
+    {
+        auto link = dialed_link();
+        const std::vector<std::byte> big(kBufBytes + 1, std::byte{0x22});
+        link->send(std::span<const std::byte>(big));
+        tr::net::transport_drop_stats_t d = link->drop_stats();
+        check(d.dropped_tx == 1 && d.dropped_tx_cause == drop_cause_t::OVERSIZE,
+              "a frame past tx_bytes is counted, cause OVERSIZE");
+        const int dials_before = fake_ws::connect_count();
+        fake_ws::push_frames({close_frame()});
+        check(wait_until([&] { return !link->link_up(); }, 5s), "the peer's CLOSE took it down");
+        const std::vector<std::byte> small(8, std::byte{0x11});
+        link->send(std::span<const std::byte>(small));
+        d = link->drop_stats();
+        check(d.dropped_tx == 2 && d.dropped_tx_cause == drop_cause_t::LINK_DOWN,
+              "a send to the down link is counted, cause LINK_DOWN");
+        check(fake_ws::sweep_until(
+                  *link, [&] { return fake_ws::connect_count() > dials_before && link->link_up(); },
+                  5s),
+              "the link re-dialed and came up");
+        d = link->drop_stats();
+        check(d.dropped_tx == 2 && d.dropped_tx_cause == drop_cause_t::LINK_DOWN &&
+                  link->stats().c.tx_drops == 2,
+              "and the new connection kept both the count and the cause");
+    }
+    check_drained();
+}
+
+// ---------------------------------------------------------------------------
 // 4 — REPORTING: a LOCAL teardown is not a peer departure.
 // ---------------------------------------------------------------------------
 void test_destructor_reports_nothing() {
@@ -484,6 +518,7 @@ int main() {
     test_dial_arms_keepalive();
     test_peer_close_reports_down();
     test_second_death_reports_again();
+    test_drops_survive_a_reconnect();
     test_destructor_reports_nothing();
     test_failed_dials_report_nothing();
     test_refused_connection_backs_off();

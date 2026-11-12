@@ -212,7 +212,10 @@ void test_link_seams() {
     counting_link_t up;
     counting_link_t down;
     up.counters = {.dropped_rx = 3, .malformed_rx = 5, .dropped_tx = 7};
-    down.counters = {.dropped_rx = 11, .malformed_rx = 0, .dropped_tx = 0};
+    down.counters = {.dropped_rx = 11,
+                     .malformed_rx = 0,
+                     .dropped_tx = 0,
+                     .dropped_tx_cause = tr::net::drop_cause_t::NONE};
     check(router.attach_link("up", up) && router.attach_link("down", down), "two links registered");
 
     const auto up_bytes = read_bytes(g, "/sink:stats.link.up");
@@ -226,6 +229,18 @@ void test_link_seams() {
           "…and the OTHER child's sub-key answers for the other link");
     check(up_block && up_block->children.size() == 6,
           "the link block carries its three nouns and nothing else");
+    // Am.6 (#2788): a link that names its drops' cause has the fourth noun, NONE (0) before
+    // its first outbound drop; a link that names none has no such noun.
+    check(down_block && down_block->children.size() == 8 &&
+              counter(*down_block, "dropped_tx_cause") == 0,
+          "a link that keeps a cause adds dropped_tx_cause, NONE before any outbound drop");
+    down.counters.dropped_tx = 2;
+    down.counters.dropped_tx_cause = tr::net::drop_cause_t::LINK_DOWN;
+    const auto down_after_bytes = read_bytes(g, "/sink:stats.link.down");
+    const auto down_after = tr::wire::decode(down_after_bytes);  // borrows the bytes
+    check(down_after && counter(*down_after, "dropped_tx") == 2 &&
+              counter(*down_after, "dropped_tx_cause") == 2,
+          "…and reads the last outbound drop's cause, LINK_DOWN = 2");
 
     // The label plane is deleted (RFC-0029 S3), so its class is no seam at all (RFC-0010
     // erratum, #2244) — the answer an unknown class gets.

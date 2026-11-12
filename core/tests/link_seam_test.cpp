@@ -679,6 +679,20 @@ void tally_counts_three_independent_words() {
     const tr::net::transport_drop_stats_t n = no_malformed.snapshot();
     check(n.dropped_rx == 1 && n.malformed_rx == 0 && n.dropped_tx == 1,
           "a class left out has no word and reads zero");
+    check(!n.dropped_tx_cause, "a tally that keeps no cause reports none (#2788)");
+
+    // #2788: the cause is one byte beside the words, kept only where a link asks for it.
+    using tr::net::drop_cause_t;
+    static_assert(sizeof(drop_tally_t<drop_classes_t{.dropped_tx_cause = true}>) <=
+                  4 * sizeof(std::size_t));
+    drop_tally_t<drop_classes_t{.dropped_tx_cause = true}> caused;
+    check(caused.snapshot().dropped_tx_cause == drop_cause_t::NONE,
+          "a tally that keeps a cause reads NONE before its first outbound drop");
+    caused.count_dropped_tx(1, drop_cause_t::OVERSIZE);
+    caused.count_dropped_tx(2, drop_cause_t::LINK_DOWN);
+    const tr::net::transport_drop_stats_t c = caused.snapshot();
+    check(c.dropped_tx == 3 && c.dropped_tx_cause == drop_cause_t::LINK_DOWN,
+          "every drop is counted, and the last one's cause is kept");
 }
 
 /**
