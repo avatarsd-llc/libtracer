@@ -183,12 +183,15 @@
 # HOW THE NUMBERS WERE PICKED. Per-job runtimes were measured from the Actions REST API
 # (40 successful runs per workflow, per-job and per-step timings), and each ceiling is
 # quoted against the HEALTHY figure — the 2026-08-19 incident runs are excluded from
-# "healthy" and named separately. Jobs longer than a couple of minutes get ~3x their
-# measured max; jobs shorter than that get a flat floor of 10 minutes (no package
-# install) or 15 (with one), because 3x a 40-second job is two minutes and any transient
-# runner stall would breach it. A ceiling that reds a healthy run is worse than none —
-# the cost of a false red is a maintainer learning to ignore the colour, and the cost of
-# a loose ceiling on a short job is at worst ten wasted minutes.
+# "healthy" and named separately. "Healthy" includes a build with a partial
+# compiler-cache miss on the loaded runner slice, not only a warm cache: a
+# warm-cache-only figure cut passing `build-test` runs at 20 min (#2833). Jobs longer
+# than a couple of minutes get ~3x their measured max; jobs shorter than that get a flat
+# floor of 10 minutes (no package install) or 15 (with one), because 3x a 40-second job
+# is two minutes and any transient runner stall would breach it. A ceiling that reds a
+# healthy run is worse than none — the cost of a false red is a maintainer learning to
+# ignore the colour, and the cost of a loose ceiling on a short job is at worst ten
+# wasted minutes.
 #
 # STEP CEILINGS. The job ceiling only turns a wedge red an hour later; the per-step
 # `timeout-minutes` on each package install is what NAMES the culprit in the checks UI.
@@ -420,10 +423,12 @@ jobs:
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
       options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
-    # Measured healthy max 4.82 min across the three legs (p50 ~4.5). 20 = ~4x, with
-    # extra room over a bare 3x because the image pull and the apt step below are inside
-    # the measured job time and are exactly the wedge surface.
-    timeout-minutes: 20
+    # Healthy includes a partial compiler-cache miss on the loaded runner slice: run
+    # 43549083901 attempt 1 built in ~18.2 min at 43% ccache misses (309/543 hits,
+    # BUILD_JOBS=4) plus ~1.5 min ctest, and was cut at the old 20-min ceiling with
+    # 331/331 passed (#2833). A warm cache does it in ~2.7 min. 40 = ~2x the partial-miss
+    # build + ctest, and still turns a real wedge red far inside GitHub's 6-hour default.
+    timeout-minutes: 40
     # Build + ctest under BOTH ACL policy configs: the default ALLOW-only MCU
     # subset (acl_full=OFF) and the full security_acl host policy with DENY
     # (acl_full=ON). The checked-in preset core/tests/presets/acl-full binds
@@ -536,10 +541,12 @@ jobs:
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
       options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g --cgroup-parent=runners-ci.slice -v /srv/libtracer-ccache:/ccache -v /sys/fs/cgroup:/host-cgroup:ro' || '--memory 10g' }}
-    # Measured healthy max 4.82 min across the three legs (p50 ~4.5). 20 = ~4x, with
-    # extra room over a bare 3x because the image pull and the apt step below are inside
-    # the measured job time and are exactly the wedge surface.
-    timeout-minutes: 20
+    # Healthy includes a partial compiler-cache miss on the loaded runner slice: run
+    # 43549083901 attempt 1 built in ~18.2 min at 43% ccache misses (309/543 hits,
+    # BUILD_JOBS=4) plus ~1.5 min ctest, and was cut at the old 20-min ceiling with
+    # 331/331 passed (#2833). A warm cache does it in ~2.7 min. 40 = ~2x the partial-miss
+    # build + ctest, and still turns a real wedge red far inside GitHub's 6-hour default.
+    timeout-minutes: 40
     # Build + ctest under BOTH ACL policy configs: the default ALLOW-only MCU
     # subset (acl_full=OFF) and the full security_acl host policy with DENY
     # (acl_full=ON). The checked-in preset core/tests/presets/acl-full binds
