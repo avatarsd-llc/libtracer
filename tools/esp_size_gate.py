@@ -29,16 +29,19 @@ object files are summed as they sit in the linked image, after `--gc-sections`, 
 compared on esp32c6 against the pins in TRANSPORT_ROWS. Growth past a pin is
 `::error::` and exit 1, so a transport cannot get fatter unseen; the component total
 above stays tracked. A pin holds only for the compiler it was measured with
-(PINNED_TOOLCHAIN, passed in as `--toolchain`): another compiler, or another target,
-reports the rows without comparing them (#1138). A transport the `full_node` image
-compiles but never links, or never compiles, says so instead of reading 0 B.
-Those (CAN, WebSocket) are pinned on a second, footprint-only image instead
-(`--image transport_footprint`, #2678), which links them; there the rows full_node
-pins are reported only. A pinned row that reads 0 B fails: it is no longer linked.
+(PINNED_TOOLCHAIN, passed in as `--toolchain`). On esp32c6 another compiler fails every
+pinned row: esp-idf.yml builds these jobs in an image pinned by digest, so a mismatch means
+the image moved or a pin went stale, and a compiler upgrade arrives as a deliberate image
+bump that re-pins every row (#2830). Another target reports the rows without comparing
+them (#1138). A transport the `full_node` image compiles but never links, or never
+compiles, says so instead of reading 0 B. Those (CAN, WebSocket) are pinned on a second,
+footprint-only image instead (`--image transport_footprint`, #2678), which links them;
+there the rows full_node pins are reported only. A pinned row that reads 0 B fails: it is
+no longer linked.
 
 Exit 0 = report published (and within any ceiling that was passed), 1 = broken
-input, over a ceiling the caller opted into, or a transport row over its pin. Stdlib
-only.
+input, over a ceiling the caller opted into, a transport row over its pin, or an esp32c6
+build by a compiler other than PINNED_TOOLCHAIN. Stdlib only.
 """
 from __future__ import annotations
 
@@ -53,18 +56,21 @@ from typing import Any
 
 # Per-transport rows (#2401): (row, object stems in libtracer.a, esp32c6 pin in flash bytes,
 # or the reason the full_node image carries no such row). Pins are the linked flash of those
-# objects in full_node @ esp32c6, measured in espressif/idf:release-v6.0 (esp-idf.yml's
-# full-node job) with PINNED_TOOLCHAIN. A row's bytes are what its own objects keep after
-# --gc-sections; code they share with the rest of the library (rope, frame, the graph) is
-# counted once, in the object that defines it.
+# objects in full_node @ esp32c6, measured in the image esp-idf.yml's full-node job pins by
+# digest (espressif/idf release-v6.0, #2830), whose compiler is PINNED_TOOLCHAIN. A row's
+# bytes are what its own objects keep after --gc-sections; code they share with the rest of
+# the library (rope, frame, the graph) is counted once, in the object that defines it.
 PINNED_TARGET = "esp32c6"
-PINNED_TOOLCHAIN = "riscv32-esp-elf-g++ (crosstool-NG esp-15.2.0_20251204) 15.2.0"
+PINNED_TOOLCHAIN = "riscv32-esp-elf-g++ (crosstool-NG esp-15.3.0_20261030) 15.3.0"
 TRANSPORT_ROWS = (
     # 2,710 -> 2,608 B (#2147): the receive thread body becomes one readiness callback.
-    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2608, None),
+    # 2,608 -> 2,468 B (#2830): image-only re-pin on the pinned digest. The image moves no
+    # byte here; the 140 B were slack the report-only rows left behind (2,468 on 15.2.0 too).
+    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2468, None),
     # 9,216 -> 9,446 B (#2147): a frame read resumes across readiness turns, so frame ingress is
     # out of line and the connection and listener each gain a callback (maintainer ruling 60).
-    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9446, None),
+    # 9,446 -> 9,422 B (#2830): image-only re-pin; no byte from the image, 24 B of old slack.
+    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9422, None),
     # 8,896 -> 9,080 B (#2147): the poll loops give way to turn functions, the write-interest
     # arm and disarm, and the thread-per-link fallback's block (maintainer ruling 60).
     # 9,080 -> 9,262 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys back
@@ -73,6 +79,7 @@ TRANSPORT_ROWS = (
     # open" read folded into the teardown's own lock, one shut_down override for both servers.
     # 9,184 -> 9,296 B: ruling 76 (2026-11-12), #2812: the one-peer liveness check owes RX
     # too (a dialer closes a server frozen mid-frame); two atomic flag calls in sweep_one.
+    # 9,296 B held by the image-only re-pin (#2830): equal on GCC 15.2.0 and 15.3.0.
     ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9296, None),
     ("CAN (transport_can + TWAI link)", ("transport_can", "twai_link", "socketcan_link_stub"),
      None, "compiled, not linked: full_node creates no CAN connection, so --gc-sections drops it"),
@@ -84,7 +91,7 @@ TRANSPORT_ROWS = (
 
 # Rows pinned on the footprint-only image (#2678): integrations/esp-idf/examples/
 # transport_footprint links the two transports full_node drops, so their rows are pinned
-# there, measured the same way (esp32c6, espressif/idf:release-v6.0, PINNED_TOOLCHAIN). The
+# there, measured the same way (esp32c6, the same pinned digest, PINNED_TOOLCHAIN). The
 # rows full_node pins stay pinned on full_node only; here they are reported.
 FOOTPRINT_IMAGE = "transport_footprint"
 FOOTPRINT_PINS = {
@@ -92,10 +99,13 @@ FOOTPRINT_PINS = {
     # gather path), which landed first. Measured on the serial run at 119d76e6.
     # 14,268 -> 14,290 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys
     # back ~110 B.
+    # 14,290 B held by the image-only re-pin (#2830): equal on GCC 15.2.0 and 15.3.0.
     "CAN (transport_can + TWAI link)": 14290,
     # 33,387 -> 33,513 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys
     # back ~110 B.
-    "WebSocket (httpd server + client link)": 33513,
+    # 33,513 -> 33,511 B (#2830): image-only re-pin. GCC 15.3.0 adds 2 B (33,509 on 15.2.0),
+    # under the 4 B of slack the report-only row left behind.
+    "WebSocket (httpd server + client link)": 33511,
 }
 
 
@@ -232,7 +242,8 @@ def main() -> int:
     ap.add_argument("--image", default="full_node", choices=("full_node", FOOTPRINT_IMAGE),
                     help=f"the example the map came from: full_node or {FOOTPRINT_IMAGE} (#2678)")
     ap.add_argument("--toolchain", default="unknown",
-                    help="the compiler's --version first line; the rows compare only on a match")
+                    help=f"the compiler's --version first line; on {PINNED_TARGET} it must be "
+                         "PINNED_TOOLCHAIN, or every pinned row fails")
     args = ap.parse_args()
 
     try:
@@ -278,7 +289,12 @@ def main() -> int:
         "</details>",
         "",
     ]
-    rows_compared = args.target == PINNED_TARGET and args.toolchain == PINNED_TOOLCHAIN
+    # Pins compare on esp32c6 only; another target reports its rows (#1138). On esp32c6 a pin
+    # holds for PINNED_TOOLCHAIN only, and the size-gate jobs build in an image pinned by digest
+    # that carries it: another compiler there fails each pinned row instead of reporting it,
+    # so a moved image cannot leave the pins unread (#2830).
+    rows_compared = args.target == PINNED_TARGET
+    toolchain_ok = args.toolchain == PINNED_TOOLCHAIN
     rows_over: list[str] = []
     rows_json: list[dict[str, Any]] = []
     if rows is not None:
@@ -308,7 +324,10 @@ def main() -> int:
                     print(f"::warning::transport row {row!r} is linked now; give it a pin (#2401)")
                 continue
             if not rows_compared:
-                verdict_row = "REPORTED (pins hold for esp32c6 + the pinned toolchain only)"
+                verdict_row = f"REPORTED (pins hold for {PINNED_TARGET} only)"
+            elif not toolchain_ok:
+                verdict_row = "FAIL (not the pinned toolchain)"
+                rows_over.append(f"{row}: not the pinned toolchain")
             elif got == 0:
                 # A pin on a row the image does not link would pass forever on 0 B.
                 verdict_row = "FAIL (not linked)"
@@ -350,8 +369,9 @@ def main() -> int:
         pathlib.Path(args.out_json).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     if rows_over:
-        print(f"::error::libtracer per-transport flash rows grew past their {PINNED_TARGET} pins "
-              f"(#2401): " + "; ".join(rows_over))
+        print(f"::error::libtracer per-transport flash rows failed their {PINNED_TARGET} pins "
+              f"(#2401; built with {args.toolchain!r}, pinned with {PINNED_TOOLCHAIN!r}): "
+              + "; ".join(rows_over))
         return 1
     if flash_ok and ram_ok:
         return 0

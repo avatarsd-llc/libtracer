@@ -85,8 +85,18 @@ on:
 #
 # The one pinned part (#2401): the per-transport rows. tools/esp_size_gate.py sums each
 # transport's object files as linked in this image and fails the job on esp32c6 when one
-# grows past its pin (TRANSPORT_ROWS there), on the compiler the pins were measured with.
-# The component total above stays tracked.
+# grows past its pin (TRANSPORT_ROWS there), or when the build's compiler is not the one
+# the pins were measured with (PINNED_TOOLCHAIN there). The component total above stays
+# tracked.
+#
+# ONE IMAGE PINNED BY DIGEST, THE REST ON THE MOVING TAG (#2830). A pin holds for one
+# compiler, so the two jobs that compare pins, full-node and transport-footprint, build in
+# espressif/idf release-v6.0 pinned by digest; there an esp32c6 build by another compiler
+# fails instead of quietly reporting. Every other job here (esp-build, concepts,
+# full-node-trimmed, rv32-census) and the HIL build stay on the moving release-v6.0 tag:
+# they prove the component still builds on what users pull. rv32-census warns when that
+# tag's compiler drifts from the pinned one, so an upgrade arrives as a deliberate PR that
+# bumps the digest and re-pins every esp32c6 row from the new image's measurement.
 #
 # MEASURED provenance, kept as historical reference (PR #193 first run,
 # 2026-07-03, espressif/idf:release-v6.0, -Os): libtracer.a flash 78,825 B
@@ -204,6 +214,23 @@ jobs:
           riscv32-esp-elf-g++ --version | head -1
           python3 tools/rv32_footprint.py --out-json rv32-footprint.json
 
+      # Toolchain drift (#2830): this job runs on the moving release-v6.0 tag, the size-gate
+      # jobs on a digest whose compiler is tools/esp_size_gate.py's PINNED_TOOLCHAIN. When the
+      # tag's compiler moves, this warns (nightly, tag, dispatch; a landing does not need it),
+      # and the bump arrives as its own PR: new digest, every esp32c6 row re-pinned. A
+      # PINNED_TOOLCHAIN this step cannot read is a broken check, so that reds the job.
+      - name: Warn when the moving tag's compiler is not the pinned one (#2830)
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          . "${IDF_PATH}/export.sh" >/dev/null
+          moving=$(riscv32-esp-elf-g++ --version | head -n1)
+          pinned=$(sed -n 's/^PINNED_TOOLCHAIN = "\(.*\)"$/\1/p' tools/esp_size_gate.py)
+          [ -n "$pinned" ] || { echo "::error::no PINNED_TOOLCHAIN line in tools/esp_size_gate.py"; exit 1; }
+          echo "moving release-v6.0: $moving"
+          echo "pinned size-gate image: $pinned"
+          [ "$moving" = "$pinned" ] || echo "::warning::espressif/idf:release-v6.0 now builds with '$moving', the size-gate image with '$pinned'. Bump the digest in esp-idf.yml (full-node, transport-footprint) in its own PR and re-pin every esp32c6 row (#2830)."
+
       - name: Upload rv32 census artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -308,7 +335,10 @@ jobs:
     needs: srcs-drift
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
-      image: espressif/idf:release-v6.0
+      # Pinned by digest (#2830, header): espressif/idf:release-v6.0 as of 2026-11-13, whose
+      # riscv32-esp-elf-g++ is crosstool-NG esp-15.3.0_20261030 (GCC 15.3.0), the
+      # PINNED_TOOLCHAIN of tools/esp_size_gate.py. Bump it only together with every pin.
+      image: espressif/idf@sha256:2253a1fa731e9cceae599d81537ddf28da40d5e9ec64211e46741579c0412671
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
@@ -471,7 +501,8 @@ jobs:
     needs: srcs-drift
     runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
-      image: espressif/idf:release-v6.0
+      # The full-node job's pinned digest (#2830): its pins hold for the same compiler.
+      image: espressif/idf@sha256:2253a1fa731e9cceae599d81537ddf28da40d5e9ec64211e46741579c0412671
       # The ci-local runners are bare machines, so the job runs in a container on BOTH
       # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
       # 10g is the per-job memory budget.
