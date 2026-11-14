@@ -1197,8 +1197,13 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
         // refusal retires nothing and the walk below cannot fail halfway (#1778).
         std::size_t n = 1;
         root->for_each_descendant([&n](vertex_t&) { ++n; });
-        // Past the entries other owners hold reservations for (`reserve_park`).
-        if (!gone.reserve(n) || !park_.reserve(park_.size() + park_tail_.reserved + n)) {
+        // Past the entries other owners hold reservations for, grown as `reserve_park` grows
+        // the park: a park that must grow takes at least twice its capacity, so a run of
+        // retires between two collect() calls copies the park a logarithmic number of times,
+        // not once each (#2845).
+        const std::size_t want = park_.size() + park_tail_.reserved + n;
+        const std::size_t cap = park_.capacity();
+        if (!gone.reserve(n) || !park_.reserve(std::max(want, std::size_t{want > cap} * 2 * cap))) {
             refused_retire_.fetch_add(1, std::memory_order_relaxed);
             return std::unexpected(status_t::BACKPRESSURE);
         }
@@ -1291,10 +1296,13 @@ result_t<void> graph_t::park_release(retired_callback_t release) {
 
 result_t<void> graph_t::reserve_park() {
     const std::unique_lock lock(map_mutex_);
-    // Room for every entry parked or reserved, plus this one; doubling, so an owner that
-    // reserves per context (one per connection) does not regrow the park per context.
+    // Room for every entry parked or reserved, plus this one. A park that must grow takes at
+    // least twice its capacity (as `retire` grows it), so an owner that reserves per context
+    // (one per connection) does not regrow the park per context; a need that fits reserves
+    // nothing.
     const std::size_t want = park_.size() + park_tail_.reserved + 1;
-    if (want > park_.capacity() && !park_.reserve(std::max(want, 2 * park_.capacity()))) {
+    const std::size_t cap = park_.capacity();
+    if (!park_.reserve(std::max(want, std::size_t{want > cap} * 2 * cap))) {
         refused_park_.fetch_add(1, std::memory_order_relaxed);
         return std::unexpected(status_t::BACKPRESSURE);
     }

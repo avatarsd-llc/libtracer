@@ -185,6 +185,12 @@ add_executable(bench_admission_gate bench_admission_gate.cpp)
 target_link_libraries(bench_admission_gate PRIVATE libtracer)
 target_compile_options(bench_admission_gate PRIVATE -Wall -Wextra)
 
+# #2845: retire and revive one vertex with no collect(); the cycle rate as the park fills.
+# Diagnostic, not a perf gate.
+add_executable(bench_retire_park bench_retire_park.cpp)
+target_link_libraries(bench_retire_park PRIVATE libtracer)
+target_compile_options(bench_retire_park PRIVATE -Wall -Wextra)
+
 # The LKV slot under concurrency (ADR-0064 2, #604): today's atomic<shared_ptr> against a
 # no-reclamation ceiling, epoch-based reclamation and hazard pointers, in three shapes, plus
 # the same question on the real graph_t::write path. The ADR's own closing consequence names
