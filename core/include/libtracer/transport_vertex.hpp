@@ -252,9 +252,11 @@ inline constexpr std::string_view kConnEndpointName = "conn";
  *
  * Destruction semantics: an owned transport lives until its connection is removed or this
  * `transport_vertex_t` destructs. The destructor detaches its connections from the router
- * and graph before closing them, in the order @ref remove_connection uses, so its recv
- * thread is joined after its name has stopped resolving. Declare the `transport_vertex_t`
- * AFTER the graph and router it binds (the usual stack order): both must outlive it.
+ * and graph before closing them, in the order @ref remove_connection uses, then runs the
+ * graph's collect, so each link's threads are joined after its name has stopped resolving
+ * and before the destructor returns. Declare the `transport_vertex_t` AFTER the graph and
+ * router it binds, and after every sink its links deliver into (the usual stack order): all
+ * of them must outlive it.
  */
 class transport_vertex_t {
    public:
@@ -379,8 +381,16 @@ class transport_vertex_t {
      * connection is removed exactly as @ref remove_connection removes it (un-routed, its
      * engine stopped, its vertex retired, then its socket closed); last, the routed-
      * subscription hold seam (#1816) is uninstalled, so a departure eviction fired by a
-     * closing socket still finds it. The graph and the router must outlive this object, and
-     * the embedder's next @ref graph::graph_t::collect frees what the endpoints parked.
+     * closing socket still finds it. Before that last step it is its links' join (#2813): it
+     * waits until every router frame and dispatch open at that point has left (the leaving
+     * thread reports it; nothing polls) and runs @ref graph::graph_t::collect, which destroys
+     * the links removed above and joins their threads. So it returns with no callback of its
+     * links still running, and the graph, the router and every sink those callbacks reach must
+     * outlive it. Destroy it where that collect may run: no direct graph read or write in
+     * flight on another thread (the collect's own rule). On a thread that runs link callbacks,
+     * or inside a router frame or dispatch, it does not wait, and its collect frees only what
+     * is already ripe (nothing, on a callback thread): the embedder's next collect frees the
+     * rest.
      *
      * Must not run from inside a call through this object (an endpoint write, or a
      * liveness subscriber reached from one of its operations): that is asserted.
@@ -676,7 +686,7 @@ class transport_vertex_t {
      * `fwd_router_t::remove_child` first (the name stops resolving, so no NEW forward
      * reaches the link), then `graph.retire()` on the identity vertex (RFC-0009 §B.6 —
      * the path re-virginizes), then the owned transport is shut down
-     * (@ref transport_t::shut_down, joining its recv thread) and parked: it is destroyed by
+     * (@ref transport_t::shut_down, which waits for nothing) and parked: it is destroyed by
      * the first `graph_t::collect()` that no router frame open at the removal is still
      * inside, so a frame (a forward, an origination, a wire listing) that reached it just
      * before the removal always finds a valid object. If the retire or the park is refused, the
@@ -686,8 +696,9 @@ class transport_vertex_t {
      *
      * A node whose connections are removed must therefore call `graph_t::collect()` from time
      * to time (any thread outside a link callback; a frame still inside the link keeps it), or
-     * every removed link is kept until the graph is destroyed. Links removed from a callback
-     * are joined and freed at the next collect() or at graph destruction.
+     * every removed link is kept until the graph is destroyed. A removed link's threads, their
+     * stacks and its descriptors live until that collect(), which joins, closes and frees them
+     * (#2813), whichever thread made the removal.
      *
      * An application liveness subscriber must not create or remove any connection from inside
      * the liveness callback.
@@ -849,8 +860,9 @@ class transport_vertex_t {
      * concurrent teardown is retiring. `ops_m_` is safe to hold there precisely because the
      * doors a fan-out reaches never take it. A link's own callbacks can take it, though: an
      * operation that arrived on a link runs on that link's receive path. So a teardown drops
-     * `ops_m_` too before it waits on the link it removes (its shut down and join), once the
-     * mutation itself is done; nothing it changes is left for a concurrent operation to see.
+     * `ops_m_` too before it shuts down the link it removes (a self-heal link's shut-down may
+     * still join its worker, until #2815), once the mutation itself is done; nothing it changes
+     * is left for a concurrent operation to see.
      *
      * A `LOOKUP` that collects nothing is a plain scoped lock — which is the point: every
      * acquisition of either mutex in this class goes through this type, so the re-entrancy

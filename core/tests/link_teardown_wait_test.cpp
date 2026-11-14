@@ -24,7 +24,7 @@
  *     link's callback, so neither may wait for the other: both complete, and once B's graph
  *     frees them neither link leaves a thread behind.
  *
- *  4. **A deferred teardown keeps the link's descriptor open until its destructor** (TCP).
+ *  4. **A shut-down keeps the link's descriptor open until its destructor** (TCP).
  *  5. **collect() from a callback frees nothing.**
  *  6. **Removal from a callback, then collect() from an app thread, leaves no thread and no
  *     descriptor behind.**
@@ -34,12 +34,13 @@
  *  8. **A stream listener removed by another link's write while a peer arrives**: the
  *     teardown's walk of the sessions is ordered after the accept that grew them (TSan).
  *  9. **A transport shut down by its own callback while it shares one `.wait` module** with
- *     other links (the transport alone, no vertex): the shut-down completes without a
- *     deadlock, the module keeps delivering to the other links, and the destructor, off the
- *     callback thread, closes the socket.
+ *     other links (the transport alone, no vertex): the module keeps delivering to the other
+ *     links, and the destructor, off the callback thread, closes the socket.
  *
- * A teardown made on a thread that runs link callbacks waits for nothing and closes nothing;
- * the joins and closes happen at the graph's collect(), outside every callback.
+ * A link's shut-down, at removal, waits for nothing and closes nothing on any thread (#2813);
+ * the joins and closes happen at the graph's collect(), outside every callback. The transport
+ * alone, without a vertex, also runs the teardown table (`link_teardown_table_test`), one link
+ * per module; section 9 is the shared module.
  *
  * Each wait is bounded: a regression prints `[FAIL]` and exits non-zero at once rather than
  * hanging ctest, since the threads it leaves stuck could not be joined.
@@ -48,7 +49,7 @@
  * (`posix_endpoint_t::stop_driver` always joining) reds section 3 (stuck); for section 1 the
  * self-join fails on a POSIX host and the thread ends unjoined, which TSan reports as a thread
  * leak (on a chip that join waits forever). Keeping the control-plane lock across the
- * teardown's waits reds section 2 (stuck). Closing on a deferred teardown reds sections 4
+ * teardown's waits reds section 2 (stuck). Closing at a shut-down reds sections 4
  * and 5; dropping collect()'s early return reds section 5; resetting a shut session's
  * buffers reds section 7.
  */
@@ -480,8 +481,8 @@ void on_a_callback_thread(Fn fn) {
     ::close(p[1]);
 }
 
-void test_deferred_teardown_keeps_the_descriptor_open_until_the_destructor() {
-    std::printf("-- a deferred teardown keeps the link's descriptor open until its destructor\n");
+void test_shut_down_keeps_the_descriptor_open_until_the_destructor() {
+    std::printf("-- a shut-down keeps the link's descriptor open until its destructor\n");
     removed_by_its_own_write_t t;
     std::this_thread::sleep_for(50ms);  // the link's callback sees its shut-down sockets
     check(sockets_on(t.port) == 2, "removed, B's link still holds both its descriptors open");
@@ -633,7 +634,7 @@ void test_transport_shut_down_by_its_own_callback_on_a_shared_module() {
         const std::array<std::byte, 4> frame{};
         a.send(std::span<const std::byte>(frame));
         check_or_exit(eventually([&] { return shut.load(); }),
-                      "b shut itself down from its own callback without a deadlock");
+                      "b shut itself down from its own callback");
         c.send(std::span<const std::byte>(frame));
         check_or_exit(eventually([&] { return to_a.load() == 1; }),
                       "the shared module still delivers to the other links");
@@ -655,7 +656,7 @@ int main() {
     test_removed_by_its_own_write(true);
     test_removed_while_its_callback_waits_for_the_control_plane();
     test_two_links_removing_each_other();
-    test_deferred_teardown_keeps_the_descriptor_open_until_the_destructor();
+    test_shut_down_keeps_the_descriptor_open_until_the_destructor();
     test_collect_from_a_callback_frees_nothing();
     test_removal_from_a_callback_then_collect_leaves_nothing_behind();
     test_a_shut_sessions_buffers_live_until_the_destructor();

@@ -144,10 +144,11 @@ inline thread_local unsigned g_callback_depth = 0;
  * @brief True on a thread that runs link callbacks: one inside a wait module's `run` (a
  *        link's own thread, or the node module's driver).
  *
- * A teardown made here waits for nothing, neither a thread's end nor a callback: such a wait
- * could be for a callback that is itself waiting on this one, here or on another link. It stops
- * the link and leaves the joins to the destructors, which the graph's `collect()` runs
- * outside every callback.
+ * Nothing that waits for a thread's end or a callback may run here: such a wait could be for a
+ * callback that is itself waiting on this one, here or on another link. A link's `shut_down`
+ * waits for nothing on any thread (#2813); its destructor, the one join, asserts that it runs
+ * off this thread, and the graph's `collect()`, which runs those destructors, returns at once
+ * here.
  */
 [[nodiscard]] inline bool on_callback_thread() noexcept { return g_callback_depth != 0; }
 
@@ -168,9 +169,9 @@ struct callback_thread_scope_t {
  * @brief The node's one wait module (ADR-0087 §3): every socket wait on the node, with no
  *        timeout.
  *
- * Thread safety: @ref attach, @ref detach, @ref want_write and @ref stop may be called from any
- * thread, and from inside a callback. A @ref detach from another thread waits for that
- * source's callback if it is in flight, and for nothing else, so once it returns the source's
+ * Thread safety: @ref attach, @ref detach, @ref disarm, @ref want_write and @ref stop may be
+ * called from any thread, and from inside a callback. A @ref detach from another thread waits for
+ * that source's callback if it is in flight, and for nothing else, so once it returns the source's
  * callback never runs again. It must not be called holding a lock that the detached source's
  * own callback takes (see the file's "A detach waits for its own source only"). @ref run is
  * called by one thread at a time.
@@ -207,6 +208,16 @@ class wait_module_t {
      * redelivered next pass.
      */
     void detach(wait_source_t& s) noexcept;
+
+    /**
+     * @brief Stop waiting on @p s , waiting for nothing: @ref detach without its wait, from any
+     *        thread. A no-op for a detached source.
+     *
+     * No new callback of @p s starts once this returns, but one already in flight may still be
+     * running; a later @ref detach waits it out. A link's `shut_down` calls this, and its
+     * destructor calls @ref detach.
+     */
+    void disarm(wait_source_t& s) noexcept;
 
     /**
      * @brief Arm or disarm write interest on @p s .

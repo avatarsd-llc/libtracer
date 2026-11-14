@@ -1570,8 +1570,14 @@ class graph_t {
      * parked_seam_count makes observable. Called from inside a router frame, it frees
      * nothing that frame could reach: the calling thread is itself still inside a bracket.
      * Called on a thread that runs link callbacks (`%tr::net::on_callback_thread`), it returns
-     * at once and frees nothing, leaving everything parked for the next call. Links removed
-     * from a callback are joined and freed at the next collect() or at graph destruction.
+     * at once and frees nothing, leaving everything parked for the next call. A removed link
+     * is only shut down at its removal (`%transport_t::shut_down` waits for nothing): its
+     * threads, their stacks and its descriptors live until the next collect() or graph
+     * destruction, which joins, closes and frees them (#2813): what the link held while live,
+     * held for longer. Destroying a `%tr::net::transport_vertex_t` runs this call once the
+     * frames open then have left, so the links it removes are joined before it returns.
+     * A node that removes links and creates others calls this after each removal, so a held
+     * link and the next one do not add up.
      *
      * @note Whatever is still parked when the graph is destroyed is freed by the graph's
      *       own teardown, ripe or not — a backstop against unbounded growth, NOT a substitute
