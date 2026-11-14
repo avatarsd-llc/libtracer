@@ -1163,6 +1163,14 @@ target_link_libraries(subscribe_retire_race_test PRIVATE libtracer Threads::Thre
 libtracer_test_warnings(subscribe_retire_race_test)
 add_test(NAME subscribe_retire_race COMMAND subscribe_retire_race_test)
 
+# #2836 — clear and admit change the subscriber count and the slot under one hold, so the count
+# equals the live edges across clear/admit/retire, and a retired vertex carries no edges into a
+# later registration.
+add_executable(edge_count_lifecycle_test edge_count_lifecycle_test.cpp)
+target_link_libraries(edge_count_lifecycle_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(edge_count_lifecycle_test)
+add_test(NAME edge_count_lifecycle COMMAND edge_count_lifecycle_test)
+
 # #1712: the per-vertex pending-mark hint — an unmarked observed write skips the key render and
 # the sweep lock (global-new counter difference), plus the mark/clear race the tsan lane runs.
 add_executable(pending_mark_test pending_mark_test.cpp)

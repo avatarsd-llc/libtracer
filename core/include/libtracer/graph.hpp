@@ -3455,12 +3455,13 @@ class graph_t {
     // whose newer value this writer never delivered — survives instead of being dropped
     // (#1185, the #854-survivor locked-erase drop).
     void clear_pending(vertex_t* v, const value_t* delivered);
-    // Subscribe/unsubscribe bookkeeping (RFC-0005): bump v's own active-slot count
-    // and every descendant's listeners_above_, under the map lock (shared — the
-    // counters are atomics; the lock only excludes concurrent vertex creation so
-    // a newborn's creation-time sum and this walk never double-count).
-    void note_subscriber_added(vertex_t* v);
-    void note_subscriber_removed(vertex_t* v);
+    // Subscribe/unsubscribe bookkeeping (RFC-0005): move v's own delivering-slot count and
+    // every strict descendant's listeners_above_ by `delta` — a child-link subtree walk,
+    // placeholders included — and zero moves nothing. The CALLER holds the map lock across
+    // this and the slot change it counts (shared suffices; the counters are atomics): the hold
+    // excludes vertex creation, so a newborn's creation-time sum and this walk never
+    // double-count, and retirement, so it never sees a count and a slot table that disagree.
+    static void note_subscribers(vertex_t* v, std::int32_t delta);
     // Clear subscriber slot `slot` of `v` and, iff it was active, unwind the bookkeeping above
     // and report the removal to the subscription observer under `caller` (a no-op for the
     // empty, local caller): the one clear `unsubscribe` and the wire `:subscribers[N]` clear
@@ -3473,7 +3474,9 @@ class graph_t {
     // slot append → transient-local durability latch (delivered outside the lock, per
     // the edge's kind) → RFC-0005 bookkeeping. Every door — the two subscribe() sugars,
     // the local `:subscribers[]` field-write, and the wire subscribe_wire — ends here,
-    // so gate and latch semantics cannot diverge per entry point.
+    // so gate and latch semantics cannot diverge per entry point. The slot lands only on the
+    // registration the gate passed: one retired since, even if registered again, is refused
+    // with the status the gate gives a vertex retired under it.
     // `link_token` is the carried interned identity (#1417), forwarded verbatim to
     // `link_index_t::index_vertex` — which ignores it unless it names a live slot spelling the key
     // this admission actually indexes under. Defaulted, so the three local doors that carry
@@ -3657,11 +3660,6 @@ class graph_t {
     // `build_key` is gone): false when the source refused (out is then empty), so every
     // caller drops, defers or answers BACKPRESSURE instead of aborting.
     [[nodiscard]] static bool try_build_key(const vertex_t* v, mem::bytes_t& out) noexcept;
-    // Bump every strict descendant's listeners_above_ by `delta` (RFC-0005 bookkeeping) —
-    // a child-link subtree walk (placeholders included, so a later fill inherits a
-    // correct count). Call with map_mutex_ held (shared suffices; counters are atomics).
-    static void bump_subtree_listeners(vertex_t* v, std::int32_t delta);
-
     // RFC-0009 §B.6: pre-order re-virginize of @p v's subtree — unwind each vertex's
     // subscriber contribution to its descendants' listeners_above_, revert it to a
     // placeholder, and flip it unregistered. Parks each detached value-seam block

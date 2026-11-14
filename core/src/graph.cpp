@@ -869,10 +869,10 @@ void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
     // descendant with none of its own is judged by them, so every vertex they gate must
     // already read as gone by the time any of them is cleared. Then, order within a vertex
     // matters:
-    //  (1) read its active-edge count and unwind exactly that contribution from every
-    //      descendant's listeners_above_ BEFORE revert zeroes own_subs_ — the mirror of
-    //      note_subscriber_removed, done inline because we already hold the unique lock
-    //      its shared lock only needed to exclude vertex creation;
+    //  (1) read its active-edge count and unwind exactly that contribution, its own and
+    //      every descendant's listeners_above_, BEFORE revert takes the slot table — the
+    //      note_subscribers every clear runs, under the unique lock its callers' shared
+    //      hold excludes;
     //  (2) [the caller clears the subtree's sweep-set keys as one prefix range];
     //  (3) revert the vertex's own state (fail-closed: clears own ACEs first, so the
     //      bearing-ancestor walk stops seeing this vertex before anything else changes);
@@ -888,8 +888,7 @@ void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
     // walk re-reads the sibling list on each ascent and an insert or erase mid-walk would move
     // the position it resumes from.
     const auto retire_one = [this, &gone](vertex_t& x) {
-        const std::uint32_t k = x.own_subs();
-        if (k > 0) bump_subtree_listeners(&x, -static_cast<std::int32_t>(k));
+        note_subscribers(&x, -static_cast<std::int32_t>(x.own_subs()));
         // Park the detached value seam (if any — the seam exists iff a handler was installed
         // at registration, whatever the role): a lock-free reader may still hold the old
         // pointer, so it is never freed here. The park's other end is the public collect(),
@@ -1031,7 +1030,7 @@ vertex_t* graph_t::make_placeholder(vertex_t& parent, std::span<const std::byte>
             fresh->slot_memo_ = static_cast<std::uint32_t>(vertex_slots_.size());
         // Subtree-subscription init (RFC-0005): a vertex born under a subscribed ancestor
         // starts with the ancestor-listener count already summed — O(1) from the parent's
-        // maintained counters (under the same unique lock the note_subscriber_* walks exclude,
+        // maintained counters (under the same unique lock the note_subscribers walks exclude,
         // so the sum and a concurrent subscribe walk never double-count); the write path's
         // is-anyone-listening check stays a single relaxed load.
         fresh->init_listeners_above(parent.listeners_above() + parent.own_subs());
@@ -1377,11 +1376,10 @@ std::size_t graph_t::evict_link_edges(std::string_view link_name, link_pair_t li
         const std::shared_lock lock(map_mutex_);
         std::size_t quiet = 0;  // suspended edges were never counted (#1533)
         const std::size_t k = v->evict_link_edges(link_name, link, routed, quiet);
-        if (k == 0) continue;  // a stale index entry: the vertex's edges went individually
-        // The k-fold mirror of note_subscriber_removed, under the same shared hold as
-        // the clear (RFC-0005 bookkeeping: descendants' writes stop bubbling here).
-        v->bump_own_subs(-static_cast<std::int32_t>(k - quiet));
-        bump_subtree_listeners(v, -static_cast<std::int32_t>(k - quiet));
+        // The k-fold note_subscribers, under the same shared hold as the clear (RFC-0005
+        // bookkeeping: descendants' writes stop bubbling here). A stale index entry, whose
+        // vertex's edges went individually, evicts nothing and moves nothing.
+        note_subscribers(v, -static_cast<std::int32_t>(k - quiet));
         total += k;
     }
     // Outside every graph lock: the receiver takes its own control-plane lock (#1816).
@@ -1419,9 +1417,7 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name, link_pair_t l
         const std::shared_lock lock(map_mutex_);
         std::size_t quiet = 0;
         const std::size_t k = v->evict_route_edges(link, route_wire, bound_echo, quiet);
-        if (k == 0) continue;
-        v->bump_own_subs(-static_cast<std::int32_t>(k - quiet));
-        bump_subtree_listeners(v, -static_cast<std::int32_t>(k - quiet));
+        note_subscribers(v, -static_cast<std::int32_t>(k - quiet));
         total += k;
     }
     // Every match was keyed on its delivery link, so every one held `link` (#1816) and was
@@ -1569,27 +1565,21 @@ void graph_t::count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noex
         count_drop(drop_reason_t::OUT_OF_MEMORY, n * lost);
 }
 
-void graph_t::bump_subtree_listeners(vertex_t* v, std::int32_t delta) {
+void graph_t::note_subscribers(vertex_t* v, std::int32_t delta) {
+    // The caller holds the map lock across this AND the slot change it counts — shared, or the
+    // unique hold retirement already has — so the pair is one step against the unique-lock
+    // writers. Vertex creation: a newborn either sees the moved own_subs_ in its creation-time
+    // sum or is already linked and walked here, never both. Retirement: it reads own_subs()
+    // and takes the slot table under its unique hold, so it sees a count and a table that
+    // agree. Counters are atomics. The descendants are exactly v's child-link subtree
+    // (ADR-0057), placeholders included, so a later fill inherits a correct count. A zero delta
+    // (a toggle, a replace that changed no count, a vertex with no delivering edge) walks
+    // nothing, and touches no edge block, which a vertex never subscribed to does not have.
+    if (delta == 0) return;
+    v->bump_own_subs(delta);
     // Iterative (vertex_t::for_each_descendant): this was self-recursion at ~208 B a frame, and
     // graph depth is a peer-chosen segment count -- see #690 and that function's docs.
     v->for_each_descendant([delta](vertex_t& c) { c.bump_listeners_above(delta); });
-}
-
-void graph_t::note_subscriber_added(vertex_t* v) {
-    // Shared map lock: excludes concurrent vertex creation (unique lock), so a
-    // newborn either sees the bumped own_subs_ in its creation-time sum or is
-    // already linked and walked here — never both. Counters are atomics. The
-    // descendants are exactly v's child-link subtree (ADR-0057) — placeholders
-    // included, so a later fill inherits a correct count.
-    const std::shared_lock lock(map_mutex_);
-    v->bump_own_subs(+1);
-    bump_subtree_listeners(v, +1);
-}
-
-void graph_t::note_subscriber_removed(vertex_t* v) {
-    const std::shared_lock lock(map_mutex_);
-    v->bump_own_subs(-1);
-    bump_subtree_listeners(v, -1);
 }
 
 bool graph_t::clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_view caller,
@@ -1606,8 +1596,16 @@ bool graph_t::clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_v
                                          : view::view_t{};
     remote_ptr_t retired_remote;
     bool was_suspended = false;
-    if (!v->clear_edge(slot, retired_ctx, &retired_remote, &was_suspended, expect)) return false;
-    if (!was_suspended) note_subscriber_removed(v);  // RFC-0005 counts delivering edges only
+    {
+        // The slot and the count change under ONE shared map hold, as set_suspended and
+        // evict_link_edges take them: a retire in between would count the cleared edge and
+        // then see it uncounted a second time. RFC-0005 counts delivering edges only, so a
+        // suspended one gives nothing back.
+        const std::shared_lock lock(map_mutex_);
+        if (!v->clear_edge(slot, retired_ctx, &retired_remote, &was_suspended, expect))
+            return false;
+        note_subscribers(v, -static_cast<std::int32_t>(!was_suspended));
+    }
     // The link hold (#1816) and the session charge (#1841) this clear gives back.
     release_edge(retired_remote, v);
     // Only a slot that WAS active is an unsubscribe; clearing an already-empty one changed
@@ -3313,6 +3311,10 @@ result_t<subscription_t> graph_t::admit_subscriber(
     // requires READ on this (the producer's) :acl, under the door's caller context — a
     // subscription delivers what a read would. A replace (`slot`) was gated by its own door,
     // the `:subscribers[N]` arm, before the slot was looked up; the same test is not run twice.
+    //
+    // The verdict is about THIS registration of `v`, so its retirement generation is read
+    // first (ADR-0062): the slot verb below lands only while it is still the same one.
+    const std::uint32_t generation = v->retire_gen();
     if (!slot && !acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
 
@@ -3342,13 +3344,17 @@ result_t<subscription_t> graph_t::admit_subscriber(
     // The observer's inputs, captured BEFORE `s` is moved into the slot verb below and before
     // a replace overwrites the slot it displaces. Both are refcount clones of already-owned
     // segments, so this costs no byte copy — and it is skipped outright unless an observer is
-    // installed AND the door is external, which is what keeps the local doors free.
-    const bool observe = observing_subscriptions(caller);
-    const view::view_t admitted_tlv = observe ? s.source_view : view::view_t{};
-    // An append names no slot, and `edge_source` answers nothing for `kNoSlot`.
-    const view::view_t displaced_tlv =
-        observe ? v->edge_source(slot.value_or(vertex_t::kNoSlot)).value_or(view::view_t{})
-                : view::view_t{};
+    // installed AND the door is external, which is what keeps the local doors free. Both are
+    // built in the one expression that tests it, so each view is constructed once.
+    struct observed_t {
+        view::view_t admitted;   // the record this admission lands
+        view::view_t displaced;  // an append names no slot: `edge_source(kNoSlot)` is empty
+    };
+    const observed_t observed =
+        observing_subscriptions(caller)
+            ? observed_t{s.source_view,
+                         v->edge_source(slot.value_or(vertex_t::kNoSlot)).value_or(view::view_t{})}
+            : observed_t{};
     // The link hold (#1816): a clone of the admitted edge's cold half, so its delivery link
     // can be named after `s` is moved into the slot, and the cold half a replace displaces.
     const remote_ptr_t admitted = s.remote;
@@ -3404,10 +3410,10 @@ result_t<subscription_t> graph_t::admit_subscriber(
         return std::unexpected(kRefusal[!slot]);
     if (!admit_session(admitted, v, caller, link_token, session))
         return std::unexpected(status_t::BACKPRESSURE);
-    note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     // The hold is taken BEFORE the edge can be seen, for the reason the index entry above is:
     // a departure that evicts the edge the instant it lands gives the hold back, and must
-    // find one to give. The failure returns below hand it back themselves (#1816).
+    // find one to give. Outside every graph lock, as the receiver takes its own; the refusal
+    // return below hands it back itself (#1816).
     hold_link(delivery_link(admitted), true);
     // An append answers in the replace verb's terms, so both share the unwind below: a fresh
     // slot is a FILLED_EMPTY add, and a `kNoSlot` is REFUSED — the injected resource could
@@ -3416,39 +3422,55 @@ result_t<subscription_t> graph_t::admit_subscriber(
     // same one the store leg answers on exhaustion.
     constexpr vertex_t::edge_replace_t kAppended[] = {vertex_t::edge_replace_t::FILLED_EMPTY,
                                                       vertex_t::edge_replace_t::REFUSED};
-    vertex_t::edge_replace_t r;
-    if (slot) {
-        // RFC-0009 §D.1 replace: the SAME door, so the latch below applies identically to a
-        // replace and to an append (ADR-0049); the READ gate ran at the `[N]` arm. An index no
-        // slot answers to is a malformed address, not a silent no-op — and refusing it is
-        // what stops a wire-supplied `:subscribers[65535]` from growing the slot vector.
-        r = v->replace_edge(*slot, std::move(s), expect, &latch, &displaced);
-        idx = *slot;
-    } else {
-        idx = v->add_edge(std::move(s), &latch, *tables_);
-        r = kAppended[idx == vertex_t::kNoSlot];
+    // What each outcome gives back of the speculative count, indexed by `edge_replace_t`. Only
+    // filling a CLEARED slot is genuinely a new listener, and a displaced SUSPENDED edge was
+    // never counted (#1533), so it is an add too. Swapping a live one leaves the count be, and
+    // a refusal adds nothing — both give the speculative raise back. The unwind costs a second
+    // subtree walk on a control-plane-COLD path, which is the right side to pay on:
+    // over-counting only ever buys a snapshot that finds nothing, while under-counting drops a
+    // delivery. A REFUSED replace changed nothing (#1622): the displaced edge still delivers,
+    // so the raise and hold go back exactly as for an index no slot answers to, and an
+    // unpublished append would be a subscription that never receives.
+    constexpr std::int32_t kGiveBack[] = {1, 1, 1, 0, 1, 0};
+    // A registration retired since the gate lands nothing, whether or not the address has been
+    // registered again since: the verdict was about the vertex that left, and a retired vertex
+    // carries no edge into a later registration. It is refused as the gate refuses a vertex
+    // retired under it, so it takes the refusal that names no slot verb.
+    vertex_t::edge_replace_t r = vertex_t::edge_replace_t::EDGE_CHANGED;
+    {
+        // The count and the slot change under ONE shared map hold, as set_suspended and
+        // evict_link_edges take them: a retire (unique hold) reads own_subs() before zeroing
+        // it and takes the slot table, so it must see the two agree, and registration cannot
+        // change while it is held.
+        const std::shared_lock lock(map_mutex_);
+        if (v->registered() && v->retire_gen() == generation) {
+            note_subscribers(v, +1);  // RFC-0005: descendants' writes now bubble here
+            if (slot) {
+                // RFC-0009 §D.1 replace: the SAME door, so the latch below applies identically
+                // to a replace and to an append (ADR-0049); the READ gate ran at the `[N]` arm.
+                // An index no slot answers to is a malformed address, not a silent no-op — and
+                // refusing it is what stops a wire-supplied `:subscribers[65535]` from growing
+                // the slot vector.
+                r = v->replace_edge(*slot, std::move(s), expect, &latch, &displaced);
+                idx = *slot;
+            } else {
+                idx = v->add_edge(std::move(s), &latch, *tables_);
+                r = kAppended[idx == vertex_t::kNoSlot];
+            }
+            note_subscribers(v, -kGiveBack[std::to_underlying(r)]);
+        }
     }
-    // Only filling a CLEARED slot is genuinely a new listener; swapping a live one leaves
-    // the count be, and a refusal adds nothing — both give the speculative bump back. The
-    // unwind costs a second subtree walk on a control-plane-COLD path, which is the right side
-    // to pay on: over-counting only ever buys a snapshot that finds nothing, while
-    // under-counting drops a delivery.
-    // A displaced SUSPENDED edge was never counted (#1533), so it is an add here too.
-    // A REFUSED replace changed nothing (#1622): the displaced edge still delivers, so the
-    // speculative bump and hold go back exactly as for an index no slot answers to, and an
-    // unpublished append would be a subscription that never receives. The refusals lead the
-    // enumeration, so one test takes them all and the table names the status.
+    // The refusals lead the enumeration, so one test takes them all and the table names the
+    // status.
     if (r <= vertex_t::edge_replace_t::EDGE_CHANGED) {
-        note_subscriber_removed(v);
         release_edges(delivery_link(admitted), session, v);
         return std::unexpected(kRefusal[std::to_underlying(r)]);
     }
-    if (r == vertex_t::edge_replace_t::REPLACED_ACTIVE) note_subscriber_removed(v);
     // A replace that displaced an edge — delivering or suspended — is two events, in
     // causal order: the old subscription ended and a new one began. Reporting only the
     // ADDED would leave an observer's inventory holding an edge that no longer exists.
     if (r != vertex_t::edge_replace_t::FILLED_EMPTY)
-        notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, displaced_tlv, idx);
+        notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, observed.displaced, idx);
 
     // The ADR-0049 durability latch is the one dispatch that does NOT come through `fan_out`,
     // so it brackets itself: a latched replay invokes the same user callback a publish does,
@@ -3460,9 +3482,9 @@ result_t<subscription_t> graph_t::admit_subscriber(
     }
     // Last, and only on the success path: an edge the caller was told about is an edge that
     // landed. No graph lock is held here — the slot verb released the vertex stripe lock and
-    // note_subscriber_added released the map lock — and the durability latch has already been
+    // its block released the map hold — and the durability latch has already been
     // dispatched, so the observer never runs interleaved with this subscription's own replay.
-    notify_subscription(sub_event_t::kind_t::ADDED, v, caller, admitted_tlv, idx);
+    notify_subscription(sub_event_t::kind_t::ADDED, v, caller, observed.admitted, idx);
     // The admitted edge's hold was taken before the slot verb, so a replace over the same
     // link never lets the count touch zero between the two (#1816).
     // The displaced edge's charge goes back with its hold (#1841): a replace is net zero.
@@ -3641,16 +3663,9 @@ result_t<void> graph_t::set_suspended(const subscription_t& sub, bool suspended)
     // uncounts after the flip. Over-counting in between only buys a snapshot that skips it.
     const std::shared_lock lock(map_mutex_);
     const std::int32_t up = suspended ? 0 : 1;
-    if (up != 0) {
-        v->bump_own_subs(+1);
-        bump_subtree_listeners(v, +1);
-    }
+    note_subscribers(v, up);
     const vertex_t::edge_suspend_t r = v->set_edge_suspended(sub.slot_, suspended);
-    const std::int32_t down = r != vertex_t::edge_suspend_t::CHANGED ? up : 1 - up;
-    if (down != 0) {
-        v->bump_own_subs(-down);
-        bump_subtree_listeners(v, -down);
-    }
+    note_subscribers(v, r != vertex_t::edge_suspend_t::CHANGED ? -up : up - 1);
     if (r == vertex_t::edge_suspend_t::NOT_FOUND) return std::unexpected(status_t::NOT_FOUND);
     return {};  // no replay: a resume delivers from the next propagated value
 }
