@@ -869,10 +869,10 @@ void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
     // descendant with none of its own is judged by them, so every vertex they gate must
     // already read as gone by the time any of them is cleared. Then, order within a vertex
     // matters:
-    //  (1) read its active-edge count and unwind exactly that contribution from every
-    //      descendant's listeners_above_ BEFORE revert zeroes own_subs_ — the mirror of
-    //      note_subscribers, done inline because we already hold the unique lock its
-    //      callers' shared hold excludes;
+    //  (1) read its active-edge count and unwind exactly that contribution, its own and
+    //      every descendant's listeners_above_, BEFORE revert takes the slot table — the
+    //      note_subscribers every clear runs, under the unique lock its callers' shared
+    //      hold excludes;
     //  (2) [the caller clears the subtree's sweep-set keys as one prefix range];
     //  (3) revert the vertex's own state (fail-closed: clears own ACEs first, so the
     //      bearing-ancestor walk stops seeing this vertex before anything else changes);
@@ -888,8 +888,7 @@ void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
     // walk re-reads the sibling list on each ascent and an insert or erase mid-walk would move
     // the position it resumes from.
     const auto retire_one = [this, &gone](vertex_t& x) {
-        const std::uint32_t k = x.own_subs();
-        if (k > 0) bump_subtree_listeners(&x, -static_cast<std::int32_t>(k));
+        note_subscribers(&x, -static_cast<std::int32_t>(x.own_subs()));
         // Park the detached value seam (if any — the seam exists iff a handler was installed
         // at registration, whatever the role): a lock-free reader may still hold the old
         // pointer, so it is never freed here. The park's other end is the public collect(),
@@ -1377,11 +1376,10 @@ std::size_t graph_t::evict_link_edges(std::string_view link_name, link_pair_t li
         const std::shared_lock lock(map_mutex_);
         std::size_t quiet = 0;  // suspended edges were never counted (#1533)
         const std::size_t k = v->evict_link_edges(link_name, link, routed, quiet);
-        if (k == 0) continue;  // a stale index entry: the vertex's edges went individually
-        // The k-fold mirror of note_subscribers, under the same shared hold as
-        // the clear (RFC-0005 bookkeeping: descendants' writes stop bubbling here).
-        v->bump_own_subs(-static_cast<std::int32_t>(k - quiet));
-        bump_subtree_listeners(v, -static_cast<std::int32_t>(k - quiet));
+        // The k-fold note_subscribers, under the same shared hold as the clear (RFC-0005
+        // bookkeeping: descendants' writes stop bubbling here). A stale index entry, whose
+        // vertex's edges went individually, evicts nothing and moves nothing.
+        note_subscribers(v, -static_cast<std::int32_t>(k - quiet));
         total += k;
     }
     // Outside every graph lock: the receiver takes its own control-plane lock (#1816).
@@ -1419,9 +1417,7 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name, link_pair_t l
         const std::shared_lock lock(map_mutex_);
         std::size_t quiet = 0;
         const std::size_t k = v->evict_route_edges(link, route_wire, bound_echo, quiet);
-        if (k == 0) continue;
-        v->bump_own_subs(-static_cast<std::int32_t>(k - quiet));
-        bump_subtree_listeners(v, -static_cast<std::int32_t>(k - quiet));
+        note_subscribers(v, -static_cast<std::int32_t>(k - quiet));
         total += k;
     }
     // Every match was keyed on its delivery link, so every one held `link` (#1816) and was
@@ -1569,24 +1565,21 @@ void graph_t::count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noex
         count_drop(drop_reason_t::OUT_OF_MEMORY, n * lost);
 }
 
-void graph_t::bump_subtree_listeners(vertex_t* v, std::int32_t delta) {
+void graph_t::note_subscribers(vertex_t* v, std::int32_t delta) {
+    // The caller holds the map lock across this AND the slot change it counts — shared, or the
+    // unique hold retirement already has — so the pair is one step against the unique-lock
+    // writers. Vertex creation: a newborn either sees the moved own_subs_ in its creation-time
+    // sum or is already linked and walked here, never both. Retirement: it reads own_subs()
+    // and takes the slot table under its unique hold, so it sees a count and a table that
+    // agree. Counters are atomics. The descendants are exactly v's child-link subtree
+    // (ADR-0057), placeholders included, so a later fill inherits a correct count. A zero delta
+    // (a toggle, a replace that changed no count, a vertex with no delivering edge) walks
+    // nothing, and touches no edge block, which a vertex never subscribed to does not have.
+    if (delta == 0) return;
+    v->bump_own_subs(delta);
     // Iterative (vertex_t::for_each_descendant): this was self-recursion at ~208 B a frame, and
     // graph depth is a peer-chosen segment count -- see #690 and that function's docs.
     v->for_each_descendant([delta](vertex_t& c) { c.bump_listeners_above(delta); });
-}
-
-void graph_t::note_subscribers(vertex_t* v, std::int32_t delta) {
-    // The caller holds the shared map lock across this AND the slot change it counts, so the
-    // pair is one step against the two unique-lock writers. Vertex creation: a newborn either
-    // sees the moved own_subs_ in its creation-time sum or is already linked and walked here,
-    // never both. Retirement: it reads own_subs() before zeroing it and takes the slot table,
-    // so it sees a count and a table that agree. Counters are atomics. The descendants are
-    // exactly v's child-link subtree (ADR-0057), placeholders included, so a later fill
-    // inherits a correct count. A zero delta (a toggle or a replace that changed no count)
-    // walks nothing.
-    if (delta == 0) return;
-    v->bump_own_subs(delta);
-    bump_subtree_listeners(v, delta);
 }
 
 bool graph_t::clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_view caller,
