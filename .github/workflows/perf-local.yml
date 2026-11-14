@@ -72,9 +72,9 @@
 #
 # STORE SWEEP (#1428): the ADR-0079 per-configuration sweep banks its DETERMINISTIC
 # columns here — the `hwm` store `used()` occupancy per (arm, T), which additionally
-# carries a WARN-FIRST pinned ratchet (bench/store_sweep_pins.json), and the T=1 latency
-# cell of each (arm, leg), which is banked and watched by the rolling `store_guard.py
-# drift` leg below rather than pinned.
+# carries a pinned ratchet that FAILS on growth (bench/store_sweep_pins.json, #2414), and
+# the T=1 latency cell of each (arm, leg), which is banked and watched by the rolling
+# `store_guard.py drift` leg below rather than pinned.
 #
 # TWO COLUMNS OF THAT INSTRUMENT ARE EXCLUDED, and they are named here rather than left
 # implied by omission:
@@ -621,10 +621,11 @@ jobs:
           esac
 
       # --- ADR-0079 store occupancy (#1428) --------------------------------------
-      # WARN-FIRST, on the same terms as the RAM ratchet above and for the same reason:
-      # the pins are MEASURED, the flip to `--mode fail` is a deliberate PR edit governed
-      # by the activation criterion recorded in bench/store_sweep_pins.json, and never an
-      # auto-ratchet. The band here is ZERO rather than the census's 8 B — this column
+      # FAILS on growth (#2414), like the counted ledger: the pins are MEASURED, a re-pin
+      # is a deliberate PR edit, and never an auto-ratchet. It shipped warn-first, and
+      # warn mode let the pins go 22,944 B stale unseen (#2406); the flip is recorded in
+      # bench/store_sweep_pins.json (`activation`). A run on another toolchain than the
+      # pins' still downgrades to warn. The band here is ZERO rather than the census's 8 B — this column
       # came back byte-identical across eight invocations spanning an 8x range of host
       # load, because the `hwm` mode runs single-threaded precisely so the figure is a
       # function of the workload and the topology and not of the scheduler.
@@ -634,18 +635,18 @@ jobs:
       # whose TIMING sample was skipped. An instrument failure (no transcript, a failed or
       # half-run calibration, an overflowing store, a dead pin) reds this step in EITHER
       # mode: a failure to measure is not a budget verdict.
-      - name: ADR-0079 store-occupancy ratchet (warn-first)
+      - name: ADR-0079 store-occupancy ratchet (fails on growth)
         run: |
           python3 bench/store_sweep_gate.py gate \
             --sweep-raw bench/bench_store_sweep_raw.txt \
             --pins bench/store_sweep_pins.json \
-            --mode warn
+            --mode fail
 
-      # The same live negative control the RAM ratchet carries, for the same reason: a
-      # warn-only comparator is invisible when it is right AND when it is broken. A
-      # doctored baseline must produce the annotation; if it does not, the step above is
-      # decorative and this one says so.
-      - name: The store ratchet must warn on an induced growth (dry run, doctored pins)
+      # The same live negative control the RAM ratchet carries: a comparator is invisible
+      # when it is right AND when it is broken. Pins doctored down by 8 B per link (two
+      # links per lane, so 16 B x T: the size of #2282's tenancy word) must FAIL the
+      # gate; if they do not, the step above is decorative and this one says so.
+      - name: The store ratchet must fail on an induced growth (dry run, doctored pins)
         run: |
           doctored="${RUNNER_TEMP:-.}/doctored_store_pins.json"
           python3 - "$doctored" <<'PY'
@@ -653,16 +654,19 @@ jobs:
           p = json.loads(pathlib.Path("bench/store_sweep_pins.json").read_text())
           for pin in p["pins"]:
               if pin["metric"] == "used_total":
-                  pin["value"] = pin["value"] - 64  # induce +64 B of "growth"
+                  pin["value"] -= 2 * pin["threads"] * 8  # induce +8 B per link
           pathlib.Path(sys.argv[1]).write_text(json.dumps(p))
           PY
+          rc=0
           out=$(python3 bench/store_sweep_gate.py gate \
                   --sweep-raw bench/bench_store_sweep_raw.txt \
-                  --pins "$doctored" --mode warn)
+                  --pins "$doctored" --mode fail) || rc=$?
           echo "$out"
-          case "$out" in
-            *"::warning::ADR-0079 store occupancy drift"*) echo "warn path is live" ;;
-            *) echo "::error::the store ratchet did not warn on a 64 B induced growth — it is vacuous"
+          case "$rc:$out" in
+            1:*"::warning::ADR-0079 store occupancy drift"*) echo "fail path is live" ;;
+            0:*"enforcing in warn mode"*"::warning::ADR-0079 store occupancy drift"*)
+              echo "warn path is live (cross-toolchain run, downgraded)" ;;
+            *) echo "::error::the store ratchet did not fail on +8 B per link — it is vacuous"
                exit 1 ;;
           esac
 
