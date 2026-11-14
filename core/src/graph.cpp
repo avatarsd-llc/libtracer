@@ -3344,14 +3344,17 @@ result_t<subscription_t> graph_t::admit_subscriber(
     // The observer's inputs, captured BEFORE `s` is moved into the slot verb below and before
     // a replace overwrites the slot it displaces. Both are refcount clones of already-owned
     // segments, so this costs no byte copy — and it is skipped outright unless an observer is
-    // installed AND the door is external, which is what keeps the local doors free.
-    view::view_t admitted_tlv;
-    view::view_t displaced_tlv;
-    if (observing_subscriptions(caller)) {
-        admitted_tlv = s.source_view;
-        // An append names no slot, and `edge_source` answers nothing for `kNoSlot`.
-        displaced_tlv = v->edge_source(slot.value_or(vertex_t::kNoSlot)).value_or(view::view_t{});
-    }
+    // installed AND the door is external, which is what keeps the local doors free. Both are
+    // built in the one expression that tests it, so each view is constructed once.
+    struct observed_t {
+        view::view_t admitted;   // the record this admission lands
+        view::view_t displaced;  // an append names no slot: `edge_source(kNoSlot)` is empty
+    };
+    const observed_t observed =
+        observing_subscriptions(caller)
+            ? observed_t{s.source_view,
+                         v->edge_source(slot.value_or(vertex_t::kNoSlot)).value_or(view::view_t{})}
+            : observed_t{};
     // The link hold (#1816): a clone of the admitted edge's cold half, so its delivery link
     // can be named after `s` is moved into the slot, and the cold half a replace displaces.
     const remote_ptr_t admitted = s.remote;
@@ -3467,7 +3470,7 @@ result_t<subscription_t> graph_t::admit_subscriber(
     // causal order: the old subscription ended and a new one began. Reporting only the
     // ADDED would leave an observer's inventory holding an edge that no longer exists.
     if (r != vertex_t::edge_replace_t::FILLED_EMPTY)
-        notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, displaced_tlv, idx);
+        notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, observed.displaced, idx);
 
     // The ADR-0049 durability latch is the one dispatch that does NOT come through `fan_out`,
     // so it brackets itself: a latched replay invokes the same user callback a publish does,
@@ -3481,7 +3484,7 @@ result_t<subscription_t> graph_t::admit_subscriber(
     // landed. No graph lock is held here — the slot verb released the vertex stripe lock and
     // its block released the map hold — and the durability latch has already been
     // dispatched, so the observer never runs interleaved with this subscription's own replay.
-    notify_subscription(sub_event_t::kind_t::ADDED, v, caller, admitted_tlv, idx);
+    notify_subscription(sub_event_t::kind_t::ADDED, v, caller, observed.admitted, idx);
     // The admitted edge's hold was taken before the slot verb, so a replace over the same
     // link never lets the count touch zero between the two (#1816).
     // The displaced edge's charge goes back with its hold (#1841): a replace is net zero.
