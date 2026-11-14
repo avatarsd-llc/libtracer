@@ -81,6 +81,9 @@ class rec_link_t final : public transport_t {
     /** @brief Deliver @p frame inbound, as this link's receive thread would: through the
      *         receiver `add_child` installed, so the router sees its per-link context. */
     void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
+    /** @brief Fire the link-state notifier with `up = true`, as a transport whose connection
+     *         came up would (#2147). */
+    void come_up() { notify_up(); }
     /** @brief A copy of every frame recorded so far, in send order. */
     std::vector<std::vector<std::byte>> frames() {
         const std::lock_guard lock(m_);
@@ -317,6 +320,33 @@ void link_down_releases_waiters() {
     check(n.link.count() == 0, "  a later write answers nothing");
 }
 
+/** @brief An up through the link-state notifier is not a down (#2147): the child stays
+ *         registered and answering, and a pending AWAIT stays pending until its own write. */
+void link_up_releases_nothing() {
+    std::printf("a link-state up evicts nothing and releases no pending AWAIT:\n");
+    node_t n;
+    const long base = n.rx.live();
+    n.link.inject(b_await("sink", 10s));
+    check(n.router->pending_awaits() == 1, "  one AWAIT is pending");
+
+    n.link.come_up();
+    check(n.router->pending_awaits() == 1, "  the up left it pending");
+    check(n.link.count() == 0, "  and answered nothing");
+    check(n.router->registry().live_size() == 1 && n.router->registry().by_name("cli") == &n.link,
+          "  the child is still registered, and its name still resolves to the link");
+    n.link.inject(b_fwd(fwd_op_t::READ, b_path({"other"}), b_path({"cli"})));
+    check(n.link.count() == 1, "  a READ on the link is still answered");
+
+    (void)n.graph.write(n.sink, make_value(b_value_u32(kChanged)));
+    check(n.link.wait_for(2, 2s), "  the AWAIT resolves on its own write");
+    const auto sent = n.link.frames();
+    const auto r = sent.size() > 1 ? parse_reply(sent[1]) : std::nullopt;
+    check(r && r->kind == reply_kind_t::RESULT && r->value == kChanged,
+          "  with the AWAIT's RESULT, carrying the new value");
+    check(n.router->pending_awaits() == 0, "  nothing is pending afterwards");
+    check(n.rx.live() == base, "  and the waiter's block went back to the link's source");
+}
+
 /** @brief Destroying the router with AWAITs pending neither hangs nor leaks. */
 void teardown_with_pending_awaits() {
     std::printf("router teardown with pending AWAITs:\n");
@@ -359,6 +389,7 @@ int main() {
     receiver_ignores_await_timeout();
     many_awaits_each_answer_once();
     link_down_releases_waiters();
+    link_up_releases_nothing();
     teardown_with_pending_awaits();
     concurrent_writes_race_arming();
     return tr::testing::summary("fwd_await_defer");

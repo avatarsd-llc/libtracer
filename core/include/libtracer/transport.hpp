@@ -1167,8 +1167,7 @@ class transport_t {
      *         installer reads @ref link_up after its install, or this up is lost. */
     void notify_up() const {
         const link_state_fn_t fn = state_fn_.load(std::memory_order_acquire);
-        if (fn != nullptr && fn != &missed_down)
-            fn(state_ctx_.load(std::memory_order_relaxed), true);
+        if (fn != nullptr) fn(state_ctx_.load(std::memory_order_relaxed), true);
     }
 
     /** @brief The delivery-tier slot (the ONE tier-select mechanism, ADR-0042 /
@@ -1184,7 +1183,7 @@ class transport_t {
      *         transport fires. */
     friend class fwd_router_t;
     /** @brief The mark @ref notify_down leaves in `state_fn_` for a down that found no
-     *         notifier. A no-op, so a later down fire calls it like any notifier. */
+     *         notifier. A no-op, so a later fire calls it like any notifier. */
     static void missed_down(void* /*ctx*/, bool /*up*/) noexcept {}
     /** @brief Installed link-state sink, or `missed_down`. Atomic: a transport's callback
      *         thread may fire it (notify_down) while add_child is still installing it. */
