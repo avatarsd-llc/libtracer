@@ -125,13 +125,16 @@ struct raw_quic_client_t {
     HQUIC cfg = nullptr;
     HQUIC conn = nullptr;
     HQUIC stream = nullptr;
+    HQUIC second = nullptr;  // a second bidi stream, once the first has ended
     bool ok = false;
 
     std::mutex m;
     std::condition_variable cv;
     bool handshake_done = false;
     bool handshake_ok = false;
-    std::atomic<bool> shut{false};  // the server tore the connection down
+    std::atomic<bool> shut{false};            // the server tore the connection down
+    std::atomic<int> bidi_credit{0};          // bidi streams the server lets us open now
+    std::atomic<bool> second_refused{false};  // the server aborted the second stream
 
     struct send_buf_t {
         QUIC_BUFFER buf{};
@@ -148,6 +151,9 @@ struct raw_quic_client_t {
                 self->cv.notify_all();
                 return QUIC_STATUS_SUCCESS;
             }
+            case QUIC_CONNECTION_EVENT_STREAMS_AVAILABLE:
+                self->bidi_credit.store(ev->STREAMS_AVAILABLE.BidirectionalCount);
+                return QUIC_STATUS_SUCCESS;
             case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
             case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
             case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
@@ -169,6 +175,28 @@ struct raw_quic_client_t {
             delete static_cast<send_buf_t*>(ev->SEND_COMPLETE.ClientContext);
         }
         return QUIC_STATUS_SUCCESS;
+    }
+
+    /** @brief The second stream's events: its send buffers, and the server's refusal. */
+    static QUIC_STATUS QUIC_API second_cb(HQUIC h, void* ctx, QUIC_STREAM_EVENT* ev) {
+        auto* self = static_cast<raw_quic_client_t*>(ctx);
+        if (ev->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED ||
+            ev->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED)
+            self->second_refused.store(true);
+        return stream_cb(h, ctx, ev);
+    }
+
+    /** @brief End the first stream in both directions, as a peer that leaves it does. */
+    void abort_stream() { api->StreamShutdown(stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0); }
+
+    /** @brief Start a second bidi stream on the same connection. */
+    bool open_second() {
+        if (QUIC_FAILED(
+                api->StreamOpen(conn, QUIC_STREAM_OPEN_FLAG_NONE, &second_cb, this, &second))) {
+            second = nullptr;
+            return false;
+        }
+        return QUIC_SUCCEEDED(api->StreamStart(second, QUIC_STREAM_START_FLAG_IMMEDIATE));
     }
 
     explicit raw_quic_client_t(std::uint16_t port) {
@@ -216,6 +244,7 @@ struct raw_quic_client_t {
     ~raw_quic_client_t() {
         if (api == nullptr) return;
         if (stream != nullptr) api->StreamClose(stream);
+        if (second != nullptr) api->StreamClose(second);
         if (conn != nullptr) {
             api->ConnectionShutdown(conn, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
             api->ConnectionClose(conn);
@@ -226,14 +255,17 @@ struct raw_quic_client_t {
         tsan_acquire(this);  // all callbacks drained — take their published writes
     }
 
-    // Write raw stream bytes (no framing added) in ONE StreamSend.
-    void write(std::span<const std::byte> bytes) {
+    // Write raw stream bytes (no framing added) in ONE StreamSend, on @p on (the first stream
+    // by default).
+    void write(std::span<const std::byte> bytes, HQUIC on = nullptr) {
         auto* sb = new send_buf_t{};
         sb->bytes.assign(bytes.begin(), bytes.end());
         sb->buf.Length = static_cast<std::uint32_t>(sb->bytes.size());
         sb->buf.Buffer = reinterpret_cast<uint8_t*>(sb->bytes.data());
         tsan_release(sb);  // pairs with SEND_COMPLETE's acquire
-        if (QUIC_FAILED(api->StreamSend(stream, &sb->buf, 1, QUIC_SEND_FLAG_NONE, sb))) delete sb;
+        if (QUIC_FAILED(
+                api->StreamSend(on != nullptr ? on : stream, &sb->buf, 1, QUIC_SEND_FLAG_NONE, sb)))
+            delete sb;
     }
 
     [[nodiscard]] bool wait_shutdown(std::chrono::milliseconds budget) {
@@ -324,6 +356,60 @@ void test_split_and_coalesced() {
     check(sink.wait_for_count(3, 3000ms), "coalesced send delivered as TWO frames");
     check(sink.count() == 3 && sink.at(1) == f2 && sink.at(2) == f3,
           "record boundaries honored (both frames byte-identical)");
+}
+
+/**
+ * @brief One peer stream per connection (ADR-0043 Phase A): a peer that ends its frame stream
+ *        gets no second one on that connection. Either its stream credit does not come back
+ *        while the link holds the first stream, or a second stream it starts is refused;
+ *        nothing a second stream carries is delivered, and the link's destruction completes.
+ */
+void test_one_peer_stream_per_connection() {
+    std::printf("QUIC transport — one peer stream per connection:\n");
+    frame_sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
+    std::optional<quic_transport_t> listener(std::in_place, std::uint16_t{0}, g_cert, g_key);
+    listener->set_receiver(rx);
+    raw_quic_client_t client(listener->local_port());
+    check(client.ok, "raw msquic client connected");
+    client.write(record(test_frame(6, 0x21)));
+    check(sink.wait_for_count(1, 3000ms), "the first stream is adopted and delivers");
+
+    // The handshake's own credit notice has long arrived: from here, a notice is credit coming
+    // back once the first stream has ended.
+    client.bidi_credit.store(0);
+    client.abort_stream();
+    const auto until = [](auto cond, std::chrono::milliseconds budget) {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        while (!cond() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(5ms);
+        return cond();
+    };
+    // The credit, if it comes back at all, comes back within a round trip of the abort.
+    if (until([&] { return client.bidi_credit.load() > 0; }, 500ms)) {
+        check(client.open_second(), "the peer starts a second bidi stream on the same connection");
+        client.write(record(test_frame(6, 0x42)), client.second);
+        check(until([&] { return client.second_refused.load(); }, 3000ms),
+              "the second stream is refused");
+    } else {
+        check(client.bidi_credit.load() == 0,
+              "the peer's stream credit stays with the stream the link holds");
+    }
+    std::this_thread::sleep_for(100ms);
+    check(sink.count() == 1, "nothing a second stream carries is delivered");
+
+    std::atomic<bool> gone{false};
+    std::thread destroyer([&] {
+        listener.reset();
+        gone.store(true);
+    });
+    if (!until([&] { return gone.load(); }, 5000ms)) {
+        std::printf("  [FAIL] the link's destruction did not complete; exiting\n");
+        std::fflush(stdout);
+        std::_Exit(1);
+    }
+    destroyer.join();
+    check(gone.load(), "the link's destruction completes");
 }
 
 void test_big_frame_chunking() {
@@ -1133,6 +1219,7 @@ int main() {
     test_dial_does_not_wait();
     test_raw_frame_duplex();
     test_split_and_coalesced();
+    test_one_peer_stream_per_connection();
     test_big_frame_chunking();
     test_oversize_prefix();
     test_view_delivery_segment_identity();

@@ -85,13 +85,22 @@ struct quic_transport_t::impl_t : msquic_endpoint_t {
 
     /** @brief The dialing peer opened the frame stream — adopt it (one
      *         bidirectional stream per connection, ADR-0043 Phase A; the
-     *         PeerBidiStreamCount=1 setting caps the peer to exactly one). */
-    QUIC_STATUS on_peer_stream_started(HQUIC /*c*/, QUIC_CONNECTION_EVENT* ev) override {
+     *         PeerBidiStreamCount=1 setting caps the peer to one at a time).
+     *
+     * Adopted once per connection and only on the live one, under @ref conn_m; any other
+     * stream is refused, and msquic closes it. The link holds the stream it adopted until it
+     * is destroyed or replaced, and a peer resumes on a new connection. The teardown harvest
+     * (and a replacement) nulls `conn` under the same lock, so a stream that starts once
+     * teardown has begun is refused too, the recheck webtransport's adoption makes. The
+     * adopted stream's credit returns when the link closes the stream. */
+    QUIC_STATUS on_peer_stream_started(HQUIC c, QUIC_CONNECTION_EVENT* ev) override {
         if ((ev->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL) != 0)
             return QUIC_STATUS_NOT_SUPPORTED;  // frame stream is bidirectional
+        const std::lock_guard lock(conn_m);
+        if (conn != c || frame_stream != nullptr) return QUIC_STATUS_ABORTED;
+        ev->PEER_STREAM_STARTED.Flags |= QUIC_STREAM_OPEN_FLAG_DELAY_ID_FC_UPDATES;
         api->SetCallbackHandler(ev->PEER_STREAM_STARTED.Stream,
                                 reinterpret_cast<void*>(&impl_t::stream_cb), this);
-        const std::lock_guard lock(conn_m);
         frame_stream = ev->PEER_STREAM_STARTED.Stream;
         return QUIC_STATUS_SUCCESS;
     }
