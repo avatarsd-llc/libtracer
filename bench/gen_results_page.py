@@ -357,9 +357,9 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "balance of the link's memory seam and the heap when the server is up and quiesced, at "
         "K established connections, and after teardown.",
         "live bytes per link · live bytes per connection",
-        "per-connection bytes drift past a measured ±8 B / ±0.5% band — WARN-first on the "
-        "pinned host (bench/ram_census_pins.json carries the pins and the activation "
-        "criterion for the flip to fail)"),
+        "per-connection bytes drift past a measured ±8 B / ±0.5% band — FAILS the counted "
+        "ledger before a merge, WARNS on the pinned host after it (bench/ram_census_pins.json "
+        "carries the pins and the activation mode, fail since #2827)"),
     instrument_t(
         "bench_peer_counts.cpp", "counted", ("ledger",),
         "Relays paced FWD{WRITE} frames from a writer process through one node to a remote "
