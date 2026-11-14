@@ -56,18 +56,21 @@ from typing import Any
 
 # Per-transport rows (#2401): (row, object stems in libtracer.a, esp32c6 pin in flash bytes,
 # or the reason the full_node image carries no such row). Pins are the linked flash of those
-# objects in full_node @ esp32c6, measured in espressif/idf:release-v6.0 (esp-idf.yml's
-# full-node job) with PINNED_TOOLCHAIN. A row's bytes are what its own objects keep after
-# --gc-sections; code they share with the rest of the library (rope, frame, the graph) is
-# counted once, in the object that defines it.
+# objects in full_node @ esp32c6, measured in the image esp-idf.yml's full-node job pins by
+# digest (espressif/idf release-v6.0, #2830), whose compiler is PINNED_TOOLCHAIN. A row's
+# bytes are what its own objects keep after --gc-sections; code they share with the rest of
+# the library (rope, frame, the graph) is counted once, in the object that defines it.
 PINNED_TARGET = "esp32c6"
-PINNED_TOOLCHAIN = "riscv32-esp-elf-g++ (crosstool-NG esp-15.2.0_20251204) 15.2.0"
+PINNED_TOOLCHAIN = "riscv32-esp-elf-g++ (crosstool-NG esp-15.3.0_20261030) 15.3.0"
 TRANSPORT_ROWS = (
     # 2,710 -> 2,608 B (#2147): the receive thread body becomes one readiness callback.
-    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2608, None),
+    # 2,608 -> 2,468 B (#2830): image-only re-pin on the pinned digest. The image moves no
+    # byte here; the 140 B were slack the report-only rows left behind (2,468 on 15.2.0 too).
+    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2468, None),
     # 9,216 -> 9,446 B (#2147): a frame read resumes across readiness turns, so frame ingress is
     # out of line and the connection and listener each gain a callback (maintainer ruling 60).
-    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9446, None),
+    # 9,446 -> 9,422 B (#2830): image-only re-pin; no byte from the image, 24 B of old slack.
+    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9422, None),
     # 8,896 -> 9,080 B (#2147): the poll loops give way to turn functions, the write-interest
     # arm and disarm, and the thread-per-link fallback's block (maintainer ruling 60).
     # 9,080 -> 9,262 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys back
@@ -76,6 +79,7 @@ TRANSPORT_ROWS = (
     # open" read folded into the teardown's own lock, one shut_down override for both servers.
     # 9,184 -> 9,296 B: ruling 76 (2026-11-12), #2812: the one-peer liveness check owes RX
     # too (a dialer closes a server frozen mid-frame); two atomic flag calls in sweep_one.
+    # 9,296 B held by the image-only re-pin (#2830): equal on GCC 15.2.0 and 15.3.0.
     ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9296, None),
     ("CAN (transport_can + TWAI link)", ("transport_can", "twai_link", "socketcan_link_stub"),
      None, "compiled, not linked: full_node creates no CAN connection, so --gc-sections drops it"),
@@ -87,7 +91,7 @@ TRANSPORT_ROWS = (
 
 # Rows pinned on the footprint-only image (#2678): integrations/esp-idf/examples/
 # transport_footprint links the two transports full_node drops, so their rows are pinned
-# there, measured the same way (esp32c6, espressif/idf:release-v6.0, PINNED_TOOLCHAIN). The
+# there, measured the same way (esp32c6, the same pinned digest, PINNED_TOOLCHAIN). The
 # rows full_node pins stay pinned on full_node only; here they are reported.
 FOOTPRINT_IMAGE = "transport_footprint"
 FOOTPRINT_PINS = {
@@ -95,10 +99,13 @@ FOOTPRINT_PINS = {
     # gather path), which landed first. Measured on the serial run at 119d76e6.
     # 14,268 -> 14,290 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys
     # back ~110 B.
+    # 14,290 B held by the image-only re-pin (#2830): equal on GCC 15.2.0 and 15.3.0.
     "CAN (transport_can + TWAI link)": 14290,
     # 33,387 -> 33,513 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys
     # back ~110 B.
-    "WebSocket (httpd server + client link)": 33513,
+    # 33,513 -> 33,511 B (#2830): image-only re-pin. GCC 15.3.0 adds 2 B (33,509 on 15.2.0),
+    # under the 4 B of slack the report-only row left behind.
+    "WebSocket (httpd server + client link)": 33511,
 }
 
 
