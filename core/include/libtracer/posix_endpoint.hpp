@@ -305,14 +305,20 @@ class posix_endpoint_t {
 
     /**
      * @brief The link's own socket's registration: a datagram socket, a dialled connection,
-     *        or a listening socket. Its context is the link.
+     *        or a listening socket. Its context is the link. Potentially overlapping, so the
+     *        shut flag declared after it sits in its tail padding (#2827).
      */
-    wait_source_t src_;
+    [[no_unique_address]] wait_source_t src_;
 
    private:
     /** @brief The fallback thread's body: drive the private module. */
     static void thread_entry(void* fallback);
 
+    /** @brief Set by a deferred teardown (@ref stop_for_shut_down): from then on no
+     *         descriptor of the link is closed before its destructor. Declared right after
+     *         @ref src_ , in the registration's tail padding, so the flag costs the link no
+     *         bytes (the `static_assert` below the class). */
+    std::atomic<bool> shut_{false};
     wait_module_t* node_; /**< @brief The node's module, or null. */
     /** @brief The module waited on, published by @ref start. */
     std::atomic<wait_module_t*> wait_{nullptr};
@@ -322,10 +328,13 @@ class posix_endpoint_t {
      *         @ref start; null on the node's module, which needs none of it. One pointer, so
      *         a link on the node's module pays nothing for the fallback it does not use. */
     fallback_t* fallback_ = nullptr;
-    /** @brief Set by a deferred teardown (@ref stop_for_shut_down): from then on no
-     *         descriptor of the link is closed before its destructor. */
-    std::atomic<bool> shut_{false};
 };
+
+// A link pays its registration and three pointers, nothing more: the shut flag lives in the
+// registration's tail padding, on every target and with or without the listed adapter. A
+// member that does not fit there grows every POSIX link (#2827).
+static_assert(sizeof(posix_endpoint_t) == sizeof(wait_source_t) + 3 * sizeof(void*),
+              "posix_endpoint_t grew past its registration and three pointers");
 
 /**
  * @brief The one-peer fd/teardown discipline every POSIX STREAM transport

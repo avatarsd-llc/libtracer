@@ -115,6 +115,16 @@ struct wait_source_t {
 
     fire_t fire; /**< @brief The callback: unset until its owner names it, before an attach. */
     void* ctx = nullptr; /**< @brief Its context: the owning link. */
+    /** @brief The next source in the lwIP adapter's list: the receiving link pays for its own
+     *         entry, so the module holds no table. Written under the module's lock; the driver
+     *         reads it with none, under the source's firing mark, so both go through
+     *         `std::atomic_ref`. Left unset until @ref wait_module_t::attach writes it, as
+     *         nothing reads it before: a link's constructor spends no store on it. An empty
+     *         member, taking no space, in a build without that adapter
+     *         (`%tr::net::kListedWaitSources`). Declared ahead of the socket so the record
+     *         ends in its two flags with either adapter, and an owner can place a flag of its
+     *         own in the tail padding (`%tr::net::posix_endpoint_t`, #2827). */
+    [[no_unique_address]] std::conditional_t<kListedWaitSources, wait_source_t*, unlisted_t> next;
     /** @brief The socket; -1 for none. Changed only while the record is detached. Atomic
      *         because a link's senders read it too (a server session's fd is this one). */
     std::atomic<int> fd{-1};
@@ -127,14 +137,6 @@ struct wait_source_t {
      *         may clear it under one; every other ordering comes from the lock or the kernel's
      *         registration. */
     std::atomic<bool> attached{false};
-    /** @brief The next source in the lwIP adapter's list: the receiving link pays for its own
-     *         entry, so the module holds no table. Written under the module's lock; the driver
-     *         reads it with none, under the source's firing mark, so both go through
-     *         `std::atomic_ref`. Left unset until @ref wait_module_t::attach writes it, as
-     *         nothing reads it before: a link's constructor spends no store on it. An empty
-     *         member, taking no space, in a build without that adapter
-     *         (`%tr::net::kListedWaitSources`). */
-    [[no_unique_address]] std::conditional_t<kListedWaitSources, wait_source_t*, unlisted_t> next;
 };
 
 /** @brief Nonzero while this thread is inside a @ref wait_module_t::run . */
