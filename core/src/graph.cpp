@@ -1200,10 +1200,13 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
         // Past the entries other owners hold reservations for, grown as `reserve_park` grows
         // the park: a park that must grow takes at least twice its capacity, so a run of
         // retires between two collect() calls copies the park a logarithmic number of times,
-        // not once each (#2845).
+        // not once each (#2845). Retire falls back to exact growth when the doubled request is
+        // refused, so it is refused only where exact growth would be.
         const std::size_t want = park_.size() + park_tail_.reserved + n;
         const std::size_t cap = park_.capacity();
-        if (!gone.reserve(n) || !park_.reserve(std::max(want, std::size_t{want > cap} * 2 * cap))) {
+        if (!gone.reserve(n) ||
+            (!park_.reserve(std::max(want, std::size_t{want > cap} * 2 * cap)) &&
+             !park_.reserve(want))) {
             refused_retire_.fetch_add(1, std::memory_order_relaxed);
             return std::unexpected(status_t::BACKPRESSURE);
         }
