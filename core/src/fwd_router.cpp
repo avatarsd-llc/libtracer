@@ -792,14 +792,11 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
     // itself is now unbounded: the descent matches each registry slot against the prefix of
     // its own width, so a mount of any width resolves and there is nothing left to assert.
     //
-    // What survives is the bound the addressing model actually has. A mount can only be
-    // ADDRESSED by a `dst` that carries at least its own segments, and a path may carry at
-    // most `graph::kMaxSegments` of them (RFC-0023). A name wider than that can never be the
-    // prefix of any address that exists, so registering it is the same silent misroute #523
-    // was filed about, one step further out. It is refused instead, by value. A name with no
-    // segments, or with an empty or over-long one, keys no vertex, so the registry refuses it
-    // below as a mount with no connection vertex.
-    if (child_registry_t::segment_count(name) > graph::kMaxSegments) return false;
+    // What survives is the bound the addressing model actually has: a path carries at most
+    // `graph::kMaxSegments` segments (RFC-0023), so a wider name could never be addressed.
+    // `child_registry_t::encode_mount_name` stops its walk there and spells such a name no
+    // run, so the registry refuses it below, with nothing registered, as it refuses a name
+    // with no segments or with an empty or over-long one: a mount with no connection vertex.
     // Populate the registry BEFORE wiring the receiver: an async transport (UDP/ws) may
     // already have a live recv thread, so `set_receiver` is the publish point — once the
     // callback is installed, on_frame can read the registry on that thread. Adding the

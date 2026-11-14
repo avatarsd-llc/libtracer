@@ -22,7 +22,8 @@
  *   - delete the `k <= best_k` longest-match filter → `longest_match_wins` fails;
  *   - delete the walker's backwards-restart → `narrow_after_wide` fails;
  *   - delete the `!next` exact-mount check → `exact_mount_terminates` fails;
- *   - delete `routable_mount_name` → `unaddressable_names_refused` fails.
+ *   - delete the `kMaxSegments` stop in `child_registry_t::encode_mount_name` →
+ *     `unaddressable_names_refused` fails.
  *
  * The OOM half of `add_child`'s new
  * `bool` lives in `mount_add_oom_test.cpp`, which needs its own binary to replace the global
@@ -68,6 +69,8 @@ struct recording_link_t : tr::net::transport_t {
         std::vector<std::byte>& f = sent.emplace_back();
         for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
     }
+    /** @brief True ⇔ some inbound sink has been installed on this link. */
+    [[nodiscard]] bool wired() const noexcept { return rx_.has_any(); }
 };
 
 /** @brief A `FWD{WRITE, dst, src, payload}` frame over the given segment lists. */
@@ -175,8 +178,12 @@ void test_unaddressable_names_refused() {
     // cannot be the prefix of any address that exists.
     const std::string too_wide = join(mount_segments(tr::graph::kMaxSegments + 1));
     check(!router.attach_link(too_wide, link), "a name wider than the path budget is refused");
+    check(router.registry().live_size() == 0, "and NOTHING was registered for it");
+    check(!link.wired(), "and NO inbound receiver was installed on the link");
     const std::string at_budget = join(mount_segments(tr::graph::kMaxSegments));
     check(router.attach_link(at_budget, link), "a name exactly AT the budget is accepted");
+    check(router.registry().live_size() == 1 && link.wired(),
+          "it IS registered and wired, so the checks above are not vacuous");
 }
 
 /** @brief Two mounts share a prefix — the wider one wins, whatever the table order. */
