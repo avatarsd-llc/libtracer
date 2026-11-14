@@ -247,6 +247,20 @@ void bracketed_terminus_ops() {
     }
 }
 
+/**
+ * @brief The retire-and-revive cycles each concurrent case runs at least. The cases are bounded
+ *        by work, not by time (#2843): each counts the operations that met `/t` retired (for a
+ *        terminus case, one made inside a `retire` call), and runs on past this until it has
+ *        @ref kInsideFloor of them, to at most @ref kMaxCycles, so the window stays covered.
+ */
+constexpr int kCycles = 4000;
+
+/** @brief The cycle cap: a case that counts fewer than @ref kInsideFloor by then fails. */
+constexpr int kMaxCycles = 20000;
+
+/** @brief The fewest such operations each concurrent case must count. */
+constexpr std::size_t kInsideFloor = 32;
+
 /** @brief A terminus WRITE made inside a retire never reaches the handler. */
 void no_terminus_mid_retire(bool pair) {
     std::printf("a %s terminus WRITE inside a retire never reaches the handler:\n",
@@ -294,8 +308,7 @@ void no_terminus_mid_retire(bool pair) {
             if (n1 != n0) bad.fetch_add(1, std::memory_order_relaxed);
         }
     });
-    constexpr int kCycles = 20000;
-    for (int i = 0; i < kCycles; ++i) {
+    for (int i = 0; i < kMaxCycles && (i < kCycles || inside.load() < kInsideFloor); ++i) {
         const auto h = g.find(at.key());
         if (!h) break;
         seq.fetch_add(1, std::memory_order_acq_rel);  // odd: a retire is in progress
@@ -307,6 +320,7 @@ void no_terminus_mid_retire(bool pair) {
     sender.join();
     std::printf("  (%zu ops made inside a retire, %zu reached the handler)\n", inside.load(),
                 bad.load());
+    check(inside.load() >= kInsideFloor, "enough terminus ops were made inside a retire");
     check(bad.load() == 0, "no terminus op inside a retire reached the handler");
 }
 
@@ -326,25 +340,27 @@ void write_across_role_flip() {
     const bytes_t frame = value_byte();
     std::atomic<bool> stop{false};
     std::atomic<std::size_t> writes{0};
+    std::atomic<std::size_t> retired{0};  // writes that met `/t` retired: NOT_FOUND
     std::atomic<std::size_t> undefined{0};
     std::thread writer([&] {
         while (!stop.load(std::memory_order_acquire)) {
             const tr::graph::result_t<void> r = g.write(at, tr::testing::make_value(frame));
             writes.fetch_add(1, std::memory_order_relaxed);
-            if (!r && r.error() != status_t::NOT_FOUND)
-                undefined.fetch_add(1, std::memory_order_relaxed);
+            if (!r)
+                (r.error() == status_t::NOT_FOUND ? retired : undefined)
+                    .fetch_add(1, std::memory_order_relaxed);
         }
     });
-    constexpr int kCycles = 20000;
-    for (int i = 0; i < kCycles; ++i) {
+    for (int i = 0; i < kMaxCycles && (i < kCycles || retired.load() < kInsideFloor); ++i) {
         const auto h = g.find(at.key());
         if (h) (void)g.retire(*h);
         revive();
     }
     stop.store(true, std::memory_order_release);
     writer.join();
-    std::printf("  (%zu writes, %zu answered an undefined status)\n", writes.load(),
-                undefined.load());
+    std::printf("  (%zu writes, %zu met /t retired, %zu answered an undefined status)\n",
+                writes.load(), retired.load(), undefined.load());
+    check(retired.load() >= kInsideFloor, "enough writes met /t retired");
     check(undefined.load() == 0, "every racing write answered success or NOT_FOUND");
 }
 
@@ -507,6 +523,8 @@ void stream_write_across_retire_pushes_nothing() {
 }  // namespace
 
 int main() {
+    // Line-buffered, so a run cut short still shows the case it was in (#2843).
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
     stored_to_stream_delivers_once();
     stream_write_across_retire_pushes_nothing();
     write_across_role_flip();
