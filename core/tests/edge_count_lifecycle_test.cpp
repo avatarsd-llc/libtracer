@@ -21,9 +21,12 @@
  *   4. One thread admits and clears while another retires and re-registers. Every retired state
  *      the retirer looks at holds no edge and a zero count, and afterwards the count, the
  *      published edges and the descendant's ancestor count are all zero.
+ *   5. An admission refuses a vertex whose retire generation stands at the ceiling
+ *      (`kGenerationSaturated`), as every other generation check does: there the counter has
+ *      stopped, so a retire since the gate could no longer be told apart.
  *
  * Without the change, (2) and (3) fail outright: the append lands, and the next registration
- * inherits it.
+ * inherits it. (5) fails if the landing test compares the generations with a plain `==`.
  *
  * The iteration count of (4) defaults to @ref kIterations; a first argument overrides it.
  */
@@ -72,6 +75,24 @@ int held(const graph_t& g, const path_t& p) {
 
 /** @brief The raw vertex behind @p h, for the published-edge and ancestor counts. */
 tr::graph::vertex_t& raw(vertex_handle_t h) { return *std::bit_cast<tr::graph::vertex_t*>(h); }
+
+/**
+ * @brief The member `vertex_t::retire_gen_`, named through an explicit instantiation, which the
+ *        language exempts from access checking. (5) stands a vertex at the ceiling generation
+ *        with it, where the retire path would take 2^32 retirements.
+ */
+struct retire_gen_member_t {
+    using type = std::atomic<std::uint32_t> tr::graph::vertex_t::*;
+    friend type member_of(retire_gen_member_t);
+};
+
+/** @brief Defines @ref member_of for @p Tag as @p M. */
+template <typename Tag, typename Tag::type M>
+struct name_member_t {
+    friend typename Tag::type member_of(Tag) { return M; }
+};
+
+template struct name_member_t<retire_gen_member_t, &tr::graph::vertex_t::retire_gen_>;
 
 /** @brief The entries the vertex behind @p h has published for the fan-out to walk. */
 std::size_t published(vertex_handle_t h) { return raw(h).published_edges(); }
@@ -201,6 +222,21 @@ void test_decision_does_not_cross_a_retire() {
     g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {nullptr, nullptr});
 }
 
+/** @brief (5) An admission refuses a vertex at the ceiling generation. */
+void test_saturated_generation_takes_no_edge() {
+    std::printf("an admission refuses a vertex whose retire generation is saturated:\n");
+    graph_t g;
+    const vertex_handle_t v = g.register_vertex(path_t("/c/s"), role_t::STORED_VALUE);
+    check(g.subscribe(path_t("/c/s"), sink, nullptr).has_value() && g.own_subs(v) == 1,
+          "below the ceiling an admit lands (the control)");
+    (raw(v).*member_of(retire_gen_member_t{})).store(tr::graph::kGenerationSaturated);
+    check(g.retire_generation(v) == tr::graph::kGenerationSaturated && g.find(path_t("/c/s").key()),
+          "/c/s is registered, at the ceiling generation");
+    check(!g.subscribe(path_t("/c/s"), sink, nullptr).has_value(),
+          "an admit at the ceiling generation is refused");
+    check(g.own_subs(v) == 1 && published(v) == 1, "... and the count and the edges are unchanged");
+}
+
 /** @brief (4) Admit and clear on one thread, retire and re-register on another. */
 void test_concurrent_lifecycle(long iterations) {
     std::printf("admit and clear on one thread, retire and re-register on another:\n");
@@ -269,5 +305,6 @@ int main(int argc, char** argv) {
     test_retired_vertex_takes_no_edge();
     test_decision_does_not_cross_a_retire();
     test_concurrent_lifecycle(iterations);
+    test_saturated_generation_takes_no_edge();
     return tr::testing::summary("edge_count_lifecycle");
 }

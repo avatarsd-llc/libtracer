@@ -3435,7 +3435,9 @@ result_t<subscription_t> graph_t::admit_subscriber(
     // A registration retired since the gate lands nothing, whether or not the address has been
     // registered again since: the verdict was about the vertex that left, and a retired vertex
     // carries no edge into a later registration. It is refused as the gate refuses a vertex
-    // retired under it, so it takes the refusal that names no slot verb.
+    // retired under it, so it takes the refusal that names no slot verb. The generation test is
+    // `bound_generation_matches`, the one every generation check uses: at the ceiling the
+    // counter stops, a retire since can no longer be told apart, and the admission is refused.
     vertex_t::edge_replace_t r = vertex_t::edge_replace_t::EDGE_CHANGED;
     {
         // The count and the slot change under ONE shared map hold, as set_suspended and
@@ -3443,7 +3445,7 @@ result_t<subscription_t> graph_t::admit_subscriber(
         // it and takes the slot table, so it must see the two agree, and registration cannot
         // change while it is held.
         const std::shared_lock lock(map_mutex_);
-        if (v->registered() && v->retire_gen() == generation) {
+        if (v->registered() && bound_generation_matches(v->retire_gen(), generation)) {
             note_subscribers(v, +1);  // RFC-0005: descendants' writes now bubble here
             if (slot) {
                 // RFC-0009 §D.1 replace: the SAME door, so the latch below applies identically
