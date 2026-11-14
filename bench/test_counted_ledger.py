@@ -73,9 +73,9 @@ def peer(**values: float) -> dict:
     return out
 
 
-def run_gate(led, peer_rows, conn_rows=None, toolchain=TOOLCHAIN, mode="fail"):
+def run_gate(led, peer_rows, conn_rows=None, toolchain=TOOLCHAIN, mode="fail", ram=RAM):
     with contextlib.redirect_stdout(io.StringIO()):
-        return cl.gate_rows(led, peer_rows, conn_rows or {}, RAM, toolchain, mode)
+        return cl.gate_rows(led, peer_rows, conn_rows or {}, ram, toolchain, mode)
 
 
 class transcript_tests(unittest.TestCase):
@@ -132,10 +132,30 @@ class gate_tests(unittest.TestCase):
         led = ledger(RAM_FAM)
         self.assertEqual(led[0]["rows"][0]["value"], 280)
         _, fails, warns = run_gate(led, peer(x__y=1), peer(tcp_server__per_conn=300))
-        self.assertEqual(fails, [])  # ram_census_pins.json is still in warn mode
+        self.assertEqual(fails, [])  # a census file in warn mode: its rows' drift only warns
         self.assertEqual(len(warns), 1)
         _, fails, warns = run_gate(led, peer(x__y=1), peer(tcp_server__per_conn=286))
         self.assertEqual((fails, warns), ([], []))  # inside ram_census's own 8 B band
+
+    def test_census_rows_fail_when_the_census_file_fails(self):
+        ram = {**RAM, "activation": {"mode": "fail"}}
+        led = ledger({**RAM_FAM, "toolchain": TOOLCHAIN}, ram=ram)  # as ram_per_peer.json is
+        _, fails, warns = run_gate(led, peer(x__y=1), peer(tcp_server__per_conn=296), ram=ram)
+        self.assertEqual((len(fails), warns), (1, []))  # one 16 B class over its pin (#2827)
+        _, fails, warns = run_gate(led, peer(x__y=1), peer(tcp_server__per_conn=280), ram=ram)
+        self.assertEqual((fails, warns), ([], []))  # at its pin
+        _, fails, warns = run_gate(led, peer(x__y=1), peer(tcp_server__per_conn=264), ram=ram)
+        self.assertEqual((len(fails), warns), (1, []))  # below its pin: re-pin it
+        _, fails, warns = run_gate(led, peer(x__y=1), peer(tcp_server__per_conn=296), ram=ram,
+                                   mode="warn")
+        self.assertEqual((fails, len(warns)), ([], 1))  # the gate's own warn mode still caps it
+        _, fails, warns = run_gate(led, peer(x__y=1), peer(tcp_server__per_conn=296), ram=ram,
+                                   toolchain="other 1.0")
+        self.assertEqual((fails, len(warns)), ([], 1))  # and so does another toolchain
+
+    def test_the_checked_in_census_pins_fail(self):
+        ram = json.loads(cl.RAM_PINS.read_text())
+        self.assertEqual(ram["activation"]["mode"], "fail")  # #2827, ruling 102
 
     def test_measured_ram_rows_read_the_conn_transcript_and_fail(self):
         led = ledger(RAM_MEASURED)
