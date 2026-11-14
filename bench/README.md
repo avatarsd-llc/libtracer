@@ -419,8 +419,9 @@ and the change that last moved it (`moved_by`).
 - `counted_ledger.py gate --mode fail`: a measured row past its pin fails, and so does a row
   below it (re-pin it: `counted_ledger.py pins --raw <peer transcript> --conn-raw <conn
   transcript> --write`, then name the change in `moved_by`). A run on another toolchain only
-  warns. The RAM rows that `ram_census_pins.json` pins stay warn-first until its activation
-  block flips; the measured RAM rows pinned in the ledger fail like any other measured row.
+  warns. The RAM rows that `ram_census_pins.json` pins are gated in its activation block's
+  mode, which reads `fail` since #2827, so they fail like the measured RAM rows pinned in the
+  ledger. The census's own ratchet in `perf-local.yml` runs after the merge and stays warn.
 
 [`perf-local.yml`](../.github/workflows/perf-local.yml) banks one point per row on every
 merge to main (`counted_ledger.py emit`), and the perf page's ledger chapter is generated
