@@ -342,6 +342,11 @@ class posix_endpoint_t {
  * on another publisher's write. A record the socket cuts short keeps its frame and offset,
  * and the rest goes on the peer's next turn, so a part write never desyncs the framing.
  *
+ * **One open per peer session:** a dialer's peer opens once, in its constructor; a
+ * listener's stays closed until an accept publishes the fd, and opens once there. Each open
+ * is closed once, at the peer's teardown or in the destructor. A send with no peer sheds,
+ * counted.
+ *
  * **Teardown-under-role invariant:** a driving thread that closes the peer fd first
  * `shutdown(2)`s it (an in-flight write returns), then closes the peer's egress — which waits
  * for the writer role to be let go — and only then resets @ref conn_fd_ to -1 and
@@ -357,25 +362,29 @@ class posix_endpoint_t {
  */
 class stream_endpoint_t : protected posix_endpoint_t {
    protected:
-    /** @brief Constructs with no peer connected (@ref conn_fd_ = -1); the egress draws from
-     *         the process net sub-pool. */
+    /** @brief Constructs a dialer with no peer connected (@ref conn_fd_ = -1); the egress
+     *         draws from the process net sub-pool. */
     stream_endpoint_t() : stream_endpoint_t(mem::net_source()) {}
 
     /**
      * @brief Constructs with no peer connected, the egress drawing from @p tx_src.
      *
-     * @param tx_src   The link's egress store: every shared frame, each (peer, vertex) ring,
-     *                 and a frame's gather overflow (@ref write_frame).
-     * @param one_peer This endpoint IS the one peer (a dialer, a one-peer listener). A
-     *                 multi-peer server passes false and keeps one peer per session. Neither
-     *                 one's writes wait (#2252), so both take the strike cap
-     *                 `kEgressStallStrikes`.
+     * @param tx_src The link's egress store: every shared frame, each (peer, vertex) ring,
+     *               and a frame's gather overflow (@ref write_frame).
+     * @param dials  This endpoint dials its one peer: the peer opens here, its one open, and
+     *               a send before the dial lands, or after it failed, finds no fd and sheds,
+     *               counted. A listener passes false and its peer stays closed until there
+     *               is a connection: a one-peer listener's opens at each accept
+     *               (@ref accept_one), and a multi-peer server keeps one peer per session.
+     *               No write waits (#2252), so every peer takes the strike cap
+     *               `kEgressStallStrikes`.
+     * @param node   The node's wait module, or null for a thread of the link's own
+     *               (@ref posix_endpoint_t).
      */
-    explicit stream_endpoint_t(mem::block_source_t& tx_src, bool one_peer = true,
+    explicit stream_endpoint_t(mem::block_source_t& tx_src, bool dials = true,
                                wait_module_t* node = nullptr)
         : posix_endpoint_t(node), io_src_(&tx_src), egress_(tx_src) {
-        // Open from the start: a send before a peer connects finds no fd and sheds, counted.
-        if (one_peer) egress_.open(peer_);
+        if (dials) egress_.open(peer_);
     }
 
     /**
@@ -582,8 +591,10 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *
      * Runs @p on_accept (per-peer setup; false rejects: the socket is closed and the listener
      * keeps waiting), publishes the fd to @ref conn_fd_, moves @ref src_ from the listening
-     * socket to the connection, served by @p fire, and only then reopens the peer's egress.
-     * A refused registration closes the peer and puts @ref src_ back on the listening socket.
+     * socket to the connection, served by @p fire, and only then opens the peer's egress:
+     * its one open for this connection, closed since construction or the last teardown.
+     * A refused registration closes the connection and puts @ref src_ back on the listening
+     * socket.
      * A listener accepts nobody else while a peer is connected: the kernel's backlog holds
      * them.
      * @ref relisten puts @ref src_ back on the listening socket after the peer departs.

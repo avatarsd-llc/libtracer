@@ -1665,6 +1665,90 @@ void test_a_session_torn_down_twice_departs_once() {
     check(downs.load() == 1, "and the destructor fired no second departure");
 }
 
+/**
+ * @brief #2824 — the one-peer listener opens its peer once per connection, at accept and never
+ *        in its constructor, and every open is paired with one close.
+ *
+ * Counted through `%tr::detail::egress_open_close_hook` across construct → accept → the peer
+ * leaves → a second peer is accepted → destroy, with the second peer still connected so the
+ * destructor's close is the one that pairs its open. A build that does not bind
+ * `kFaultInjection` never calls the hook, so the count arm says it is skipped there.
+ */
+void test_listener_opens_its_peer_at_accept() {
+    std::printf("TCP transport — the one-peer listener opens its peer at accept, once (#2824):\n");
+    if constexpr (!tr::graph::kFaultInjection) {
+        std::printf("  skipped: this build does not bind kFaultInjection, so nothing counts\n");
+        return;
+    }
+    static std::atomic<int> opens{0}, closes{0};
+    opens.store(0);
+    closes.store(0);
+    struct hook_guard_t {
+        ~hook_guard_t() { tr::detail::egress_open_close_hook = nullptr; }
+    } const guard;
+    tr::detail::egress_open_close_hook = [](bool opened) noexcept {
+        (opened ? opens : closes).fetch_add(1);
+    };
+
+    frame_sink_t at_listener;
+    auto rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
+    std::atomic<int> downs{0};
+    std::optional<raw_client_t> second;  // outlives the listener: the destructor closes its peer
+    {
+        tcp_transport_t listener(std::uint16_t{0});
+        check(listener.ok(), "listener bound (ephemeral port)");
+        listener.set_receiver(rx);
+        listener.set_down_notifier([](void* c) { static_cast<std::atomic<int>*>(c)->fetch_add(1); },
+                                   &downs);
+        check(opens.load() == 0 && closes.load() == 0,
+              "constructed, the peer is closed: nothing opened it");
+        {
+            raw_client_t first(listener.local_port());
+            first.write(record(test_frame(3, 0x51)));
+            check(at_listener.wait_for_count(1, 2s), "the first peer was accepted");
+            check(opens.load() == 1 && closes.load() == 0, "the accept opened the peer, once");
+        }  // the first peer leaves
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (downs.load() == 0 && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(1ms);
+        check(downs.load() == 1, "the link reported the first peer gone");
+        check(opens.load() == 1 && closes.load() == 1, "its leaving closed the peer, once");
+
+        second.emplace(listener.local_port());
+        second->write(record(test_frame(4, 0x52)));
+        check(at_listener.wait_for_count(2, 2s), "the listener accepted a second peer");
+        check(opens.load() == 2 && closes.load() == 1, "the re-accept opened the peer once more");
+    }
+    check(opens.load() == 2 && closes.load() == 2,
+          "destroying the link closed the open peer: every open paired with one close");
+}
+
+/**
+ * @brief #2824 — a send on a one-peer listener before its first accept finds the peer closed:
+ *        it is shed and counted, and nothing of it waits for the peer that comes later.
+ */
+void test_listener_send_before_first_accept_is_counted() {
+    std::printf("TCP transport — a send before the listener's first accept is counted (#2824):\n");
+    frame_sink_t at_listener;
+    auto rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
+    tcp_transport_t listener(std::uint16_t{0});
+    check(listener.ok(), "listener bound (ephemeral port)");
+    listener.set_receiver(rx);
+    listener.send(test_frame(8, 0x61));
+    check(listener.drop_stats().dropped_tx == 1, "a send with no peer yet is shed, counted");
+
+    raw_client_t client(listener.local_port());
+    client.write(record(test_frame(2, 0x62)));
+    check(at_listener.wait_for_count(1, 2s), "the first peer was accepted");
+    check(read_within(client.fd, 1, 200ms).empty(),
+          "the shed frame never reaches it: nothing waited for the peer");
+    const auto f = test_frame(6, 0x63);
+    listener.send(f);
+    check(read_within(client.fd, record(f).size(), 2s) == record(f),
+          "a send after the accept reaches the peer");
+    check(listener.drop_stats().dropped_tx == 1, "and is not counted as shed");
+}
+
 int main() {
     // #1438: this suite is labelled `bus` because it drives the ADR-0044 peer-named tier —
     // `bus()->set_peer_receiver(...)` and friends. On a build that closed the module out
@@ -1700,5 +1784,7 @@ int main() {
     test_push_on_connect_waits_for_start_receiving();
     test_start_receiving_is_idempotent();
     test_a_session_torn_down_twice_departs_once();
+    test_listener_opens_its_peer_at_accept();
+    test_listener_send_before_first_accept_is_counted();
     return tr::testing::summary("tcp");
 }

@@ -199,7 +199,8 @@ bool tcp_transport_t::start_receiving() {
 }
 
 tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, const tcp_config_t& config)
-    : stream_endpoint_t(config.memory.io_or_default(), true, config.wait),
+    // A listener: the peer stays closed until an accept opens it.
+    : stream_endpoint_t(config.memory.io_or_default(), false, config.wait),
       listen_(true),
       backend_(config.memory.rx) {
     const std::size_t max_frame = config.max_frame;

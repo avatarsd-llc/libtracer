@@ -489,8 +489,9 @@ void stream_endpoint_t::accept_one(int listen_fd, function_ref_t<bool(int)> on_a
     tx_moved_.store(true, std::memory_order_relaxed);  // a new peer starts alive (#2198)
     rx_moved_.store(true, std::memory_order_relaxed);
     // The listener's source carries the connection now: nobody else is accepted until the
-    // peer departs and `relisten` puts it back. The egress opens only once the source is on
-    // the connection, so no sender can arm write interest on the listening socket.
+    // peer departs and `relisten` puts it back. The egress, closed since construction or the
+    // last teardown, opens once, last, with the source on the connection: no sender can arm
+    // write interest on the listening socket.
     // A refused registration refuses the peer and puts the listener back, so the link keeps
     // accepting rather than going deaf.
     const wait_source_t::fire_t on_listen = src_.fire;

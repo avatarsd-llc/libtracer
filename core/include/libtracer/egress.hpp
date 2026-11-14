@@ -85,10 +85,26 @@
 #include <span>
 #include <utility>
 
+#include "libtracer/config.hpp"
 #include "libtracer/function_ref.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/park.hpp"
 #include "libtracer/value.hpp"
+
+namespace tr::detail {
+
+/**
+ * @brief Test seam: called with true by every @ref tr::net::egress_t::open, and with false by
+ *        each @ref tr::net::egress_t::close that closes an open peer, so a test can count
+ *        that every open of a peer is paired with one close (#2824).
+ *
+ * Install it before the link under test is built, and clear it before the test returns.
+ * Consulted only when the build binds `%tr::graph::default_config_t::kFaultInjection` (#1719);
+ * a default build carries no branch for it and emits no definition of it.
+ */
+inline void (*egress_open_close_hook)(bool opened) noexcept = nullptr;
+
+}  // namespace tr::detail
 
 namespace tr::net {
 
@@ -556,16 +572,25 @@ class egress_t {
         while (egress_frame_t* const f = pop(p)) egress_frame_t::release(f);
         p.strikes_ = 0;
         p.held_.store(false, std::memory_order_release);
+        if constexpr (::tr::graph::kFaultInjection) {
+            if (auto* const hook = ::tr::detail::egress_open_close_hook) hook(false);
+        }
     }
 
     /**
      * @brief Open @p p for a session: a peer starts closed, and a closed one holds no frame.
+     *
+     * Called once per session, on a closed peer: each open is paired with one @ref close
+     * before the next.
      *
      * @param first A frame to put on the wire ahead of anything a sender offers (a WebSocket
      *              server's 101), or null. The egress takes over the caller's reference. It
      *              is held, so the next turn — a send or @ref flush — writes it first.
      */
     void open(egress_peer_t& p, egress_frame_t* first = nullptr) noexcept {
+        if constexpr (::tr::graph::kFaultInjection) {
+            if (auto* const hook = ::tr::detail::egress_open_close_hook) hook(true);
+        }
         p.strikes_ = 0;
         p.wire_ = first;
         p.off_ = 0;
