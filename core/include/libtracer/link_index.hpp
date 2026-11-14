@@ -55,12 +55,12 @@ class vertex_t;
  * would instead leak a live edge past a departure, so every path that can create one
  * indexes, and no path except whole-link eviction removes.
  *
- * Insertion happens at the `note_subscriber_added` bump, NOT after the slot lands:
- * that bump is precisely the predicate (`own_subs() > 0`) the replaced whole-tree walk
- * keyed on, so the index becomes visible to a concurrent eviction no later than the walk
- * would have seen the vertex. The subscribe-racing-its-own-link's-teardown window is
- * therefore exactly the pre-existing one `graph_t::evict_link_edges` documents, neither
- * widened nor narrowed.
+ * Insertion happens beside the `note_subscriber_added` bump, as the last charge of the
+ * admission record (#2814), and NOT after the slot lands: that bump is precisely the
+ * predicate (`own_subs() > 0`) the replaced whole-tree walk keyed on, and both come before
+ * the edge exists, so the index is visible to a concurrent eviction before the edge it
+ * stands for is. The subscribe-racing-its-own-link's-teardown window is therefore exactly
+ * the pre-existing one `graph_t::evict_link_edges` documents, neither widened nor narrowed.
  *
  * Drawn from the graph's TABLE source (`graph_t::table_source`, ADR-0083, #1778): every
  * table here is a core container whose growth refuses by value, so an exhausted source
@@ -169,8 +169,12 @@ class link_index_t {
      * by name and the fallback is counted in @ref name_lookups.
      * @retval false The table source refused the entry: @p v is NOT indexed, so the caller
      *               must refuse the admission (a live unindexed edge would outlive its link).
+     * @note The empty link is answered here, inline: every local subscribe asks (#2814), and
+     *       it costs a test rather than a call.
      */
-    [[nodiscard]] bool index_vertex(std::string_view link, link_id_t token, vertex_t* v);
+    [[nodiscard]] bool index_vertex(std::string_view link, link_id_t token, vertex_t* v) {
+        return link.empty() || index_named(link, token, v);
+    }
 
     /**
      * @brief The DISTINCT candidate count for @p link — `graph_t::link_edge_candidates`'s body.
@@ -201,6 +205,12 @@ class link_index_t {
     [[nodiscard]] std::size_t name_lookups() const;
 
    private:
+    /**
+     * @brief @ref index_vertex for a non-empty @p link: the carry, the name fallback and the
+     *        idempotent insert, out of line.
+     */
+    [[nodiscard]] bool index_named(std::string_view link, link_id_t token, vertex_t* v);
+
     /** @brief One link's candidate list, plus where its sorted prefix ends. */
     struct link_entry_t {
         mem::block_array_t<vertex_t*> vs; /**< @brief The link's DISTINCT candidate vertices:
