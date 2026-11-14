@@ -1121,7 +1121,8 @@ class transport_t {
      * after it lets its own locks go, which this call cannot know. The router does so
      * through @ref notify_down, which now finds its notifier installed. A QUIC dial
      * that fails its handshake before the router installs its notifier is the case. An up
-     * before any install is not kept: the installer reads @ref link_up.
+     * before the install is not kept: an installer that needs it reads @ref link_up after
+     * this call returns, or an up that came in between is lost.
      * @param fn  The notifier; @p ctx is passed back as its first argument.
      * @param ctx Caller-owned context; must outlive every possible notification.
      * @return True iff the link went down before this install: @p fn was not called for it,
@@ -1162,8 +1163,8 @@ class transport_t {
     }
 
     /** @brief Fire the link-state notifier with `up = true`, when the link's one connection
-     *         comes up after construction. With none installed the fire is dropped: the
-     *         installer reads @ref link_up. */
+     *         comes up after construction. With none installed the fire is dropped: an
+     *         installer reads @ref link_up after its install, or this up is lost. */
     void notify_up() const {
         const link_state_fn_t fn = state_fn_.load(std::memory_order_acquire);
         if (fn != nullptr && fn != &missed_down)
