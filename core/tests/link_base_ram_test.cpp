@@ -134,8 +134,13 @@ void run_arm(const char* name) {
  * `std::mutex`: 40 B on x86_64 glibc, 48 B on aarch64 glibc. So the pin is 616 B plus that
  * mutex, exact on each target: 656 B on x86_64, 664 B on aarch64. Every other byte is
  * pointers, sizes and block counts, the same on any 64-bit target.
+ *
+ * The READ budget (#2774) adds 8 B when a build turns it on, and nothing when it is off (every
+ * leg that binds its own fragment pins the off number): the session's 4-byte tally, which finds
+ * no padding in the slot and so takes 8. The link reaches it through a virtual, so no link
+ * object, the session's facade included, carries a byte for it.
  */
-constexpr std::size_t kWsPeerBytes64 = 616 + sizeof(std::mutex);
+constexpr std::size_t kWsPeerBytes64 = 616 + sizeof(std::mutex) + (tr::net::kReadBudgetOn ? 8 : 0);
 
 /** @brief A receive backend over the platform heap that adds to @p src's live balance. */
 class counting_rx_t final : public tr::mem::mem_backend_t {

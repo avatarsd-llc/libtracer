@@ -94,6 +94,9 @@ concept frame_observer = requires(std::string_view inbound_link_name) {
     { O::on_frame(inbound_link_name) } noexcept -> std::same_as<void>;
 };
 
+static_assert(graph::config_t::kReadBudget <= 254,
+              "config_t::kReadBudget counts in a saturating byte; at most 254 (#2774).");
+
 static_assert(frame_observer<graph::config_t::frame_observer_t>,
               "config_t::frame_observer_t needs `static void on_frame(std::string_view) "
               "noexcept` (#2580); see default_config_t::frame_observer_t in config.hpp.");
@@ -877,6 +880,22 @@ class fwd_router_t {
      */
     void on_frame(std::string_view inbound_name, std::span<const std::byte> frame);
 
+    /**
+     * @brief Close the current READ run (#2774): every session starts the next one with no
+     *        READs counted, and the census of sessions that READ starts at zero again.
+     *
+     * The application's clock drives the budget (`%graph::default_config_t::kReadBudget`): it
+     * calls this from any task or timer on its own clock, e.g. every 100 ms; a starved idle
+     * task stretches the run, and the budget with it. The library reads no clock.
+     *
+     * O(1) whatever the session count: a close is a compare-and-swap loop on one atomic word
+     * that advances the run stamp by exactly one, takes no lock and touches no session, so it is
+     * safe from any thread and from several closers at once, concurrently with READs on every
+     * receive thread; the stamp never moves backwards. When the budget is off it does nothing, so
+     * application code need not test the build.
+     */
+    void close_read_run() noexcept { read_run_.close(); }
+
     // -- origination (#1645) ------------------------------------------------------------
 
     /**
@@ -1315,6 +1334,18 @@ class fwd_router_t {
          */
         std::atomic<bool> retired{false};
         /**
+         * @brief The READ tally of a link that is one session (#2774): one whose
+         *        `%transport_t::inbound_tally` answers null. Written only on the link's receive
+         *        thread; no byte when the READ budget is off.
+         *
+         * NOT reset when a re-add rebinds this ctx (#884). It is a plain word owned by the
+         * receive thread, and a departing link's thread may still be inside a frame when the
+         * control thread rebinds. A reset there would be a data race, and it would buy little:
+         * the run stamp already ages the count, so a link re-added within one run carries its
+         * count to the end of that run and no further.
+         */
+        [[no_unique_address]] mutable session_read_tally_t read_tally{};
+        /**
          * @brief Next published receiver ctx — the LOCK-FREE reader chain (ADR-0063 §3).
          *
          * The bound hop reads this table from a transport RECEIVE thread while `add_child`
@@ -1555,6 +1586,22 @@ class fwd_router_t {
      */
     [[gnu::cold]] void refuse_unserved_type(std::byte type, std::string_view inbound_name,
                                             const child_rx_ctx_t* inbound_ctx) noexcept;
+    /**
+     * @brief Hand a request this node terminates to @p terminus, unless the READ budget
+     *        (#2774) refuses it: a READ whose session is over the budget while another
+     *        session READ in this run is answered `tr::flow::backpressure` (the stack-built
+     *        refusal) instead. With the budget off, this is the bare @p terminus call.
+     *
+     * The one place both terminus arms of `route_fwd_ingress` reach, so the budget's test
+     * is taken once, not at each arm. The session's tally is the delivering slot's
+     * (`%transport_t::inbound_tally`) or, for a link that is one session, its
+     * registration's. A frame with no receive ctx (the public `on_frame` doors, a frame
+     * this node originates) belongs to no session and is never refused.
+     */
+    template <class Cursor, class Terminus>
+    void reach_terminus(const Cursor& cur, const fwd_pre_t& pre, graph::fwd_op_t op,
+                        std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx,
+                        Terminus& terminus, const wire::path_pair_t* target);
     /**
      * @brief Classify ONE inbound FWD frame and dispatch it — the ingress driver, once.
      *
@@ -2009,6 +2056,9 @@ class fwd_router_t {
     /** @brief @ref reply_name_lookups's counter: cold state, so it sits with the drops. Bumped
      *         only on the by-name arm of `reply_link`, never on a point-to-point reply. */
     std::atomic<std::size_t> reply_name_lookups_{0};
+    /** @brief The READ run's census (#2774), advanced by @ref close_read_run; no byte when the
+     *         budget is off. */
+    [[no_unique_address]] read_census_t<kReadBudgetOn> read_run_;
 
     /**
      * @brief Where a terminating `FWD{REPLY}` goes: the oldest armed @ref origin_t whose return

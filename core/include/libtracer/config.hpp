@@ -663,6 +663,32 @@ struct default_config_t {
     using frame_observer_t = ::tr::net::no_frame_observer_t;
 
     /**
+     * @brief How many READs one session may send in a run while another session reads too
+     *        (#2774); 0, the default, turns the budget off and compiles it away.
+     *
+     * When several sessions READ one node at once, each READ is served in arrival order, so a
+     * session that reads now and then waits behind sessions that read in bursts. With a budget
+     * N, a READ this node terminates is answered `tr::flow::backpressure` (the existing reply)
+     * when it is beyond the session's N-th in the current run AND at least two sessions have
+     * READ in that run. A session alone in a run is never refused, and neither is a WRITE, a
+     * subscribe, an AWAIT, a REPLY, or a frame this node forwards.
+     *
+     * The application closes a run by calling `%fwd_router_t::close_read_run` from any task or
+     * timer on its own clock, e.g. every 100 ms; a starved idle task stretches the run, and the
+     * budget with it. The library reads no clock (no timers in libtracer). A session
+     * is one slot of a stream server (TCP, WS, the ESP-IDF WS link) or a whole link otherwise,
+     * and its count lives in that slot (receiver pays). At 0, every tally member is an empty
+     * `[[no_unique_address]]` type and the check is not compiled: 0 bytes, no branch.
+     *
+     * The census counts sessions that READ in the run, not sessions still connected: a session
+     * that READ and left still counts until the run closes, so a newcomer that is alone past
+     * its N-th READ may be refused for the rest of that run.
+     *
+     * Override fragment: `static constexpr std::uint8_t kReadBudget = 3;`. At most 254.
+     */
+    static constexpr std::uint8_t kReadBudget = 0;
+
+    /**
      * @brief Locks in the host guard's process-wide stripe table (#1716); a power of two.
      *
      * Applies when the build keeps the default @ref guard_t, and then the library then binds

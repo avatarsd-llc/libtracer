@@ -624,6 +624,14 @@ transport_t* slot_server_t::peer_link_of(peer_handle_t peer) {
     return s.open.load(std::memory_order_relaxed) && s.handle == peer ? &endpoint_of(s) : nullptr;
 }
 
+read_tally_t* slot_server_t::inbound_tally() noexcept {
+    // Asked inside a delivery, on the driving thread: the slot table's only mutator, so the
+    // lookup takes no lock. `delivering_` names the session whose frame is in flight and is
+    // cleared once it is handed up, so outside a delivery this answers null.
+    if (!delivering_.valid() || delivering_.index >= slots_.size()) return nullptr;
+    return tally_of(slots_[delivering_.index]->read_tally);
+}
+
 bool slot_server_t::close_peer(std::string_view peer) {
     // Shutdown-only under peers_m_; the driving thread's next pass observes the close and runs
     // the IDENTICAL remote-FIN teardown — no duplicate logic, and no off-thread touch of the
@@ -760,6 +768,7 @@ void slot_server_t::accept_peer() {
         // mistaken for its successor's.
         if (++slot->gen_seq == 0) slot->gen_seq = 1;
         slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen_seq};
+        slot->read_tally = session_read_tally_t{};  // a new tenancy has read nothing (#2774)
         // The routable NAME is the handle spelled out — `p<slot>~<gen>`, legal by
         // construction (ADR-0073 §2). It carries the generation, so a reused slot gets a
         // FRESH name: a route another node still holds for the previous session names

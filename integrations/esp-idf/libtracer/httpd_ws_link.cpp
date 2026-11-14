@@ -946,6 +946,10 @@ struct httpd_ws_link_t::session_t {
      * matches whoever lands on the slot next. Guarded by `peers_m_`, like the name.
      */
     peer_handle_t handle;
+    /** @brief This session's READs in the current run (#2774): handed to the router through
+     *         `inbound_tally` while the session's frame is delivered, and reset at the claim.
+     *         No byte when the READ budget is off. */
+    [[no_unique_address]] session_read_tally_t read_tally{};
     bool open = false; /**< @brief True between handshake and close. */
     /**
      * @brief The peer's ROUTABLE name — `p<slot>~<gen>` (ADR-0073 §2, #426, #994).
@@ -2368,6 +2372,7 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     // the TX path and the routing plane, never two that could disagree. `gen` is
     // never 0 after the increment on a claim, so the handle is always valid.
     slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen};
+    slot->read_tally = session_read_tally_t{};  // a new tenancy has read nothing (#2774)
     // ADR-0073 §2: the routable NAME is the handle spelled out, `p<slot>~<gen>`, legal
     // by construction, and the `<ip>:<port>` goes to the diagnostics field instead of
     // into the graph. The generation makes a reused slot's name a fresh one.
@@ -3279,12 +3284,20 @@ void httpd_ws_link_t::note_rx_drop(session_t* slot) {
 void httpd_ws_link_t::deliver(peer_handle_t peer, std::span<const std::byte> frame) {
     // Peer-named bus tag when the facet is on (each tab its own return route); the flat
     // point-to-point sink otherwise — matching what fwd_router_t::add_child installed.
-    if (peer_named_) {
+    // The WHO, for @ref inbound_peer (#1846) and the READ budget's @ref inbound_tally (#2774).
+    rx_peer_ = peer;
+    if (peer_named_)
         peer_rx_.deliver_borrowed(peer, frame);
-    } else {
-        rx_peer_ = peer;  // the flat arm's WHO, for @ref inbound_peer (#1846)
+    else
         rx_.deliver_borrowed(frame);
-    }
+}
+
+read_tally_t* httpd_ws_link_t::inbound_tally() noexcept {
+    // Asked inside a delivery, on the httpd task, which is the only task that claims or grows
+    // `slots_`, so the lookup takes no lock. The handle compare refuses a recycled slot.
+    if (!rx_peer_.valid() || rx_peer_.index >= slots_.size()) return nullptr;
+    session_t* const s = slots_[rx_peer_.index];
+    return s->handle == rx_peer_ ? tally_of(s->read_tally) : nullptr;
 }
 
 void httpd_ws_link_t::deliver_owned(peer_handle_t peer, view::rope_t frame) {
@@ -3302,12 +3315,11 @@ void httpd_ws_link_t::deliver_owned(peer_handle_t peer, view::rope_t frame) {
     // have destroyed this link in-call (#814), so after a delivery `this` is touched only
     // when no sink ran.
     bool delivered = false;
-    if (peer_named_) {
+    rx_peer_ = peer;
+    if (peer_named_)
         delivered = peer_rx_.deliver_rope(peer, std::move(frame), *rx_backend_);
-    } else {
-        rx_peer_ = peer;
+    else
         delivered = rx_.deliver_rope(std::move(frame), *rx_backend_);
-    }
     if (!delivered) rx_dropped_pool_.fetch_add(1, std::memory_order_relaxed);
 }
 

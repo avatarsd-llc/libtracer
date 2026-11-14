@@ -802,6 +802,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *          off-thread read merely *defined* rather than *correct* buys nothing.
      */
     [[nodiscard]] peer_handle_t inbound_peer() const noexcept override { return delivering_; }
+    /** @brief The delivering session's READ tally (#2774): its slot, found by
+     *         @ref inbound_peer's handle; null outside a delivery. */
+    [[nodiscard]] read_tally_t* inbound_tally() noexcept override;
 
     /**
      * @brief The SUBJECT token of @p peer — `p<slot>~<gen>`, this kind's session identity.
@@ -926,6 +929,10 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
          *         @ref handle is minted at. Bumped once per accept (never reused, never
          *         zero), so the counter survives the retire that clears @ref handle. */
         std::uint32_t gen_seq = 0;
+        /** @brief This session's READs in the current run (#2774): written by the driving
+         *         thread, and handed to the router through @ref inbound_tally while it delivers
+         *         the session's frame; reset at accept. No byte when the budget is off. */
+        [[no_unique_address]] session_read_tally_t read_tally{};
         /** @brief This session's egress (ADR-0087 §2, #2144): its frames waiting per vertex,
          *         its writer role and its strikes. Closed while the slot is free; reset as the
          *         slot is recycled, so a stalled peer's frames and strikes are never inherited

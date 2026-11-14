@@ -61,10 +61,14 @@ PINNED_TARGET = "esp32c6"
 PINNED_TOOLCHAIN = "riscv32-esp-elf-g++ (crosstool-NG esp-15.2.0_20251204) 15.2.0"
 TRANSPORT_ROWS = (
     # 2,710 -> 2,608 B (#2147): the receive thread body becomes one readiness callback.
-    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2608, None),
+    # 2,608 -> 2,612 B (+4): rulings 83/85/93 (2026-11-14), #2774 per-session READ budget,
+    # built off: the off build's cost is accepted. Main's pin plus the measured delta.
+    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2612, None),
     # 9,216 -> 9,446 B (#2147): a frame read resumes across readiness turns, so frame ingress is
     # out of line and the connection and listener each gain a callback (maintainer ruling 60).
-    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9446, None),
+    # 9,446 -> 9,462 B (+16): rulings 83/85/93 (2026-11-14), #2774 per-session READ budget,
+    # built off: the off build's cost is accepted. Main's pin plus the measured delta.
+    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9462, None),
     # 8,896 -> 9,080 B (#2147): the poll loops give way to turn functions, the write-interest
     # arm and disarm, and the thread-per-link fallback's block (maintainer ruling 60).
     # 9,080 -> 9,262 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys back
@@ -73,7 +77,9 @@ TRANSPORT_ROWS = (
     # open" read folded into the teardown's own lock, one shut_down override for both servers.
     # 9,184 -> 9,296 B: ruling 76 (2026-11-12), #2812: the one-peer liveness check owes RX
     # too (a dialer closes a server frozen mid-frame); two atomic flag calls in sweep_one.
-    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9296, None),
+    # 9,296 -> 9,304 B (+8): rulings 83/85/93 (2026-11-14), #2774 per-session READ budget,
+    # built off: the off build's cost is accepted. Main's pin plus the measured delta.
+    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9304, None),
     ("CAN (transport_can + TWAI link)", ("transport_can", "twai_link", "socketcan_link_stub"),
      None, "compiled, not linked: full_node creates no CAN connection, so --gc-sections drops it"),
     ("WebSocket (httpd server + client link)", ("httpd_ws_link", "esp_ws_client_link"),
@@ -92,10 +98,14 @@ FOOTPRINT_PINS = {
     # gather path), which landed first. Measured on the serial run at 119d76e6.
     # 14,268 -> 14,290 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys
     # back ~110 B.
-    "CAN (transport_can + TWAI link)": 14290,
+    # 14,290 -> 14,306 B (+16): rulings 83/85/93 (2026-11-14), #2774 per-session READ budget,
+    # built off: the off build's cost is accepted. Main's pin plus the measured delta.
+    "CAN (transport_can + TWAI link)": 14306,
     # 33,387 -> 33,513 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys
     # back ~110 B.
-    "WebSocket (httpd server + client link)": 33513,
+    # 33,513 -> 33,515 B (+2): rulings 83/85/93 (2026-11-14), #2774 per-session READ budget,
+    # built off: the off build's cost is accepted. Main's pin plus the measured delta.
+    "WebSocket (httpd server + client link)": 33515,
 }
 
 
