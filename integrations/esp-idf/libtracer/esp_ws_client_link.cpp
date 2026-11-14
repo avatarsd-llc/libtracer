@@ -795,15 +795,15 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     }
     // The connection edge, and the only place the link can observe one: `drop()`
     // deliberately stays silent (see below), so this counter IS the reconnect signal.
-    // The per-connection counters reset here; `last_rx_us` goes back to "never" rather
-    // than carrying the previous session's staleness forward.
+    // The per-connection traffic counters reset here; `last_rx_us` goes back to "never" rather
+    // than carrying the previous session's staleness forward. The drop tally does not: the
+    // drops that preceded a connection loss are what explains it (#2788).
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     {
         const std::lock_guard<tr::mutex_t> lk(st_m_);
         traffic_ = {};
     }
 #endif
-    tx_drops_.store(0, std::memory_order_relaxed);
     held_.restart_peaks();
     connected_at_us_.store(esp_timer_get_time(), std::memory_order_relaxed);
     connect_ms_.store(static_cast<std::uint32_t>(dial_us / 1000), std::memory_order_relaxed);
@@ -839,7 +839,6 @@ esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
     // Relaxed loads, one by one: none of these is used to check another, and each is
     // written only on a failure, at a (re)connect or, for the queue peaks, when a frame has
     // to wait (#2464), never per frame written (#1663).
-    out.c.tx_drops = tx_drops_.load(std::memory_order_relaxed);
     out.c.connected_at_us = connected_at_us_.load(std::memory_order_relaxed);
     out.c.tx_queue_peak = held_.peak_frames();
     out.tx_queue_peak_bytes = held_.peak_bytes();
@@ -849,15 +848,16 @@ esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
     out.dial_failures = dial_failures_.load(std::memory_order_relaxed);
 #endif
     out.connect_ms = connect_ms_.load(std::memory_order_relaxed);
-    // Filled from the tally's `dropped_rx`, not kept in a second counter: the receive path already
-    // tallies every inbound discard there (#953/#901), and a second counter bumped at the same
-    // sites could only drift from it. `c.rx_drops` and `drop_stats().dropped_rx` are therefore two
-    // spellings of one number, never two numbers. Saturating, because the block is 32-bit and the
-    // tally is word-wide — on a 64-bit host a link that really dropped 4 billion messages reports
-    // the cap here and the exact figure through `drop_stats().dropped_rx`.
-    const std::uint64_t rx_dropped = drops_.snapshot().dropped_rx;
-    out.c.rx_drops = static_cast<std::uint32_t>(
-        std::min<std::uint64_t>(rx_dropped, std::numeric_limits<std::uint32_t>::max()));
+    // Filled from the tally, not kept in second counters: every drop is tallied there
+    // (#953/#901, #2788), and a second counter bumped at the same sites could only drift from
+    // it. `c.rx_drops`/`c.tx_drops` and `drop_stats().dropped_rx`/`dropped_tx` are therefore two
+    // spellings of one number each, and both survive a reconnect. Saturating, because the block
+    // is 32-bit and the tally is word-wide — on a 64-bit host a link that really dropped 4
+    // billion messages reports the cap here and the exact figure through `drop_stats()`.
+    const transport_drop_stats_t dropped = drops_.snapshot();
+    constexpr std::uint64_t kCap = std::numeric_limits<std::uint32_t>::max();
+    out.c.rx_drops = static_cast<std::uint32_t>(std::min(dropped.dropped_rx, kCap));
+    out.c.tx_drops = static_cast<std::uint32_t>(std::min(dropped.dropped_tx, kCap));
     // Read OUTSIDE the mutex: `connected_` is atomic and `drop()` clears it while
     // holding write_m_, so taking it inside would say nothing extra and reading it
     // here keeps the hold to the struct copy. This field is LIVENESS — the same answer
@@ -946,7 +946,7 @@ void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> head
     const std::size_t n = head.size() + value.link_count();
     std::span<const std::byte>* const iov = table.acquire(n);
     if (iov == nullptr) {
-        tx_drops_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_tx(1, drop_cause_t::SHED);  // `memory.io` refused the table
         return;
     }
     std::copy(head.begin(), head.end(), iov);
@@ -966,16 +966,15 @@ void esp_ws_client_link_t::send_on(std::span<const std::span<const std::byte>> i
     if (total > tx_bytes_) {  // drop oversize
         // This is the `tx_bytes` CEILING, and this is the only place that can
         // name it. `transport_t::send` returns void, so the router cannot be told the frame
-        // died; `tx_drops_` says one did, but a send to a peer that is down and a frame a
-        // full ring sheds bump that same counter, so a bump alone does not even say WHICH drop
-        // this was, let alone which knob was too small. A per-frame ceiling nobody can see
+        // died; `dropped_tx` says one did, and its cause (#2788) says it was this ceiling, but
+        // not which frame size or which knob was too small. A per-frame ceiling nobody can see
         // is how a blob-carrying value or a composed reply vanishes with clean logs on both
         // ends (#959). Logged every time, exactly like the
         // rx-buffer arm in recv_loop: this firing means the link emits NOTHING at this
         // frame size, which is a misconfiguration to fix, not a rate to live with.
         ESP_LOGW(kTag, "outbound frame %u B exceeds %u B tx buffer — dropped",
                  static_cast<unsigned>(total), static_cast<unsigned>(tx_bytes_));
-        tx_drops_.fetch_add(1, std::memory_order_relaxed);
+        drops_.count_dropped_tx(1, drop_cause_t::OVERSIZE);
         return;
     }
     // Announce this sender BEFORE it can reach write_m_ (#952). A sender that becomes the
@@ -1025,10 +1024,16 @@ void esp_ws_client_link_t::send_on(std::span<const std::span<const std::byte>> i
             return f != nullptr ? resume(*f, 0) : tr::net::egress_step_t{0, false, true};
         },
         resume, [] {});
-    tx_drops_.fetch_add(r.shed, std::memory_order_relaxed);
+    // A write here fails only on a connection that is down (write_locked holds a socket error
+    // for the read side), so what an up link sheds is its own bound's: a full ring, the
+    // `tx_bytes` budget or a refused block (#2788). Counted only when something was lost: the
+    // success path takes no atomic.
+    const bool up = connected_.load(std::memory_order_acquire);
+    if (r.shed != 0)
+        drops_.count_dropped_tx(r.shed, up ? drop_cause_t::SHED : drop_cause_t::LINK_DOWN);
     // A send on a link that is down is the event that ends a backoff no app clock drives
     // (#2337). Inside the sender tally, so the destructor cannot have destroyed the mutex.
-    if (connected_.load(std::memory_order_acquire)) return;
+    if (up) return;
     bool woke = false;
     {
         const std::lock_guard<tr::mutex_t> lk(backoff_m_);
@@ -1147,11 +1152,13 @@ void esp_ws_client_link_t::recv_loop() {
         // published. No new wait, this is the loop's own poll cadence. On the turn that finds
         // the connection down it drains what waited, so nothing of the old connection is
         // written to the next one. Those losses are counted like a send to a link that is
-        // down, so `stats()` read during a backoff says what was lost.
+        // down, so `stats()` read during a backoff says what was lost. A flush admits nothing,
+        // and its write fails only on a connection that is gone: every frame it sheds is lost
+        // to the link going down (#2788).
         {
             resume_t resume{*this};
-            tx_drops_.fetch_add(egress_.flush(peer_, resume, [] {}).shed,
-                                std::memory_order_relaxed);
+            const std::uint32_t shed = egress_.flush(peer_, resume, [] {}).shed;
+            if (shed != 0) drops_.count_dropped_tx(shed, drop_cause_t::LINK_DOWN);
         }
         if (!connected_.load(std::memory_order_acquire)) {
             // A new connection is a new stream: nothing of the old one's frame or message

@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -489,6 +490,22 @@ struct link_memory_t {
 };
 
 /**
+ * @brief Why a link last dropped an outbound frame (#2788): the value a drop snapshot's
+ *        `dropped_tx_cause` holds, and the `dropped_tx_cause` noun of `:stats.link.<child>`
+ *        (RFC-0010 Amendment 6). One byte, stored on the drop arm only.
+ */
+enum class drop_cause_t : std::uint8_t {
+    NONE = 0,            /**< @brief No outbound frame dropped since the link was constructed. */
+    OVERSIZE = 1,        /**< @brief The frame was larger than the link's per-frame ceiling. */
+    LINK_DOWN = 2,       /**< @brief No connection stood to write to, or it went down with the frame
+                                     still waiting. */
+    SHED = 3,            /**< @brief The link's own bound shed it: a full lane ring (conflate,
+                                     drop-oldest, the reliable arm's refusal), the budget for waiting
+                                     frames, or a store that refused its block. */
+    TRANSPORT_ERROR = 4, /**< @brief The socket failed the write. */
+};
+
+/**
  * @brief One transport's shed-frame counters, as a generic `transport_t*` holder
  *        can read them (#932).
  *
@@ -516,6 +533,9 @@ struct transport_drop_stats_t {
     /** @brief Outbound frames the caller believed sent that never reached the wire —
      *         oversize for the peer's cap, no peer/dead socket, or a refused gather. */
     std::uint64_t dropped_tx = 0;
+    /** @brief The cause of the last frame counted in @ref dropped_tx (#2788); empty on a
+     *         link whose @ref drop_tally_t does not record one. */
+    std::optional<drop_cause_t> dropped_tx_cause = std::nullopt;
 };
 
 /**
@@ -523,9 +543,11 @@ struct transport_drop_stats_t {
  *        (#2482) — a build-time choice, so a link with no such class pays no word for it.
  */
 struct drop_classes_t {
-    bool dropped_rx = true;   /**< @brief Count inbound frames shed (backpressure). */
-    bool malformed_rx = true; /**< @brief Count inbound frames refused as malformed. */
-    bool dropped_tx = true;   /**< @brief Count outbound frames that never reached the wire. */
+    bool dropped_rx = true;        /**< @brief Count inbound frames shed (backpressure). */
+    bool malformed_rx = true;      /**< @brief Count inbound frames refused as malformed. */
+    bool dropped_tx = true;        /**< @brief Count outbound frames that never reached the wire. */
+    bool dropped_tx_cause = false; /**< @brief Keep the cause of the last outbound drop: one
+                                               byte, for a link that can name it (#2788). */
 };
 
 /**
@@ -541,10 +563,16 @@ struct drop_classes_t {
  * cannot be counted (the count operation does not exist), and reads zero in the snapshot.
  * Sampled per the snapshot-coherence clause of core/STYLE.md §Introspection.
  *
+ * With @ref drop_classes_t::dropped_tx_cause, an outbound drop is counted together with its
+ * cause, and the last one is kept (one relaxed byte store beside the count).
+ *
  * @tparam Classes The classes this link can drop; all three by default.
  */
 template <drop_classes_t Classes = drop_classes_t{}>
 class drop_tally_t {
+    static_assert(Classes.dropped_tx || !Classes.dropped_tx_cause,
+                  "a cause is kept only for the outbound drops a tally counts");
+
    public:
     /** @brief Count @p n inbound frames shed rather than delivered. */
     void count_dropped_rx(std::size_t n = 1) noexcept
@@ -562,8 +590,16 @@ class drop_tally_t {
 
     /** @brief Count @p n outbound frames that never reached the wire. */
     void count_dropped_tx(std::size_t n = 1) noexcept
-        requires(Classes.dropped_tx)
+        requires(Classes.dropped_tx && !Classes.dropped_tx_cause)
     {
+        dropped_tx_.fetch_add(n, std::memory_order_relaxed);
+    }
+
+    /** @brief Count @p n outbound frames that never reached the wire, all lost to @p cause. */
+    void count_dropped_tx(std::size_t n, drop_cause_t cause) noexcept
+        requires(Classes.dropped_tx_cause)
+    {
+        dropped_tx_cause_.store(cause, std::memory_order_relaxed);
         dropped_tx_.fetch_add(n, std::memory_order_relaxed);
     }
 
@@ -576,6 +612,8 @@ class drop_tally_t {
             s.malformed_rx = malformed_rx_.load(std::memory_order_relaxed);
         if constexpr (Classes.dropped_tx)
             s.dropped_tx = dropped_tx_.load(std::memory_order_relaxed);
+        if constexpr (Classes.dropped_tx_cause)
+            s.dropped_tx_cause = dropped_tx_cause_.load(std::memory_order_relaxed);
         return s;
     }
 
@@ -589,6 +627,9 @@ class drop_tally_t {
     [[no_unique_address]] word_t<Classes.dropped_rx, 0> dropped_rx_{}; /**< @brief Shed inbound. */
     [[no_unique_address]] word_t<Classes.malformed_rx, 1> malformed_rx_{}; /**< @brief Malformed. */
     [[no_unique_address]] word_t<Classes.dropped_tx, 2> dropped_tx_{}; /**< @brief Shed outbound. */
+    /** @brief The last outbound drop's cause, or nothing when the link names none. */
+    [[no_unique_address]] std::conditional_t<Classes.dropped_tx_cause, std::atomic<drop_cause_t>,
+                                             std::integral_constant<int, 3>> dropped_tx_cause_{};
 };
 
 /**
