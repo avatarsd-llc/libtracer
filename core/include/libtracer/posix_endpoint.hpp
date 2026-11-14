@@ -334,7 +334,9 @@ class posix_endpoint_t {
 // registration's tail padding, on every target and with or without the listed adapter. A
 // member that does not fit there grows every POSIX link (#2827).
 static_assert(sizeof(posix_endpoint_t) == sizeof(wait_source_t) + 3 * sizeof(void*),
-              "posix_endpoint_t grew past its registration and three pointers");
+              "posix_endpoint_t is its registration plus three pointers (48 B on an x86-64 "
+              "Linux host, 32 B on esp32c6 with the lwIP adapter): a member here grows every "
+              "POSIX link and its ledger rows (#2827)");
 
 /**
  * @brief The one-peer fd/teardown discipline every POSIX STREAM transport
