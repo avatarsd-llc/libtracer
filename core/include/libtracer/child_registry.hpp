@@ -35,6 +35,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/packed_path.hpp"
+#include "libtracer/path.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/transport.hpp"
@@ -481,7 +482,8 @@ class child_registry_t {
             hit->egress_.store(egress, std::memory_order_release);
             return true;
         }
-        // A name with no packed spelling keys no vertex, so it can have no connection vertex.
+        // A name with no packed spelling keys no vertex, so it can have no connection vertex;
+        // one wider than a path may be is refused the same way (`encode_mount_name`, #523).
         const std::size_t mount_bytes = encode_mount_name(name, nullptr);
         if (mount_bytes == 0) return false;
         child_t* const slot = append();
@@ -842,6 +844,12 @@ class child_registry_t {
      * `u8` length field yields an empty run, and the hop falls back to encoding the name
      * per-frame.
      *
+     * So does a name of more than `graph::kMaxSegments` segments (#523). A mount is only
+     * addressed by a `dst` that carries at least its own segments, and a path carries at most
+     * that many (RFC-0023), so a wider name could never be the prefix of any address that
+     * exists. The walk stops there, and @ref add, which every registration goes through,
+     * refuses the name by this one empty run.
+     *
      * One pass serves both halves of @ref add's single allocation (#1779): with @p out null
      * it only measures, otherwise it writes the run there (sized by the measuring call).
      * Public because it is a pure function of @p name.
@@ -851,7 +859,7 @@ class child_registry_t {
     [[nodiscard]] static std::size_t encode_mount_name(std::string_view name,
                                                        std::byte* out) noexcept {
         std::size_t n = 0;
-        for (std::size_t at = 0;;) {
+        for (std::size_t at = 0, segs = 0; segs < graph::kMaxSegments; ++segs) {
             const std::size_t slash = name.find('/', at);
             const std::string_view seg = name.substr(
                 at, slash == std::string_view::npos ? std::string_view::npos : slash - at);
@@ -864,6 +872,7 @@ class child_registry_t {
             if (slash == std::string_view::npos) return n;
             at = slash + 1;
         }
+        return 0;  // wider than a path may be
     }
 
     /** @brief Number of slots — live children PLUS tombstones (test introspection). */
