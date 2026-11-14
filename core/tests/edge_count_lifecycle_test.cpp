@@ -25,6 +25,8 @@
  *      (`kGenerationSaturated`), as every other generation check does: there the counter has
  *      stopped, so a retire since the gate could no longer be told apart.
  *
+ * A refused admission answers NOT_FOUND, as an unsubscribe does for a retired vertex.
+ *
  * Without the change, (2) and (3) fail outright: the append lands, and the next registration
  * inherits it. (5) fails if the landing test compares the generations with a plain `==`.
  *
@@ -157,8 +159,9 @@ void test_retired_vertex_takes_no_edge() {
     const tr::view::view_t record = subscriber_record(path_t("/c/t"));
 
     check(g.retire(v).has_value(), "retire /c/b");
-    check(!g.write(v, field, record).has_value(),
-          "an append through the retired vertex's handle is refused");
+    const auto stale = g.write(v, field, record);
+    check(!stale && stale.error() == tr::graph::status_t::NOT_FOUND,
+          "an append through the retired vertex's handle answers NOT_FOUND");
     check(g.own_subs(v) == 0 && published(v) == 0, "... and the retired vertex holds no edge");
     check(g.try_register_vertex(path_t("/c/b"), role_t::STORED_VALUE).has_value(), "re-register");
     check(g.own_subs(v) == 0 && published(v) == 0, "the re-registration starts with no edges");
@@ -206,8 +209,9 @@ void test_decision_does_not_cross_a_retire() {
 
     const std::uint32_t generation = g.retire_generation(v);
     seam.armed = true;
-    check(!g.write(v, field, record, "peer").has_value(),
-          "an append whose vertex was retired and registered again under it is refused");
+    const auto crossed = g.write(v, field, record, "peer");
+    check(!crossed && crossed.error() == tr::graph::status_t::NOT_FOUND,
+          "an append whose vertex was retired and registered again under it answers NOT_FOUND");
     check(
         seam.calls == 1 && g.retire_generation(v) == generation + 1 && g.find(path_t("/c/d").key()),
         "... the seam ran once, and /c/d is registered again, one generation on");
@@ -232,8 +236,9 @@ void test_saturated_generation_takes_no_edge() {
     (raw(v).*member_of(retire_gen_member_t{})).store(tr::graph::kGenerationSaturated);
     check(g.retire_generation(v) == tr::graph::kGenerationSaturated && g.find(path_t("/c/s").key()),
           "/c/s is registered, at the ceiling generation");
-    check(!g.subscribe(path_t("/c/s"), sink, nullptr).has_value(),
-          "an admit at the ceiling generation is refused");
+    const auto ceiling = g.subscribe(path_t("/c/s"), sink, nullptr);
+    check(!ceiling && ceiling.error() == tr::graph::status_t::NOT_FOUND,
+          "an admit at the ceiling generation answers NOT_FOUND");
     check(g.own_subs(v) == 1 && published(v) == 1, "... and the count and the edges are unchanged");
 }
 

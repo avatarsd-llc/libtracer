@@ -3475,8 +3475,8 @@ class graph_t {
     // the edge's kind) → RFC-0005 bookkeeping. Every door — the two subscribe() sugars,
     // the local `:subscribers[]` field-write, and the wire subscribe_wire — ends here,
     // so gate and latch semantics cannot diverge per entry point. The slot lands only on the
-    // registration the gate passed: one retired since, even if registered again, is refused
-    // with the status the gate gives a vertex retired under it.
+    // registration the gate passed: one retired since, even if registered again, or one whose
+    // retire generation is saturated, answers NOT_FOUND.
     // `link_token` is the carried interned identity (#1417), forwarded verbatim to
     // `link_index_t::index_vertex` — which ignores it unless it names a live slot spelling the key
     // this admission actually indexes under. Defaulted, so the three local doors that carry

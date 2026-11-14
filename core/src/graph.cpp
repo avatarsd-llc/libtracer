@@ -3403,9 +3403,10 @@ result_t<subscription_t> graph_t::admit_subscriber(
     // Every refusal below answers from one table, indexed by `edge_replace_t`'s refusals, which
     // lead that enumeration: an index no slot answers to (OUT_OF_RANGE), a source that could
     // not carry the edge (REFUSED) and an edge that changed under the write (EDGE_CHANGED). A
-    // replace with no block is the first, an append whose block was refused the second.
+    // replace with no block is the first, an append whose block was refused the second. The
+    // last entry, NOT_FOUND, is for an admission that ran no slot verb at all (below).
     constexpr status_t kRefusal[] = {status_t::INVALID_PATH, status_t::BACKPRESSURE,
-                                     status_t::PERMISSION_DENIED};
+                                     status_t::PERMISSION_DENIED, status_t::NOT_FOUND};
     if (slot ? !v->has_edges() : !v->reserve_edges(*tables_))
         return std::unexpected(kRefusal[!slot]);
     if (!admit_session(admitted, v, caller, link_token, session))
@@ -3434,11 +3435,13 @@ result_t<subscription_t> graph_t::admit_subscriber(
     constexpr std::int32_t kGiveBack[] = {1, 1, 1, 0, 1, 0};
     // A registration retired since the gate lands nothing, whether or not the address has been
     // registered again since: the verdict was about the vertex that left, and a retired vertex
-    // carries no edge into a later registration. It is refused as the gate refuses a vertex
-    // retired under it, so it takes the refusal that names no slot verb. The generation test is
-    // `bound_generation_matches`, the one every generation check uses: at the ceiling the
-    // counter stops, a retire since can no longer be told apart, and the admission is refused.
+    // carries no edge into a later registration. It answers NOT_FOUND, as an unsubscribe and
+    // the owner-side setters (#2669) do for a vertex that is no longer registered: the refusal
+    // no slot verb gives. The generation test is `bound_generation_matches`, the one every
+    // generation check uses: at the ceiling the counter stops, a retire since can no longer be
+    // told apart, and the admission is refused the same way.
     vertex_t::edge_replace_t r = vertex_t::edge_replace_t::EDGE_CHANGED;
+    std::size_t refusal = std::size(kRefusal) - 1;  // NOT_FOUND until a slot verb runs
     {
         // The count and the slot change under ONE shared map hold, as set_suspended and
         // evict_link_edges take them: a retire (unique hold) reads own_subs() before zeroing
@@ -3459,14 +3462,15 @@ result_t<subscription_t> graph_t::admit_subscriber(
                 idx = v->add_edge(std::move(s), &latch, *tables_);
                 r = kAppended[idx == vertex_t::kNoSlot];
             }
-            note_subscribers(v, -kGiveBack[std::to_underlying(r)]);
+            refusal = std::to_underlying(r);
+            note_subscribers(v, -kGiveBack[refusal]);
         }
     }
     // The refusals lead the enumeration, so one test takes them all and the table names the
     // status.
     if (r <= vertex_t::edge_replace_t::EDGE_CHANGED) {
         release_edges(delivery_link(admitted), session, v);
-        return std::unexpected(kRefusal[std::to_underlying(r)]);
+        return std::unexpected(kRefusal[refusal]);
     }
     // A replace that displaced an edge — delivering or suspended — is two events, in
     // causal order: the old subscription ended and a new one began. Reporting only the
