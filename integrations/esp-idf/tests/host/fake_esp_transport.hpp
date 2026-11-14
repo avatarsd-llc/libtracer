@@ -45,7 +45,8 @@
  * link's best-effort socket-option block (#957), with `setsockopt` interposed on the
  * opting-in target so no option reaches the kernel either. A frame is one non-blocking
  * `send()` on that socket (#2787); every client target wraps `send` into this fake, which
- * writes it to the connection whose socket the link resolved last, whatever the number.
+ * writes it to the connection whose socket the link resolved last, whatever the number. The
+ * link's `shutdown()` of that connection at shut_down() (#2813) is wrapped the same way.
  */
 #pragma once
 
@@ -204,6 +205,10 @@ void release_connects(bool succeed);
 /** @brief `esp_transport_close` calls that reached a live handle since the reset — the
  *         "a dial that resolved SUCCESS was closed, not merely destroyed" oracle. */
 [[nodiscard]] int close_count();
+
+/** @brief `shutdown` calls that reached a live handle since the reset: the "the peer saw the
+ *         close at shut_down(), before the destructor" oracle (#2813). */
+[[nodiscard]] int shutdown_count();
 
 /** @brief The `timeout_ms` the last dial asked for — the bound the link chose. */
 [[nodiscard]] int last_connect_timeout_ms();

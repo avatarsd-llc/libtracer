@@ -110,13 +110,17 @@ bool wait_module_t::attach(wait_source_t& s) noexcept {
     return false;
 }
 
-void wait_module_t::detach(wait_source_t& s) noexcept {
+void wait_module_t::disarm(wait_source_t& s) noexcept {
     locked([&] {
         if (!s.attached.load(std::memory_order_relaxed)) return;
         ::epoll_ctl(fd_[0], EPOLL_CTL_DEL, s.fd.load(std::memory_order_relaxed), nullptr);
         s.attached.store(false, std::memory_order_relaxed);
         gen_.fetch_add(1);  // seq_cst: the other half of fire_marked's handshake
     });
+}
+
+void wait_module_t::detach(wait_source_t& s) noexcept {
+    disarm(s);
     await_quiet(s);
 }
 

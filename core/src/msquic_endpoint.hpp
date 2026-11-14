@@ -735,8 +735,8 @@ class msquic_endpoint_t {
     /** @} */
 
     /**
-     * @brief The deferred teardown, for a `shut_down` on a thread that runs link callbacks:
-     *        it only shuts down; it closes nothing. Stops delivery and departures, refuses
+     * @brief The `shut_down` of a QUIC link, on any thread: it only shuts down; it waits for
+     *        nothing and closes nothing. Stops delivery and departures, refuses
      *        new peers, and shuts the live connection down (which waits for nothing). Every
      *        handle stays owned and open until the destructor's @ref teardown.
      */
@@ -755,7 +755,7 @@ class msquic_endpoint_t {
     void teardown() noexcept {
         if (api == nullptr) return;  // MsQuicOpen2 failed — nothing to unwind
         // Each Close below waits for that handle's callbacks, so it runs off every callback
-        // thread: from the destructor, or a shut_down made on an application thread.
+        // thread: from the destructor, the one join.
         assert(!on_callback_thread() && "a QUIC teardown runs off every callback thread");
         // Our own teardown: latch the departure guard BEFORE any Close, so a
         // shutdown callback draining under the Closes below cannot fire the

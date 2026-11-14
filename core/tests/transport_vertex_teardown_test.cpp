@@ -21,7 +21,8 @@
  * plane is gone, and expect neither to reach the closed link. Last, a forward and a listing
  * are each held inside a connection's link while it is removed: the removal shuts the link
  * down and parks it, and only a `collect()` after every router frame that could reach it has
- * left destroys it.
+ * left destroys it. The plane's own destruction is such a `collect()`: it returns with its
+ * links destroyed, and with a frame held inside one it returns only after that frame has left.
  */
 
 #include <atomic>
@@ -442,6 +443,46 @@ void listing_in_flight_across_removal() {
     remove_with_call_inside(g, *net, p, [&] { (void)g.read(children); });
 }
 
+/**
+ * @brief Destroying the plane is its links' join (#2813): it returns with every link it owned
+ *        destroyed, with no `collect()` of the test's own, and with a router frame held inside
+ *        one of them it returns only after that frame has left.
+ */
+void destruction_joins_its_links() {
+    graph_t g;
+    fwd_router_t router(g);
+    probe_t py;
+    auto net = plane_owning_y(g, router, py);
+    net.reset();
+    check(py.shut.load() && py.closed.load(), "destroying the plane destroys the link it owned");
+    if constexpr (tr::net::kBusLinks) {
+        probe_t p;
+        net = plane_owning_x(g, router, p);
+        fwd_router_t::origin_t slot([](void*, const tr::view::rope_t&) {}, nullptr);
+        const path_t dst("/net/m/x/p0");
+        p.stay.store(true);
+        p.hold.store(true);
+        std::thread inside(
+            [&] { (void)router.originate(slot, tr::graph::fwd_op_t::READ, dst, {}); });
+        while (!p.entered.load()) std::this_thread::yield();
+        std::atomic<bool> done{false};
+        std::thread destroyer([&] {
+            net.reset();
+            done.store(true);
+        });
+        while (!p.shut.load()) std::this_thread::yield();
+        for (int i = 0; i < 1000; ++i) std::this_thread::yield();
+        check(!done.load() && !p.closed.load(),
+              "with a frame inside its link, the plane's destruction has not returned");
+        p.stay.store(false);
+        inside.join();
+        destroyer.join();
+        check(!p.closed_inside.load(), "the link was never destroyed under the frame");
+        check(p.closed.load(), "and once the frame left, the destruction destroyed the link");
+        (void)router.cancel(slot);
+    }
+}
+
 /** @brief A removal whose retire is refused keeps the shut-down link for the graph's life. */
 void refused_retire_keeps_the_link() {
     gate_source_t gate;
@@ -478,6 +519,7 @@ int main() {
     forward_in_flight_across_removal();
     bus_children_read_after_destruction();
     with_link_held_across_collects();
+    destruction_joins_its_links();
     if constexpr (tr::net::kBusLinks) {
         forward_held_across_collects();
         origination_held_across_collects();

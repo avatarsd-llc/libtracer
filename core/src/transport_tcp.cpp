@@ -244,8 +244,8 @@ tcp_transport_t::~tcp_transport_t() {
 
 void tcp_transport_t::shut_down() {
     shut_down_stream();
-    // Only the joined thread read the listen socket, so it can go now and free its port;
-    // deferred, it is only shut down, and the destructor closes it.
+    // A callback in flight may still read the listen socket: it is only shut down here, and
+    // the destructor closes it and frees its port.
     release_listen(listen_fd_);
 }
 

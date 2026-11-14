@@ -17,6 +17,7 @@
 #include <utility>
 
 #include "libtracer/frame.hpp"
+#include "libtracer/park.hpp"
 #include "libtracer/sync.hpp"
 #include "libtracer/wait.hpp"
 
@@ -58,8 +59,8 @@ self_heal_link_t::~self_heal_link_t() {
     assert(!on_callback_thread() && "a link's destructor runs off every callback thread");
     halt(false);
     // A send routed by a frame has returned by now (the engine is freed where no frame can
-    // reach it); one made directly and still in flight frees its socket through the
-    // socket's own source (#2288).
+    // reach it); one made directly and still in flight is waited out, so every socket is
+    // destroyed here, before the engine goes (#2288, #2813).
     (void)drop_corpses(std::exchange(corpses_, nullptr), true);
 }
 
@@ -82,7 +83,11 @@ void self_heal_link_t::born() {
 void self_heal_link_t::sock_ref_t::reset() noexcept {
     sock_t* const s = s_;
     s_ = nullptr;
-    if (s == nullptr || s->refs.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+    if (s == nullptr) return;
+    const std::uint32_t was = s->refs.fetch_sub(1, std::memory_order_acq_rel);
+    // The engine's destructor waits for the list's hold to be the last (see drop_corpses).
+    if (was == (sock_t::kHoldWaiting | 2U)) park_wake(s->refs);
+    if (was != 1) return;
     mem::drop_in(*s->src, s);  // destroys the socket first: joins its receive thread
 }
 
@@ -98,13 +103,23 @@ self_heal_link_t::sock_t* self_heal_link_t::drop_corpses(sock_t* head, bool all)
     sock_t* kept = nullptr;
     while (head != nullptr) {
         sock_t* const next = head->next_corpse;
-        // Shut down before the list lets go, so its receive thread stops reaching the engine
-        // (#2288).
+        // Shut down before the list lets go: no new receive starts (#2288).
         head->link->shut_down();
         // The list's hold is the last one to go. A corpse is out of `inner_`, so no new hold
         // is taken on it: when the count is one, this release destroys it, here. Otherwise a
         // send still holds it, and the list keeps it for a later reap or the destructor.
-        if (all || head->refs.load(std::memory_order_acquire) == 1) {
+        // The destructor (@p all) waits for that send instead, one non-blocking write: the
+        // socket is then destroyed here, while the engine lives, and a receive already running
+        // on it finishes against a live engine (#2813).
+        if (all) {
+            std::uint32_t r = head->refs.fetch_or(sock_t::kHoldWaiting, std::memory_order_acquire);
+            while ((r & ~sock_t::kHoldWaiting) != 1) {
+                park_wait(head->refs, r | sock_t::kHoldWaiting, std::memory_order_acquire);
+                r = head->refs.load(std::memory_order_acquire);
+            }
+            head->refs.store(1, std::memory_order_relaxed);
+        }
+        if (head->refs.load(std::memory_order_acquire) == 1) {
             sock_ref_t{head}.reset();
         } else {
             head->next_corpse = kept;
