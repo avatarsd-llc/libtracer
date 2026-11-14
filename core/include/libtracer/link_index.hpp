@@ -55,8 +55,8 @@ class vertex_t;
  * would instead leak a live edge past a departure, so every path that can create one
  * indexes, and no path except whole-link eviction removes.
  *
- * Insertion happens at the `note_subscriber_added` bump, NOT after the slot lands:
- * that bump is precisely the predicate (`own_subs() > 0`) the replaced whole-tree walk
+ * Insertion happens ahead of the `graph_t::note_subscribers` raise, NOT after the slot lands:
+ * that raise is precisely the predicate (`own_subs() > 0`) the replaced whole-tree walk
  * keyed on, so the index becomes visible to a concurrent eviction no later than the walk
  * would have seen the vertex. The subscribe-racing-its-own-link's-teardown window is
  * therefore exactly the pre-existing one `graph_t::evict_link_edges` documents, neither

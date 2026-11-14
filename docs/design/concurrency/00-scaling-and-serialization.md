@@ -56,7 +56,7 @@ discounted. `evict_link_edges` is the one function that takes it twice.
 | shared | `graph.cpp:graph_t::vertex_slot`, `graph.cpp:graph_t::vertex_slot_at`, `graph.cpp:graph_t::deref_vertex_slot`, `graph.cpp:graph_t::vertex_slot_count` | per op, bound-path addressed only — see below |
 | shared | `graph_fields.cpp:field_surface_t::write_acl` — the `:acl` write only, not every `:field` write | per `:acl` write |
 | shared | `graph.cpp:graph_t::read_children`, `graph.cpp:graph_t::read_children_folded`, `graph.cpp:graph_t::read_subtree_folded` | per composed read — these walk, so they need it |
-| shared | `graph.cpp:graph_t::note_subscriber_added` / `graph.cpp:graph_t::note_subscriber_removed`, `graph.cpp:graph_t::evict_link_edges`, `graph.cpp:graph_t::parked_seam_count` | control plane |
+| shared | `graph.cpp:graph_t::admit_subscriber` / `graph.cpp:graph_t::clear_subscriber_slot` (across the count and the slot change), `graph.cpp:graph_t::set_suspended`, `graph.cpp:graph_t::evict_link_edges`, `graph.cpp:graph_t::parked_seam_count` | control plane |
 
 `graph.cpp:graph_t::retire_subtree` takes nothing of its own: it is called from inside `retire`'s unique
 hold and recurses under it. A doc comment states the same contract for the
