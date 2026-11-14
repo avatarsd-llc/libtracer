@@ -357,9 +357,9 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
     if (conn_park_t* const p = std::exchange(park_, nullptr)) {
         p->config = std::move(destroy_config_);
         p->link = std::move(destroy_);
-        // JOINS the receive thread — not under either lock. Called on that thread itself (the
-        // link removed from its own callback) it only stops it: the graph's collect() frees
-        // the link from another thread, and its destructor joins there.
+        // Shut down, not under either lock: it waits for no thread, on any thread (#2813). The
+        // graph's collect() frees the link off every callback thread, and its destructor joins
+        // there.
         if (p->link) p->link->shut_down();
         // Its entry was reserved at creation, so this park cannot be refused. A refused retire
         // (counted and returned in `out`) keeps the block for the graph's lifetime instead.
@@ -371,7 +371,7 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
         else
             owner_.graph_.unreserve_park();
     }
-    destroy_.reset();  // a transaction with no park: JOINS the receive thread — same reason
+    destroy_.reset();  // a transaction with no park: the destructor joins — not under a lock
     // The config the socket (or its engine's settings) viewed goes only after the socket.
     destroy_config_ = mem::bytes_t(mem::null_source());
     if (publish_) {

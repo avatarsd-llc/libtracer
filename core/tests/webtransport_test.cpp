@@ -52,6 +52,7 @@
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_webtransport.hpp"
 #include "libtracer/wait.hpp"
+#include "link_teardown_table.hpp"
 #include "raw_wt_client.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
@@ -1646,50 +1647,34 @@ void test_start_receiving_is_inert_where_it_must_be() {
 
 }  // namespace
 
-/**
- * @brief A session shut down from its own callback: a `shut_down` made on a thread that runs
- *        link callbacks only shuts down and waits for nothing; it delivers nothing after; the
- *        destructor, on an application thread, closes every handle.
- */
-void test_shut_down_from_its_own_callback() {
-    std::printf("WebTransport — shut down from its own receive callback:\n");
-    std::atomic<int> delivered{0};
-    std::atomic<bool> on_callback{false};
-    std::atomic<bool> shut_returned{false};
-    webtransport_transport_t* listener_p = nullptr;
-    auto listener_rx = [&](std::span<const std::byte>) {
-        if (delivered.fetch_add(1) != 0) return;
-        on_callback.store(tr::net::on_callback_thread());
-        listener_p->shut_down();  // the removal, delivered on the link's own callback
-        shut_returned.store(true);
-    };
-    {
-        webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
-        listener_p = &listener;
-        listener.set_receiver(listener_rx);
-        webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
-        check(wait_session(dialer), "the dialed session comes up");
+/** @brief The teardown table's WebTransport rig (#2813): the listener under test, a dialled
+ *         session sending it frames; msquic's threads run its callbacks. */
+struct wt_rig_t {
+    static constexpr const char* name = "webtransport";
+    wt_rig_t() {
+        link_.emplace(std::uint16_t{0}, g_cert, g_key);
+        peer_.emplace("127.0.0.1", link_->local_port(), "/", dev_tls());
+        up_ = wait_session(*peer_);
         const auto deadline = std::chrono::steady_clock::now() + 3s;
-        while (!listener.session_up() && std::chrono::steady_clock::now() < deadline)
+        while (up_ && !link_->session_up() && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(5ms);
-        check(listener.session_up(), "server reports the session up");
-        dialer.send(test_frame(5, 0x10));
-        bool returned = false;
-        for (int i = 0; i < 2500 && !returned; ++i) {
-            returned = shut_returned.load();
-            if (!returned) std::this_thread::sleep_for(2ms);
-        }
-        check(returned, "the shut_down made on its own callback returned");
-        if (!returned) {
-            std::printf("webtransport: FAIL (stuck; exiting)\n");
-            std::fflush(stdout);
-            std::_Exit(1);
-        }
-        check(on_callback.load(), "msquic's callback runs as a callback thread");
-        dialer.send(test_frame(7, 0x20));
-        std::this_thread::sleep_for(200ms);
-        check(delivered.load() == 1, "the shut session delivers nothing after");
-    }  // destroyed here, on this thread: the destructor's teardown closes every handle
+        up_ = up_ && link_->session_up();
+    }
+    bool ok() { return up_; }
+    tr::net::transport_t& link() { return *link_; }
+    void poke() { peer_->send(test_frame(5, 0x10)); }
+    void destroy_link() { link_.reset(); }
+    /** @brief The dialer saw the connection shut down. */
+    bool peer_saw_close() { return !peer_->link_up(); }
+    std::optional<webtransport_transport_t> link_;
+    std::optional<webtransport_transport_t> peer_;
+    bool up_ = false;
+};
+
+/** @brief #2751, #2813: WebTransport against the one teardown table. */
+void test_teardown_table() {
+    tr::testing::teardown::run_table<wt_rig_t>(
+        [](bool ok, std::string_view what) { check(ok, what); });
 }
 
 int main() {
@@ -1742,6 +1727,6 @@ int main() {
     test_peer_stream_cycling_is_bounded();
     test_push_on_session_waits_for_start_receiving();
     test_start_receiving_is_inert_where_it_must_be();
-    test_shut_down_from_its_own_callback();
+    test_teardown_table();
     return tr::testing::summary("webtransport");
 }

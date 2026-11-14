@@ -761,8 +761,8 @@ void ws_client_transport_t::on_conn(void* ctx, wait_source_t& self, std::uint8_t
     // polls the link reads the state it was just told about.
     link.connected_.store(false, std::memory_order_relaxed);
     // Departure seam (RFC-0009 §D extended): the one connection died under us, so report the
-    // link down (after teardown, no locks held). A local shut_down detaches first and never
-    // gets here.
+    // link down (after teardown, no locks held). A local shut_down takes the link off the wait
+    // first, so only a callback already in flight can still get here after it.
     link.notify_down();
 }
 

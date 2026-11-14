@@ -676,7 +676,7 @@ class transport_vertex_t {
      * `fwd_router_t::remove_child` first (the name stops resolving, so no NEW forward
      * reaches the link), then `graph.retire()` on the identity vertex (RFC-0009 §B.6 —
      * the path re-virginizes), then the owned transport is shut down
-     * (@ref transport_t::shut_down, joining its recv thread) and parked: it is destroyed by
+     * (@ref transport_t::shut_down, which waits for nothing) and parked: it is destroyed by
      * the first `graph_t::collect()` that no router frame open at the removal is still
      * inside, so a frame (a forward, an origination, a wire listing) that reached it just
      * before the removal always finds a valid object. If the retire or the park is refused, the
@@ -686,8 +686,9 @@ class transport_vertex_t {
      *
      * A node whose connections are removed must therefore call `graph_t::collect()` from time
      * to time (any thread outside a link callback; a frame still inside the link keeps it), or
-     * every removed link is kept until the graph is destroyed. Links removed from a callback
-     * are joined and freed at the next collect() or at graph destruction.
+     * every removed link is kept until the graph is destroyed. A removed link's threads, their
+     * stacks and its descriptors live until that collect(), which joins, closes and frees them
+     * (#2813), whichever thread made the removal.
      *
      * An application liveness subscriber must not create or remove any connection from inside
      * the liveness callback.
@@ -849,8 +850,9 @@ class transport_vertex_t {
      * concurrent teardown is retiring. `ops_m_` is safe to hold there precisely because the
      * doors a fan-out reaches never take it. A link's own callbacks can take it, though: an
      * operation that arrived on a link runs on that link's receive path. So a teardown drops
-     * `ops_m_` too before it waits on the link it removes (its shut down and join), once the
-     * mutation itself is done; nothing it changes is left for a concurrent operation to see.
+     * `ops_m_` too before it shuts down the link it removes (a self-heal link's shut-down may
+     * still join its worker, until #2815), once the mutation itself is done; nothing it changes
+     * is left for a concurrent operation to see.
      *
      * A `LOOKUP` that collects nothing is a plain scoped lock — which is the point: every
      * acquisition of either mutex in this class goes through this type, so the re-entrancy

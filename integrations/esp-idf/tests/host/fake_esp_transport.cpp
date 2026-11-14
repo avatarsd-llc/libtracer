@@ -61,6 +61,7 @@ struct state_t {
         bool upgraded = false;       /**< @brief Its handshake request has been answered. */
         std::vector<std::byte> resp; /**< @brief The `101` queued for it. */
         std::size_t resp_off = 0;    /**< @brief Bytes of `resp` already served. */
+        bool shut = false; /**< @brief Shut down (`__wrap_shutdown`): reads see its end. */
     };
     /**
      * @brief Every handle created and not yet destroyed, with its connection's state.
@@ -76,6 +77,7 @@ struct state_t {
     std::uintptr_t next_handle = 0x7c000001;
     int misuse = 0;            /**< @brief Ops on a null/destroyed handle — see handle_misuse. */
     int closes = 0;            /**< @brief Closes that reached a live handle. */
+    int shutdowns = 0;         /**< @brief `shutdown` calls that reached a live handle. */
     bool fail_connect = false; /**< @brief Every dial fails at once. */
     bool hang_connect = false; /**< @brief Every dial blocks for its timeout, then fails. */
     std::condition_variable connect_cv; /**< @brief Wakes dials parked by `hang_connect`. */
@@ -137,7 +139,8 @@ bool pending(esp_transport_handle_t t) {
     const auto it = st().live.find(t);
     if (it == st().live.end()) return false;
     const state_t::conn_t& c = it->second;
-    return c.resp_off < c.resp.size() || (c.upgraded && st().stream == t && frames_pending(st()));
+    return c.shut || c.resp_off < c.resp.size() ||
+           (c.upgraded && st().stream == t && frames_pending(st()));
 }
 
 /** @brief Append @p f to @p out as a server frame: unmasked, with a 2/4/10-byte header. */
@@ -237,6 +240,7 @@ void reset() {
     st().live.clear();
     st().misuse = 0;
     st().closes = 0;
+    st().shutdowns = 0;
     st().fail_connect = false;
     st().hang_connect = false;
     st().connect_released = false;
@@ -373,6 +377,11 @@ bool wait_drained(std::chrono::milliseconds limit) {
 int close_count() {
     const std::lock_guard<std::mutex> lk(st().m);
     return st().closes;
+}
+
+int shutdown_count() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().shutdowns;
 }
 
 int last_connect_timeout_ms() {
@@ -591,8 +600,10 @@ int esp_transport_read(esp_transport_handle_t t, char* buffer, int len, int time
         if (!handle_usable(t)) return -1;
     }
     // `tcp_read`: whatever is queued, up to the room offered, across frame boundaries — the
-    // connection's `101` first, then (once it is the stream) the scripted frames.
+    // connection's `101` first, then (once it is the stream) the scripted frames. A connection
+    // shut down has ended: the read reports the end of the stream.
     state_t::conn_t& c = st().live[t];
+    if (c.shut) return -1;
     const std::size_t room = len > 0 ? static_cast<std::size_t>(len) : std::size_t{0};
     std::size_t got = 0;
     const std::size_t from_resp = std::min(room, c.resp.size() - c.resp_off);
@@ -692,6 +703,30 @@ extern "C" ssize_t __wrap_send(int fd, const void* buf, std::size_t len, int fla
         tx.erase(tx.begin(), tx.begin() + static_cast<std::ptrdiff_t>(h.size + h.len));
     }
     return static_cast<ssize_t>(take);
+}
+
+/**
+ * @brief The link's shutdown of its connection (#2813), interposed (`-Wl,--wrap=shutdown` on
+ *        every client target), on the connection whose socket the link resolved last.
+ *
+ * What the peer sees is the close: it is counted (@ref fake_ws::shutdown_count), and a poll
+ * of that connection wakes and its read reports the end of the stream, as lwIP's does. The
+ * handle stays live: only `esp_transport_close` and `esp_transport_destroy` end it. Nothing
+ * reaches the kernel, whatever the number.
+ */
+extern "C" int __wrap_shutdown(int fd, int how) {
+    (void)fd;
+    (void)how;
+    const std::lock_guard<std::mutex> lk(st().m);
+    const esp_transport_handle_t t = st().sock;
+    if (!handle_usable(t)) {
+        errno = EBADF;
+        return -1;
+    }
+    st().live[t].shut = true;
+    ++st().shutdowns;
+    st().cv.notify_all();
+    return 0;
 }
 
 /** @} */

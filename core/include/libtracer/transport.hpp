@@ -952,21 +952,23 @@ class transport_t {
      * @brief Stop for good, short of being destroyed: the counterpart of
      *        @ref start_receiving.
      *
-     * When this returns, no inbound frame is delivered any more and the link's own threads
-     * have been joined, unless it was called on a thread that runs link callbacks
-     * (`%tr::net::on_callback_thread`): there it waits for nothing and closes nothing, the
-     * link's threads end as soon as their callbacks return, and the destructor joins them and
-     * closes the link's descriptors, which stay owned and open until then. Destructors always
-     * join, and run outside every callback, as the graph's `collect()` does. The object itself
-     * stays valid, and every call on it stays safe, until it is destroyed. What a later send does
-     * is the link's: the stream links (TCP, WebSocket) have closed their connections and shed it;
-     * UDP on a POSIX host has released its socket and the send fails; UDP over lwIP, and CAN, keep
-     * their socket or bus until destruction, so a send there still leaves (see each override). That
-     * is the point: an owner that removes a link while a forward that looked it up may still be on
-     * its way into it shuts it down at removal and destroys it later, where no such call can
-     * remain.
-     * `%transport_vertex_t` does that, destroying an owned link at the graph's next
-     * `collect()`.
+     * It waits for nothing, on every thread (#2813): it stops delivery, shuts the link's
+     * descriptors down (shutdown, never close) and stops the link's driver, then returns. It
+     * joins no thread and waits out no callback, so an owner may call it under a lock that a
+     * callback takes; at most it waits out a sender's one nonblocking write. (A self-heal link
+     * still joins its worker off a callback thread, until #2815 removes that worker.) No new
+     * inbound frame starts delivery once it returns; a callback already in flight may still finish,
+     * and does not put the link back on its wait. A connection's peer sees the close then, not at
+     * the destructor.
+     * The destructor is the one join and the one close: it waits out that callback, joins the
+     * link's threads, closes its descriptors and frees, and it runs off every callback thread.
+     * Until then the object stays valid and every call on it stays safe, and a send never waits on
+     * it: it is shed or counted as a drop, except on a link that keeps its socket or bus until
+     * destruction, where it may still leave (see each override). That is the point: an owner that
+     * removes a link while a forward that looked it up may still be on its way into it shuts it
+     * down at removal and destroys it later, where no such call can remain. `%transport_vertex_t`
+     * does that, destroying an owned link at the graph's next `collect()`; a link that owns a
+     * thread holds its stack and its descriptors until then.
      *
      * IDEMPOTENT, and safe to follow with the destructor. The DEFAULT IS A NO-OP, which is
      * right for a link with no thread and no descriptor of its own; a link that has either

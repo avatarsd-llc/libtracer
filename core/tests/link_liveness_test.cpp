@@ -1083,9 +1083,9 @@ struct gate_rig_t {
 }  // namespace
 
 /**
- * @brief #2288 — a socket reference held past the engine's destruction (an in-flight send)
- *        releases the socket through the socket alone, and the engine has already shut it
- *        down: nothing reads the dead engine, and no receive can reach it.
+ * @brief #2288, #2813 — a socket a direct send still holds when the engine is destroyed: the
+ *        destructor shuts it down, waits for that send's one write to leave, and destroys the
+ *        socket before it returns, so no receive on it outlives the engine.
  *
  * A template so that, on a `kSelfHealLinks = false` build, the discarded body names no
  * engine symbol: that image has no engine to link against (`main` skips before the call).
@@ -1093,7 +1093,7 @@ struct gate_rig_t {
 template <bool kOn = tr::net::kSelfHealLinks>
 void test_socket_ref_outlives_engine() {
     if constexpr (kOn) {
-        std::printf("#2288: a socket held past the engine's destruction:\n");
+        std::printf("#2288: a socket a send holds when the engine is destroyed:\n");
         gate_rig_t rig;
         gate_rig_t* const r = &rig;
         tr::net::conn_settings_t settings;
@@ -1125,16 +1125,34 @@ void test_socket_ref_outlives_engine() {
         }
         gated_sock_t* const sock = rig.sock;
         tr::net::self_heal_link_t* const raw = engine.release();
-        delete raw;  // the engine goes while the send still holds its socket
+        std::atomic<bool> gone{false};
+        std::atomic<bool> alive_at_return{true};
+        std::thread deleter([&] {
+            delete raw;  // the engine goes while the send still holds its socket
+            alive_at_return.store(rig.alive.load());
+            gone.store(true);
+        });
+        bool shut = false;
+        for (int i = 0; i < 5000 && !shut; ++i) {
+            {
+                const std::lock_guard l(sock->m);
+                shut = sock->shut;
+            }
+            if (!shut) std::this_thread::sleep_for(1ms);
+        }
+        check(shut, "the engine's destructor shut the held socket down");
+        std::this_thread::sleep_for(100ms);
+        check(!gone.load(), "and has not returned while the send still holds the socket");
+        check(rig.alive.load(), "the in-flight send still holds the socket");
         {
             const std::lock_guard l(sock->m);
-            check(sock->shut, "the engine shut the held socket down before it was destroyed");
-            check(rig.alive.load(), "the in-flight send still holds the socket");
             sock->open = true;
             sock->cv.notify_all();
         }
-        sender.join();  // its hold is the last: the socket goes through its own source
-        check(!rig.alive.load(), "the last hold destroyed the socket, after the engine was gone");
+        sender.join();
+        deleter.join();
+        check(!alive_at_return.load(),
+              "the destructor destroyed the socket once the send let go, before it returned");
     }
 }
 
