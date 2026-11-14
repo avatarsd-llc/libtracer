@@ -194,6 +194,33 @@
       "goal": 0,
       "moved_by": "#2137 (seeded from the peer-cost study)",
       "basis": "Worker task + the socket's recv task, 12288 B each. Goal: the wait module (#2136) leaves no per-connection task."
+    },
+    {
+      "id": "removed link held until collect: thread-per-link fallback",
+      "target": "MID",
+      "source": "static",
+      "value": 13100,
+      "goal": 0,
+      "moved_by": "#2813 (first pin: shut_down never waits; the destructor at collect() is the one join)",
+      "basis": "What a removed link keeps from its removal until the application's next collect(), which joins its thread and frees it (#2813: shut_down never waits): its thread's stack and its record, the bytes it held while live, held for longer and not added. Peak RAM is the same as before #2813: a node that removes and re-creates links calls collect() after each removal (graph_t::collect docs), so a held link and its replacement do not overlap. MID, the class that runs these threads; a NARROW node runs no thread-owning link (no OS, the app's loop polls the wait module, ADR-0087). Sizes: riscv32 DW_AT_byte_size from the esp32c6 full_node and transport_footprint builds (espressif/idf:release-v6.0, riscv32-esp-elf-g++ 15.2.0) at bde961e6d, plus the thread block's static_thread_t ctl_t (208 B), at full_node's CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT (12,288 B), the stack the 'client link task stack' row uses. tcp_server_transport_t 480 B (the largest socket link record; tcp_transport_t 280 B, udp_transport_t 208 B) + posix_endpoint_t::fallback_t 124 B (the private wait_module_t 116 B, its static_thread_t and source) + ctl_t 208 B + the 12,288 B stack. At the IDF default 3,072 B stack: 3,884 B. Goal: on the node's wait module a link holds no stack."
+    },
+    {
+      "id": "removed link held until collect: CAN/TWAI",
+      "target": "MID",
+      "source": "static",
+      "value": 13700,
+      "goal": 0,
+      "moved_by": "#2813 (first pin: shut_down never waits; the destructor at collect() is the one join)",
+      "basis": "What a removed link keeps from its removal until the application's next collect(), which joins its thread and frees it (#2813: shut_down never waits): its thread's stack and its record, the bytes it held while live, held for longer and not added. Peak RAM is the same as before #2813: a node that removes and re-creates links calls collect() after each removal (graph_t::collect docs), so a held link and its replacement do not overlap. MID, the class that runs these threads; a NARROW node runs no thread-owning link (no OS, the app's loop polls the wait module, ADR-0087). Sizes: riscv32 DW_AT_byte_size from the esp32c6 full_node and transport_footprint builds (espressif/idf:release-v6.0, riscv32-esp-elf-g++ 15.2.0) at bde961e6d, plus the thread block's static_thread_t ctl_t (208 B), at full_node's CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT (12,288 B), the stack the 'client link task stack' row uses. can_transport_t 776 B + twai_link_t 428 B + ctl_t 208 B + the 12,288 B dispatch stack (twai_link_config_t::stack_size 0). Unchanged by #2813: CAN already joined at destruction (#2786). At the IDF default 3,072 B stack: 4,484 B."
+    },
+    {
+      "id": "removed link held until collect: ESP WS client",
+      "target": "MID",
+      "source": "static",
+      "value": 13104,
+      "goal": 0,
+      "moved_by": "#2813 (first pin: shut_down never waits; the destructor at collect() is the one join)",
+      "basis": "What a removed link keeps from its removal until the application's next collect(), which joins its thread and frees it (#2813: shut_down never waits): its thread's stack and its record, the bytes it held while live, held for longer and not added. Peak RAM is the same as before #2813: a node that removes and re-creates links calls collect() after each removal (graph_t::collect docs), so a held link and its replacement do not overlap. MID, the class that runs these threads; a NARROW node runs no thread-owning link (no OS, the app's loop polls the wait module, ADR-0087). Sizes: riscv32 DW_AT_byte_size from the esp32c6 full_node and transport_footprint builds (espressif/idf:release-v6.0, riscv32-esp-elf-g++ 15.2.0) at bde961e6d, plus the thread block's static_thread_t ctl_t (208 B), at full_node's CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT (12,288 B), the stack the 'client link task stack' row uses. esp_ws_client_link_t 440 B + its dial_t slot 168 B + ctl_t 208 B + the 12,288 B receive stack (recv_stack 0). At the IDF default 3,072 B stack: 3,888 B. Not the connection: shut_down shuts it down and the receive task releases it before collect()."
     }
   ],
   "toolchain": "c++ 13.3.0",
