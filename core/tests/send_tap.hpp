@@ -51,7 +51,12 @@ class send_tap_t final : public net::transport_t {
                 static_cast<send_tap_t*>(c)->rx_.deliver_borrowed(f);
             },
             this);
-        inner_.set_down_notifier([](void* c) { static_cast<send_tap_t*>(c)->notify_down(); }, this);
+        inner_.set_link_state_notifier(
+            [](void* c, bool up) {
+                auto* const self = static_cast<send_tap_t*>(c);
+                up ? self->notify_up() : self->notify_down();
+            },
+            this);
     }
 
     send_tap_t(const send_tap_t&) = delete;

@@ -1013,8 +1013,8 @@ void test_flat_server_down_only_on_last_session() {
     check(server.ok(), "flat server bound");
     check(server.bus() == nullptr, "flat server exposes no bus facet (peer_named=false)");
     server.set_receiver(srv_rx);
-    server.set_down_notifier([](void* c) { static_cast<std::atomic<int>*>(c)->fetch_add(1); },
-                             &downs);
+    server.set_link_state_notifier(
+        [](void* c, bool /*up*/) { static_cast<std::atomic<int>*>(c)->fetch_add(1); }, &downs);
     const std::uint16_t port = server.local_port();
 
     frame_sink_t at_a;
@@ -1117,7 +1117,7 @@ struct inbound_probe_t {
         cv.notify_all();
     }
     /** @brief The `{fn, ctx}` link-down notifier: record the answer outside a delivery. */
-    static void on_down(void* ctx) {
+    static void on_down(void* ctx, bool /*up*/) {
         auto* self = static_cast<inbound_probe_t*>(ctx);
         {
             const std::lock_guard lock(self->m);
@@ -1147,7 +1147,7 @@ void test_flat_server_inbound_peer_only_inside_a_delivery() {
     check(server.ok(), "flat server bound");
     probe.link = &server;
     server.set_receiver(probe);
-    server.set_down_notifier(&inbound_probe_t::on_down, &probe);
+    server.set_link_state_notifier(&inbound_probe_t::on_down, &probe);
 
     {
         raw_client_t client(server.local_port());
@@ -1634,8 +1634,8 @@ void test_a_session_torn_down_twice_departs_once() {
         tr::net::tcp_server_transport_t server(0);
         check(server.ok(), "flat server bound");
         server.set_receiver(srv_rx);
-        server.set_down_notifier([](void* c) { static_cast<std::atomic<int>*>(c)->fetch_add(1); },
-                                 &downs);
+        server.set_link_state_notifier(
+            [](void* c, bool /*up*/) { static_cast<std::atomic<int>*>(c)->fetch_add(1); }, &downs);
         std::optional<tcp_transport_t> a;
         a.emplace("127.0.0.1", server.local_port());
         a->start_receiving();
@@ -1698,8 +1698,8 @@ void test_listener_opens_its_peer_at_accept() {
         tcp_transport_t listener(std::uint16_t{0});
         check(listener.ok(), "listener bound (ephemeral port)");
         listener.set_receiver(rx);
-        listener.set_down_notifier([](void* c) { static_cast<std::atomic<int>*>(c)->fetch_add(1); },
-                                   &downs);
+        listener.set_link_state_notifier(
+            [](void* c, bool /*up*/) { static_cast<std::atomic<int>*>(c)->fetch_add(1); }, &downs);
         check(opens.load() == 0 && closes.load() == 0,
               "constructed, the peer is closed: nothing opened it");
         {

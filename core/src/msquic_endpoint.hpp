@@ -398,7 +398,7 @@ class msquic_endpoint_t {
      * one-peer replacement harvest after the first fire. Called from a
      * connection (or listener) callback with no conn_m held: the notifier
      * re-enters the routing plane, which takes graph locks (the transport.hpp
-     * set_down_notifier contract).
+     * set_link_state_notifier contract).
      */
     void fire_link_down() {
         if (stopping.load(std::memory_order_relaxed)) return;  // our own teardown

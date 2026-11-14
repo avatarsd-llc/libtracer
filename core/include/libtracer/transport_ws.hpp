@@ -524,7 +524,7 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
     /** @brief Liveness (the @ref transport_t::link_up contract): true from the completed
      *         handshake until the recv loop's teardown — a peer CLOSE, a remote hangup, a
      *         fatal receive error or an RFC 6455 breach all clear it (relaxed atomic; the
-     *         push twin is @ref set_down_notifier). A client that is never
+     *         push twin is @ref set_link_state_notifier). A client that is never
      *         started never observes the wire and so never reports down (see
      *         @ref start_receiving). */
     [[nodiscard]] bool link_up() const noexcept override {

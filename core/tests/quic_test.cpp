@@ -1026,9 +1026,11 @@ void test_dial_does_not_wait() {
     // with the dial started, not up, and not yet ended — the old constructor could only
     // return once the handshake had failed.
     std::atomic<int> downs{0};
-    const auto count = [](void* c) { static_cast<std::atomic<int>*>(c)->fetch_add(1); };
+    const auto count = [](void* c, bool /*up*/) {
+        static_cast<std::atomic<int>*>(c)->fetch_add(1);
+    };
     quic_transport_t dialer("127.0.0.1", ntohs(at.sin_port), dev_tls());
-    const bool missed = dialer.set_down_notifier(count, &downs);
+    const bool missed = dialer.set_link_state_notifier(count, &downs);
     check(dialer.ok() && !dialer.link_up() && !dialer.dial_ended() && !missed && downs.load() == 0,
           "the constructor returned with the dial started, not up and not ended");
 
@@ -1053,7 +1055,7 @@ void test_dial_does_not_wait() {
                              quic_dial_tls_t{.ca_file = g_other_cert});
     check(refused.ok() && await_ended(refused) && !refused.link_up(),
           "a wrong-CA dial is started, then ends on its refused handshake");
-    check(refused.set_down_notifier(count, &late) && late.load() == 0,
+    check(refused.set_link_state_notifier(count, &late) && late.load() == 0,
           "the fire that found no notifier is reported to the late install");
 }
 

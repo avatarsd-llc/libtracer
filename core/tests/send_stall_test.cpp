@@ -378,12 +378,12 @@ void test_tcp_link_sheds_and_drops_a_stalled_peer() {
     check(link.ok(), "the dial succeeded");
     // The link-down event, not a clock, says when the verdict reached the connection.
     std::atomic<bool> down{false};
-    const auto on_down = [](void* ctx) {
+    const auto on_down = [](void* ctx, bool /*up*/) {
         auto* d = static_cast<std::atomic<bool>*>(ctx);
         d->store(true);
         d->notify_all();
     };
-    if (link.set_down_notifier(on_down, &down)) on_down(&down);
+    if (link.set_link_state_notifier(on_down, &down)) on_down(&down, false);
     link.start_receiving();
 
     const int peer = ::accept(listener, nullptr, nullptr);

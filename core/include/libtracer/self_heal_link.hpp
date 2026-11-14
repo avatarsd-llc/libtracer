@@ -269,7 +269,7 @@ class self_heal_link_t final : public transport_t {
 
    private:
     /** @brief One constructed socket plus the identity its down-notifier reports with:
-     *         the ctx handed to `transport_t::set_down_notifier` must outlive every
+     *         the ctx handed to `transport_t::set_link_state_notifier` must outlive every
      *         notification, so it lives WITH the socket it names.
      *
      *  Shared by count, not by `std::shared_ptr` (#1780): the record is one block from the
