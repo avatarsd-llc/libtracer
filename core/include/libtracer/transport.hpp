@@ -1159,7 +1159,7 @@ class transport_t {
             if (state_fn_.compare_exchange_weak(fn, &missed_down, std::memory_order_acq_rel,
                                                 std::memory_order_acquire))
                 return;  // kept: the next set_link_state_notifier reports it
-        if (fn != &missed_down) fn(state_ctx_.load(std::memory_order_relaxed), false);
+        fn(state_ctx_.load(std::memory_order_relaxed), false);
     }
 
     /** @brief Fire the link-state notifier with `up = true`, when the link's one connection
@@ -1184,7 +1184,7 @@ class transport_t {
      *         transport fires. */
     friend class fwd_router_t;
     /** @brief The mark @ref notify_down leaves in `state_fn_` for a down that found no
-     *         notifier; never called. */
+     *         notifier. A no-op, so a later down fire calls it like any notifier. */
     static void missed_down(void* /*ctx*/, bool /*up*/) noexcept {}
     /** @brief Installed link-state sink, or `missed_down`. Atomic: a transport's callback
      *         thread may fire it (notify_down) while add_child is still installing it. */
