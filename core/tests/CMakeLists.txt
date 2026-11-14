@@ -1520,6 +1520,14 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(session_admission_test)
     add_test(NAME session_admission COMMAND session_admission_test)
 
+    # #2814: an edge's admission charges (listener count, link hold, session charge, index
+    # entry) are one record — a refusal at any step leaves nothing charged, and a replace is
+    # net zero on every charge. Skips in a build that binds kSessionAdmission = false.
+    add_executable(admission_record_test admission_record_test.cpp)
+    target_link_libraries(admission_record_test PRIVATE libtracer)
+    libtracer_test_warnings(admission_record_test)
+    add_test(NAME admission_record COMMAND admission_record_test)
+
     # #1878: the app-field on-demand read seam — a declared field's read answers the owner's
     # live value, locally and over a link, and a refused client write never reads back.
     add_executable(app_field_read_hook_test app_field_read_hook_test.cpp)

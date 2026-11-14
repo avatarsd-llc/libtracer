@@ -512,9 +512,10 @@ using link_hold_fn_t = void (*)(void* ctx, link_pair_t link, bool held);
  *
  * A remote edge stores its link as a pair (`%subscriber_remote_t::link`), not as the name
  * it used to store, so the one consumer that still keys by name and holds only the edge asks
- * here: the session seam's per-edge `RELEASE` (#1841). Asked on unsubscribe, replace and
- * retirement only, never on the delivery path. A bus peer's name may be formatted into
- * @p scratch (at least `%tr::net::kPeerNameChars`); the answer is borrowed for the call.
+ * here: the session seam's per-edge `RELEASE` (#1841). Asked on unsubscribe, replace,
+ * retirement and a refused admission only, never on the delivery path. A bus peer's name may
+ * be formatted into @p scratch (at least `%tr::net::kPeerNameChars`); the answer is borrowed
+ * for the call.
  * Empty ⇒ the pair names no link the plane still knows, and the event is not offered.
  *
  * @note Asked only in a build with `config_t::kSessionAdmission`, beside the seam it serves;
@@ -3455,12 +3456,13 @@ class graph_t {
     // whose newer value this writer never delivered — survives instead of being dropped
     // (#1185, the #854-survivor locked-erase drop).
     void clear_pending(vertex_t* v, const value_t* delivered);
-    // Subscribe/unsubscribe bookkeeping (RFC-0005): bump v's own active-slot count
-    // and every descendant's listeners_above_, under the map lock (shared — the
-    // counters are atomics; the lock only excludes concurrent vertex creation so
-    // a newborn's creation-time sum and this walk never double-count).
+    // Subscribe bookkeeping (RFC-0005): bump v's own active-slot count and every
+    // descendant's listeners_above_, under the map lock (shared — the counters are atomics;
+    // the lock only excludes concurrent vertex creation so a newborn's creation-time sum and
+    // this walk never double-count). `note_subscriber_removed` is its mirror, the count step of
+    // @ref release_admission: out of line, so a release with nothing to count builds no frame.
     void note_subscriber_added(vertex_t* v);
-    void note_subscriber_removed(vertex_t* v);
+    [[gnu::noinline]] void note_subscriber_removed(vertex_t* v);
     // Clear subscriber slot `slot` of `v` and, iff it was active, unwind the bookkeeping above
     // and report the removal to the subscription observer under `caller` (a no-op for the
     // empty, local caller): the one clear `unsubscribe` and the wire `:subscribers[N]` clear
@@ -3482,7 +3484,10 @@ class graph_t {
     // stored pair stands for — the key the departure index files it under and the session
     // seam is offered (#1941): the edge itself keeps only the pair. A field write no link
     // carried passes the edge's caller context, which is what its departure finds it by
-    // (#943); a local door, which admits no remote half, passes nothing.
+    // (#943). An edge with no remote half has no session, so its door passes nothing: an
+    // empty `session` is never offered to the session seam and never indexed. The step takes
+    // the edge's charges as one admission record and gives every one back on a refusal
+    // (#2814, @ref release_admission).
     [[nodiscard]] result_t<subscription_t> admit_subscriber(
         vertex_t* v, subscriber_t s, std::string_view caller,
         std::optional<std::size_t> slot = std::nullopt, link_id_t link_token = {},
@@ -3504,43 +3509,42 @@ class graph_t {
     // loop (`vertex_t::copy_published` +277 B on the symbol ratchet).
     [[gnu::noinline, gnu::cold]] void hold_link(link_pair_t link, bool held,
                                                 std::size_t n = 1) const;
-    // Admit a remote edge's SESSION, then index its producer under that session (#1841, #1071)
-    // — the one step that keys an edge to the departure that will reclaim it. The session is
-    // offered to the session-admission seam FIRST, so a refused subscribe leaves no index
-    // entry behind (a refusal a peer can repeat must not grow the index), and an index refusal
-    // after an admitting hook is RELEASEd back to it. A local edge (no cold half) has no
-    // session and is not indexed: true. False ⇒ refused, nothing admitted, nothing owed.
-    // `session` is the session's NAME, as `admit_subscriber` was handed it (non-empty here).
-    [[nodiscard]] bool admit_session(const remote_ptr_t& remote, vertex_t* v,
-                                     std::string_view caller, link_id_t link_token,
-                                     std::string_view session);
-    // The ONE give-back for @p n admitted edges that ended — refused by the slot verb, cleared,
-    // displaced by a replace, reclaimed by a route refusal or by their producer's retirement: the
-    // link hold each took over @p link (#1816) and the session charge each made to @p session
-    // (#1841), one event per edge. A session departure is not one of these: `END` resets the
-    // session instead. A @p link that is not valid, or an empty @p session, gives back nothing
-    // on that side. Called with NO graph lock held.
+    // The link hold and the session charge of @p n admitted edges that ended over @p link and
+    // were charged to @p session: the hold each took (#1816) and the charge each made (#1841),
+    // one event per edge. What a route refusal gives back for the edges it reclaimed in bulk,
+    // and what @ref release_admission gives back for one edge after its count. A session
+    // departure is not one of these: `END` resets the session instead. A @p link that is not
+    // valid, or an empty @p session, gives back nothing on that side. Called with NO graph lock
+    // held.
     void release_edges(link_pair_t link, std::string_view session, const vertex_t* v,
                        std::size_t n = 1) const;
-    // @ref release_edges for ONE ended edge known only by its cold half: the session's NAME
-    // is asked of the link object (`graph_hooks_t::link_name`, #1941), and only in a build
-    // that has the session seam to tell. Out of line and cold for `hold_link`'s reason.
-    [[gnu::noinline, gnu::cold]] void release_edge(const remote_ptr_t& remote,
-                                                   const vertex_t* v) const;
+    // The ONE release of an edge's ADMISSION RECORD (#2814) — every charge `admit_subscriber`
+    // took for it, given back whole when the edge ends one at a time: refused by the admission
+    // step itself, displaced by a replace, cleared, or dropped by its producer's retirement.
+    // The listener count goes back iff @p counted (a delivering edge; a suspended one and a
+    // retired one were unwound elsewhere), then the hold and the session charge. The record
+    // stores nothing: the session's NAME is asked of the link object (`graph_hooks_t::link_name`,
+    // #1941) for the pair the cold half @p remote stores, and only in a build that has the
+    // session seam to tell. @p v may be null only when @p counted is false. Called with NO graph
+    // lock held. Out of line for `hold_link`'s reason, but not cold: every unsubscribe runs it,
+    // and a cold callee moves its caller's path into a `.cold` clone.
+    [[gnu::noinline]] void release_admission(const remote_ptr_t& remote, vertex_t* v, bool counted);
     // Offer one event to the session-admission seam (#1841); true = admitted, which is also the
     // answer with nothing installed, for an empty session, and for every RELEASE / END. In a
     // build without `config_t::kSessionAdmission` this folds to `true` at compile time, so the
-    // subscribe and departure paths carry no load and no branch for the seam.
+    // subscribe and departure paths carry no load and no branch for the seam. A local edge has
+    // no session and is never offered: the empty session is answered here, inline, so a local
+    // subscribe or clear makes no call for it (#2814).
     [[nodiscard]] bool session_event(session_event_t::kind_t kind, std::string_view session,
                                      const vertex_t* v, std::string_view caller) const {
         if constexpr (config_t::kSessionAdmission)
-            return dispatch_session_event(kind, session, v, caller);
+            return session.empty() || dispatch_session_event(kind, session, v, caller);
         else
             return true;
     }
-    // The installed-build leg of `session_event`: one coherent slot read, and the producer's
-    // key rendered on a stack frame only when a hook is there to see it. Cold and out of line
-    // for `hold_link`'s reason.
+    // The installed-build leg of `session_event` for a non-empty session: one coherent slot
+    // read, and the producer's key rendered on a stack frame only when a hook is there to see
+    // it. Cold and out of line for `hold_link`'s reason.
     [[gnu::noinline, gnu::cold]] bool dispatch_session_event(session_event_t::kind_t kind,
                                                              std::string_view session,
                                                              const vertex_t* v,
