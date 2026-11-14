@@ -1698,8 +1698,8 @@ void test_listener_opens_its_peer_at_accept() {
         tcp_transport_t listener(std::uint16_t{0});
         check(listener.ok(), "listener bound (ephemeral port)");
         listener.set_receiver(rx);
-        listener.set_down_notifier([](void* c) { static_cast<std::atomic<int>*>(c)->fetch_add(1); },
-                                   &downs);
+        listener.set_link_state_notifier(
+            [](void* c, bool /*up*/) { static_cast<std::atomic<int>*>(c)->fetch_add(1); }, &downs);
         check(opens.load() == 0 && closes.load() == 0,
               "constructed, the peer is closed: nothing opened it");
         {
