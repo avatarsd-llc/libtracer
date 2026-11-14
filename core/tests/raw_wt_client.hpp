@@ -125,17 +125,22 @@ struct raw_wt_client_t {
     HQUIC conn = nullptr;                /**< @brief The connection handle. */
     bool ok = false;                     /**< @brief QUIC up and the H3 face sent. */
 
-    std::mutex m;                  /**< @brief Guards the rendezvous + the handle lists. */
+    std::mutex m;                  /**< @brief Guards the rendezvous. */
     std::condition_variable cv;    /**< @brief The handshake rendezvous. */
     bool handshake_done = false;   /**< @brief Handshake stage resolved. */
     bool handshake_ok = false;     /**< @brief Handshake stage outcome. */
     std::atomic<bool> shut{false}; /**< @brief The server tore the CONNECTION down. */
     std::vector<std::unique_ptr<wt_stream_t>> streams; /**< @brief Our streams. */
-    std::vector<HQUIC> peer_streams; /**< @brief The server's H3 streams (accepted, drained). */
 
     /** @brief The server's own control/QPACK streams: accepted so msquic has a
-     *         handler, contents irrelevant to every vector here. */
-    static QUIC_STATUS QUIC_API peer_stream_cb(HQUIC, void*, QUIC_STREAM_EVENT*) {
+     *         handler, contents irrelevant to every vector here. Each one closes its own
+     *         handle when it has shut down, as every stream does when the connection goes,
+     *         so a stream the server opens while this client is being destroyed is closed
+     *         too, and the registration's close does not wait for it. */
+    static QUIC_STATUS QUIC_API peer_stream_cb(HQUIC h, void* api, QUIC_STREAM_EVENT* ev) {
+        if (ev->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE &&
+            !ev->SHUTDOWN_COMPLETE.AppCloseInProgress)
+            static_cast<const QUIC_API_TABLE*>(api)->StreamClose(h);
         return QUIC_STATUS_SUCCESS;
     }
 
@@ -154,9 +159,8 @@ struct raw_wt_client_t {
             }
             case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
                 self->api->SetCallbackHandler(ev->PEER_STREAM_STARTED.Stream,
-                                              reinterpret_cast<void*>(&peer_stream_cb), nullptr);
-                const std::lock_guard lock(self->m);
-                self->peer_streams.push_back(ev->PEER_STREAM_STARTED.Stream);
+                                              reinterpret_cast<void*>(&peer_stream_cb),
+                                              const_cast<QUIC_API_TABLE*>(self->api));
                 return QUIC_STATUS_SUCCESS;
             }
             case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
@@ -253,19 +257,10 @@ struct raw_wt_client_t {
 
     ~raw_wt_client_t() {
         if (api == nullptr) return;
-        // Harvest the server-opened handles UNDER the lock and close them
-        // outside it: conn_cb pushes them from an msquic worker, and StreamClose
-        // blocks until that stream's callbacks drain — closing while holding the
-        // lock a callback also takes would deadlock. (`streams` needs no lock:
-        // only this thread ever touches it.)
-        std::vector<HQUIC> peers;
-        {
-            const std::lock_guard lock(m);
-            peers.swap(peer_streams);
-        }
+        // Our own streams (only this thread touches `streams`); the server's close themselves
+        // as the connection shuts down (`peer_stream_cb`).
         for (const auto& s : streams)
             if (s->h != nullptr) api->StreamClose(s->h);
-        for (HQUIC h : peers) api->StreamClose(h);
         if (conn != nullptr) {
             api->ConnectionShutdown(conn, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
             api->ConnectionClose(conn);
