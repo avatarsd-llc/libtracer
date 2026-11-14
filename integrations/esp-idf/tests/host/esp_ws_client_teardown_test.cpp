@@ -83,6 +83,7 @@
 #include "libtracer/wait.hpp"
 #include "libtracer/ws.hpp"
 #include "libtracer_esp/esp_ws_client_link.hpp"
+#include "link_teardown_table.hpp"
 
 namespace {
 
@@ -944,9 +945,11 @@ void test_a_refused_scratch_is_a_failed_dial() {
  * @brief #1606 — shut_down() stops the link now and the destructor frees it later ("shut
  *        down now, free at collect()").
  *
- * After shut_down() the connection is closed and its pair released, the link reports down,
- * and a send is shed without reaching the transport or counting a drop; the dial slot stays
- * drawn until the destructor, which then returns everything.
+ * After shut_down() the link reports down and a send is shed without reaching the transport or
+ * counting a drop. shut_down() waits for no thread (#2813) but shuts the connection down before
+ * it returns, so the peer sees the close then, not at the destructor; the receive thread
+ * releases the connection (closes the socket, frees the transport pair) as it ends. The dial
+ * slot stays held until the destructor, the one join, which then returns everything.
  *
  * What stays drawn is sampled once the link has settled, not at link_up(): the dial publishes
  * the connection BEFORE the recv thread frames the bytes pipelined behind the 101 and returns
@@ -968,11 +971,17 @@ void test_shut_down_stops_now_and_the_destructor_frees() {
         check(wait_until([&] { return link->link_up(); }, 2s), "a link came up");
         check(wait_until([&] { return state.live == slot; }, 2s),
               "and returned its handshake block once the first bytes were framed");
+        const int closes = fake_ws::close_count();
         const auto start = std::chrono::steady_clock::now();
         link->shut_down();
         check_under_ms(ms_since(start), 1500, "shut_down() is bounded");
+        check(fake_ws::shutdown_count() == 1,
+              "the connection was shut down before shut_down() returned: the peer sees the close");
         check(!link->link_up(), "it reports down");
-        check(fake_ws::live_handles() == 0, "its transport pair is released");
+        check(wait_until([&] { return fake_ws::close_count() > closes; }, 2s),
+              "and the receive thread closed the socket, before the destructor");
+        check(wait_until([] { return fake_ws::live_handles() == 0; }, 2s),
+              "and freed its transport pair, before the destructor");
         const int writes = fake_ws::writes_started();
         link->send(payload());
         check(fake_ws::writes_started() == writes, "a later send never reaches the transport");
@@ -990,10 +999,10 @@ void test_shut_down_stops_now_and_the_destructor_frees() {
  *
  * The dial is held inside `esp_transport_get_socket` (`fake_ws::park_get_socket`), where it
  * applies the socket policy — past the resolve, so it is not in flight and shut_down() cannot
- * condemn it — while shut_down() runs its top-of-function `connected_` clear and parks in the
- * join. Released, the dial stores `true` and the thread exits on
- * `stop_` without a departure arm. Without the second clear beside the release, link_up()
- * then answers true for a link whose pair is already gone. Run under TSan as well.
+ * condemn it — while shut_down() runs its `connected_` clear and returns (it waits for nothing,
+ * #2813). Released, the dial stores `true` and the thread exits on `stop_` without a departure
+ * arm. The receive loop releases the connection and clears `connected_` as it ends (drop()), so
+ * link_up() answers false again within that turn. Run under TSan as well.
  */
 void test_shut_down_racing_a_resolved_dial_leaves_the_link_down() {
     std::printf("#1606 shut_down() racing a resolved dial leaves the link down:\n");
@@ -1006,16 +1015,14 @@ void test_shut_down_racing_a_resolved_dial_leaves_the_link_down() {
         link->start_receiving();
         check(wait_until([] { return fake_ws::get_socket_parked(); }, 2s),
               "the dial resolved and is held applying its socket policy");
-        std::thread stopper([&] { link->shut_down(); });
-        // Let shut_down() pass its first clear and reach the join; the dial cannot move.
-        std::this_thread::sleep_for(100ms);
-        fake_ws::park_get_socket(false);
-        stopper.join();
+        link->shut_down();
         check(!link->link_up(), "link_up() is false once shut_down() returns");
+        fake_ws::park_get_socket(false);
+        check(wait_until([&] { return !link->link_up(); }, 2s),
+              "and is false again once the stopped receive loop ends");
         check(!link->stats().up, "and so is stats().up");
-        check(fake_ws::live_handles() == 0, "and the transport is released");
     }
-    check(drained_fake(), "it drained");
+    check(drained_fake(), "the transport was released");
 }
 /**
  * @brief #2265: a reader parked inside `esp_transport_read` does not hold a send.
@@ -1161,48 +1168,45 @@ void test_a_ping_mid_fragment_is_answered_whole() {
 
 }  // namespace
 
-/** @brief A receiver that shuts its own link down from inside the delivery, once. */
-struct shut_from_delivery_t {
-    esp_ws_client_link_t* link = nullptr;
-    std::atomic<bool> on_callback{false};
-    std::atomic<bool> returned{false};
-    std::atomic<int> handles_after{-1};
-    void operator()(std::span<const std::byte>) {
-        if (returned.load()) return;
-        on_callback.store(tr::net::on_callback_thread());
-        link->shut_down();  // the removal, delivered on the link's own receive thread
-        handles_after.store(fake_ws::live_handles());
-        returned.store(true);
-    }
-};
+namespace {
 
-/**
- * @brief #2751 — a `shut_down` made on the link's own receive thread only shuts down: it
- *        returns without joining that thread and releases no handle; the destructor, off
- *        every callback thread, joins the thread and releases the connection.
- */
-void test_shut_down_from_its_own_delivery_only_shuts_down() {
-    std::printf("#2751 shut_down() from its own delivery only shuts down:\n");
-    fake_ws::reset();
-    shut_from_delivery_t rx;
-    {
-        auto link = tr::mem::make_poly<esp_ws_client_link_t>(
+/** @brief The teardown table's ESP-IDF WebSocket client rig (#2813): the link under test on the
+ *         fake transport, whose server side pushes it frames. */
+struct esp_ws_rig_t {
+    static constexpr const char* name = "esp ws client";
+    esp_ws_rig_t() {
+        fake_ws::reset();
+        link_ = tr::mem::make_poly<esp_ws_client_link_t>(
             tr::mem::net_source(), "127.0.0.1", 8080,
             tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
-        rx.link = link.get();
-        link->set_receiver(rx);
-        link->start_receiving();
-        check(wait_until([&] { return link->link_up(); }, 2s), "a link came up");
-        fake_ws::push_frames({fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, true, 8, 0x11)});
-        check(wait_until([&] { return rx.returned.load(); }, 2s),
-              "the shut_down made in its own delivery returned");
-        check(rx.on_callback.load(), "the receive thread runs as a callback thread");
-        check(rx.handles_after.load() > 0, "it released no handle: the connection stays held");
-        check(!link->link_up(), "and the link reports down");
-    }  // the destructor, on this thread, joins the receive thread and releases the pair
-    check(drained_fake(), "the destructor released everything");
+    }
+    ~esp_ws_rig_t() { link_.reset(); }
+    esp_ws_rig_t(const esp_ws_rig_t&) = delete;
+    esp_ws_rig_t& operator=(const esp_ws_rig_t&) = delete;
+    bool ok() { return true; }
+    tr::net::transport_t& link() { return *link_; }
+    /** @brief A frame from the server, once the link has come up (not into its handshake). */
+    void poke() {
+        up_ = up_ || (link_ && link_->link_up());
+        if (up_)
+            fake_ws::push_frames(
+                {fake_ws::make_frame(tr::net::ws::opcode_t::BINARY, true, 8, 0x11)});
+    }
+    void destroy_link() { link_.reset(); }
+    /** @brief The link shut its connection down: what the server sees as the close. */
+    bool peer_saw_close() { return fake_ws::shutdown_count() > 0; }
+    tr::mem::poly_ptr_t<esp_ws_client_link_t> link_;
+    bool up_ = false;
+};
+
+/** @brief #2751, #2813: the ESP-IDF WebSocket client against the one teardown table. */
+void test_teardown_table() {
+    tr::testing::teardown::run_table<esp_ws_rig_t>(check);
+    check(drained_fake(), "the table's destructors released everything");
     check(fake_ws::handle_misuse() == 0, "with no handle misuse");
 }
+
+}  // namespace
 
 int main() {
     std::printf("esp_ws_client_link bounded-blocking host suite (#952, #1058):\n");
@@ -1228,7 +1232,7 @@ int main() {
     test_one_send_costs_one_write_and_one_mask_pass();
     test_control_frames_are_answered_through_the_write_path();
     test_a_ping_mid_fragment_is_answered_whole();
-    test_shut_down_from_its_own_delivery_only_shuts_down();
+    test_teardown_table();
     // Nothing detached may still be running here: a condemned dial's recv thread outlives
     // its link by design, and one still inside the transport at process exit is a crash
     // under ASan/TSan and a leak under LSan. Every case drains, and this is the backstop.

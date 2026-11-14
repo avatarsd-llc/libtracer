@@ -6,7 +6,9 @@
 #include "libtracer/transport_vertex.hpp"
 
 #include <array>
+#include <atomic>
 #include <cassert>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <initializer_list>
@@ -21,9 +23,11 @@
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/packed_path.hpp"
+#include "libtracer/park.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/self_heal_link.hpp"
 #include "libtracer/tlv_emit.hpp"
+#include "libtracer/wait.hpp"
 
 namespace tr::net {
 
@@ -224,6 +228,28 @@ void parse_config(const tlv_node_t* config, conn_settings_t& s) {
     return view_t::over(std::move(seg));
 }
 
+/**
+ * @brief Block until every router frame and dispatch open now has left: the grace point, a
+ *        notice the last leaving thread runs (no polling, no clock).
+ *
+ * Returns at once where that point cannot be waited for: on a thread that runs link callbacks
+ * or is itself inside a frame (it would wait for itself), under `reclaim_strict` (no second
+ * thread to wait for, and no exit that runs the notice), and when the table refuses it.
+ */
+void await_grace() {
+    std::atomic<std::uint32_t> passed{0};
+    const auto pass = [](void* c) {
+        auto* const word = static_cast<std::atomic<std::uint32_t>*>(c);
+        word->store(1, std::memory_order_release);
+        park_wake(*word);
+    };
+    if (on_callback_thread() || graph::detail_qsbr::rec().depth != 0 ||
+        !graph::reclaim_policy_t::kDefersToDispatchExit ||
+        !graph::detail_qsbr::retire(&passed, pass))
+        return;
+    park_wait(passed, std::uint32_t{0}, std::memory_order_acquire);
+}
+
 }  // namespace
 
 /**
@@ -232,10 +258,10 @@ void parse_config(const tlv_node_t* config, conn_settings_t& s) {
  * Removing a connection un-routes it and retires its vertex, but a forward that looked the
  * link up just before the un-route, or a `:children[]` listing that loaded the vertex's seam
  * just before the retire, can still be on its way into the link. So the link is not destroyed
- * at removal: it is shut down there (no frame in either direction, its threads joined) and
- * moved here, and the block is handed to `graph_t::park_reserved`, so the link is destroyed at
- * the same point the retired seam is freed. A call that reaches it in between finds a valid,
- * shut-down object. If the retire is refused, the block and the link stay for the graph's
+ * at removal: it is shut down there (no new frame in either direction; its threads end when
+ * it is destroyed) and moved here, and the block is handed to `graph_t::park_reserved`, so the link
+ * is destroyed at the same point the retired seam is freed. A call that reaches it in between finds
+ * a valid, shut-down object. If the retire is refused, the block and the link stay for the graph's
  * lifetime rather than being freed under such a call.
  *
  * Drawn from the graph's table source when the connection is created, together with its
@@ -357,9 +383,9 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
     if (conn_park_t* const p = std::exchange(park_, nullptr)) {
         p->config = std::move(destroy_config_);
         p->link = std::move(destroy_);
-        // JOINS the receive thread — not under either lock. Called on that thread itself (the
-        // link removed from its own callback) it only stops it: the graph's collect() frees
-        // the link from another thread, and its destructor joins there.
+        // Shut down, not under either lock: it waits for no thread, on any thread (#2813). The
+        // graph's collect() frees the link off every callback thread, and its destructor joins
+        // there.
         if (p->link) p->link->shut_down();
         // Its entry was reserved at creation, so this park cannot be refused. A refused retire
         // (counted and returned in `out`) keeps the block for the graph's lifetime instead.
@@ -371,7 +397,7 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
         else
             owner_.graph_.unreserve_park();
     }
-    destroy_.reset();  // a transaction with no park: JOINS the receive thread — same reason
+    destroy_.reset();  // a transaction with no park: the destructor joins — not under a lock
     // The config the socket (or its engine's settings) viewed goes only after the socket.
     destroy_config_ = mem::bytes_t(mem::null_source());
     if (publish_) {
@@ -499,6 +525,15 @@ transport_vertex_t::~transport_vertex_t() {
         ctl_txn_t txn(*this, ctl_scope_t::OPERATION);
         more = !conns_.empty() && remove_connection_locked(txn, conns_.at(0).key).has_value();
     }
+    // Then the links' join (#2813). Each link removed above is shut down and parked, and the
+    // graph's collect() destroys it, joining its threads. The plane's end is that point: once
+    // every router frame and dispatch open now has left, no frame can still reach a link parked
+    // above, so collect() frees them while the router, the graph and every context their
+    // callbacks reach are still alive. On a thread that runs link callbacks, or inside a frame,
+    // there is no wait and collect() frees only what is already ripe (nothing, on a callback
+    // thread): the rest waits for the embedder's next collect(), as a removal's links do.
+    await_grace();
+    graph_.collect();
     // Last: closing a socket above can fire its departure eviction, which gives back each
     // evicted edge's hold through this seam. Cleared only if it is still this plane's, so a
     // plane wired later onto the same graph keeps its own.
@@ -1309,11 +1344,10 @@ result_t<void> transport_vertex_t::remove_connection_locked(ctl_txn_t& txn, std:
     //     connection may take the same name — which is exactly the tombstone the registry
     //     reuses. Retiring an already-retired or unregistered vertex is a no-op, so a
     //     half-built connection tears down cleanly too.
-    //  4. Shut the owned socket down, with both locks down: it joins the link's threads (and
-    //     an engine's worker), which may be waiting for either lock; on a thread that runs
-    //     link callbacks it waits for nothing and the joins happen at collect(). Then park it
-    //     until a collect() that no router frame open now is still inside, so a frame already
-    //     on its way into it finds a valid object.
+    //  4. Shut the owned socket down, with both locks down: it waits for no thread (#2813),
+    //     and its threads are joined where it is destroyed. Then park it until a collect() that
+    //     no router frame open now is still inside, so a frame already on its way into it
+    //     finds a valid object. The plane's destructor is such a collect() for what it removes.
     //     A provided link is borrowed and left untouched.
     //
     // #576: step 3 is the peer-driven append site of the value-seam park — but only for a

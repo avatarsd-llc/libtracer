@@ -1602,7 +1602,7 @@ void test_recv_stack_sized() {
 }
 
 /**
- * @brief #2751 — one session torn down by its own callback and by a deferred teardown at
+ * @brief #2751 — one session torn down by its own callback and by a shut_down at
  *        once departs once.
  *
  * The server's own teardown of a departed peer is parked (`detail::slot_teardown_hook`)
@@ -1654,7 +1654,7 @@ void test_a_session_torn_down_twice_departs_once() {
             server.shut_down();
         });
         other.join();
-        check(downs.load() == 0, "the deferred teardown fired no departure for it");
+        check(downs.load() == 0, "the shut_down fired no departure for it");
         released.store(true);
         const auto d2 = std::chrono::steady_clock::now() + 3s;
         while (downs.load() == 0 && std::chrono::steady_clock::now() < d2)

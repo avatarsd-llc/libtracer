@@ -48,6 +48,8 @@
 #include "libtracer/can_framing.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
+#include "libtracer/wait.hpp"
+#include "link_teardown_table.hpp"
 #include "test_support.hpp"
 
 // #2022: a raw CAN link is destroyed as the class it is (or through `poly_ptr_t`), never
@@ -159,6 +161,8 @@ class fake_link_t : public tr::net::can_link_t {
 
    private:
     void run() {
+        // A receive thread runs link callbacks, as the SocketCAN and TWAI links' threads do.
+        const tr::net::callback_thread_scope_t delivering;
         std::unique_lock lock(m_);
         while (true) {
             cv_.wait(lock, [this] { return stop_ || !q_.empty(); });
@@ -1842,6 +1846,36 @@ void test_one_segment_per_message() {
     }
 }
 
+/** @brief The teardown table's CAN rig (#2813): two transports on one fake bus, the link
+ *         under test delivering on its fake link's receive thread. */
+struct can_teardown_rig_t {
+    static constexpr const char* name = "can";
+    can_teardown_rig_t() {
+        link_.emplace(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus_),
+                      tr::net::transport_can_config_t{.version = 0,
+                                                      .node = 2,
+                                                      .mode = can::can_frame_mode_t::CLASSIC,
+                                                      .path = "under/test"});
+        peer_.emplace(
+            tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus_),
+            tr::net::transport_can_config_t{
+                .version = 0, .node = 1, .mode = can::can_frame_mode_t::CLASSIC, .path = "peer"});
+    }
+    bool ok() { return true; }
+    tr::net::transport_t& link() { return *link_; }
+    void poke() { peer_->send(make_payload(4)); }
+    void destroy_link() { link_.reset(); }
+    fake_can_bus_t bus_;
+    std::optional<tr::net::can_transport_t> link_;
+    std::optional<tr::net::can_transport_t> peer_;
+};
+
+/** @brief CAN against the one teardown table: it already met the contract (#2786). */
+void test_teardown_table() {
+    tr::testing::teardown::run_table<can_teardown_rig_t>(
+        [](bool ok, std::string_view what) { check(ok, what); });
+}
+
 int main() {
     test_roundtrip(tr::net::can::can_frame_mode_t::CLASSIC, 20, "classic, multi-frame");
     test_roundtrip(tr::net::can::can_frame_mode_t::FD, 150, "CAN-FD, multi-frame");
@@ -1871,5 +1905,6 @@ int main() {
     test_same_id_reissue_rewrites_in_place();
     test_blocked_group_does_not_hold_a_concurrent_sender();
     test_wrap_waits_for_the_group_in_flight();
+    test_teardown_table();
     return tr::testing::summary("transport_can");
 }

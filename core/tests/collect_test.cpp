@@ -388,6 +388,8 @@ void test_one_park_drains_every_kind() {
     counting_source_t src;
     graph_t g(src);
     int runs = 0;
+    std::size_t before = 0;
+    std::size_t seams = 0;
     {
         fwd_router_t router(g);
         transport_vertex_t net(g, router);
@@ -395,20 +397,20 @@ void test_one_park_drains_every_kind() {
         // A bus connection's teardown parks a seam AND its link block.
         check(create_conn(g, net, link, "bus"), "created a bus connection");
         check(net.remove_connection(mount_of("bus")).has_value(), "and removed it");
-        // An embedder's own release, between the two transport teardowns.
+        // An embedder's own release, and a seam vertex of its own.
         check(g.park_release({&runs, &count_runs}).has_value(), "park an embedder release");
-        // The plane's destructor parks its creator endpoint's seam AND its context.
+        check(g.retire(make_handler_vertex(g, "/dev/mixed")).has_value(), "retire a seam vertex");
+        seams = g.parked_seam_count();
+        std::printf("  %zu seams parked beside 2 releases, %zu blocks out\n", seams, src.live);
+        check(seams == 2, "the identity and handler seams are parked");
+        check(runs == 0, "and nothing has run before collect()");
+        before = src.live;
+        // The plane's destructor parks its creator endpoint's seam AND its context, then runs
+        // the collect() that frees them all, as its links' join (#2813).
     }
-    check(g.retire(make_handler_vertex(g, "/dev/mixed")).has_value(), "retire a seam vertex");
-    const std::size_t seams = g.parked_seam_count();
-    std::printf("  %zu seams parked beside 3 releases, %zu blocks out\n", seams, src.live);
-    check(seams == 3, "the identity, endpoint and handler seams are parked");
-    check(runs == 0, "and nothing has run before collect()");
-    const std::size_t before = src.live;
-    g.collect();
     check(g.parked_seam_count() == 0, "one collect() frees every seam");
     check(runs == 1, "and runs the embedder release exactly once");
-    // Three seam blocks, the link's park block and the endpoint's context (its module
+    // The two seam blocks, the link's park block and the endpoint's context (its module
     // string included) are back in the source.
     check(before - src.live >= seams + 2, "and frees the link block and the endpoint context");
     const std::size_t after = src.live;

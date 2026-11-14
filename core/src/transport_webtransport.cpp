@@ -1076,14 +1076,8 @@ webtransport_transport_t::~webtransport_transport_t() = default;  // ~impl_t run
 // such a link is inert — never ok(), never up, sends nothing, counts nothing.
 
 void webtransport_transport_t::shut_down() {
-    if (!impl_) return;
-    // Deferred on a thread that runs link callbacks: it only shuts down, and the destructor
-    // closes every handle. Otherwise the teardown runs here, idempotent, and the destructor's
-    // own is then a no-op.
-    if (on_callback_thread())
-        impl_->shut();
-    else
-        impl_->teardown();
+    // Shuts down and waits for nothing: the destructor's teardown closes every handle.
+    if (impl_) impl_->shut();
 }
 
 bool webtransport_transport_t::start_receiving() {
