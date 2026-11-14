@@ -29,16 +29,19 @@ object files are summed as they sit in the linked image, after `--gc-sections`, 
 compared on esp32c6 against the pins in TRANSPORT_ROWS. Growth past a pin is
 `::error::` and exit 1, so a transport cannot get fatter unseen; the component total
 above stays tracked. A pin holds only for the compiler it was measured with
-(PINNED_TOOLCHAIN, passed in as `--toolchain`): another compiler, or another target,
-reports the rows without comparing them (#1138). A transport the `full_node` image
-compiles but never links, or never compiles, says so instead of reading 0 B.
-Those (CAN, WebSocket) are pinned on a second, footprint-only image instead
-(`--image transport_footprint`, #2678), which links them; there the rows full_node
-pins are reported only. A pinned row that reads 0 B fails: it is no longer linked.
+(PINNED_TOOLCHAIN, passed in as `--toolchain`). On esp32c6 another compiler fails every
+pinned row: esp-idf.yml builds these jobs in an image pinned by digest, so a mismatch means
+the image moved or a pin went stale, and a compiler upgrade arrives as a deliberate image
+bump that re-pins every row (#2830). Another target reports the rows without comparing
+them (#1138). A transport the `full_node` image compiles but never links, or never
+compiles, says so instead of reading 0 B. Those (CAN, WebSocket) are pinned on a second,
+footprint-only image instead (`--image transport_footprint`, #2678), which links them;
+there the rows full_node pins are reported only. A pinned row that reads 0 B fails: it is
+no longer linked.
 
 Exit 0 = report published (and within any ceiling that was passed), 1 = broken
-input, over a ceiling the caller opted into, or a transport row over its pin. Stdlib
-only.
+input, over a ceiling the caller opted into, a transport row over its pin, or an esp32c6
+build by a compiler other than PINNED_TOOLCHAIN. Stdlib only.
 """
 from __future__ import annotations
 
@@ -232,7 +235,8 @@ def main() -> int:
     ap.add_argument("--image", default="full_node", choices=("full_node", FOOTPRINT_IMAGE),
                     help=f"the example the map came from: full_node or {FOOTPRINT_IMAGE} (#2678)")
     ap.add_argument("--toolchain", default="unknown",
-                    help="the compiler's --version first line; the rows compare only on a match")
+                    help=f"the compiler's --version first line; on {PINNED_TARGET} it must be "
+                         "PINNED_TOOLCHAIN, or every pinned row fails")
     args = ap.parse_args()
 
     try:
@@ -278,7 +282,12 @@ def main() -> int:
         "</details>",
         "",
     ]
-    rows_compared = args.target == PINNED_TARGET and args.toolchain == PINNED_TOOLCHAIN
+    # Pins compare on esp32c6 only; another target reports its rows (#1138). On esp32c6 a pin
+    # holds for PINNED_TOOLCHAIN only, and the size-gate jobs build in an image pinned by digest
+    # that carries it: another compiler there fails each pinned row instead of reporting it,
+    # so a moved image cannot leave the pins unread (#2830).
+    rows_compared = args.target == PINNED_TARGET
+    toolchain_ok = args.toolchain == PINNED_TOOLCHAIN
     rows_over: list[str] = []
     rows_json: list[dict[str, Any]] = []
     if rows is not None:
@@ -308,7 +317,10 @@ def main() -> int:
                     print(f"::warning::transport row {row!r} is linked now; give it a pin (#2401)")
                 continue
             if not rows_compared:
-                verdict_row = "REPORTED (pins hold for esp32c6 + the pinned toolchain only)"
+                verdict_row = f"REPORTED (pins hold for {PINNED_TARGET} only)"
+            elif not toolchain_ok:
+                verdict_row = "FAIL (not the pinned toolchain)"
+                rows_over.append(f"{row}: not the pinned toolchain")
             elif got == 0:
                 # A pin on a row the image does not link would pass forever on 0 B.
                 verdict_row = "FAIL (not linked)"
@@ -350,8 +362,9 @@ def main() -> int:
         pathlib.Path(args.out_json).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     if rows_over:
-        print(f"::error::libtracer per-transport flash rows grew past their {PINNED_TARGET} pins "
-              f"(#2401): " + "; ".join(rows_over))
+        print(f"::error::libtracer per-transport flash rows failed their {PINNED_TARGET} pins "
+              f"(#2401; built with {args.toolchain!r}, pinned with {PINNED_TOOLCHAIN!r}): "
+              + "; ".join(rows_over))
         return 1
     if flash_ok and ram_ok:
         return 0
