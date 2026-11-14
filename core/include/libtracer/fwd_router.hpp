@@ -1587,18 +1587,21 @@ class fwd_router_t {
     [[gnu::cold]] void refuse_unserved_type(std::byte type, std::string_view inbound_name,
                                             const child_rx_ctx_t* inbound_ctx) noexcept;
     /**
-     * @brief The READ budget's verdict (#2774), compiled to `false` when it is off: true iff
-     *        @p op is a READ this node terminates whose session is over the budget while
-     *        another session READ in this run, in which case it has answered
-     *        `tr::flow::backpressure` (the stack-built refusal) and the caller stops.
+     * @brief Hand a request this node terminates to @p terminus, unless the READ budget
+     *        (#2774) refuses it: a READ whose session is over the budget while another
+     *        session READ in this run is answered `tr::flow::backpressure` (the stack-built
+     *        refusal) instead. With the budget off, this is the bare @p terminus call.
      *
-     * The session's tally is the delivering slot's (`%transport_t::inbound_tally`) or, for a
-     * link that is one session, its registration's. A frame with no receive ctx (the public
-     * `on_frame` doors, a frame this node originates) belongs to no session and is never refused.
+     * The one place both terminus arms of `route_fwd_ingress` reach, so the budget's test
+     * is taken once, not at each arm. The session's tally is the delivering slot's
+     * (`%transport_t::inbound_tally`) or, for a link that is one session, its
+     * registration's. A frame with no receive ctx (the public `on_frame` doors, a frame
+     * this node originates) belongs to no session and is never refused.
      */
-    template <class Cursor>
-    bool read_refused(const Cursor& cur, const fwd_pre_t& pre, graph::fwd_op_t op,
-                      std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx);
+    template <class Cursor, class Terminus>
+    void reach_terminus(const Cursor& cur, const fwd_pre_t& pre, graph::fwd_op_t op,
+                        std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx,
+                        Terminus& terminus, const wire::path_pair_t* target);
     /**
      * @brief Classify ONE inbound FWD frame and dispatch it — the ingress driver, once.
      *
