@@ -13,9 +13,10 @@
 #     the code, this IS the gate: its pin is the count.
 #   * the measured gate (`counted_ledger.py gate`) runs bench_peer_counts and bench_conn_ram
 #     and compares the WIDE rows with their pins. The RAM rows ram_census_pins.json pins
-#     read their pins, band and mode from that file, which is still warn-first, so their
-#     drift warns and does not fail until its activation block says so. The RAM rows the
-#     ledger pins itself (remote subscriptions, a peer's buffer after a 16 KiB frame) fail.
+#     read their pins, band and mode from that file, whose activation block reads fail
+#     (#2827: a warn-only row let #2753's +16 B land), so their drift fails here like the
+#     RAM rows the ledger pins itself (remote subscriptions, a peer's buffer after a
+#     16 KiB frame). perf-local's census ratchet, which runs after the merge, stays warn.
 #
 # History is not written here: perf-local.yml banks one point per row on every merge to
 # main, into the bench-local store the perf page's ledger section reads.
