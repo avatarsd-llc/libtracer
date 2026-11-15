@@ -325,6 +325,12 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "declaration gate's walk stays flat under churn. A diagnostic, not a gate.",
         "ns/op · ns p50 / p99 · churn bytes"),
     instrument_t(
+        "bench_retire_park.cpp", "inproc", (),
+        "Retires and revives one vertex with no `collect()` between, in windows of 5,000 "
+        "cycles up to 50,000 parked entries: a park that grows geometrically keeps the cycle "
+        "rate flat as it fills. A diagnostic, not a gate.",
+        "cycles/s per window · last/first"),
+    instrument_t(
         "bench_chain_delivery_pair.cpp", "framed", (),
         "Stream delivery over the RFC-0029 PAIR chain at 1 and 3 hops, 64 B to 16 KiB, "
         "unbatched and with BATCH, with the reply leg priced separately. A report, not a gate.",

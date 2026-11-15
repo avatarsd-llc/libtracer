@@ -22,12 +22,16 @@
  *   (d) a creation (a module's endpoint, a connection) swept over every budget: a refusal,
  *       the park reservation's among them, answers `BACKPRESSURE` and creates nothing;
  *   (e) a null release hook handed to `park_release` / `park_reserved` parks nothing, so
- *       `collect()` never frees the caller's context into the table source as a seam.
+ *       `collect()` never frees the caller's context into the table source as a seam;
+ *   (f) `retire` on a source that refuses the park's doubled growth but grants the exact
+ *       size falls back to exact growth and succeeds (#2845).
  *
  * The unsubscribe refusal (`release_refused`) is reclaim_test's (f).
  */
 
+#include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <new>
 #include <string>
 #include <string_view>
@@ -51,7 +55,8 @@ using tr::testing::check;
 
 /**
  * @brief A source that serves from the heap until armed, then serves `allow` more blocks and
- *        refuses every request after them. It records every live block, so a leak is a
+ *        refuses every request after them; bounded, it refuses every block larger than the
+ *        bound. It records every live block, so a leak is a
  *        number the test asserts, and frees what is left when it goes, so a block a case
  *        keeps on purpose is not reported a second time by LeakSanitizer.
  */
@@ -65,7 +70,7 @@ class gate_source_t final : public tr::mem::block_source_t {
     }
 
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
-        if (armed_ && allow_ == 0) {
+        if ((armed_ && allow_ == 0) || bytes > bound_) {
             ++refused_;
             return nullptr;
         }
@@ -92,6 +97,13 @@ class gate_source_t final : public tr::mem::block_source_t {
     }
     /** @brief Serve everything again. */
     void disarm() noexcept { armed_ = false; }
+    /** @brief Refuse every block larger than @p bytes, until @ref unbound. */
+    void bound(std::size_t bytes) noexcept {
+        bound_ = bytes;
+        refused_ = 0;
+    }
+    /** @brief Serve a block of any size again. */
+    void unbound() noexcept { bound_ = std::numeric_limits<std::size_t>::max(); }
     /** @brief Blocks handed out and not given back. */
     [[nodiscard]] std::size_t live() const noexcept { return live_.size(); }
 
@@ -100,6 +112,7 @@ class gate_source_t final : public tr::mem::block_source_t {
    private:
     bool armed_ = false;
     std::size_t allow_ = 0;
+    std::size_t bound_ = std::numeric_limits<std::size_t>::max();
     std::unordered_map<void*, std::pair<std::size_t, std::size_t>> live_;
 };
 
@@ -170,6 +183,40 @@ void test_retire_refusal() {
         check(g.retire(v).has_value(), "with room again the retire succeeds");
         check(g.reclaim_refusals().retire_refused == 1, "and counts nothing");
         g.collect();
+    }
+    check(src.live() == 0, "the graph gave back every block it drew");
+}
+
+/** @brief The layout of one park entry: a release and the epoch it was parked at. */
+struct park_entry_t {
+    tr::graph::retired_callback_t release;
+    std::uint32_t epoch = 0;
+};
+
+void test_retire_falls_back_to_exact_growth() {
+    std::printf(
+        "#2845 (f): retire falls back to exact growth when the doubled request is "
+        "refused:\n");
+    gate_source_t src;
+    {
+        graph_t g{src};
+        const vertex_handle_t a = seam_vertex(g, "/dev/a");
+        const vertex_handle_t b = seam_vertex(g, "/dev/b");
+        const vertex_handle_t c = seam_vertex(g, "/dev/c");
+        check(g.retire(a).has_value() && g.retire(b).has_value(),
+              "two retires park two seams, a park of two entries");
+        // The third needs three entries; the park grows to twice its capacity, four. A source
+        // that grants a block of three entries but not of four refuses only the doubling.
+        src.bound(3 * sizeof(park_entry_t));
+        const auto r = g.retire(c);
+        src.unbound();
+        check(src.refused_ == 1, "the doubled request is refused");
+        check(r.has_value(), "the retire succeeds at the exact size");
+        check(g.parked_seam_count() == 3, "and the park holds its entry");
+        check(g.reclaim_refusals().retire_refused == 0, "no retire is counted refused");
+        check(!g.find(path_t("/dev/c").key()).has_value(), "the vertex is retired");
+        g.collect();
+        check(g.parked_seam_count() == 0, "collect() frees all three seams");
     }
     check(src.live() == 0, "the graph gave back every block it drew");
 }
@@ -354,6 +401,7 @@ void test_null_hook_is_never_freed() {
 int main() {
     test_park_refusals();
     test_retire_refusal();
+    test_retire_falls_back_to_exact_growth();
     test_link_teardown_cannot_be_refused_its_park();
     test_creation_refused_its_reservation();
     test_null_hook_is_never_freed();
