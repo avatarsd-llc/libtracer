@@ -45,18 +45,19 @@ Process-wide by construction: one graph, one mutex. Guards the Composite child l
 a reallocation) and the `registered_` placeholder flag
 ([ADR-0057 — graph composite vertex tree](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0057-graph-composite-vertex-tree.md)).
 
-The list below is every acquisition in `graph.cpp` — **17 sites in 16 functions**, which is what
+The list below is every acquisition in `graph.cpp` — **26 sites in 25 functions**, which is what
 `grep -n map_mutex_ core/src/graph.cpp` returns once its comment hits are
-discounted. `evict_link_edges` is the one function that takes it twice.
+discounted. `collect` is the one function that takes it twice: shared to find what to collect,
+then unique to collect it.
 
 | taken | where | frequency |
 | --- | --- | --- |
-| **unique** | `graph.cpp:graph_t::register_vertex_key`, `graph.cpp:graph_t::retire`, `graph.cpp:graph_t::collect` | control plane |
+| **unique** | `graph.cpp:graph_t::register_vertex_key_span`, `graph.cpp:graph_t::retire`, `graph.cpp:graph_t::collect`, `graph.cpp:graph_t::set_creation_hook`, `graph.cpp:graph_t::register_session_anchor`, `graph.cpp:graph_t::reserve_park`, `graph.cpp:graph_t::unreserve_park`, `graph.cpp:graph_t::park_reserved`, `graph.cpp:graph_t::hide_from_enumeration`, `graph.cpp:graph_t::set_policy`, `graph.cpp:graph_t::set_intent_document` | control plane |
 | shared | `graph.cpp:graph_t::find_ptr` — **so every `path_t` overload pays it once**; ≥3× and non-scaling (§6) | per op, path-addressed only |
 | shared | `graph.cpp:graph_t::vertex_slot`, `graph.cpp:graph_t::vertex_slot_at`, `graph.cpp:graph_t::deref_vertex_slot`, `graph.cpp:graph_t::vertex_slot_count` | per op, bound-path addressed only — see below |
 | shared | `graph_fields.cpp:field_surface_t::write_acl` — the `:acl` write only, not every `:field` write | per `:acl` write |
 | shared | `graph.cpp:graph_t::read_children`, `graph.cpp:graph_t::read_children_folded`, `graph.cpp:graph_t::read_subtree_folded` | per composed read — these walk, so they need it |
-| shared | `graph.cpp:graph_t::note_subscriber_added` / `graph.cpp:graph_t::note_subscriber_removed`, `graph.cpp:graph_t::evict_link_edges`, `graph.cpp:graph_t::parked_seam_count` | control plane |
+| shared | `graph.cpp:graph_t::admit_subscriber` / `graph.cpp:graph_t::clear_subscriber_slot` (across the count and the slot change), `graph.cpp:graph_t::set_suspended`, `graph.cpp:graph_t::evict_link_edges`, `graph.cpp:graph_t::evict_route_edges`, `graph.cpp:graph_t::parked_seam_count`, `graph.cpp:graph_t::find_session_anchor`, `graph.cpp:graph_t::session_anchor_slots`, `graph.cpp:graph_t::collect` | control plane |
 
 `graph.cpp:graph_t::retire_subtree` takes nothing of its own: it is called from inside `retire`'s unique
 hold and recurses under it. A doc comment states the same contract for the

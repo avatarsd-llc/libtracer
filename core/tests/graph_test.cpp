@@ -742,7 +742,7 @@ void test_admission_door_uniformity() {
  * **Why the bound is 200 us, measured.** The bound has to exceed the real handoff latency or
  * the guard goes vacuous, and that latency is not the window — it is one `subscribe` plus the
  * writer's offset loop, single-digit microseconds. Calibrated against the #635 defect itself
- * (the `note_subscriber_added` bump moved back to trailing the append) on an idle host, one
+ * (the `note_subscribers` raise moved back to trailing the append) on an idle host, one
  * process pinned to two CPUs, 8 runs per budget per guard: at **20 us and 50 us both guards
  * MISS the reintroduced bug outright** on some runs — the fall-through fires on ordinary
  * rounds and the two threads stop racing at all. At **200 us both guards catch it 8/8**, at
@@ -837,8 +837,9 @@ void post_handoff(std::atomic<int>& slot, int round) {
  * zero count, skips the snapshot, and the latch one line earlier already holds the OLD one.
  *
  * **Why it is shaped like this.** The gap is one stripe unlock plus one shared-lock
- * acquire — tens of nanoseconds — because `note_subscriber_added` bumps the count as its
- * first act. Two earlier drafts of this test could not see it. Spawning a thread per round
+ * acquire — tens of nanoseconds — because the count raise took its own shared lock as its
+ * first act when this was calibrated (it now runs under the admission's one hold, so the gap is
+ * narrower still). Two earlier drafts of this test could not see it. Spawning a thread per round
  * failed outright (creation alone is ~20 us, so the subscribe always finished first, and
  * the test passed against the bug it targets); parking that thread first found it once in
  * ~8000 rounds, because the spawn jitter still swamped the window. Both threads therefore
@@ -918,7 +919,7 @@ void test_subscribe_never_misses_a_racing_write() {
  * this guard covers exactly one of them:
  *
  * - **Program order — COVERED.** The count must rise BEFORE the slot the latch is taken
- *   from. Move the `note_subscriber_added` bump in `graph_t::admit_subscriber` back to
+ *   from. Move the `note_subscribers` raise in `graph_t::admit_subscriber` back to
  *   trailing `add_edge` and this fails: an assign landing in the gap stores its value, reads
  *   a zero count, skips the mark, and the latch one line earlier already holds the OLD one —
  *   so the sweep below finds nothing and the new value is delivered nowhere.
