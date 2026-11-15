@@ -455,7 +455,10 @@ void destruction_joins_its_links() {
     auto net = plane_owning_y(g, router, py);
     net.reset();
     check(py.shut.load() && py.closed.load(), "destroying the plane destroys the link it owned");
-    if constexpr (tr::net::kBusLinks) {
+    // A frame on another thread during the destruction is a dispatch live elsewhere, which
+    // reclaim_strict_t's precondition rules out (no preemption and no second core,
+    // libtracer/reclaim.hpp) and which it cannot see: that arm runs under the default policy.
+    if constexpr (tr::net::kBusLinks && tr::graph::reclaim_policy_t::kDefersToDispatchExit) {
         probe_t p;
         net = plane_owning_x(g, router, p);
         fwd_router_t::origin_t slot([](void*, const tr::view::rope_t&) {}, nullptr);

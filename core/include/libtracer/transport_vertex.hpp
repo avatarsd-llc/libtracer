@@ -390,7 +390,8 @@ class transport_vertex_t {
      * flight on another thread (the collect's own rule). On a thread that runs link callbacks,
      * or inside a router frame or dispatch, it does not wait, and its collect frees only what
      * is already ripe (nothing, on a callback thread): the embedder's next collect frees the
-     * rest.
+     * rest. Under @ref tr::graph::reclaim_strict_t it never waits: that policy's precondition
+     * leaves no other thread to wait for.
      *
      * Must not run from inside a call through this object (an endpoint write, or a
      * liveness subscriber reached from one of its operations): that is asserted.
