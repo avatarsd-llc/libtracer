@@ -261,6 +261,26 @@ constexpr int kMaxCycles = 20000;
 /** @brief The fewest such operations each concurrent case must count. */
 constexpr std::size_t kInsideFloor = 32;
 
+/**
+ * @brief The fewest operations a terminus case must make inside a `retire` call: @ref
+ *        kInsideFloor in a TSan build, none in any other.
+ *
+ * A terminus op counts only if it starts after a `retire` call does and returns before that
+ * call does. Under TSan every op and every retire is slow, and each terminus case passes the
+ * floor within @ref kCycles (56 to 2600 per case, measured). In an optimized build a retire takes
+ * about as long as one op, so whether an op fits inside one is down to scheduling: on a
+ * RelWithDebInfo build the count ranged from 2 to about 3000 per case, and running up to ten
+ * times as many cycles still left some runs short. The window itself is covered in every build
+ * by the bracketed case above, which parks an op inside its access check across a retire; this
+ * concurrent case is the TSan check of the lock-free registration read, and it still checks
+ * that no op inside a retire reaches the handler in every build.
+ */
+#ifdef LIBTRACER_TEST_TSAN
+constexpr std::size_t kTerminusFloor = kInsideFloor;
+#else
+constexpr std::size_t kTerminusFloor = 0;
+#endif
+
 /** @brief A terminus WRITE made inside a retire never reaches the handler. */
 void no_terminus_mid_retire(bool pair) {
     std::printf("a %s terminus WRITE inside a retire never reaches the handler:\n",
@@ -308,7 +328,7 @@ void no_terminus_mid_retire(bool pair) {
             if (n1 != n0) bad.fetch_add(1, std::memory_order_relaxed);
         }
     });
-    for (int i = 0; i < kMaxCycles && (i < kCycles || inside.load() < kInsideFloor); ++i) {
+    for (int i = 0; i < kMaxCycles && (i < kCycles || inside.load() < kTerminusFloor); ++i) {
         const auto h = g.find(at.key());
         if (!h) break;
         seq.fetch_add(1, std::memory_order_acq_rel);  // odd: a retire is in progress
@@ -320,7 +340,7 @@ void no_terminus_mid_retire(bool pair) {
     sender.join();
     std::printf("  (%zu ops made inside a retire, %zu reached the handler)\n", inside.load(),
                 bad.load());
-    check(inside.load() >= kInsideFloor, "enough terminus ops were made inside a retire");
+    check(inside.load() >= kTerminusFloor, "enough terminus ops were made inside a retire");
     check(bad.load() == 0, "no terminus op inside a retire reached the handler");
 }
 
