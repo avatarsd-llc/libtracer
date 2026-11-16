@@ -67,12 +67,14 @@ TRANSPORT_ROWS = (
     # 2,608 -> 2,468 B (#2830): image-only re-pin on the pinned digest. The image moves no
     # byte here; the 140 B were slack the report-only rows left behind (2,468 on 15.2.0 too).
     # 2,468 -> 2,464 B (#2827): the shut flag sits in the wait registration's tail padding.
-    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2464, None),
+    # 2,464 -> 2,450 B (#2813): the endpoint's attach is out of line.
+    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2450, None),
     # 9,216 -> 9,446 B (#2147): a frame read resumes across readiness turns, so frame ingress is
     # out of line and the connection and listener each gain a callback (maintainer ruling 60).
     # 9,446 -> 9,422 B (#2830): image-only re-pin; no byte from the image, 24 B of old slack.
     # 9,422 -> 9,418 B (#2827): the shut flag sits in the wait registration's tail padding.
-    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9418, None),
+    # 9,418 -> 9,178 B (#2813): shut_down never waits, and the endpoint's attach is out of line.
+    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9178, None),
     # 8,896 -> 9,080 B (#2147): the poll loops give way to turn functions, the write-interest
     # arm and disarm, and the thread-per-link fallback's block (maintainer ruling 60).
     # 9,080 -> 9,262 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys back
@@ -83,7 +85,9 @@ TRANSPORT_ROWS = (
     # too (a dialer closes a server frozen mid-frame); two atomic flag calls in sweep_one.
     # 9,296 B held by the image-only re-pin (#2830): equal on GCC 15.2.0 and 15.3.0.
     # 9,296 -> 9,292 B (#2827): the shut flag sits in the wait registration's tail padding.
-    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9292, None),
+    # 9,292 -> 9,282 B (#2813): shut_down never waits; its join-or-defer branch is deleted, and
+    # attach (now out of line) keeps a shut link off the wait.
+    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9282, None),
     ("CAN (transport_can + TWAI link)", ("transport_can", "twai_link", "socketcan_link_stub"),
      None, "compiled, not linked: full_node creates no CAN connection, so --gc-sections drops it"),
     ("WebSocket (httpd server + client link)", ("httpd_ws_link", "esp_ws_client_link"),
@@ -108,7 +112,9 @@ FOOTPRINT_PINS = {
     # back ~110 B.
     # 33,513 -> 33,511 B (#2830): image-only re-pin. GCC 15.3.0 adds 2 B (33,509 on 15.2.0),
     # under the 4 B of slack the report-only row left behind.
-    "WebSocket (httpd server + client link)": 33511,
+    # 33,511 -> 33,463 B (#2813): the client link's shut_down never waits and shuts the
+    # connection down; drop() is the one release of a connection.
+    "WebSocket (httpd server + client link)": 33463,
 }
 
 
