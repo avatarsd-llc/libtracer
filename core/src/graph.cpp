@@ -1217,13 +1217,14 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
         const std::uint32_t epoch = detail_qsbr::advance();
         for (std::size_t i = parked_before; i < park_.size(); ++i) park_[i].epoch = epoch;
     }
-    // Each dropped routed edge gives its link hold back, outside every graph lock: an edge
-    // is reported exactly twice over its life, and retirement is one of its ends (#1816).
+    // Each dropped edge gives its admission record back (#2814), outside every graph lock: an
+    // edge is reported exactly twice over its life, and retirement is one of its ends (#1816).
     // The tables themselves are destroyed when `gone` leaves scope — outside the locks too.
-    // The session charge goes back with it (#1841); the producer has just retired, so the
+    // The walk above already unwound the listener count, so what goes back here is its link
+    // hold and its session charge (#1841), the producer having just retired, so the
     // event names none. An edge with no link or no session gives back nothing on that side.
     for (const detached_edges_t& table : gone)
-        table.for_each_edge([this](const pub_edge_t& e) { release_edge(e.remote, nullptr); });
+        table.for_each_edge([this](const pub_edge_t& e) { release_admission(e.remote, nullptr); });
     // Drop the retired vertices from the sweep sets — AFTER releasing the map lock, so the
     // sweep lock is not held across the retire walk. A stale entry would otherwise (a) leak, and
     // worse (b) silently re-enroll a revived vertex into UNCONDITIONAL sweeping through the leaked
@@ -1617,8 +1618,9 @@ bool graph_t::clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_v
             return false;
         note_subscribers(v, -static_cast<std::int32_t>(!was_suspended));
     }
-    // The link hold (#1816) and the session charge (#1841) this clear gives back.
-    release_edge(retired_remote, v);
+    // The rest of the cleared edge's admission record (#2814): its link hold (#1816) and its
+    // session charge (#1841).
+    release_admission(retired_remote, v);
     // Only a slot that WAS active is an unsubscribe; clearing an already-empty one changed
     // nothing and must not be reported as a removal. A no-op for the empty caller.
     notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, cleared_tlv, slot);
@@ -3373,43 +3375,56 @@ result_t<subscription_t> graph_t::admit_subscriber(
 
     edge_latch_t latch;
     std::size_t idx = 0;
-    // The listener count goes up BEFORE the slot exists, not after (#635). fan_out now SKIPS
-    // the entire snapshot when this count reads zero, so a bump that TRAILED the append would
-    // leave a window where the edge is live and invisible: a publish landing in it delivers to
-    // nobody, while the latch taken inside the edge verb below already holds the PREVIOUS
-    // value — the new subscriber would miss that write outright. Bumping first inverts the
-    // window into the harmless direction (a count with no slot yet ⇒ one snapshot that finds
-    // nothing). vertex_t::own_subs_ordered carries the ordering argument.
-    // Index this vertex under the link the edge is admitted OVER (#1071). The spelling is
-    // `vertex_t::evict_link_edges`'s, not a paraphrase of it: the NAME of the link whose pair
-    // the edge stores first, `caller` when it stores none. The stored link is the link the
-    // edge was admitted over, which for a field_write edge is a link with no route (#2135); a
-    // field_write that no link carried has only its caller (#943), and keying on the delivery
-    // link alone un-indexes either.
+    // THE ADMISSION RECORD (#2814). An admitted edge holds four charges, and they are one
+    // record: taken below in one order, refused whole, and given back whole by
+    // `release_admission`, the one release every edge that ends one at a time goes through —
+    // this step's own refusal, a replace's displaced edge, a clear and a retirement. The record
+    // stores nothing: the edge's own cold half names its link and its session, and whether
+    // the edge was counted is what the verb that ended it answers.
     //
-    // Deliberately BEFORE the append and not conditional on it succeeding. The index is a
-    // superset (see link_index_t): an admission that then fails BACKPRESSURE or OUT_OF_RANGE
-    // leaves a stale entry, which costs one no-op eviction, whereas indexing only on success
-    // would open a window where the edge is live and unindexed — a departure could then miss
-    // it, which is a leaked subscriber edge rather than a wasted comparison.
+    // The edge block comes first, ahead of every charge, so a refusal there leaves nothing to
+    // undo: the listener count lives in it (#2673). An append reserves it (an exhausted table
+    // source refuses BACKPRESSURE, the answer the append's own refusal gives); a replace
+    // allocates nothing, because an edgeless vertex has no slot a `:subscribers[N]` index could
+    // name.
     //
-    // The carried token rides along (#1417) and is CHECKED against that spelling rather than
-    // trusted: the two cases where it is the wrong key — a mount-routed target, whose
-    // delivery link is the mount's and not the arrival's, and the `caller` fallback — are
-    // exactly the ones the name compare inside rejects, so neither can silently un-index the
-    // edges #943 and #1071 fixed.
+    // 1. The session's ADMIT (#1841): an embedder's per-session budget refuses here,
+    //    BACKPRESSURE, with nothing yet taken, and ahead of the index entry, so a refusal a
+    //    peer can repeat never grows the index. A local edge has no session (its door passes
+    //    none), so it is never offered.
+    // 2. The link hold (#1816), taken BEFORE the edge can be seen: a departure that evicts the
+    //    edge the instant it lands gives the hold back, and must find one to give. Outside
+    //    every graph lock, as the receiver takes its own.
+    // 3. The departure index entry (#1071), under the link the edge is admitted OVER. The
+    //    spelling is `vertex_t::evict_link_edges`'s, not a paraphrase of it: the NAME of the
+    //    link whose pair the edge stores first, `caller` when it stores none. The stored link
+    //    is the link the edge was admitted over, which for a field_write edge is a link with no
+    //    route (#2135); a field_write that no link carried has only its caller (#943), and
+    //    keying on the delivery link alone un-indexes either. Deliberately BEFORE the append
+    //    and not conditional on it succeeding: the index is a superset (see link_index_t), so
+    //    an admission the slot verb then refuses leaves a stale entry, which costs one no-op
+    //    eviction, whereas indexing only on success would open a window where the edge is live
+    //    and unindexed — a departure could then miss it, which is a leaked subscriber edge
+    //    rather than a wasted comparison. The carried token rides along (#1417) and is CHECKED
+    //    against that spelling rather than trusted: the two cases where it is the wrong key — a
+    //    mount-routed target, whose delivery link is the mount's and not the arrival's, and the
+    //    `caller` fallback — are exactly the ones the name compare inside rejects, so neither
+    //    can silently un-index the edges #943 and #1071 fixed.
+    // 4. The listener count, raised BEFORE the slot exists, not after (#635), and with the slot
+    //    change under one shared map hold (below). fan_out SKIPS the entire snapshot when this
+    //    count reads zero, so a raise that TRAILED the append would leave a window where the
+    //    edge is live and invisible: a publish landing in it delivers to nobody, while the
+    //    latch taken inside the edge verb already holds the PREVIOUS value — the new subscriber
+    //    would miss that write outright. Raising first inverts the window into the harmless
+    //    direction (a count with no slot yet ⇒ one snapshot that finds nothing).
+    //    vertex_t::own_subs_ordered carries the ordering argument. The count is settled inside
+    //    that hold for every outcome, a displaced edge's included, so `release_admission` gives
+    //    back only the hold and the session charge.
     //
-    // A refused entry (#1778: the table source is exhausted) refuses the ADMISSION, for the
-    // same reason: an edge that no departure can find is a leak, not a degraded delivery.
-    //
-    // The session-admission seam (#1841) runs inside the same step, ahead of the index entry:
-    // an embedder's per-session budget refuses here, BACKPRESSURE, before anything exists.
-    //
-    // The count that bump raises lives in the edge block (#2673), so the block comes first,
-    // ahead of every other admission step so that a refusal here leaves nothing to undo. An
-    // append reserves it (an exhausted table source refuses BACKPRESSURE, the answer the
-    // append's own refusal gives); a replace allocates nothing, because an edgeless vertex has
-    // no slot a `:subscribers[N]` index could name.
+    // A refused index entry (#1778: the table source is exhausted) refuses the admission for
+    // the same reason, since an edge that no departure can find is a leak and not a degraded
+    // delivery, and it is answered as the REFUSED an append whose array could not be published
+    // answers. So from the ADMIT on there is one refusal arm, and it releases the record.
     //
     // Every refusal below answers from one table, indexed by `edge_replace_t`'s refusals, which
     // lead that enumeration: an index no slot answers to (OUT_OF_RANGE), a source that could
@@ -3420,18 +3435,20 @@ result_t<subscription_t> graph_t::admit_subscriber(
                                      status_t::PERMISSION_DENIED, status_t::NOT_FOUND};
     if (slot ? !v->has_edges() : !v->reserve_edges(*tables_))
         return std::unexpected(kRefusal[!slot]);
-    if (!admit_session(admitted, v, caller, link_token, session))
+    if (!session_event(session_event_t::kind_t::ADMIT, session, v, caller))
         return std::unexpected(status_t::BACKPRESSURE);
-    // The hold is taken BEFORE the edge can be seen, for the reason the index entry above is:
-    // a departure that evicts the edge the instant it lands gives the hold back, and must
-    // find one to give. Outside every graph lock, as the receiver takes its own; the refusal
-    // return below hands it back itself (#1816).
     hold_link(delivery_link(admitted), true);
-    // An append answers in the replace verb's terms, so both share the unwind below: a fresh
-    // slot is a FILLED_EMPTY add, and a `kNoSlot` is REFUSED — the injected resource could
-    // not carry the edge (#477 / #635: publishing the new edge array is the one allocation an
-    // append now makes), BACKPRESSURE being the injected-resource status (ADR-0060 §3), the
-    // same one the store leg answers on exhaustion.
+    // A refused entry runs no slot verb: the landing below is held to the ceiling generation,
+    // which `bound_generation_matches` never accepts, and it answers REFUSED's BACKPRESSURE
+    // rather than NOT_FOUND.
+    const bool indexed = link_index_.index_vertex(session, link_token, v);
+    const std::uint32_t lands_on[] = {kGenerationSaturated, generation};
+    constexpr std::size_t kNoVerb[] = {1, std::size(kRefusal) - 1};
+    // An append answers in the replace verb's terms, so both share the refusal arm below: a
+    // fresh slot is a FILLED_EMPTY add, and a `kNoSlot` is REFUSED — the injected resource
+    // could not carry the edge (#477 / #635: publishing the new edge array is the one
+    // allocation an append now makes), BACKPRESSURE being the injected-resource status
+    // (ADR-0060 §3), the same one the store leg answers on exhaustion.
     constexpr vertex_t::edge_replace_t kAppended[] = {vertex_t::edge_replace_t::FILLED_EMPTY,
                                                       vertex_t::edge_replace_t::REFUSED};
     // What each outcome gives back of the speculative count, indexed by `edge_replace_t`. Only
@@ -3452,14 +3469,14 @@ result_t<subscription_t> graph_t::admit_subscriber(
     // generation check uses: at the ceiling the counter stops, a retire since can no longer be
     // told apart, and the admission is refused the same way.
     vertex_t::edge_replace_t r = vertex_t::edge_replace_t::EDGE_CHANGED;
-    std::size_t refusal = std::size(kRefusal) - 1;  // NOT_FOUND until a slot verb runs
+    std::size_t refusal = kNoVerb[indexed];  // until a slot verb runs
     {
         // The count and the slot change under ONE shared map hold, as set_suspended and
         // evict_link_edges take them: a retire (unique hold) reads own_subs() before zeroing
         // it and takes the slot table, so it must see the two agree, and registration cannot
         // change while it is held.
         const std::shared_lock lock(map_mutex_);
-        if (v->registered() && bound_generation_matches(v->retire_gen(), generation)) {
+        if (v->registered() && bound_generation_matches(v->retire_gen(), lands_on[indexed])) {
             note_subscribers(v, +1);  // RFC-0005: descendants' writes now bubble here
             if (slot) {
                 // RFC-0009 §D.1 replace: the SAME door, so the latch below applies identically
@@ -3480,9 +3497,15 @@ result_t<subscription_t> graph_t::admit_subscriber(
     // The refusals lead the enumeration, so one test takes them all and the table names the
     // status.
     if (r <= vertex_t::edge_replace_t::EDGE_CHANGED) {
-        release_edges(delivery_link(admitted), session, v);
+        release_admission(admitted, v);
         return std::unexpected(kRefusal[refusal]);
     }
+    // The displaced edge's record goes back next, right behind the slot verb as a clear's does,
+    // so a replace is net zero on every charge before the observer's two calls or the latched
+    // replay below; its count already went back inside the hold. Its hold and its charge trail
+    // the admitted edge's, taken above, so a replace over the same link or session never lets
+    // either touch zero between the two (#1816, #1841).
+    release_admission(displaced, v);
     // A replace that displaced an edge — delivering or suspended — is two events, in
     // causal order: the old subscription ended and a new one began. Reporting only the
     // ADDED would leave an observer's inventory holding an edge that no longer exists.
@@ -3502,25 +3525,10 @@ result_t<subscription_t> graph_t::admit_subscriber(
     // its block released the map hold — and the durability latch has already been
     // dispatched, so the observer never runs interleaved with this subscription's own replay.
     notify_subscription(sub_event_t::kind_t::ADDED, v, caller, observed.admitted, idx);
-    // The admitted edge's hold was taken before the slot verb, so a replace over the same
-    // link never lets the count touch zero between the two (#1816).
-    // The displaced edge's charge goes back with its hold (#1841): a replace is net zero.
-    release_edge(displaced, v);
     return subscription_t{v, idx};
 }
 
-bool graph_t::admit_session(const remote_ptr_t& remote, vertex_t* v, std::string_view caller,
-                            link_id_t link_token, std::string_view session) {
-    if (!remote) return true;  // a local edge: no session, no departure to index it for
-    if (!session_event(session_event_t::kind_t::ADMIT, session, v, caller)) return false;
-    // A refused entry (#1778: the table source is exhausted) refuses the admission, and what
-    // the hook charged for it is given back: it is answered exactly as a refusal.
-    if (link_index_.index_vertex(session, link_token, v)) return true;
-    (void)session_event(session_event_t::kind_t::RELEASE, session, v, {});
-    return false;
-}
-
-void graph_t::release_edge(const remote_ptr_t& remote, const vertex_t* v) const {
+void graph_t::release_admission(const remote_ptr_t& remote, const vertex_t* v) const {
     // The session's NAME, asked of the link object (#1941): the edge stores its link as a
     // pair, and only the session seam still keys by name. An edge no link carried has its
     // caller as its session (#943). A build without that seam has no name slot (its read is
@@ -3532,7 +3540,11 @@ void graph_t::release_edge(const remote_ptr_t& remote, const vertex_t* v) const 
         session = remote->link.valid() && name.fn != nullptr
                       ? name.fn(name.ctx, remote->link, scratch)
                       : remote->caller.view();
-    release_edges(delivery_link(remote), session, v);
+    // The hold and the charge of this one edge, as `release_edges` gives back n of them. Not
+    // through it: called here, the RELEASE folds away in a build without the seam and takes
+    // the name above with it, where an out-of-line call would still have to be handed one.
+    hold_link(delivery_link(remote), false);
+    (void)session_event(session_event_t::kind_t::RELEASE, session, v, {});
 }
 
 void graph_t::release_edges(link_pair_t link, std::string_view session, const vertex_t* v,
@@ -3546,10 +3558,10 @@ void graph_t::release_edges(link_pair_t link, std::string_view session, const ve
 
 bool graph_t::dispatch_session_event(session_event_t::kind_t kind, std::string_view session,
                                      const vertex_t* v, std::string_view caller) const {
-    // The coherent read (#1049), then dispatch from the snapshot. A local edge has no session
-    // and is never offered: its admission is the owner's own decision.
+    // The coherent read (#1049), then dispatch from the snapshot. A local edge, which has no
+    // session, never reaches here (`session_event`): its admission is the owner's own decision.
     const auto hook = session_admission_.get();
-    if (hook.fn == nullptr || session.empty()) return true;
+    if (hook.fn == nullptr) return true;
     // A refused producer render reports an EMPTY producer, as `notify_subscription`'s does: the
     // session is the decision's key, and the producer is context. Nothing renders on END.
     std::array<std::byte, 256> scratch;  // a stack frame first (#1778)

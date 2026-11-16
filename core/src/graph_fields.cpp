@@ -700,17 +700,23 @@ struct graph_t::field_surface_t {
         // append is reached only through the public `graph_t::write(v, field, value, caller)`,
         // which an embedder may drive with an inbound link name. `[N]` has no such diversion
         // and IS reached from the wire.
+        //
+        // Only an edge with that cold half has a session (#2814): a local edge is handed none,
+        // so the admission step never offers it to the session seam nor indexes it, even when
+        // the write carried a link.
+        std::string_view session;
         if (!ctx.subject.empty()) {
             subscriber_remote_t* const r = s.ensure_remote(g.table_source());
             if (r == nullptr || !r->caller.assign(ctx.subject))
                 return std::unexpected(status_t::BACKPRESSURE);
             r->link = ctx.session_link;
+            session = ctx.session_link.valid() ? ctx.session : ctx.subject;
         }
         // The single admission step (ADR-0049): READ gate → append (or replace at
         // `slot` — §D.1's "admitted through the same admission door") → latch. A field-write
         // subscribe returns no host handle — discard it.
-        if (const auto r = g.admit_subscriber(v, std::move(s), ctx.subject, slot, {}, edge.get(),
-                                              ctx.session_link.valid() ? ctx.session : ctx.subject);
+        if (const auto r =
+                g.admit_subscriber(v, std::move(s), ctx.subject, slot, {}, edge.get(), session);
             !r)
             return std::unexpected(r.error());
         return {};

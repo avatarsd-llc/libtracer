@@ -169,8 +169,12 @@ class link_index_t {
      * by name and the fallback is counted in @ref name_lookups.
      * @retval false The table source refused the entry: @p v is NOT indexed, so the caller
      *               must refuse the admission (a live unindexed edge would outlive its link).
+     * @note The empty link is answered here, inline: every local subscribe asks (#2814), and
+     *       it costs a test rather than a call.
      */
-    [[nodiscard]] bool index_vertex(std::string_view link, link_id_t token, vertex_t* v);
+    [[nodiscard]] bool index_vertex(std::string_view link, link_id_t token, vertex_t* v) {
+        return link.empty() || index_named(link, token, v);
+    }
 
     /**
      * @brief The DISTINCT candidate count for @p link — `graph_t::link_edge_candidates`'s body.
@@ -201,6 +205,12 @@ class link_index_t {
     [[nodiscard]] std::size_t name_lookups() const;
 
    private:
+    /**
+     * @brief @ref index_vertex for a non-empty @p link: the carry, the name fallback and the
+     *        idempotent insert, out of line.
+     */
+    [[nodiscard]] bool index_named(std::string_view link, link_id_t token, vertex_t* v);
+
     /** @brief One link's candidate list, plus where its sorted prefix ends. */
     struct link_entry_t {
         mem::block_array_t<vertex_t*> vs; /**< @brief The link's DISTINCT candidate vertices:

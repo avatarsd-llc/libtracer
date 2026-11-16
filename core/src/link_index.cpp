@@ -195,9 +195,10 @@ void link_index_t::release_slot(std::uint32_t i) {
     free_head_ = i;
 }
 
-/** @brief Record @p v under @p link, by the carried token when it validates. */
-bool link_index_t::index_vertex(std::string_view link, link_id_t token, vertex_t* v) {
-    if (link.empty()) return true;  // the LOCAL spelling — no link teardown can ever name it
+/** @brief Record @p v under the non-empty @p link, by the carried token when it validates. */
+bool link_index_t::index_named(std::string_view link, link_id_t token, vertex_t* v) {
+    // The LOCAL (empty) spelling, which no link teardown can ever name, never reaches here:
+    // `index_vertex` answers it inline.
     const std::lock_guard lock(mutex_);
     // THE CARRY (#1417). A valid token whose slot is live AND spells `link` is the entry,
     // reached by subscript: no hash, no find, no key copy. Everything else falls back to
