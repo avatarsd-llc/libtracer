@@ -99,8 +99,11 @@ struct quic_transport_t::impl_t : msquic_endpoint_t {
         if ((ev->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL) != 0)
             return QUIC_STATUS_NOT_SUPPORTED;  // frame stream is bidirectional
         const std::lock_guard lock(conn_m);
-        // No test reaches the dialer case: its settings never set PeerBidiStreamCount, so msquic
-        // advertises 0 bidi streams to its peer. Keep the !listen refusal if either changes.
+        // Defence in depth, no test reaches it: the dialer's settings never set
+        // PeerBidiStreamCount, so msquic advertises 0 bidi streams to the peer. A process-wide
+        // PeerBidiStreamCount does not change that, because msquic copies it into the connection
+        // without IsSet (settings.c:234) and applies a limit only when IsSet. Keep the !listen
+        // refusal if the dial settings ever set the count.
         if (!listen || conn != c || frame_stream != nullptr) return QUIC_STATUS_ABORTED;
         ev->PEER_STREAM_STARTED.Flags |= QUIC_STREAM_OPEN_FLAG_DELAY_ID_FC_UPDATES;
         api->SetCallbackHandler(ev->PEER_STREAM_STARTED.Stream,
