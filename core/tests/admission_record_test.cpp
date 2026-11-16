@@ -15,16 +15,21 @@
  *    session's ADMIT, the departure index entry, and the slot verb's three refusals (a slot the
  *    index names does not exist, the source could not carry the edge, the slot changed under
  *    the write). The table-source steps are reached by refusing every draw in turn; the ADMIT
- *    by an embedder that refuses it, which leaves no index entry either.
+ *    by an embedder that refuses it, which leaves no index entry either. The count is read at
+ *    each refused draw of the edge array: it is already raised there (#635).
  * 2. A local edge has no session, even when the write that made it carried a link: it is
  *    never offered to the session seam and never indexed.
  * 3. A replace that displaces a delivering edge, and one that displaces a suspended edge, are
  *    each net zero on every charge: afterwards the ledger reads the new edge's record alone,
- *    and clearing it reads nothing.
+ *    and clearing it reads nothing. The subscription observer, which a replace calls twice
+ *    and a clear once, reads the count each time: the displaced edge's record is already back
+ *    by the first call, so it never reads one high.
  *
- * The vectors catch a release that leaves a charge out. Drop the count, the hold or the RELEASE
- * from `graph_t::release_admission`, or answer a refused index entry without releasing the
- * record: the refusal sweep of vector 1 fails for each, and vector 3 for the first three too.
+ * The vectors catch a release that leaves a charge out. Drop the count's give-back from the slot
+ * change, the hold or the RELEASE from `graph_t::release_admission`, or answer a refused index
+ * entry without releasing the record: the refusal sweep of vector 1 fails for each, and vector 3
+ * for the first three too.
+ * Give a replace's displaced record back after its observer calls and vector 3 fails.
  * In a build without `kSessionAdmission` the file is skipped, as `session_admission_test` is:
  * the categories below are told apart by the ADMIT.
  */
@@ -73,7 +78,10 @@ class gate_source_t final : public tr::mem::block_source_t {
     gate_source_t() noexcept : tr::mem::block_source_t("gate") {}
 
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
-        if (armed_ && allow_ == 0) return nullptr;
+        if (armed_ && allow_ == 0) {
+            if (on_refuse) on_refuse();
+            return nullptr;
+        }
         if (armed_) --allow_;
         return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
     }
@@ -87,6 +95,8 @@ class gate_source_t final : public tr::mem::block_source_t {
     }
     /** @brief Serve everything again. */
     void disarm() noexcept { armed_ = false; }
+    /** @brief Run at each refused draw, before it answers; nothing when empty. */
+    std::function<void()> on_refuse;
 
    private:
     bool armed_ = false;    /**< @brief Refusing past the budget? */
@@ -246,6 +256,7 @@ void test_refused_at_every_table_draw() {
     bool saw_slot = false;
     bool saw_success = false;
     bool all_clear = true;
+    bool slot_counted = true;
     bool prev_blockless_refusal = false;
     for (std::size_t allow = 0; allow < 64 && !saw_success; ++allow) {
         gate_source_t gate;
@@ -254,6 +265,8 @@ void test_refused_at_every_table_draw() {
         ledger.install(g);
         const vertex_handle_t p = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
         const vertex_handle_t c = g.register_vertex(path_t("/p/c"), role_t::STORED_VALUE);
+        std::uint32_t at_refusal = 0;
+        gate.on_refuse = [&] { at_refusal = g.own_subs(p); };  // a relaxed load, no lock
         gate.arm(allow);
         const auto r = wire_sub(g, p, "s1", "alice");
         gate.disarm();
@@ -272,12 +285,14 @@ void test_refused_at_every_table_draw() {
         prev_blockless_refusal = !has_block(p);
         saw_index |= admitted && !indexed;
         saw_slot |= admitted && indexed;
+        slot_counted &= !(admitted && indexed) || at_refusal == 1;
         all_clear &= r.error() == status_t::BACKPRESSURE && ledger.clear(g, p, c);
     }
     check(saw_success, "the sweep ends on the budget that admits");
     check(saw_block, "it refused the edge block");
     check(saw_index, "it refused the index entry after the ADMIT was granted");
     check(saw_slot, "it refused the edge array after the index entry landed");
+    check(slot_counted, "...with the count already raised (#635)");
     check(all_clear, "every refusal answered BACKPRESSURE and left nothing charged");
 }
 
@@ -354,6 +369,19 @@ void test_refused_slot_verb() {
  * it holds no link, and it is charged to that session. The displaced edge's whole record goes
  * back, so the ledger reads the new edge alone.
  */
+/** @brief The producer's count, as the subscription observer reads it at each call. */
+struct count_watch_t {
+    const graph_t* g = nullptr;      /**< @brief The graph the producer is in. */
+    vertex_handle_t p;               /**< @brief The producer. */
+    std::vector<std::uint32_t> seen; /**< @brief The count at each call, in order. */
+
+    /** @brief The installed observer: a relaxed load, no lock and no write. */
+    static void on_event(void* ctx, const tr::graph::sub_event_t& /*event*/) {
+        auto& self = *static_cast<count_watch_t*>(ctx);
+        self.seen.push_back(self.g->own_subs(self.p));
+    }
+};
+
 void test_replace_is_net_zero(bool suspended) {
     std::printf("a replace displacing a %s edge is net zero on every charge:\n",
                 suspended ? "suspended" : "delivering");
@@ -370,11 +398,17 @@ void test_replace_is_net_zero(bool suspended) {
                   ledger.reads(g, p, c, 0, 1, "s1", 1),
               "suspended, it keeps its hold and its charge and is no longer counted");
     }
+    count_watch_t watch{&g, p, {}};
+    g.set_hook(&tr::graph::graph_hooks_t::subscription_observer,
+               {&count_watch_t::on_event, &watch});
     check(slot_write(g, p, 0, b_subscriber("t"), "alice", "s1").has_value(),
           "its holder replaces it over the same session");
     check(ledger.reads(g, p, c, 1, 0, "s1", 1), "the ledger reads the replacement's record alone");
+    check(watch.seen == std::vector<std::uint32_t>{1, 1},
+          "...and so did the observer, at the REMOVED and at the ADDED");
     check(slot_write(g, p, 0, b_clear(), "alice", "s1").has_value() && ledger.clear(g, p, c),
           "clearing the replacement leaves nothing");
+    check(watch.seen == std::vector<std::uint32_t>{1, 1, 0}, "...and its REMOVED reads none");
 }
 
 }  // namespace
