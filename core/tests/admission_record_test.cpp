@@ -22,8 +22,8 @@
  * 3. A replace that displaces a delivering edge, and one that displaces a suspended edge, are
  *    each net zero on every charge: afterwards the ledger reads the new edge's record alone,
  *    and clearing it reads nothing. The subscription observer, which a replace calls twice
- *    and a clear once, reads the count each time: the displaced edge's record is already back
- *    by the first call, so it never reads one high.
+ *    and a clear once, reads the count and the session's charges each time: the displaced
+ *    edge's record is already back by the first call, so neither ever reads one high.
  *
  * The vectors catch a release that leaves a charge out. Drop the count's give-back from the slot
  * change, the hold or the RELEASE from `graph_t::release_admission`, or answer a refused index
@@ -369,16 +369,23 @@ void test_refused_slot_verb() {
  * it holds no link, and it is charged to that session. The displaced edge's whole record goes
  * back, so the ledger reads the new edge alone.
  */
-/** @brief The producer's count, as the subscription observer reads it at each call. */
+/**
+ * @brief The producer's count and session `s1`'s charges, as the subscription observer reads
+ *        them at each call.
+ */
 struct count_watch_t {
-    const graph_t* g = nullptr;      /**< @brief The graph the producer is in. */
-    vertex_handle_t p;               /**< @brief The producer. */
-    std::vector<std::uint32_t> seen; /**< @brief The count at each call, in order. */
+    const graph_t* g = nullptr;       /**< @brief The graph the producer is in. */
+    vertex_handle_t p;                /**< @brief The producer. */
+    const ledger_t* ledger = nullptr; /**< @brief The ledger that counts the charges. */
+    std::vector<std::uint32_t> seen;  /**< @brief The count at each call, in order. */
+    std::vector<int> owed;            /**< @brief `s1`'s charges at each call, in order. */
 
-    /** @brief The installed observer: a relaxed load, no lock and no write. */
+    /** @brief The installed observer: a relaxed load and a ledger read, no lock and no write. */
     static void on_event(void* ctx, const tr::graph::sub_event_t& /*event*/) {
         auto& self = *static_cast<count_watch_t*>(ctx);
         self.seen.push_back(self.g->own_subs(self.p));
+        const auto it = self.ledger->charged.find("s1");
+        self.owed.push_back(it == self.ledger->charged.end() ? 0 : it->second);
     }
 };
 
@@ -398,17 +405,20 @@ void test_replace_is_net_zero(bool suspended) {
                   ledger.reads(g, p, c, 0, 1, "s1", 1),
               "suspended, it keeps its hold and its charge and is no longer counted");
     }
-    count_watch_t watch{&g, p, {}};
+    count_watch_t watch{&g, p, &ledger, {}, {}};
     g.set_hook(&tr::graph::graph_hooks_t::subscription_observer,
                {&count_watch_t::on_event, &watch});
     check(slot_write(g, p, 0, b_subscriber("t"), "alice", "s1").has_value(),
           "its holder replaces it over the same session");
     check(ledger.reads(g, p, c, 1, 0, "s1", 1), "the ledger reads the replacement's record alone");
     check(watch.seen == std::vector<std::uint32_t>{1, 1},
-          "...and so did the observer, at the REMOVED and at the ADDED");
+          "...and so did the observer's count, at the REMOVED and at the ADDED");
+    check(watch.owed == std::vector<int>{1, 1},
+          "...and its charges: the displaced edge's went back before the first call");
     check(slot_write(g, p, 0, b_clear(), "alice", "s1").has_value() && ledger.clear(g, p, c),
           "clearing the replacement leaves nothing");
     check(watch.seen == std::vector<std::uint32_t>{1, 1, 0}, "...and its REMOVED reads none");
+    check(watch.owed == std::vector<int>{1, 1, 0}, "...and no charge");
 }
 
 }  // namespace

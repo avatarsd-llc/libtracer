@@ -3439,8 +3439,8 @@ result_t<subscription_t> graph_t::admit_subscriber(
         return std::unexpected(status_t::BACKPRESSURE);
     hold_link(delivery_link(admitted), true);
     // A refused entry runs no slot verb: the landing below is held to the ceiling generation,
-    // which `bound_generation_matches` never accepts, and it answers REFUSED's BACKPRESSURE
-    // rather than NOT_FOUND.
+    // which `bound_generation_matches` never accepts (vertex_handle.hpp pins that clause with a
+    // static_assert), and it answers REFUSED's BACKPRESSURE rather than NOT_FOUND.
     const bool indexed = link_index_.index_vertex(session, link_token, v);
     const std::uint32_t lands_on[] = {kGenerationSaturated, generation};
     constexpr std::size_t kNoVerb[] = {1, std::size(kRefusal) - 1};
