@@ -215,6 +215,8 @@ class fake_link_t : public transport_t {
     void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
     /** @brief Simulate the transport observing its one connection dead. */
     void die() { notify_down(); }
+    /** @brief Simulate the transport's one connection coming up (#2147). */
+    void come_up() { notify_up(); }
     /** @brief Drain the recorded sends. */
     std::vector<std::vector<std::byte>> drain() {
         const std::lock_guard lock(m_);
@@ -822,6 +824,14 @@ void test_departure_notifier_seam() {
     check(p2p.count() == 1 && bus.peer("10.0.0.7:51001").count() == 1 &&
               bus.peer("10.0.0.8:51002").count() == 1,
           "all three sessions deliver pre-departure");
+    p2p.drain();
+    bus.peer("10.0.0.7:51001").drain();
+    bus.peer("10.0.0.8:51002").drain();
+
+    p2p.come_up();  // an up through the same notifier evicts nothing (#2147)
+    check(g.write(path_t("/s"), rope_t{make_value(b_value_u8(0x33))}).has_value(),
+          "write /s after an up");
+    check(p2p.count() == 1, "an up left the child's edges in place");
     p2p.drain();
     bus.peer("10.0.0.7:51001").drain();
     bus.peer("10.0.0.8:51002").drain();

@@ -604,14 +604,17 @@ class fwd_router_t {
      * Defined here, inline, so it is emitted only where it is called: the MCU archive, whose
      * wiring is `make_connection`, carries none of it (the no-heap link check, #1783).
      *
-     * @return @ref add_child's verdict.
+     * @return @ref add_child's verdict. A name with no mount run, which @ref add_child refuses,
+     *         is refused before it is asked.
      */
     [[nodiscard]] bool attach_link(std::string_view name, transport_t& link,
                                    mem::block_source_t* rx = nullptr, link_kind_t kind = {}) {
         // The vertex's key is the mount's packed run, the same bytes `add_child` finds it by,
         // spelled into control-plane scratch from the link plane's source (#1779) and released
-        // before returning. An empty run keys nothing, so `add_child` refuses it below.
+        // before returning. A name with no run keys nothing and `add_child` would refuse it, so
+        // it is refused here, before a block is drawn or written.
         const std::size_t n = child_registry_t::encode_mount_name(name, nullptr);
+        if (n == 0) return false;
         auto* const key = static_cast<std::byte*>(link_src_->try_alloc(n + 1, 1));
         if (key == nullptr) return false;
         (void)child_registry_t::encode_mount_name(name, key);
@@ -755,7 +758,7 @@ class fwd_router_t {
      * filed under it is released (ADR-0084).
      *
      * `add_child` installs this automatically behind every child's departure notifier
-     * (`transport_t::set_down_notifier` with the child's registered NAME; the bus facet's
+     * (`transport_t::set_link_state_notifier` with the child's registered NAME; the bus facet's
      * `bus_link_t::set_peer_down_notifier` with the departed PEER's name — the same name
      * inbound frames were tagged with, hence the name subscriber edges stored). A host
      * that learns of a departure out-of-band (its own session manager) may call it
@@ -766,7 +769,7 @@ class fwd_router_t {
      *
      * Runs on the calling thread (typically a transport receive/close thread) and takes
      * graph locks — callers must hold no transport-internal locks (the
-     * `set_down_notifier` calling discipline).
+     * `set_link_state_notifier` calling discipline).
      * @param link_name The routing plane's inbound NAME for the departed link/peer.
      */
     void link_down(std::string_view link_name);

@@ -81,6 +81,9 @@ struct fake_sock_t final : tr::net::transport_t {
 
     /** @brief The remote hangup: fire the down-notifier (a protected base seam). */
     void die() { notify_down(); }
+    /** @brief The connection coming up: fire the link-state notifier with `up = true`
+     *         (#2147). */
+    void come_up() { notify_up(); }
 };
 
 /**
@@ -496,6 +499,43 @@ void test_standing_binding_selfheals() {
         std::this_thread::yield();  // the worker reaps off-thread; bounded backstop
     }
     check(g_socks_alive.load() == 0, "the closed socket was destroyed (no socket at rest)");
+}
+
+/** @brief An up from the live socket is not a loss (#2147): no heal, no retry, no state
+ *         change, and the next op is served on the same socket. */
+void test_up_from_live_socket_heals_nothing() {
+    std::printf("S5: an up from the live socket heals nothing — still UP, no retry:\n");
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_fake_engine_module(net, script);
+    const script_guard_t guard{script};  // bounded teardown even on a failing test
+    (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", 1));
+
+    check(net.acquire_link("net/fake-client/a").has_value(), "acquire_link takes the hold");
+    check(script.await_attempts(1), "the acquire kicked a dial");
+    script.script(true);
+    check(await_state(node, "/net/fake-client/a", link_state_t::UP), "the link comes UP");
+
+    script.built[0]->come_up();
+    // A loss here would flip the state at once (ops fail fast), so the op right after the up
+    // tells a heal apart without waiting for one: it is served, not dropped.
+    const std::uint64_t drops_before = dropped_tx(net, "net/fake-client/a");
+    const std::byte frame[1] = {std::byte{0x00}};
+    tr::testing::link_of(net, "net/fake-client/a")->send(frame);
+    check(dropped_tx(net, "net/fake-client/a") == drops_before && script.built[0]->sent.load() == 1,
+          "the op after the up is served on the same socket, not dropped");
+    check(state_byte(node, "/net/fake-client/a") == static_cast<std::uint8_t>(link_state_t::UP),
+          "the published state is still UP");
+    {
+        const std::lock_guard l(script.m);
+        check(script.attempts == 1 && script.built.size() == 1,
+              "no retry was dialed and no socket built");
+    }
+    check(net.release_link("net/fake-client/a").has_value(), "release_link drops the hold");
+    check(await_state(node, "/net/fake-client/a", link_state_t::DORMANT),
+          "the last release re-dormants the link");
 }
 
 void test_release_during_heal_stops_retry() {
@@ -1228,6 +1268,7 @@ int main() {
     test_lone_oneshot_failure_redormants();
     test_loss_at_refcount_zero_redormants();
     test_standing_binding_selfheals();
+    test_up_from_live_socket_heals_nothing();
     test_release_during_heal_stops_retry();
     test_remove_while_healing_tears_down();
     test_backoff_runs_on_the_app_now();

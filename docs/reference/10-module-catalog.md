@@ -323,10 +323,14 @@ void tx_set_rope_receiver (transport_t *t,
 /* True iff this transport honours the owning sink. */
 bool tx_delivers_ropes (const transport_t *t);
 
-/* Fired when this transport's one connection dies — remote hangup,
-   protocol close, or a fatal receive error. The forwarder uses it to
-   evict the link's subscriber edges. */
-void tx_set_down_notifier (transport_t *t, void (*fn)(void *ctx), void *ctx);
+/* Fired with up = false when this transport's one connection dies —
+   remote hangup, protocol close, or a fatal receive error. The forwarder
+   evicts the link's subscriber edges on a down. up = true is reserved for
+   a connection that comes up after creation; no transport fires it yet.
+   True: it went down before this install. An up before the install is
+   not kept, so an installer that needs it reads the link's link_up
+   state after this returns. */
+bool tx_set_link_state_notifier (transport_t *t, void (*fn)(void *ctx, bool up), void *ctx);
 
 /* Begin delivering: the second half of a two-phase bring-up, and what
    makes "set before frames flow" above achievable at all. A no-op for a

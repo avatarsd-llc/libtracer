@@ -498,7 +498,7 @@ class esp_ws_client_link_t final : public transport_t {
      * detect: a peer that vanishes without a FIN is noticed by the keepalive probes the
      * dial arms (#957), so this answers `true` for a dead peer for at most that window.
      * A layer that needs the transition rather than the state takes the departure seam
-     * (`transport_t::set_down_notifier`), which this link fires on every death path.
+     * (`transport_t::set_link_state_notifier`), which this link fires on every death path.
      *
      * Relaxed, per the base contract: it is a hint, never a synchronisation point. The
      * handle-publication edge rides the SAME flag read with acquire (see `send()`), which

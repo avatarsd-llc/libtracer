@@ -22,7 +22,8 @@
  *   - delete the `k <= best_k` longest-match filter → `longest_match_wins` fails;
  *   - delete the walker's backwards-restart → `narrow_after_wide` fails;
  *   - delete the `!next` exact-mount check → `exact_mount_terminates` fails;
- *   - delete `routable_mount_name` → `unaddressable_names_refused` fails.
+ *   - delete the `kMaxSegments` stop in `child_registry_t::encode_mount_name` →
+ *     `unaddressable_names_refused` fails.
  *
  * The OOM half of `add_child`'s new
  * `bool` lives in `mount_add_oom_test.cpp`, which needs its own binary to replace the global
@@ -47,6 +48,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "route_frame_builder.hpp"  // host-only frame builders (#1779)
@@ -68,6 +70,8 @@ struct recording_link_t : tr::net::transport_t {
         std::vector<std::byte>& f = sent.emplace_back();
         for (const std::span<const std::byte>& s : iov) f.insert(f.end(), s.begin(), s.end());
     }
+    /** @brief True ⇔ some inbound sink has been installed on this link. */
+    [[nodiscard]] bool wired() const noexcept { return rx_.has_any(); }
 };
 
 /** @brief A `FWD{WRITE, dst, src, payload}` frame over the given segment lists. */
@@ -170,13 +174,39 @@ void test_unaddressable_names_refused() {
     check(!router.attach_link("/a", link), "a leading separator is refused");
     check(router.registry().live_size() == 0,
           "and NOTHING was registered — no healthy-looking ghost");
+    check(!link.wired(), "and NO inbound receiver was installed on the link");
 
     // The one real bound: a `dst` carries at most `kMaxSegments` segments, so a wider mount
     // cannot be the prefix of any address that exists.
     const std::string too_wide = join(mount_segments(tr::graph::kMaxSegments + 1));
     check(!router.attach_link(too_wide, link), "a name wider than the path budget is refused");
+    check(router.registry().live_size() == 0, "and NOTHING was registered for it");
+    check(!link.wired(), "and NO inbound receiver was installed on the link");
     const std::string at_budget = join(mount_segments(tr::graph::kMaxSegments));
     check(router.attach_link(at_budget, link), "a name exactly AT the budget is accepted");
+    check(router.registry().live_size() == 1 && link.wired(),
+          "it IS registered and wired, so the checks above are not vacuous");
+}
+
+/**
+ * @brief `attach_link` refuses a name it cannot encode before it draws or writes its key block.
+ *
+ * The router here draws its link plane from the raw heap, not a slab, so every block is its own
+ * allocation and an AddressSanitizer build sees any write past one, even by a byte.
+ */
+void test_unencodable_names_through_attach_link() {
+    std::printf("attach_link refuses a name it cannot encode, with nothing written\n");
+    tr::graph::graph_t graph{tr::mem::heap_source()};
+    tr::net::fwd_router_t router{graph, {.link_src = &tr::mem::heap_source()}};
+    recording_link_t link;
+
+    check(!router.attach_link("a/", link), "a trailing separator is refused");
+    check(router.registry().live_size() == 0 && !link.wired(), "  nothing registered or wired");
+    check(!router.attach_link("a//b", link), "a name with an EMPTY segment is refused");
+    check(router.registry().live_size() == 0 && !link.wired(), "  nothing registered or wired");
+    const std::string too_wide = join(mount_segments(tr::graph::kMaxSegments + 1));
+    check(!router.attach_link(too_wide, link), "a name wider than the path budget is refused");
+    check(router.registry().live_size() == 0 && !link.wired(), "  nothing registered or wired");
 }
 
 /** @brief Two mounts share a prefix — the wider one wins, whatever the table order. */
@@ -292,6 +322,7 @@ int main() {
                                 std::size_t{8}, std::size_t{33}})
         test_width(w);
     test_unaddressable_names_refused();
+    test_unencodable_names_through_attach_link();
     test_longest_match_wins();
     test_segment_boundaries();
     test_exact_mount_terminates();
