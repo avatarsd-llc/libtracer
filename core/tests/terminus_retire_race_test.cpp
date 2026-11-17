@@ -249,13 +249,14 @@ void bracketed_terminus_ops() {
 
 /**
  * @brief The retire-and-revive cycles each concurrent case runs at least. The cases are bounded
- *        by work, not by time (#2843): each counts the operations that met `/t` retired (for a
- *        terminus case, one made inside a `retire` call), and runs on past this until it has
- *        @ref kInsideFloor of them, to at most @ref kMaxCycles, so the window stays covered.
+ *        by work, not by time (#2843). A terminus case counts the operations made inside a
+ *        `retire` call and runs on past this until it has @ref kTerminusFloor of them, to at most
+ *        @ref kMaxCycles. The role-flip case runs exactly this many, each holding `/t` retired
+ *        until a whole write has run against it.
  */
 constexpr int kCycles = 4000;
 
-/** @brief The cycle cap: a case that counts fewer than @ref kInsideFloor by then fails. */
+/** @brief The cycle cap: a terminus case that counts fewer than its floor by then fails. */
 constexpr int kMaxCycles = 20000;
 
 /** @brief The fewest such operations each concurrent case must count. */
@@ -344,7 +345,17 @@ void no_terminus_mid_retire(bool pair) {
     check(bad.load() == 0, "no terminus op inside a retire reached the handler");
 }
 
-/** @brief A write racing a retire-and-revive answers a defined status and never crashes. */
+/**
+ * @brief A write racing a retire-and-revive answers a defined status and never crashes.
+ *
+ * Each cycle holds `/t` retired until the writer has finished two more writes. The second of
+ * them began after the first returned, so after the retire did, and returned before the revive:
+ * it ran wholly against the retired path and must answer NOT_FOUND. So every cycle contributes
+ * at least one such write in every build, rather than only when the writer happens to land in
+ * the gap between a retire and its revive, which in an optimized build is about one write long
+ * and on one gcc-15 RelWithDebInfo run caught none of 38,818 writes. The other writes still
+ * overlap the retire and the revive freely.
+ */
 void write_across_role_flip() {
     std::printf("a write racing a retire-and-revive answers a defined status:\n");
     graph_t g;
@@ -365,22 +376,25 @@ void write_across_role_flip() {
     std::thread writer([&] {
         while (!stop.load(std::memory_order_acquire)) {
             const tr::graph::result_t<void> r = g.write(at, tr::testing::make_value(frame));
-            writes.fetch_add(1, std::memory_order_relaxed);
             if (!r)
                 (r.error() == status_t::NOT_FOUND ? retired : undefined)
                     .fetch_add(1, std::memory_order_relaxed);
+            writes.fetch_add(1, std::memory_order_release);
         }
     });
-    for (int i = 0; i < kMaxCycles && (i < kCycles || retired.load() < kInsideFloor); ++i) {
+    for (int i = 0; i < kCycles; ++i) {
         const auto h = g.find(at.key());
         if (h) (void)g.retire(*h);
+        const std::size_t before = writes.load(std::memory_order_acquire);
+        while (writes.load(std::memory_order_acquire) < before + 2) std::this_thread::yield();
         revive();
     }
     stop.store(true, std::memory_order_release);
     writer.join();
     std::printf("  (%zu writes, %zu met /t retired, %zu answered an undefined status)\n",
                 writes.load(), retired.load(), undefined.load());
-    check(retired.load() >= kInsideFloor, "enough writes met /t retired");
+    check(retired.load() >= static_cast<std::size_t>(kCycles),
+          "every cycle had a write meet /t retired");
     check(undefined.load() == 0, "every racing write answered success or NOT_FOUND");
 }
 
