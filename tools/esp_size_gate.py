@@ -66,11 +66,13 @@ TRANSPORT_ROWS = (
     # 2,710 -> 2,608 B (#2147): the receive thread body becomes one readiness callback.
     # 2,608 -> 2,468 B (#2830): image-only re-pin on the pinned digest. The image moves no
     # byte here; the 140 B were slack the report-only rows left behind (2,468 on 15.2.0 too).
-    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2468, None),
+    # 2,468 -> 2,464 B (#2827): the shut flag sits in the wait registration's tail padding.
+    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2464, None),
     # 9,216 -> 9,446 B (#2147): a frame read resumes across readiness turns, so frame ingress is
     # out of line and the connection and listener each gain a callback (maintainer ruling 60).
     # 9,446 -> 9,422 B (#2830): image-only re-pin; no byte from the image, 24 B of old slack.
-    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9422, None),
+    # 9,422 -> 9,418 B (#2827): the shut flag sits in the wait registration's tail padding.
+    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9418, None),
     # 8,896 -> 9,080 B (#2147): the poll loops give way to turn functions, the write-interest
     # arm and disarm, and the thread-per-link fallback's block (maintainer ruling 60).
     # 9,080 -> 9,262 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys back
@@ -80,7 +82,8 @@ TRANSPORT_ROWS = (
     # 9,184 -> 9,296 B: ruling 76 (2026-11-12), #2812: the one-peer liveness check owes RX
     # too (a dialer closes a server frozen mid-frame); two atomic flag calls in sweep_one.
     # 9,296 B held by the image-only re-pin (#2830): equal on GCC 15.2.0 and 15.3.0.
-    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9296, None),
+    # 9,296 -> 9,292 B (#2827): the shut flag sits in the wait registration's tail padding.
+    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9292, None),
     ("CAN (transport_can + TWAI link)", ("transport_can", "twai_link", "socketcan_link_stub"),
      None, "compiled, not linked: full_node creates no CAN connection, so --gc-sections drops it"),
     ("WebSocket (httpd server + client link)", ("httpd_ws_link", "esp_ws_client_link"),
