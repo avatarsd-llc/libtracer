@@ -92,12 +92,19 @@ struct quic_transport_t::impl_t : msquic_endpoint_t {
      * is destroyed or replaced, and a peer resumes on a new connection. The teardown harvest
      * (and a replacement) nulls `conn` under the same lock, so a stream that starts once
      * teardown has begun is refused too, the recheck webtransport's adoption makes. The
-     * adopted stream's credit returns when the link closes the stream. */
+     * adopted stream's credit returns when the link closes the stream. A dialer adopts none:
+     * it opens its own frame stream at CONNECTED, so a stream its peer starts is refused,
+     * including on a connection whose own stream could not be opened. */
     QUIC_STATUS on_peer_stream_started(HQUIC c, QUIC_CONNECTION_EVENT* ev) override {
         if ((ev->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL) != 0)
             return QUIC_STATUS_NOT_SUPPORTED;  // frame stream is bidirectional
         const std::lock_guard lock(conn_m);
-        if (conn != c || frame_stream != nullptr) return QUIC_STATUS_ABORTED;
+        // Defence in depth, no test reaches it: the dialer's settings never set
+        // PeerBidiStreamCount, so msquic advertises 0 bidi streams to the peer. A process-wide
+        // PeerBidiStreamCount does not change that, because msquic copies it into the connection
+        // without IsSet (settings.c:234) and applies a limit only when IsSet. Keep the !listen
+        // refusal if the dial settings ever set the count.
+        if (!listen || conn != c || frame_stream != nullptr) return QUIC_STATUS_ABORTED;
         ev->PEER_STREAM_STARTED.Flags |= QUIC_STREAM_OPEN_FLAG_DELAY_ID_FC_UPDATES;
         api->SetCallbackHandler(ev->PEER_STREAM_STARTED.Stream,
                                 reinterpret_cast<void*>(&impl_t::stream_cb), this);
