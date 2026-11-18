@@ -249,38 +249,34 @@ void bracketed_terminus_ops() {
 
 /**
  * @brief The retire-and-revive cycles each concurrent case runs at least. The cases are bounded
- *        by work, not by time (#2843). A terminus case counts the operations made inside a
- *        `retire` call and runs on past this until it has @ref kTerminusFloor of them, to at most
- *        @ref kMaxCycles. The role-flip case runs exactly this many, each holding `/t` retired
- *        until a whole write has run against it.
+ *        by work, not by time (#2843). A terminus case runs on past this until it has counted
+ *        @ref kTerminusFloor operations inside a `retire` call, to at most @ref kMaxCycles. The
+ *        role-flip case runs exactly this many, each holding `/t` retired until a whole write
+ *        has run against it.
  */
 constexpr int kCycles = 4000;
 
-/** @brief The cycle cap: a terminus case that counts fewer than its floor by then fails. */
+/** @brief The cycle cap. A terminus case reaches its floor within its first @ref
+ *         kTerminusFloor cycles (see there), so the cap ends only a case that never can. */
 constexpr int kMaxCycles = 20000;
 
-/** @brief The fewest such operations each concurrent case must count. */
-constexpr std::size_t kInsideFloor = 32;
-
 /**
- * @brief The fewest operations a terminus case must make inside a `retire` call: @ref
- *        kInsideFloor in a TSan build, none in any other.
+ * @brief The fewest operations a terminus case must make inside a `retire` call, in every build.
  *
- * A terminus op counts only if it starts after a `retire` call does and returns before that
- * call does. Under TSan every op and every retire is slow, and each terminus case passes the
- * floor within @ref kCycles (56 to 2600 per case, measured). In an optimized build a retire takes
- * about as long as one op, so whether an op fits inside one is down to scheduling: on a
- * RelWithDebInfo build the count ranged from 2 to about 3000 per case, and running up to ten
- * times as many cycles still left some runs short. The window itself is covered in every build
- * by the bracketed case above, which parks an op inside its access check across a retire; this
- * concurrent case is the TSan check of the lock-free registration read, and it still checks
- * that no op inside a retire reaches the handler in every build.
+ * A terminus op counts only if it starts after the cycle's window opens (`seq` goes odd, just
+ * before `retire` is called) and returns before it closes (`seq` goes even, once `retire` has
+ * returned). Counting free-running ops left this to scheduling: a busy runner sometimes fitted
+ * too few ops into the window (21 of 32 in one TSan run, #2867), and in an optimized build a
+ * retire takes about as long as one op. So until the floor is reached, each cycle waits, with no
+ * clock, for the sender to START an op inside the open window before calling `retire`, and for
+ * that op to RETURN before closing it. Every such cycle counts at least one op, and scheduling
+ * can delay a cycle but never cost it its op: the floor is reached in at most this many cycles.
+ * `retire` is called as soon as the op has started, so under TSan the op is usually still in
+ * flight against a real retire; once the floor is reached the sender runs free again, as before.
+ * The bracketed case above parks an op inside its access check across a retire for the exact
+ * interleaving, and the handler check below holds for every counted op either way.
  */
-#ifdef LIBTRACER_TEST_TSAN
-constexpr std::size_t kTerminusFloor = kInsideFloor;
-#else
-constexpr std::size_t kTerminusFloor = 0;
-#endif
+constexpr std::size_t kTerminusFloor = 32;
 
 /** @brief A terminus WRITE made inside a retire never reaches the handler. */
 void no_terminus_mid_retire(bool pair) {
@@ -314,6 +310,8 @@ void no_terminus_mid_retire(bool pair) {
     std::atomic<bool> stop{false};
     std::atomic<std::size_t> bad{0};
     std::atomic<std::size_t> inside{0};
+    std::atomic<std::uint32_t> started{0};  // the window an op was last started in
+    std::atomic<std::uint32_t> done{0};     // the window an op last returned in, counted
     std::thread sender([&] {
         while (!stop.load(std::memory_order_acquire)) {
             const auto e = g.vertex_slot_at(index);
@@ -321,19 +319,26 @@ void no_terminus_mid_retire(bool pair) {
             const bytes_t frame = write_to_t(pair, *e);
             const std::uint32_t s0 = seq.load(std::memory_order_acquire);
             const std::size_t n0 = calls.load(std::memory_order_acquire);
+            started.store(s0, std::memory_order_release);  // an op is in flight in window s0
             router.on_frame("p0", frame);
             const std::size_t n1 = calls.load(std::memory_order_acquire);
             const std::uint32_t s1 = seq.load(std::memory_order_acquire);
-            if (s0 != s1 || (s0 & 1u) == 0) continue;
-            inside.fetch_add(1, std::memory_order_relaxed);
-            if (n1 != n0) bad.fetch_add(1, std::memory_order_relaxed);
+            if (s0 == s1 && (s0 & 1u) != 0) {
+                inside.fetch_add(1, std::memory_order_relaxed);
+                if (n1 != n0) bad.fetch_add(1, std::memory_order_relaxed);
+            }
+            done.store(s0, std::memory_order_release);  // ...and it has returned, counted
         }
     });
     for (int i = 0; i < kMaxCycles && (i < kCycles || inside.load() < kTerminusFloor); ++i) {
         const auto h = g.find(at.key());
-        if (!h) break;
-        seq.fetch_add(1, std::memory_order_acq_rel);  // odd: a retire is in progress
+        if (!h || !g.vertex_slot_at(index)) break;
+        // Until the floor is reached, the window waits for an op (kTerminusFloor's brief).
+        const bool gate = inside.load(std::memory_order_relaxed) < kTerminusFloor;
+        const std::uint32_t s = seq.fetch_add(1, std::memory_order_acq_rel) + 1;  // odd: open
+        while (gate && started.load(std::memory_order_acquire) != s) std::this_thread::yield();
         (void)g.retire(*h);
+        while (gate && done.load(std::memory_order_acquire) != s) std::this_thread::yield();
         seq.fetch_add(1, std::memory_order_acq_rel);  // even: it has returned
         revive();
     }
