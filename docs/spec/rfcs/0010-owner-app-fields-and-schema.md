@@ -1484,4 +1484,6 @@ A link that publishes `dropped_tx_cause` counts it and `dropped_tx` since the li
 constructed, and MUST NOT reset either at a reconnect: the drops that preceded a connection loss
 are what explains it.
 The cause is a hint sampled under the snapshot-coherence clause of Amendment 1 §D.3: a reader
-racing a drop may see the new count with the previous cause.
+racing a drop may see the count and the cause from either side of it: the new count with the
+previous cause, or the previous count with the new one. So a `dropped_tx` of 0 beside a cause
+other than `NONE` is that race, not a contradiction of the `NONE` row.

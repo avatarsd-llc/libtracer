@@ -639,8 +639,9 @@ class esp_ws_client_link_t final : public transport_t {
      * `OVERSIZE`: past `tx_bytes`.
      * `LINK_DOWN`: no connection stood, or the frame still waited when it went down. `SHED`:
      * a full lane ring, the `tx_bytes` budget for waiting frames, or a refused `memory.io`
-     * block. `TRANSPORT_ERROR`: the socket failed the write. No write here waits (#2787), so
-     * there is no write-timeout cause to report.
+     * block. This link never reports `TRANSPORT_ERROR`: a failed write here means the
+     * connection is gone, which reads `LINK_DOWN`. No write here waits (#2787), so there is no
+     * write-timeout cause to report.
      */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
         return drops_.snapshot();

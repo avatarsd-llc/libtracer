@@ -1035,6 +1035,8 @@ void esp_ws_client_link_t::send_on(std::span<const std::span<const std::byte>> i
     // `tx_bytes` budget or a refused block (#2788). Counted only when something was lost: the
     // success path takes no atomic.
     const bool up = connected_.load(std::memory_order_acquire);
+    // `up` is read after the egress, so a shed that raced a re-dial reads SHED rather than
+    // LINK_DOWN; deliberate, since the cause is a hint (RFC-0010 Amendment 6).
     if (r.shed != 0)
         drops_.count_dropped_tx(r.shed, up ? drop_cause_t::SHED : drop_cause_t::LINK_DOWN);
     // A send on a link that is down is the event that ends a backoff no app clock drives

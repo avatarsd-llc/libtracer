@@ -502,7 +502,7 @@ enum class drop_cause_t : std::uint8_t {
     SHED = 3,            /**< @brief The link's own bound shed it: a full lane ring (conflate,
                                      drop-oldest, the reliable arm's refusal), the budget for waiting
                                      frames, or a store that refused its block. */
-    TRANSPORT_ERROR = 4, /**< @brief The socket failed the write. */
+    TRANSPORT_ERROR = 4, /**< @brief The transport failed the write. */
 };
 
 /**
@@ -564,7 +564,7 @@ struct drop_classes_t {
  * cause, and the last one is kept (one relaxed byte store beside the count), read through
  * @ref dropped_tx_cause rather than the snapshot.
  *
- * @tparam Classes The classes this link can drop; all three by default.
+ * @tparam Classes The classes this link can drop; the three counters by default, no cause.
  */
 template <drop_classes_t Classes = drop_classes_t{}>
 class drop_tally_t {

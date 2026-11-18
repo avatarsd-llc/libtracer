@@ -682,7 +682,7 @@ void tally_counts_three_independent_words() {
 
     // #2788: the cause is one byte beside the words, kept only where a link asks for it.
     using tr::net::drop_cause_t;
-    static_assert(sizeof(drop_tally_t<drop_classes_t{.dropped_tx_cause = true}>) <=
+    static_assert(sizeof(drop_tally_t<drop_classes_t{.dropped_tx_cause = true}>) ==
                   4 * sizeof(std::size_t));
     drop_tally_t<drop_classes_t{.dropped_tx_cause = true}> caused;
     check(caused.dropped_tx_cause() == drop_cause_t::NONE,
