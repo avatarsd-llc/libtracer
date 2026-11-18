@@ -432,7 +432,8 @@ enum class slot_state_t : std::uint32_t {
  * @brief One deferred release obligation and the epoch it was retired at.
  *
  * `ctx` / `release` are written only under @ref slot_state_t::FILLING and read only under
- * @ref slot_state_t::CLAIMING — both states are owned exclusively by one thread — so they are
+ * @ref slot_state_t::FILLING (@ref retire_onto's takeover) or @ref slot_state_t::CLAIMING — both
+ * states are owned exclusively by one thread — so they are
  * plain members rather than atomics, published and consumed by @ref state's release/acquire
  * transitions. @ref epoch is atomic because a drainer reads it BEFORE it claims, to skip a slot
  * that is not yet past without writing to it; `%drain_ripe` checks it again once claimed.
@@ -978,6 +979,62 @@ inline bool retire(void* ctx, void (*release)(void*), registry_t& r = registry()
             drain(r, t);
             return true;
         }
+    return false;
+}
+
+/** @brief A release hook that releases nothing: @ref rider_t's default. */
+inline void release_nothing(void* /*ctx*/) noexcept {}
+
+/** @brief The pair a slot held before `%retire_onto` took it over; run first by the new hook.
+ *         Its default releases nothing, so the hook calls it unconditionally. */
+struct rider_t {
+    void* ctx = nullptr;                       /**< @brief The pair's context. */
+    void (*release)(void*) = &release_nothing; /**< @brief Its release hook. */
+};
+
+/**
+ * @brief Retire @p ctx's @p release into any slot not mid-step, for a caller that must not be
+ *        refused (the transport plane's join notice, #2840).
+ *
+ * One scan takes the first EMPTY or READY slot to FILLING. An EMPTY slot is filled as
+ * @ref retire fills one. A READY slot's pair moves into @p held, and the slot is republished
+ * with @p release at the current epoch; @p release must run @p held's pair first, so that pair
+ * is released later than it could have been, never earlier (the new epoch is at or past its
+ * own). @p held keeps its default, which releases nothing, for an EMPTY slot, and must stay alive
+ * until @p release has run. One call fills @p held at most once, since it returns as soon as it
+ * takes a slot, and a refused call leaves it untouched.
+ *
+ * The scan may take over an occupied slot while a later one is empty. That is safe: the displaced
+ * pair's release only runs later, never earlier, and the table keeps one slot per pair either way.
+ *
+ * @return False only when every slot was mid-step on another thread (FILLING or CLAIMING) as the
+ *         scan reached it. Such a step leaves its slot EMPTY or READY, so a retry fails again
+ *         only while other threads keep every slot mid-step: at least `kDeferredReleaseSlots`
+ *         threads preempted mid-step (`default_config_t::kDeferredReleaseSlots`).
+ */
+inline bool retire_onto(rider_t& held, void* ctx, void (*release)(void*),
+                        registry_t& r = registry(), retired_table_t& t = retired_table()) noexcept {
+    const std::uint32_t e = advance(r);
+    for (retired_slot_t& s : t.slots) {
+        slot_state_t from = slot_state_t::EMPTY;
+        if (!s.state.compare_exchange_strong(from, slot_state_t::FILLING, std::memory_order_acq_rel,
+                                             std::memory_order_relaxed) &&
+            (from != slot_state_t::READY ||
+             !s.state.compare_exchange_strong(from, slot_state_t::FILLING,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_relaxed)))
+            continue;
+        if (from == slot_state_t::READY)
+            held = {s.ctx, s.release};
+        else
+            r.ctl.live.fetch_add(1, std::memory_order_relaxed);
+        s.ctx = ctx;
+        s.release = release;
+        s.epoch.store(e, std::memory_order_relaxed);
+        s.state.store(slot_state_t::READY, std::memory_order_release);
+        drain(r, t);  // as in retire: the participants may have quiesced during the fill
+        return true;
+    }
     return false;
 }
 

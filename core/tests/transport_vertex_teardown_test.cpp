@@ -43,6 +43,7 @@
 #include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
+#include "libtracer/qsbr.hpp"
 #include "libtracer/transport_vertex.hpp"
 #include "test_support.hpp"
 
@@ -486,6 +487,47 @@ void destruction_joins_its_links() {
     }
 }
 
+/** @brief With the reclaim table full, the plane's destruction still waits for the frame and
+ *         destroys its link before it returns (#2840). */
+void full_table_destruction_joins_its_links() {
+    if constexpr (tr::net::kBusLinks && tr::graph::reclaim_policy_t::kDefersToDispatchExit) {
+        graph_t g;
+        fwd_router_t router(g);
+        probe_t p;
+        auto net = plane_owning_x(g, router, p);
+        fwd_router_t::origin_t slot([](void*, const tr::view::rope_t&) {}, nullptr);
+        const path_t dst("/net/m/x/p0");
+        p.stay.store(true);
+        p.hold.store(true);
+        std::thread inside(
+            [&] { (void)router.originate(slot, tr::graph::fwd_op_t::READ, dst, {}); });
+        while (!p.entered.load()) std::this_thread::yield();
+        // The frame inside the link keeps every pair retired now from ripening: fill the table.
+        std::atomic<int> released{0};
+        const auto count = [](void* c) { static_cast<std::atomic<int>*>(c)->fetch_add(1); };
+        int filled = 0;
+        while (tr::graph::detail_qsbr::retire(&released, count)) ++filled;
+        check(filled > 0 && released.load() == 0, "the reclaim table is full and nothing ripened");
+        std::atomic<bool> done{false};
+        std::thread destroyer([&] {
+            net.reset();
+            done.store(true);
+        });
+        while (!p.shut.load()) std::this_thread::yield();
+        for (int i = 0; i < 1000; ++i) std::this_thread::yield();
+        check(!done.load() && !p.closed.load() && released.load() == 0,
+              "with the table full and a frame inside its link, the destruction has not returned, "
+              "and the pair whose slot its notice took is still held");
+        p.stay.store(false);
+        inside.join();
+        destroyer.join();
+        check(!p.closed_inside.load(), "the link was never destroyed under the frame");
+        check(p.closed.load(), "and once the frame left, the destruction destroyed the link");
+        check(released.load() == filled, "every pair that filled the table was released");
+        (void)router.cancel(slot);
+    }
+}
+
 /** @brief A removal whose retire is refused keeps the shut-down link for the graph's life. */
 void refused_retire_keeps_the_link() {
     gate_source_t gate;
@@ -523,6 +565,7 @@ int main() {
     bus_children_read_after_destruction();
     with_link_held_across_collects();
     destruction_joins_its_links();
+    full_table_destruction_joins_its_links();
     if constexpr (tr::net::kBusLinks) {
         forward_held_across_collects();
         origination_held_across_collects();
