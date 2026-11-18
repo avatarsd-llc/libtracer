@@ -37,6 +37,12 @@
  * router calls it once per inbound frame, with the link's name, before dispatch. Its tally is
  * per thread, so no other test's receive threads race on it.
  *
+ * **The READ budget on, at its widest.** `kReadBudget` defaults to 0, off (#2774). The test
+ * build turns it on so `fwd_read_budget_test` runs the refusal path and the RAM ratchets pin the
+ * per-session cost with the budget on (every leg that binds its own fragment pins it off). 254,
+ * the widest budget, so no other test's READs come near it: a test never closes a run, and only
+ * a session past its 254th READ while a second session reads is refused.
+ *
  * **It yields to a fragment the build already supplies.** A CI leg that binds its own
  * configuration (a reclamation policy, the bus module closed, ...) lists its fragment later on
  * the include path; that fragment is the configuration under test and must not be shadowed.
@@ -58,6 +64,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string_view>
 
 namespace tr::graph {
@@ -95,6 +102,8 @@ struct instrumented_config_t : default_config_t {
     static constexpr bool kSessionAdmission = true;
     /** @brief Count inbound frames per thread (#2580). */
     using frame_observer_t = counting_frame_observer_t;
+    /** @brief The READ budget on, at its widest (#2774). */
+    static constexpr std::uint8_t kReadBudget = 254;
 };
 
 using config_t = instrumented_config_t;
