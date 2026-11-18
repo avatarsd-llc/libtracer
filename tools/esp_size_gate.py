@@ -124,7 +124,10 @@ FOOTPRINT_PINS = {
     # connection down; drop() is the one release of a connection.
     # 33,463 -> 33,465 B (+2): rulings 83/85/93, #2774 per-session READ budget, built off:
     # the off build's cost is accepted. Main's pin plus the measured delta.
-    "WebSocket (httpd server + client link)": 33465,
+    # 33,465 -> 33,567 B (+102): rulings 86/116/117, #2788 drop cause: the noun's bytes moved from
+    # fwd_router into the one link that keeps a cause; the component total grew 2 B over the
+    # shared-snapshot shape, and UDP, TCP and CAN stay at their pins.
+    "WebSocket (httpd server + client link)": 33567,
 }
 
 
