@@ -276,6 +276,9 @@ class self_heal_link_t final : public transport_t {
      *  engine's store, the count is in the block, and the corpse list threads through it,
      *  so parking a dead socket can never fail for want of memory. */
     struct sock_t {
+        /** @brief Set in `refs` by the engine's destructor while it waits for a send's hold
+         *         to go: the send whose release leaves only the list's hold wakes it (#2813). */
+        static constexpr std::uint32_t kHoldWaiting = 1U << 31;
         transport_ptr_t link;               /**< @brief The factory-constructed socket. */
         self_heal_link_t* self = nullptr;   /**< @brief Back-pointer for the receive sinks
                                                         and the notifier: valid until the
@@ -287,7 +290,9 @@ class self_heal_link_t final : public transport_t {
                                                         late down must not kill a healed
                                                         successor. */
         std::atomic<std::uint32_t> refs{1}; /**< @brief Holders: `inner_`, the corpse list,
-                                                        and each in-flight send. */
+                                                        and each in-flight send, plus
+                                                        `%kHoldWaiting` while the
+                                                        engine's destructor waits. */
         sock_t* next_corpse = nullptr;      /**< @brief The corpse list's link. */
     };
 

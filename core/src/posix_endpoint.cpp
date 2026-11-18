@@ -211,31 +211,38 @@ bool posix_endpoint_t::start(std::size_t stack_size, mem::block_source_t& src) {
 
 void posix_endpoint_t::stop_and_join() {
     assert(!on_callback_thread() && "a link's destructor runs off every callback thread");
-    (void)stop_for_shut_down();
+    stop_waiting();
+    // The one wait: a private module's driver ends once its callback in flight returns, and on
+    // the node's module the detach waits out this link's own callback in flight, if any.
+    if (fallback_ != nullptr) fallback_->thread.join();
+    if (wait_module_t* const w = waiting()) w->detach(src_);
 }
 
-bool posix_endpoint_t::stop_for_shut_down() {
-    const bool deferred = on_callback_thread();
+void posix_endpoint_t::stop_waiting() {
     // Before any descriptor is read: a callback's release_fd that runs after this keeps its fd.
-    if (deferred) shut_.store(true, std::memory_order_seq_cst);
+    shut_.store(true, std::memory_order_seq_cst);
     wait_module_t* const w = wait_.load(std::memory_order_acquire);
-    if (w == nullptr) return deferred;
-    // A private module's driver goes first: once it is joined no callback can run, so the
-    // detach takes no lock and waits on nobody, and a teardown made under the caller's lock
-    // (a transport vertex's control plane) cannot cross a callback that takes that lock. Not
-    // joined on a deferred teardown: the thread may be this one, or be inside a callback that
-    // waits on this one. Once its callback returns its run() sees the stop and the thread
-    // ends; the destructor joins it.
-    if (fallback_ != nullptr) {
-        fallback_->module.stop();
-        if (!deferred) fallback_->thread.join();
-    }
-    w->detach(src_);
-    return deferred;
+    if (w == nullptr) return;
+    // Nothing is waited for: the thread may be this one, or be inside a callback that waits on
+    // this one. A private module's driver sees the stop once its callback returns and ends; the
+    // destructor joins it.
+    if (fallback_ != nullptr) fallback_->module.stop();
+    w->disarm(src_);
+}
+
+bool posix_endpoint_t::attach(wait_source_t& s, int fd, wait_source_t::fire_t fire,
+                              bool write) noexcept {
+    s.fd.store(fd, std::memory_order_relaxed);
+    s.fire = fire;
+    s.ctx = this;
+    if (write) s.write.store(true, std::memory_order_relaxed);
+    if (waiter().attach(s) && !shut_seq()) return true;
+    waiter().disarm(s);  // nothing when the module refused it
+    return false;
 }
 
 void posix_endpoint_t::release_fd(std::atomic<int>& slot, int fd) noexcept {
-    // Cleared, THEN the mark read, against stop_for_shut_down's mark-then-read (both
+    // Cleared, THEN the mark read, against stop_waiting's mark-then-read (both
     // seq_cst): a teardown that read this fd sees it kept open, and one that read -1 found
     // it gone, so no shutdown lands on a closed descriptor.
     slot.store(-1, std::memory_order_seq_cst);
@@ -246,14 +253,8 @@ void posix_endpoint_t::release_fd(std::atomic<int>& slot, int fd) noexcept {
     slot.store(fd, std::memory_order_relaxed);  // the destructor closes it
 }
 
-void posix_endpoint_t::release_listen(int& fd) noexcept {
-    if (fd < 0) return;
-    if (shut_.load(std::memory_order_relaxed)) {
-        (void)::shutdown(fd, SHUT_RDWR);
-        return;
-    }
-    ::close(fd);
-    fd = -1;
+void posix_endpoint_t::release_listen(int fd) noexcept {
+    if (fd >= 0) (void)::shutdown(fd, SHUT_RDWR);
 }
 
 stream_endpoint_t::~stream_endpoint_t() {
@@ -470,9 +471,9 @@ void stream_endpoint_t::teardown_peer(int fd) {
 }
 
 void stream_endpoint_t::shut_down_stream() {
-    // Detached first, so no callback can tear the peer down under this one. Deferred, a
-    // callback may still run: the fd is read after the link is marked shut, so it stays open.
-    (void)stop_for_shut_down();
+    // Off the wait first, so no new callback can tear the peer down under this one. One in
+    // flight may still run: the fd is read after the link is marked shut, so it stays open.
+    stop_waiting();
     const int fd = conn_fd_.load(std::memory_order_seq_cst);
     if (fd >= 0) teardown_peer(fd);
 }
@@ -788,10 +789,10 @@ void slot_server_t::accept_peer() {
     slot->write.store(false, std::memory_order_relaxed);
     slot->fd.store(fd, std::memory_order_release);
     // On the wait before it opens, so a first frame the socket holds can arm writability. A
-    // refused registration refuses the peer, as the cap does. A slot taken before a deferred
-    // teardown walked the table may be attached after it: on a shut link the session is torn
+    // refused registration refuses the peer, as the cap does. A slot taken before a shut-down
+    // walked the table may be attached after it: on a shut link the session is torn
     // down the same way. That read comes after the attach (seq_cst, against the mark the
-    // teardown stores before its walk), so either it sees the link shut or the walk's detach
+    // teardown stores before its walk), so either it sees the link shut or the walk's disarm
     // follows the attach.
     if (!waiter().attach(*slot) || shut_seq()) {
         teardown_slot(*slot);
@@ -858,9 +859,10 @@ void slot_server_t::service_peer(session_base_t& s) {
 }
 
 void slot_server_t::teardown_slot(session_base_t& s) {
-    // Off the wait first: no callback for this slot runs after, so a shut-down walk never
-    // tears down a session under its own callback, and this is that walk's only detach.
-    if (wait_module_t* const w = waiting()) w->detach(s);
+    // Off the wait first, waiting for nothing: no new callback for this slot starts after. One
+    // already in flight may tear the same session down beside this one; the exchanges below
+    // make every step run once.
+    if (wait_module_t* const w = waiting()) w->disarm(s);
     char departed[kPeerNameChars];
     peer_handle_t departed_handle;
     bool was_open = false;
@@ -918,14 +920,13 @@ void slot_server_t::teardown_slot(session_base_t& s) {
 }
 
 void slot_server_t::shut_down_slots(bool tear_down) {
-    // The fallback thread and the listener first, for the reason posix_endpoint_t gives:
-    // `slots_` grows only in the listener's callback, so the table is then still, except
-    // against an accept already past its shut check on a deferred teardown (see
-    // accept_peer). Then ONE walk: each slot off the wait, and torn down for a shut_down.
-    (void)stop_for_shut_down();
+    // The listener first: `slots_` grows only in the listener's callback, so the table is then
+    // still, except against an accept already past its shut check (see accept_peer). Then ONE
+    // walk: each slot torn down for a shut_down, or detached for the destructor.
+    stop_waiting();
     for (std::size_t i = 0; session_base_t* const s = slot_at(i); ++i)
         if (tear_down)
-            teardown_slot(*s);  // its first act is the slot's detach
+            teardown_slot(*s);  // its first act is the slot's disarm
         else if (wait_module_t* const w = waiting())
             w->detach(*s);
     release_listen(listen_fd_);
@@ -934,7 +935,7 @@ void slot_server_t::shut_down_slots(bool tear_down) {
 void slot_server_t::shut_down() { shut_down_slots(true); }
 
 void slot_server_t::stop_and_join() {
-    assert(!on_callback_thread() && "a link's destructor runs off every callback thread");
+    posix_endpoint_t::stop_and_join();  // asserts it runs off every callback thread
     shut_down_slots(false);
 }
 

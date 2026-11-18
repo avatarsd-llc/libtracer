@@ -134,10 +134,10 @@
  *     destroyed inside one dial bound therefore retain N recv-thread stacks for the
  *     remainder of it. Admission is per-link and lives in the link's own slot, so no
  *     global gate exists that a condemned dial could make a fresh link wait behind.
- *   - Teardown is a BARRIER, not an assumption. The destructor disarms the link
- *     (`stop_`), wakes the recv thread's backoff, joins it (or detaches it, per the note
- *     above), then destroys the handles
- *     UNDER the same mutex a sender holds across its write, and finally waits out
+ *   - Teardown is a BARRIER, not an assumption. @ref shut_down disarms the link
+ *     (`stop_`) and wakes the recv thread's backoff; the recv thread's last `drop()`
+ *     destroys the handles UNDER the same mutex a sender holds across its write; the
+ *     destructor joins that thread (or detaches it, per the note above) and finally waits out
  *     every sender that had already ANNOUNCED itself on the in-flight tally — raised at
  *     the top of `send()`, before it queues on that mutex. Before #952 it destroyed the
  *     handles with that mutex held nowhere, on the false premise that the joined recv
@@ -156,7 +156,7 @@
  *     holds.
  *   - The DEPARTURE SEAM is reported (#957). The recv loop's "not connected" arm is
  *     downstream of all three sites that clear `connected_` — `drop()` (peer CLOSE, a
- *     poll error, a read error), `send()`'s failed/short-write arm, and the destructor —
+ *     poll error, a read error), `send()`'s failed/short-write arm, and @ref shut_down —
  *     so it fires `notify_down()` once per connection that was up, with no transport lock
  *     held, before it re-dials. A LOCAL teardown reports nothing (core's `stop_` rule,
  *     and the third of those three sites). It used to fire from nowhere, on
@@ -358,7 +358,8 @@ class esp_ws_client_link_t final : public transport_t {
                                   const esp_ws_client_config_t& config = {});
 
     /**
-     * @brief Stop the recv thread, then close + destroy the esp_transport handles.
+     * @brief Stop the recv thread, then close + destroy the esp_transport handles: the link's
+     *        one join, run off every callback thread (asserted).
      *
      * @ref shut_down first, then the memory (#1606). Bounded and ordered (#952): the link is
      * disarmed first, the recv thread's
@@ -452,16 +453,18 @@ class esp_ws_client_link_t final : public transport_t {
 
     /**
      * @brief Stop for good, short of being destroyed (the @ref transport_t::shut_down
-     *        contract): disarm, stop the recv thread, close and release the connection.
+     *        contract): disarm the link, shut its connection down, and wait for no thread.
      *
-     * "Shut down now, free at collect()": an owner that removes this link while a forward
-     * may still be on its way into it calls this at removal, and the destructor — at the
-     * graph's next `collect()` — returns the memory (the dial slot). A
-     * `send()` after this is shed without touching a handle and without counting a drop.
-     * Its cost is the destructor's worst case, `kPollMs`; a dial in flight
-     * is condemned rather than waited out, as there. IDEMPOTENT, and safe to follow with
-     * the destructor. On a thread that runs link callbacks (the recv thread among them) it
-     * only shuts down: the destructor joins the recv thread and releases the connection.
+     * "Shut down now, free at collect()" (#2813): an owner that removes this link while a
+     * forward may still be on its way into it calls this at removal. It stores the stop, shuts
+     * the connection's socket down (the peer sees the close now), wakes the recv thread's
+     * backoff and condemns a dial in flight, then returns: the link reports down, and a
+     * `send()` after this is shed without touching a handle and without counting a drop. The
+     * one wait is for `write_m_`, which a sender holds for one non-blocking `send()`. The recv
+     * thread releases the connection and ends on its own, within one poll turn (`kPollMs`) or
+     * once a delivery in flight returns; its stack stays held until the destructor, at the
+     * graph's next `collect()`, joins the thread and frees it. IDEMPOTENT,
+     * and safe to follow with the destructor.
      */
     void shut_down() override;
 
@@ -941,7 +944,7 @@ class esp_ws_client_link_t final : public transport_t {
 #endif
     /** @brief Liveness — what @ref link_up reports, and the handles' publication flag.
      *         Set by `connect_once()`, cleared by `drop()`, by `send()`'s failed/short-write
-     *         arm and by the destructor. */
+     *         arm and by @ref shut_down. */
     std::atomic<bool> connected_{false};
     /** @brief The came-up fact — what @ref ok reports (#1059). Set with `connected_` on
      *         every completed handshake and NEVER cleared, so it latches the first one.

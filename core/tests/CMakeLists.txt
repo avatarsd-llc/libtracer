@@ -339,6 +339,16 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_TCP A
     libtracer_test_warnings(link_teardown_wait_test)
     add_test(NAME link_teardown_wait COMMAND link_teardown_wait_test)
 
+    # #2813 — the one teardown table (link_teardown_table.hpp) over every host socket link, on
+    # its own thread and on a node wait module: shut_down never waits, the destructor joins.
+    add_executable(link_teardown_table_test link_teardown_table_test.cpp)
+    target_link_libraries(link_teardown_table_test PRIVATE libtracer)
+    # Row 5 holds the link's own socket reads and accepts (the test's io_watch_t).
+    target_link_options(link_teardown_table_test PRIVATE "-Wl,--wrap=recvmsg" "-Wl,--wrap=recv"
+        "-Wl,--wrap=accept")
+    libtracer_test_warnings(link_teardown_table_test)
+    add_test(NAME link_teardown_table COMMAND link_teardown_table_test)
+
     # #2147 slice 3 — the node's wait module through the transport vertex: a SPEC-created udp,
     # tcp or ws link puts its sockets on the module the vertex was given and spawns no thread.
     add_executable(node_wait_module_test node_wait_module_test.cpp)
@@ -892,7 +902,8 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # the offered buffer is what splits ONE oversized frame across reads that each report
     # the same fin. NO socket is opened here: the fake's esp_transport_get_socket answers -1,
     # and a frame's one non-blocking send() (#2787) is wrapped into the fake (--wrap=send on
-    # every client target), which writes it to the connection whose socket the link resolved.
+    # every client target), which writes it to the connection whose socket the link resolved;
+    # so is shut_down()'s shutdown() of that connection (--wrap=shutdown, #2813).
     add_executable(esp_ws_client_recv_test
         "${LIBTRACER_ESP_DIR}/tests/host/esp_ws_client_recv_test.cpp"
         "${LIBTRACER_ESP_DIR}/tests/host/fake_esp_transport.cpp"
@@ -903,7 +914,7 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
         "${LIBTRACER_ESP_DIR}/libtracer"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(esp_ws_client_recv_test PRIVATE libtracer)
-    target_link_options(esp_ws_client_recv_test PRIVATE "-Wl,--wrap=send")
+    target_link_options(esp_ws_client_recv_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(esp_ws_client_recv_test)
     add_test(NAME esp_ws_client_recv COMMAND esp_ws_client_recv_test)
 
@@ -924,12 +935,13 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
         "${LIBTRACER_ESP_DIR}/tests/host/fake_esp_transport.cpp"
         "${LIBTRACER_ESP_DIR}/libtracer/esp_ws_client_link.cpp")
     target_include_directories(esp_ws_client_teardown_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
         "${LIBTRACER_ESP_DIR}/tests/host"
         "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
         "${LIBTRACER_ESP_DIR}/libtracer"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(esp_ws_client_teardown_test PRIVATE libtracer)
-    target_link_options(esp_ws_client_teardown_test PRIVATE "-Wl,--wrap=send")
+    target_link_options(esp_ws_client_teardown_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(esp_ws_client_teardown_test)
     add_test(NAME esp_ws_client_teardown COMMAND esp_ws_client_teardown_test)
     # Three cases spend a real wait on purpose (a 600 ms held write, a 2.5 s hung dial,
@@ -956,7 +968,7 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(esp_ws_client_liveness_test PRIVATE libtracer)
     target_link_options(esp_ws_client_liveness_test PRIVATE "-Wl,--wrap=setsockopt"
-        "-Wl,--wrap=send")
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(esp_ws_client_liveness_test)
     add_test(NAME esp_ws_client_liveness COMMAND esp_ws_client_liveness_test)
     # Two cases spend real reconnect backoffs on purpose (1.5 s each, twice over for the
@@ -983,7 +995,7 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
         "${LIBTRACER_ESP_DIR}/libtracer"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(esp_ws_client_dial_test PRIVATE libtracer)
-    target_link_options(esp_ws_client_dial_test PRIVATE "-Wl,--wrap=send")
+    target_link_options(esp_ws_client_dial_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(esp_ws_client_dial_test)
     add_test(NAME esp_ws_client_dial COMMAND esp_ws_client_dial_test)
     # One case spends a real reconnect backoff on purpose (1.5 s), to make the second dial
@@ -1005,7 +1017,8 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     target_compile_definitions(esp_ws_client_dial_stats_test PRIVATE
         CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS=1)
     target_link_libraries(esp_ws_client_dial_stats_test PRIVATE libtracer)
-    target_link_options(esp_ws_client_dial_stats_test PRIVATE "-Wl,--wrap=send")
+    target_link_options(esp_ws_client_dial_stats_test PRIVATE "-Wl,--wrap=send"
+        "-Wl,--wrap=shutdown")
     libtracer_test_warnings(esp_ws_client_dial_stats_test)
     add_test(NAME esp_ws_client_dial_stats COMMAND esp_ws_client_dial_stats_test)
     set_tests_properties(esp_ws_client_dial_stats PROPERTIES TIMEOUT 60)
@@ -1023,7 +1036,8 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     target_compile_definitions(esp_ws_client_traffic_stats_test PRIVATE
         CONFIG_LIBTRACER_LINK_TRAFFIC_STATS=1)
     target_link_libraries(esp_ws_client_traffic_stats_test PRIVATE libtracer)
-    target_link_options(esp_ws_client_traffic_stats_test PRIVATE "-Wl,--wrap=send")
+    target_link_options(esp_ws_client_traffic_stats_test PRIVATE "-Wl,--wrap=send"
+        "-Wl,--wrap=shutdown")
     libtracer_test_warnings(esp_ws_client_traffic_stats_test)
     add_test(NAME esp_ws_client_traffic_stats COMMAND esp_ws_client_traffic_stats_test)
     set_tests_properties(esp_ws_client_traffic_stats PROPERTIES TIMEOUT 60)
