@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795015754296,
+  "lastUpdate": 1795015761789,
   "repoUrl": "https://github.com/avatarsd-llc/libtracer",
   "entries": {
     "libtracer bench-local latency (ns, smaller is better, fixed pinned host)": [
@@ -430310,6 +430310,2190 @@ window.BENCHMARK_DATA = {
             "value": 11322979,
             "unit": "deliveries/s",
             "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=0.8 (host psi <=41.6, info), nivcsw 1022, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 46.0 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (A/A bracket p75 10.8% (band 6.0%), max 18.1% (cap 15.0%)) · CONTAMINATED (host load 26.3 > bar 4.2)"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "15184545+AvatarSD@users.noreply.github.com",
+            "name": "avatarsd",
+            "username": "AvatarSD"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2b4e8350b35d25cce7ee00418cec6ad065958891",
+          "message": "Merge pull request #2862 from avatarsd-llc/fix/2840-plane-join-on-refusal\n\nnet: the plane's destruction joins its links when the reclaim table is full",
+          "timestamp": "2026-11-18T17:01:51+02:00",
+          "tree_id": "38b3b54711aad19b61efbb3ba409f963d4ea4fc8",
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/2b4e8350b35d25cce7ee00418cec6ad065958891"
+        },
+        "date": 1795015760192,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "inproc 64B/fan8/1ep throughput",
+            "value": 58256808,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 64B/fan128/1ep throughput",
+            "value": 127872692,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 64B/fan1024/1ep throughput",
+            "value": 139842014,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 64B/fan8192/1ep throughput",
+            "value": 66367636,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 1B/fan1/1ep throughput",
+            "value": 11437125,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 8B/fan1/1ep throughput",
+            "value": 11514501,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep throughput",
+            "value": 11439218,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 1024B/fan1/1ep throughput",
+            "value": 12598920,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 8192B/fan1/1ep throughput",
+            "value": 12722836,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 984B/fan1/1ep throughput",
+            "value": 10434193,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 985B/fan1/1ep throughput",
+            "value": 10501643,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 4096B/fan1/1ep throughput",
+            "value": 12643242,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 16384B/fan1/1ep throughput",
+            "value": 12587890,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 65536B/fan1/1ep throughput",
+            "value": 12595823,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 2B/fan1/1ep throughput",
+            "value": 11446033,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 3B/fan1/1ep throughput",
+            "value": 11451945,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 4B/fan1/1ep throughput",
+            "value": 11483534,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 6B/fan1/1ep throughput",
+            "value": 11498315,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 11B/fan1/1ep throughput",
+            "value": 11503289,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 16B/fan1/1ep throughput",
+            "value": 11502918,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 23B/fan1/1ep throughput",
+            "value": 11487042,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 32B/fan1/1ep throughput",
+            "value": 11348972,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 45B/fan1/1ep throughput",
+            "value": 11515575,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 91B/fan1/1ep throughput",
+            "value": 11434392,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 128B/fan1/1ep throughput",
+            "value": 11382605,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 181B/fan1/1ep throughput",
+            "value": 11234793,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 256B/fan1/1ep throughput",
+            "value": 11015399,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 362B/fan1/1ep throughput",
+            "value": 11038996,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 512B/fan1/1ep throughput",
+            "value": 11053651,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 724B/fan1/1ep throughput",
+            "value": 10824063,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 1448B/fan1/1ep throughput",
+            "value": 12546236,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 2048B/fan1/1ep throughput",
+            "value": 12612364,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 2896B/fan1/1ep throughput",
+            "value": 12608087,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 5793B/fan1/1ep throughput",
+            "value": 12615498,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 11585B/fan1/1ep throughput",
+            "value": 12689280,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 23170B/fan1/1ep throughput",
+            "value": 12701430,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 32768B/fan1/1ep throughput",
+            "value": 12630182,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 46341B/fan1/1ep throughput",
+            "value": 12703629,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-borrow 1B/fan1/1ep throughput",
+            "value": 11429458,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-borrow 8B/fan1/1ep throughput",
+            "value": 11346467,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep throughput",
+            "value": 11517207,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-borrow 1024B/fan1/1ep throughput",
+            "value": 11496928,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-borrow 8192B/fan1/1ep throughput",
+            "value": 11508127,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-borrow 984B/fan1/1ep throughput",
+            "value": 11507061,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-borrow 985B/fan1/1ep throughput",
+            "value": 11508379,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-borrow 4096B/fan1/1ep throughput",
+            "value": 11489273,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-borrow 16384B/fan1/1ep throughput",
+            "value": 11487623,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-borrow 65536B/fan1/1ep throughput",
+            "value": 11534850,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-path 64B/fan1/1ep throughput",
+            "value": 9144955,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-path 64B/fan1/8ep throughput",
+            "value": 9041353,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-path 64B/fan1/128ep throughput",
+            "value": 8795542,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-path 64B/fan1/1024ep throughput",
+            "value": 8649045,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-path 64B/fan1/8192ep throughput",
+            "value": 8091768,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "mixed 0B/fan6/128ep throughput",
+            "value": 43339785,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "path-parse 2B/fan1/1ep throughput",
+            "value": 37819461,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "path-parse 12B/fan2/1ep throughput",
+            "value": 31005022,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "path-parse 23B/fan4/1ep throughput",
+            "value": 24660206,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "path-parse 16B/fan8/1ep throughput",
+            "value": 18201820,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "eptype-lean 64B/fan1/1ep throughput",
+            "value": 11404848,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "eptype-lean-cached 64B/fan1/1ep throughput",
+            "value": 11513076,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "eptype-stream 64B/fan1/1ep throughput",
+            "value": 8690744,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "eptype-stream 984B/fan1/1ep throughput",
+            "value": 8155826,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "eptype-stream 985B/fan1/1ep throughput",
+            "value": 8238726,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "eptype-stream 1024B/fan1/1ep throughput",
+            "value": 8204278,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "eptype-stream 4096B/fan1/1ep throughput",
+            "value": 6778414,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "eptype-stream 16384B/fan1/1ep throughput",
+            "value": 4532670,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "eptype-stream 65536B/fan1/1ep throughput",
+            "value": 1429184,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fold-b1 512B/fan1/1ep throughput",
+            "value": 514625529,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fold-b2 512B/fan1/1ep throughput",
+            "value": 330371716,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fold-b4 512B/fan1/1ep throughput",
+            "value": 209550714,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fold-b8 512B/fan1/1ep throughput",
+            "value": 121217749,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-deliver 64B/fan1/1ep throughput",
+            "value": 17763906,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-deliver 64B/fan8/1ep throughput",
+            "value": 77447467,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-deliver 64B/fan128/1ep throughput",
+            "value": 132074514,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-deliver 64B/fan1024/1ep throughput",
+            "value": 141699420,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-deliver 64B/fan8192/1ep throughput",
+            "value": 65286170,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-heap 64B/fan1/1ep throughput",
+            "value": 258141792,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-pool 64B/fan1/1ep throughput",
+            "value": 229153347,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-heap 64B/fan1/1ep throughput",
+            "value": 99098403,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-pool 64B/fan1/1ep throughput",
+            "value": 99256765,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-heap 1024B/fan1/1ep throughput",
+            "value": 213272366,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-pool 1024B/fan1/1ep throughput",
+            "value": 224792853,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-heap 1024B/fan1/1ep throughput",
+            "value": 68994923,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-pool 1024B/fan1/1ep throughput",
+            "value": 74629817,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-heap 984B/fan1/1ep throughput",
+            "value": 210697535,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-pool 984B/fan1/1ep throughput",
+            "value": 221192938,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-heap 984B/fan1/1ep throughput",
+            "value": 65154772,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-pool 984B/fan1/1ep throughput",
+            "value": 73636238,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-heap 985B/fan1/1ep throughput",
+            "value": 214039263,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-pool 985B/fan1/1ep throughput",
+            "value": 226667936,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-heap 985B/fan1/1ep throughput",
+            "value": 66238918,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-pool 985B/fan1/1ep throughput",
+            "value": 73969312,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-heap 4096B/fan1/1ep throughput",
+            "value": 97244811,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-pool 4096B/fan1/1ep throughput",
+            "value": 224261004,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-heap 4096B/fan1/1ep throughput",
+            "value": 27965129,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-pool 4096B/fan1/1ep throughput",
+            "value": 28184357,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-heap 16384B/fan1/1ep throughput",
+            "value": 105782270,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-pool 16384B/fan1/1ep throughput",
+            "value": 223664110,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-heap 16384B/fan1/1ep throughput",
+            "value": 8796795,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-pool 16384B/fan1/1ep throughput",
+            "value": 9085692,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-heap 65536B/fan1/1ep throughput",
+            "value": 100076458,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-pool 65536B/fan1/1ep throughput",
+            "value": 228772225,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-heap 65536B/fan1/1ep throughput",
+            "value": 1808195,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-pool 65536B/fan1/1ep throughput",
+            "value": 1823667,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool 1B/fan1/1ep throughput",
+            "value": 12091420,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool 8B/fan1/1ep throughput",
+            "value": 12206537,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool 64B/fan1/1ep throughput",
+            "value": 12185757,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool 1024B/fan1/1ep throughput",
+            "value": 13149194,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool 8192B/fan1/1ep throughput",
+            "value": 13055277,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool-borrow 1B/fan1/1ep throughput",
+            "value": 11727893,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool-borrow 8B/fan1/1ep throughput",
+            "value": 12188089,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool-borrow 64B/fan1/1ep throughput",
+            "value": 12100968,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool-borrow 1024B/fan1/1ep throughput",
+            "value": 12176290,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool-borrow 8192B/fan1/1ep throughput",
+            "value": 12240858,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool 984B/fan1/1ep throughput",
+            "value": 10706146,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool 985B/fan1/1ep throughput",
+            "value": 10857404,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool 4096B/fan1/1ep throughput",
+            "value": 13180834,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool 16384B/fan1/1ep throughput",
+            "value": 13223205,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool 65536B/fan1/1ep throughput",
+            "value": 13148373,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool-borrow 984B/fan1/1ep throughput",
+            "value": 12248249,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool-borrow 985B/fan1/1ep throughput",
+            "value": 12256115,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool-borrow 4096B/fan1/1ep throughput",
+            "value": 12325080,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool-borrow 16384B/fan1/1ep throughput",
+            "value": 12300542,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-pool-borrow 65536B/fan1/1ep throughput",
+            "value": 12336687,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan1/1ep throughput",
+            "value": 8503839,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan8/1ep throughput",
+            "value": 20072233,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan128/1ep throughput",
+            "value": 23971181,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan1024/1ep throughput",
+            "value": 24414404,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan8192/1ep throughput",
+            "value": 19993246,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan1/1ep throughput",
+            "value": 10230123,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan8/1ep throughput",
+            "value": 33519958,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan128/1ep throughput",
+            "value": 46442573,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan1024/1ep throughput",
+            "value": 48492313,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan8192/1ep throughput",
+            "value": 33454997,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 64B/fan16/1ep throughput",
+            "value": 86125857,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 64B/fan32/1ep throughput",
+            "value": 106006554,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 64B/fan64/1ep throughput",
+            "value": 121142270,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 64B/fan256/1ep throughput",
+            "value": 135414168,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc 64B/fan512/1ep throughput",
+            "value": 138891680,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-heap-aged 64B/fan1/1ep throughput",
+            "value": 263435542,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-heap-aged 64B/fan1/1ep throughput",
+            "value": 101141125,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-alloc-heap-aged 1024B/fan1/1ep throughput",
+            "value": 252998667,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "lkv-store-heap-aged 1024B/fan1/1ep throughput",
+            "value": 67150959,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 16B/fan1/1ep throughput",
+            "value": 311941651,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 64B/fan1/1ep throughput",
+            "value": 312567040,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 80B/fan1/1ep throughput",
+            "value": 312346626,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 112B/fan1/1ep throughput",
+            "value": 312461692,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 128B/fan1/1ep throughput",
+            "value": 312478244,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 176B/fan1/1ep throughput",
+            "value": 310983834,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 208B/fan1/1ep throughput",
+            "value": 312506797,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 256B/fan1/1ep throughput",
+            "value": 311657282,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 304B/fan1/1ep throughput",
+            "value": 311764667,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 464B/fan1/1ep throughput",
+            "value": 312642907,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 512B/fan1/1ep throughput",
+            "value": 312361280,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 560B/fan1/1ep throughput",
+            "value": 312046144,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 960B/fan1/1ep throughput",
+            "value": 309970510,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 968B/fan1/1ep throughput",
+            "value": 311133790,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 976B/fan1/1ep throughput",
+            "value": 310405143,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 984B/fan1/1ep throughput",
+            "value": 311881351,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 985B/fan1/1ep throughput",
+            "value": 311785705,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 992B/fan1/1ep throughput",
+            "value": 312060028,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 1000B/fan1/1ep throughput",
+            "value": 309073513,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 1008B/fan1/1ep throughput",
+            "value": 309209447,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 1016B/fan1/1ep throughput",
+            "value": 309881889,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 1024B/fan1/1ep throughput",
+            "value": 306830791,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 1032B/fan1/1ep throughput",
+            "value": 308569698,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 1040B/fan1/1ep throughput",
+            "value": 309561992,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 1048B/fan1/1ep throughput",
+            "value": 304171212,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 1056B/fan1/1ep throughput",
+            "value": 299038844,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 1064B/fan1/1ep throughput",
+            "value": 300872190,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 1072B/fan1/1ep throughput",
+            "value": 299593278,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 1080B/fan1/1ep throughput",
+            "value": 296416020,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 1088B/fan1/1ep throughput",
+            "value": 298824417,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 1096B/fan1/1ep throughput",
+            "value": 299248065,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 2000B/fan1/1ep throughput",
+            "value": 301178787,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 2048B/fan1/1ep throughput",
+            "value": 305843784,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 2096B/fan1/1ep throughput",
+            "value": 308884971,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 4048B/fan1/1ep throughput",
+            "value": 308295245,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 4096B/fan1/1ep throughput",
+            "value": 104744282,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 4144B/fan1/1ep throughput",
+            "value": 104759770,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 8144B/fan1/1ep throughput",
+            "value": 110089946,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 8192B/fan1/1ep throughput",
+            "value": 113908732,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 8240B/fan1/1ep throughput",
+            "value": 113252763,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 16336B/fan1/1ep throughput",
+            "value": 104676635,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 16384B/fan1/1ep throughput",
+            "value": 112426020,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 16432B/fan1/1ep throughput",
+            "value": 114809165,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 32720B/fan1/1ep throughput",
+            "value": 116124245,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 32768B/fan1/1ep throughput",
+            "value": 102104683,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 32816B/fan1/1ep throughput",
+            "value": 100763782,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 65488B/fan1/1ep throughput",
+            "value": 115878989,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 65536B/fan1/1ep throughput",
+            "value": 119598853,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-heap 65584B/fan1/1ep throughput",
+            "value": 54207775,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 16B/fan1/1ep throughput",
+            "value": 234082200,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 64B/fan1/1ep throughput",
+            "value": 233129696,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 80B/fan1/1ep throughput",
+            "value": 233641956,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 112B/fan1/1ep throughput",
+            "value": 235496322,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 128B/fan1/1ep throughput",
+            "value": 233991737,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 176B/fan1/1ep throughput",
+            "value": 234804719,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 208B/fan1/1ep throughput",
+            "value": 234221203,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 256B/fan1/1ep throughput",
+            "value": 234585679,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 304B/fan1/1ep throughput",
+            "value": 235037809,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 464B/fan1/1ep throughput",
+            "value": 234062685,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 512B/fan1/1ep throughput",
+            "value": 235192085,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 560B/fan1/1ep throughput",
+            "value": 235034519,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 960B/fan1/1ep throughput",
+            "value": 235249423,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 968B/fan1/1ep throughput",
+            "value": 235158668,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 976B/fan1/1ep throughput",
+            "value": 235254115,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 984B/fan1/1ep throughput",
+            "value": 234823610,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 985B/fan1/1ep throughput",
+            "value": 234907593,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 992B/fan1/1ep throughput",
+            "value": 234750563,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 1000B/fan1/1ep throughput",
+            "value": 234950446,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 1008B/fan1/1ep throughput",
+            "value": 235555808,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 1016B/fan1/1ep throughput",
+            "value": 235285905,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 1024B/fan1/1ep throughput",
+            "value": 234047124,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 1032B/fan1/1ep throughput",
+            "value": 235575930,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 1040B/fan1/1ep throughput",
+            "value": 234588019,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 1048B/fan1/1ep throughput",
+            "value": 234218159,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 1056B/fan1/1ep throughput",
+            "value": 234851875,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 1064B/fan1/1ep throughput",
+            "value": 234511505,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 1072B/fan1/1ep throughput",
+            "value": 234181170,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 1080B/fan1/1ep throughput",
+            "value": 234110502,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 1088B/fan1/1ep throughput",
+            "value": 234451755,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 1096B/fan1/1ep throughput",
+            "value": 235414901,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 2000B/fan1/1ep throughput",
+            "value": 234546363,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 2048B/fan1/1ep throughput",
+            "value": 235415723,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 2096B/fan1/1ep throughput",
+            "value": 233719207,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 4048B/fan1/1ep throughput",
+            "value": 232770360,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 4096B/fan1/1ep throughput",
+            "value": 233946048,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 4144B/fan1/1ep throughput",
+            "value": 235501153,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 8144B/fan1/1ep throughput",
+            "value": 234560157,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 8192B/fan1/1ep throughput",
+            "value": 234842961,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 8240B/fan1/1ep throughput",
+            "value": 235496569,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 16336B/fan1/1ep throughput",
+            "value": 234802257,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 16384B/fan1/1ep throughput",
+            "value": 232391638,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 16432B/fan1/1ep throughput",
+            "value": 233557514,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 32720B/fan1/1ep throughput",
+            "value": 232447584,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 32768B/fan1/1ep throughput",
+            "value": 230721199,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 32816B/fan1/1ep throughput",
+            "value": 233753613,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 65488B/fan1/1ep throughput",
+            "value": 235005858,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 65536B/fan1/1ep throughput",
+            "value": 233475018,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "cliff-alloc-pool 65584B/fan1/1ep throughput",
+            "value": 235637916,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "stream-spill 64B/fan1/1ep throughput",
+            "value": 7605098,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "stream-defer 64B/fan1/1ep throughput",
+            "value": 7201018,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-class-c1 64B/fan1/1ep throughput",
+            "value": 349651889,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-class-c8 64B/fan1/1ep throughput",
+            "value": 349299534,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-class-c32 64B/fan1/1ep throughput",
+            "value": 351233474,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-direct 64B/fan1/1ep throughput",
+            "value": 350195955,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-fallback 64B/fan1/1ep throughput",
+            "value": 200591604,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-values 64B/fan1/1ep throughput",
+            "value": 287822503,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-values 984B/fan1/1ep throughput",
+            "value": 285873099,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-values 985B/fan1/1ep throughput",
+            "value": 284750202,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-values 1024B/fan1/1ep throughput",
+            "value": 279133613,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-values 4096B/fan1/1ep throughput",
+            "value": 280427557,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-values 16384B/fan1/1ep throughput",
+            "value": 112752619,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-values 65536B/fan1/1ep throughput",
+            "value": 134820067,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-values 65552B/fan1/1ep throughput",
+            "value": 134004742,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-values 65600B/fan1/1ep throughput",
+            "value": 56420706,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-tables 64B/fan1/1ep throughput",
+            "value": 68871192,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-tables 984B/fan1/1ep throughput",
+            "value": 69270929,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-tables 985B/fan1/1ep throughput",
+            "value": 70016435,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-tables 1024B/fan1/1ep throughput",
+            "value": 69818287,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-tables 4096B/fan1/1ep throughput",
+            "value": 69467496,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-tables 16384B/fan1/1ep throughput",
+            "value": 61295888,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-tables 65536B/fan1/1ep throughput",
+            "value": 62402296,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-tables 65552B/fan1/1ep throughput",
+            "value": 61208437,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "seam-tables 65600B/fan1/1ep throughput",
+            "value": 54393573,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "topics-bound 64B/fan1/1ep throughput",
+            "value": 11372604,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "topics-addr 64B/fan1/1ep throughput",
+            "value": 9191492,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "topics-bound 64B/fan1/100ep throughput",
+            "value": 11424477,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "topics-addr 64B/fan1/100ep throughput",
+            "value": 8658106,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "topics-bound 64B/fan1/10000ep throughput",
+            "value": 10498953,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "topics-addr 64B/fan1/10000ep throughput",
+            "value": 8129960,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-mt1 64B/fan1/1ep throughput",
+            "value": 12004851,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-mt2 64B/fan1/2ep throughput",
+            "value": 23822715,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "inproc-mt4 64B/fan1/4ep throughput",
+            "value": 44728550,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "acl-inherit-d4 64B/fan1/1ep throughput",
+            "value": 32325841,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "acl-inherit-d4-mt4 64B/fan1/4ep throughput",
+            "value": 31709182,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "poolalloc-mt1 64B/fan1/1ep throughput",
+            "value": 14394725,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "heapalloc-mt1 64B/fan1/1ep throughput",
+            "value": 16895211,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "poolalloc-mt2 64B/fan1/1ep throughput",
+            "value": 12445109,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "heapalloc-mt2 64B/fan1/1ep throughput",
+            "value": 20745846,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "poolalloc-mt4 64B/fan1/1ep throughput",
+            "value": 9829992,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "heapalloc-mt4 64B/fan1/1ep throughput",
+            "value": 42637675,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "stream-w1 64B/fan1/1ep throughput",
+            "value": 8099846,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "stream-w2 64B/fan1/1ep throughput",
+            "value": 3082052,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "stream-w4 64B/fan1/1ep throughput",
+            "value": 4445706,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan1/1ep throughput",
+            "value": 9864639,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan2/1ep throughput",
+            "value": 9777213,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan4/1ep throughput",
+            "value": 9624673,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan8/1ep throughput",
+            "value": 9391525,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan16/1ep throughput",
+            "value": 8915860,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan32/1ep throughput",
+            "value": 8163043,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan64/1ep throughput",
+            "value": 6828705,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan1/1ep throughput",
+            "value": 9969170,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan2/2ep throughput",
+            "value": 9908787,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan4/4ep throughput",
+            "value": 9667539,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan8/8ep throughput",
+            "value": 9405188,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan16/16ep throughput",
+            "value": 8913802,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan32/32ep throughput",
+            "value": 8077858,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan64/64ep throughput",
+            "value": 6485858,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan1/1ep throughput",
+            "value": 8117488,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan2/1ep throughput",
+            "value": 8121152,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan4/1ep throughput",
+            "value": 7964342,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan8/1ep throughput",
+            "value": 7823708,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan16/1ep throughput",
+            "value": 7461221,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan32/1ep throughput",
+            "value": 6863450,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan64/1ep throughput",
+            "value": 5265258,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan1/1ep throughput",
+            "value": 10849050,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan2/2ep throughput",
+            "value": 11039187,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan4/4ep throughput",
+            "value": 10971390,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan8/8ep throughput",
+            "value": 11026764,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan16/16ep throughput",
+            "value": 10938878,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan32/32ep throughput",
+            "value": 10702679,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan64/64ep throughput",
+            "value": 10225518,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan1/1ep throughput",
+            "value": 8718318,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2) · AA-ROW-OVER-BAND"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan2/2ep throughput",
+            "value": 8672162,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2) · AA-ROW-OVER-BAND"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan4/4ep throughput",
+            "value": 8739595,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan8/8ep throughput",
+            "value": 8672241,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan16/16ep throughput",
+            "value": 8643506,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan32/32ep throughput",
+            "value": 8584225,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan64/64ep throughput",
+            "value": 8336671,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-value 64B/fan1/1ep throughput",
+            "value": 9993990,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-value 984B/fan1/1ep throughput",
+            "value": 9980321,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-value 985B/fan1/1ep throughput",
+            "value": 10006887,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-value 1024B/fan1/1ep throughput",
+            "value": 10010693,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-value 4096B/fan1/1ep throughput",
+            "value": 10035018,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-value 16384B/fan1/1ep throughput",
+            "value": 9966201,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-value 65536B/fan1/1ep throughput",
+            "value": 9863903,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl-value 64B/fan1/1ep throughput",
+            "value": 8176007,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl-value 984B/fan1/1ep throughput",
+            "value": 8140163,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl-value 985B/fan1/1ep throughput",
+            "value": 8141694,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl-value 1024B/fan1/1ep throughput",
+            "value": 8140507,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl-value 4096B/fan1/1ep throughput",
+            "value": 7946842,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl-value 16384B/fan1/1ep throughput",
+            "value": 8071326,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-acl-value 65536B/fan1/1ep throughput",
+            "value": 8060648,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 64B/fan1/1ep throughput",
+            "value": 8564202,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 984B/fan1/1ep throughput",
+            "value": 8772020,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 985B/fan1/1ep throughput",
+            "value": 8727211,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 1024B/fan1/1ep throughput",
+            "value": 8742511,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 4096B/fan1/1ep throughput",
+            "value": 8731112,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 16384B/fan1/1ep throughput",
+            "value": 8532546,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 65536B/fan1/1ep throughput",
+            "value": 8480998,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-terminus 4B/fan1/1ep throughput",
+            "value": 3460957,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-forward 4B/fan1/1ep throughput",
+            "value": 11683728,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-terminus 64B/fan1/1ep throughput",
+            "value": 3443851,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-forward 64B/fan1/1ep throughput",
+            "value": 11677664,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-terminus 512B/fan1/1ep throughput",
+            "value": 3443267,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-forward 512B/fan1/1ep throughput",
+            "value": 11678118,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-terminus 984B/fan1/1ep throughput",
+            "value": 3333052,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-forward 984B/fan1/1ep throughput",
+            "value": 11537431,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-terminus 985B/fan1/1ep throughput",
+            "value": 3350412,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-forward 985B/fan1/1ep throughput",
+            "value": 11608514,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-terminus 1024B/fan1/1ep throughput",
+            "value": 3361152,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-forward 1024B/fan1/1ep throughput",
+            "value": 11696832,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-terminus 4096B/fan1/1ep throughput",
+            "value": 2931140,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-forward 4096B/fan1/1ep throughput",
+            "value": 11702580,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-terminus 16384B/fan1/1ep throughput",
+            "value": 2308538,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-forward 16384B/fan1/1ep throughput",
+            "value": 11721091,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-terminus 65536B/fan1/1ep throughput",
+            "value": 1186820,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
+          },
+          {
+            "name": "chain-forward 65536B/fan1/1ep throughput",
+            "value": 11542716,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.2.6-76070206-generic · bench cpu2: foreign <=0.1%, bench.slice psi <=1.0 (host psi <=75.1, info), nivcsw 280, 7/7 clean (0 re-run) · c++ 13.3.0 · clock 1 ns res · 43.6 ns/sample · alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8 · CONTAMINATED (host load 38.1 > bar 4.2)"
           }
         ]
       }
