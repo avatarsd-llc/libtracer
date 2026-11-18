@@ -432,7 +432,8 @@ enum class slot_state_t : std::uint32_t {
  * @brief One deferred release obligation and the epoch it was retired at.
  *
  * `ctx` / `release` are written only under @ref slot_state_t::FILLING and read only under
- * @ref slot_state_t::CLAIMING — both states are owned exclusively by one thread — so they are
+ * @ref slot_state_t::FILLING (@ref retire_onto's takeover) or @ref slot_state_t::CLAIMING — both
+ * states are owned exclusively by one thread — so they are
  * plain members rather than atomics, published and consumed by @ref state's release/acquire
  * transitions. @ref epoch is atomic because a drainer reads it BEFORE it claims, to skip a slot
  * that is not yet past without writing to it; `%drain_ripe` checks it again once claimed.
@@ -1000,7 +1001,11 @@ struct rider_t {
  * with @p release at the current epoch; @p release must run @p held's pair first, so that pair
  * is released later than it could have been, never earlier (the new epoch is at or past its
  * own). @p held keeps its default, which releases nothing, for an EMPTY slot, and must stay alive
- * until @p release has run.
+ * until @p release has run. One call fills @p held at most once, since it returns as soon as it
+ * takes a slot, and a refused call leaves it untouched.
+ *
+ * The scan may take over an occupied slot while a later one is empty. That is safe: the displaced
+ * pair's release only runs later, never earlier, and the table keeps one slot per pair either way.
  *
  * @return False only when every slot was mid-step on another thread (FILLING or CLAIMING) as the
  *         scan reached it. Such a step leaves its slot EMPTY or READY, so a retry fails again

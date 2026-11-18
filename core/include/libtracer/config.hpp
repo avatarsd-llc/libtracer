@@ -746,7 +746,7 @@ struct default_config_t {
      * were still inside their fan-outs. The `unsubscribe` answers `BACKPRESSURE` and
      * `graph_t::reclaim_refusals()` counts every one (`release_refused`), so an undersized bound
      * is observable rather than silent. The transport plane's join notice is never refused:
-     * it takes over an occupied slot instead (`detail_qsbr::retire_onto`, #2840), and retries
+     * it takes over an occupied slot instead (`%detail_qsbr::retire_onto`, #2840), and retries
      * only while every slot is mid-fill or mid-drain on another thread. So the bound must
      * exceed the number of threads that can be preempted in such a step while a plane is
      * destroyed. Override fragment:
