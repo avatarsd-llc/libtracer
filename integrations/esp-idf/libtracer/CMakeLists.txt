@@ -286,6 +286,13 @@ if(CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES)
 else()
     set(LIBTRACER_VERTEX_LOCK_STRIPES 16)
 endif()
+# The per-session READ budget (#2865, binding #2774's kReadBudget), the same two-pass
+# fallback (core's default, 0 = off). A 0 knob is CMake-false and lands on the same 0.
+if(CONFIG_LIBTRACER_READ_BUDGET)
+    set(LIBTRACER_READ_BUDGET ${CONFIG_LIBTRACER_READ_BUDGET})
+else()
+    set(LIBTRACER_READ_BUDGET 0)
+endif()
 # The park table's stripe count (#2454), the same two-pass fallback (core's default, 8).
 if(CONFIG_LIBTRACER_PARK_STRIPES)
     set(LIBTRACER_PARK_STRIPES ${CONFIG_LIBTRACER_PARK_STRIPES})
@@ -517,6 +524,7 @@ set(LIBTRACER_CONFIG_OVERRIDE_TEXT
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 ${LIBTRACER_SLOT_INCLUDE}${LIBTRACER_SYNC_INCLUDE}${LIBTRACER_FRAME_OBSERVER_INCLUDE}
 namespace tr::graph {
 
@@ -533,6 +541,7 @@ struct esp_config_t : default_config_t {
     static constexpr bool kSelfHealLinks = ${LIBTRACER_SELF_HEAL_LINKS};
     static constexpr bool kCreationHooks = ${LIBTRACER_CREATION_HOOKS};
     static constexpr bool kSessionAdmission = ${LIBTRACER_SESSION_ADMISSION};
+    static constexpr std::uint8_t kReadBudget = ${LIBTRACER_READ_BUDGET};
     static constexpr bool kListedWaitSources = ${LIBTRACER_LISTED_WAIT_SOURCES};
     static constexpr std::size_t kSelfHealWorkerStackBytes = ${LIBTRACER_SELF_HEAL_WORKER_STACK};
     static constexpr std::size_t kRxDrainFrames = ${LIBTRACER_RX_DRAIN_FRAMES};

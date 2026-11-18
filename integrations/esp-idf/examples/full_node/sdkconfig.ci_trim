@@ -16,3 +16,6 @@
 # transports on and is byte-identical to before #393.
 CONFIG_LIBTRACER_TRANSPORT_TCP=n
 CONFIG_LIBTRACER_TRANSPORT_WS=n
+# The per-session READ budget (#2865) set non-zero, so one chip build compiles the
+# budget in. This job is not size-gated, so the stock size rows stay on the default 0.
+CONFIG_LIBTRACER_READ_BUDGET=3

@@ -610,6 +610,10 @@ jobs:
           . "${IDF_PATH}/export.sh"
           idf.py set-target esp32c6
           idf.py build
+          # sdkconfig.ci_trim also sets CONFIG_LIBTRACER_READ_BUDGET=3 (#2865): the knob
+          # must reach the generated config, or this leg did not compile the budget in.
+          grep -rq --include=config_override.hpp 'kReadBudget = 3;' build \
+            || { echo "::error::CONFIG_LIBTRACER_READ_BUDGET=3 did not reach kReadBudget"; exit 1; }
 
       - name: Assert the trimmed transport TUs were shed (and UDP kept)
         shell: bash
