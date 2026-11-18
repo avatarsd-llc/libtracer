@@ -1437,6 +1437,13 @@ add_executable(subtree_read_test subtree_read_test.cpp)
 target_link_libraries(subtree_read_test PRIVATE libtracer)
 libtracer_test_warnings(subtree_read_test)
 add_test(NAME subtree_snapshot COMMAND subtree_read_test)
+# #2846: a subtree walk yields to a thread waiting for the map lock exclusively. Parked by a
+# hook, released by events, never a clock; a TSan target.
+add_executable(walk_yield_test walk_yield_test.cpp)
+target_link_libraries(walk_yield_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(walk_yield_test)
+add_test(NAME walk_yield COMMAND walk_yield_test)
+set_tests_properties(walk_yield PROPERTIES TIMEOUT 300)
 
 # RFC-0025 §4.1.2 (Amendment 3, clause 5) — propagate's FOLD emission mode: ONE
 # RFC-0005 §B branch-write frame per swept subtree instead of RFC-0008 §D's one

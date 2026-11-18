@@ -76,6 +76,8 @@ using tr::testing::check;
 /** @brief What one read of the forking vertex came back as. */
 enum class shape_t : std::uint8_t {
     NONE,      /**< @brief The read returned no value at all. */
+    YIELDED,   /**< @brief The read answered `BACKPRESSURE`: its walk yielded to a writer
+                        waiting for the map lock (#2846), and the reader retries. */
     LEAF,      /**< @brief The vertex's own one-byte scalar. */
     FORKED,    /**< @brief A composed reply that CARRIES the child. */
     ROOT_ONLY, /**< @brief The LEGAL retirement transient: a composed POINT wrapping the
@@ -105,7 +107,8 @@ enum class shape_t : std::uint8_t {
 [[nodiscard]] shape_t classify_read(graph_t& g, const char* p, std::uint8_t leaf_byte,
                                     std::string_view child_name, std::vector<std::byte>& scratch) {
     const auto r = g.read(path_t(p));
-    if (!r.has_value()) return shape_t::NONE;
+    if (!r.has_value())
+        return r.error() == tr::graph::status_t::BACKPRESSURE ? shape_t::YIELDED : shape_t::NONE;
     scratch.clear();
     for (const tr::view::view_t& l : (*r)->links()) {
         const auto s = l.bytes();
@@ -281,6 +284,8 @@ void test_concurrent_fork() {
         std::atomic<std::size_t> acked{0}; /**< @brief Highest phase this reader has answered. */
         std::size_t reads = 0;             /**< @brief Reads completed, free-running included. */
         std::size_t bad = 0;               /**< @brief Reads that returned no value. */
+        std::size_t yielded = 0;           /**< @brief Reads whose walk yielded to the writer
+                                                     (#2846); retried, never a phase answer. */
         std::size_t root_only = 0;         /**< @brief Free-running reads that saw the LEGAL
                                                      root-only retirement transient. */
         std::size_t malformed = 0;         /**< @brief Reads of a shape the contract does not
@@ -307,6 +312,10 @@ void test_concurrent_fork() {
             while (!stop.load(std::memory_order_relaxed)) {
                 const std::size_t seq = phase.load(std::memory_order_acquire);
                 const shape_t s = classify_read(g, kRoot, kRootByte, kChildName, scratch);
+                if (s == shape_t::YIELDED) {  // a writer was waiting: retry, answer nothing
+                    ++t.yielded;
+                    continue;
+                }
                 ++t.reads;
                 // EVERY read is classified, free-running included (#1030): the two settled
                 // shapes and the root-only retirement transient are the contract's whole
@@ -365,8 +374,10 @@ void test_concurrent_fork() {
     for (auto& t : pool) t.join();
 
     std::size_t reads = 0, bad = 0, root_only = 0, malformed = 0, forked = 0, leaf = 0, wrong = 0;
+    std::size_t yielded = 0;
     for (const reader_tally_t& t : tally) {
         reads += t.reads;
+        yielded += t.yielded;
         bad += t.bad;
         root_only += t.root_only;
         malformed += t.malformed;
@@ -381,9 +392,12 @@ void test_concurrent_fork() {
 
     std::printf(
         "    %zu rounds x %zu readers -> %zu reads, %zu no-value, %zu malformed, %zu "
-        "root-only transients; %zu forked + %zu leaf phase observations, %zu wrong\n",
-        kRounds, kReaders, reads, bad, malformed, root_only, forked, leaf, wrong);
-    check(bad == 0, "every concurrent read of the forking vertex returned a value");
+        "root-only transients; %zu forked + %zu leaf phase observations, %zu wrong; %zu "
+        "yielded to the writer and retried\n",
+        kRounds, kReaders, reads, bad, malformed, root_only, forked, leaf, wrong, yielded);
+    check(bad == 0,
+          "every concurrent read of the forking vertex returned a value or yielded to the "
+          "writer (#2846)");
     check(malformed == 0,
           "every free-running read was one of the three specified shapes — leaf, forked, or "
           "the root-only retirement transient (RFC-0016 §B erratum, #1030) — never torn");
