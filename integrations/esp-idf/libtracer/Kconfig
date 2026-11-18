@@ -384,6 +384,28 @@ menu "libtracer"
             OFF by default, the lean choice. Off, the graph has no slot for the
             hook and the subscribe and departure paths pay nothing for it.
 
+    config LIBTRACER_READ_BUDGET
+        int "READs one session may send per run while another session reads"
+        range 0 254
+        default 0
+        help
+            Bind tr::graph::config_t::kReadBudget (#2774, #2865). With a budget
+            N, a READ this node terminates is answered BACKPRESSURE when it is
+            beyond the session's N-th in the current run AND at least two
+            sessions have READ in that run. A session alone in a run is never
+            refused, and neither is a WRITE, a subscribe, an AWAIT, a REPLY or
+            a frame this node forwards.
+
+            The application closes a run by calling
+            fwd_router_t::close_read_run from a task or timer on its own clock
+            (the library reads no clock). A session is one slot of a stream
+            server (the WS server link) or a whole link otherwise, and its
+            count lives in that slot.
+
+            0, the default, turns the budget off and compiles it away: every
+            tally member is an empty type and the check is not compiled, so a
+            default build pays 0 bytes and no branch.
+
     choice LIBTRACER_DEFAULT_SHARE_HINT
         prompt "Copy-or-share default for a vertex that declares no hint"
         default LIBTRACER_DEFAULT_SHARE_HINT_DEFAULT
