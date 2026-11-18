@@ -242,7 +242,7 @@ struct grace_notice_t {
  * Returns at once where that point cannot be waited for: on a thread that runs link callbacks
  * or is itself inside a frame (it would wait for itself), and under `reclaim_strict` (no second
  * thread to wait for, and no exit that runs the notice). A full table does not refuse it
- * (#2840): the notice then rides a slot another pair holds, and releases that pair first.
+ * (#2840): the notice then takes over a slot another pair holds, and releases that pair first.
  */
 void await_grace() {
     grace_notice_t n;
@@ -255,10 +255,10 @@ void await_grace() {
     if (on_callback_thread() || graph::detail_qsbr::rec().depth != 0 ||
         !graph::reclaim_policy_t::kDefersToDispatchExit)
         return;
-    // A second try is needed only while every slot is mid-fill or mid-drain on another thread,
-    // one slot per thread: with fewer threads than slots, the first try always lands.
-    while (!graph::detail_qsbr::retire(&n, pass) &&
-           !graph::detail_qsbr::retire_onto(n.held, &n, pass)) {
+    // A scan fails only when every slot was mid-fill or mid-drain on another thread as it reached
+    // it, and each such step ends in a few instructions: the retry spins only while
+    // kDeferredReleaseSlots threads or more are preempted mid-step (see that constant).
+    while (!graph::detail_qsbr::retire_onto(n.held, &n, pass)) {
     }
     park_wait(n.passed, std::uint32_t{0}, std::memory_order_acquire);
 }

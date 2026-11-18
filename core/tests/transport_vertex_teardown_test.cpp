@@ -515,8 +515,9 @@ void full_table_destruction_joins_its_links() {
         });
         while (!p.shut.load()) std::this_thread::yield();
         for (int i = 0; i < 1000; ++i) std::this_thread::yield();
-        check(!done.load() && !p.closed.load(),
-              "with the table full and a frame inside its link, the destruction has not returned");
+        check(!done.load() && !p.closed.load() && released.load() == 0,
+              "with the table full and a frame inside its link, the destruction has not returned, "
+              "and the pair whose slot its notice took is still held");
         p.stay.store(false);
         inside.join();
         destroyer.join();

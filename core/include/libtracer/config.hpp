@@ -745,7 +745,11 @@ struct default_config_t {
      * reached a quiescent state, or a burst of retirements outran the table while participants
      * were still inside their fan-outs. The `unsubscribe` answers `BACKPRESSURE` and
      * `graph_t::reclaim_refusals()` counts every one (`release_refused`), so an undersized bound
-     * is observable rather than silent. Override fragment:
+     * is observable rather than silent. The transport plane's join notice is never refused:
+     * it takes over an occupied slot instead (`detail_qsbr::retire_onto`, #2840), and retries
+     * only while every slot is mid-fill or mid-drain on another thread. So the bound must
+     * exceed the number of threads that can be preempted in such a step while a plane is
+     * destroyed. Override fragment:
      * `static constexpr std::size_t kDeferredReleaseSlots = 64;`
      */
     static constexpr std::size_t kDeferredReleaseSlots = 16;

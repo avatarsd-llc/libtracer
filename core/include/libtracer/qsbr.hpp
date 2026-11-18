@@ -431,8 +431,7 @@ enum class slot_state_t : std::uint32_t {
 /**
  * @brief One deferred release obligation and the epoch it was retired at.
  *
- * `ctx` / `release` are written only under @ref slot_state_t::FILLING (or under
- * @ref slot_state_t::CLAIMING by `%retire_onto`) and read only under
+ * `ctx` / `release` are written only under @ref slot_state_t::FILLING and read only under
  * @ref slot_state_t::CLAIMING — both states are owned exclusively by one thread — so they are
  * plain members rather than atomics, published and consumed by @ref state's release/acquire
  * transitions. @ref epoch is atomic because a drainer reads it BEFORE it claims, to skip a slot
@@ -993,30 +992,42 @@ struct rider_t {
 };
 
 /**
- * @brief Retire @p ctx's @p release into a slot another pair already holds, for a caller that
- *        must not be refused (the transport plane's join notice, #2840).
+ * @brief Retire @p ctx's @p release into any slot not mid-step, for a caller that must not be
+ *        refused (the transport plane's join notice, #2840).
  *
- * Claims a READY slot as a drainer would, moves its pair into @p held, and republishes the slot
- * with @p release at the current epoch. @p release must run @p held's pair first. That pair is
- * only released later than it could have been, never earlier: the new epoch is at or past its
- * own. @p held must stay alive until @p release has run. A slot is out of READY only while one
- * thread fills or drains it, so after a full table refused @ref retire this fails only while
- * every slot is in such a step.
+ * One scan takes the first EMPTY or READY slot to FILLING. An EMPTY slot is filled as
+ * @ref retire fills one. A READY slot's pair moves into @p held, and the slot is republished
+ * with @p release at the current epoch; @p release must run @p held's pair first, so that pair
+ * is released later than it could have been, never earlier (the new epoch is at or past its
+ * own). @p held keeps its default, which releases nothing, for an EMPTY slot, and must stay alive
+ * until @p release has run.
+ *
+ * @return False only when every slot was mid-step on another thread (FILLING or CLAIMING) as the
+ *         scan reached it. Such a step leaves its slot EMPTY or READY, so a retry fails again
+ *         only while other threads keep every slot mid-step: at least `kDeferredReleaseSlots`
+ *         threads preempted mid-step (`default_config_t::kDeferredReleaseSlots`).
  */
 inline bool retire_onto(rider_t& held, void* ctx, void (*release)(void*),
                         registry_t& r = registry(), retired_table_t& t = retired_table()) noexcept {
     const std::uint32_t e = advance(r);
     for (retired_slot_t& s : t.slots) {
-        slot_state_t expected = slot_state_t::READY;
-        if (!s.state.compare_exchange_strong(expected, slot_state_t::CLAIMING,
-                                             std::memory_order_acq_rel, std::memory_order_relaxed))
+        slot_state_t from = slot_state_t::EMPTY;
+        if (!s.state.compare_exchange_strong(from, slot_state_t::FILLING, std::memory_order_acq_rel,
+                                             std::memory_order_relaxed) &&
+            (from != slot_state_t::READY ||
+             !s.state.compare_exchange_strong(from, slot_state_t::FILLING,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_relaxed)))
             continue;
-        held = {s.ctx, s.release};
+        if (from == slot_state_t::READY)
+            held = {s.ctx, s.release};
+        else
+            r.ctl.live.fetch_add(1, std::memory_order_relaxed);
         s.ctx = ctx;
         s.release = release;
         s.epoch.store(e, std::memory_order_relaxed);
         s.state.store(slot_state_t::READY, std::memory_order_release);
-        drain(r, t);  // as in retire: the participants may have quiesced during the takeover
+        drain(r, t);  // as in retire: the participants may have quiesced during the fill
         return true;
     }
     return false;
