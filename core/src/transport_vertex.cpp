@@ -228,26 +228,39 @@ void parse_config(const tlv_node_t* config, conn_settings_t& s) {
     return view_t::over(std::move(seg));
 }
 
+/** @brief The plane's join notice: set once the grace point passes, after the pair whose
+ *         slot it rode (if the table was full) has been released. */
+struct grace_notice_t {
+    graph::detail_qsbr::rider_t held;     /**< @brief The ridden slot's pair, run first. */
+    std::atomic<std::uint32_t> passed{0}; /**< @brief Set by the leaving thread. */
+};
+
 /**
  * @brief Block until every router frame and dispatch open now has left: the grace point, a
  *        notice the last leaving thread runs (no polling, no clock).
  *
  * Returns at once where that point cannot be waited for: on a thread that runs link callbacks
- * or is itself inside a frame (it would wait for itself), under `reclaim_strict` (no second
- * thread to wait for, and no exit that runs the notice), and when the table refuses it.
+ * or is itself inside a frame (it would wait for itself), and under `reclaim_strict` (no second
+ * thread to wait for, and no exit that runs the notice). A full table does not refuse it
+ * (#2840): the notice then rides a slot another pair holds, and releases that pair first.
  */
 void await_grace() {
-    std::atomic<std::uint32_t> passed{0};
+    grace_notice_t n;
     const auto pass = [](void* c) {
-        auto* const word = static_cast<std::atomic<std::uint32_t>*>(c);
-        word->store(1, std::memory_order_release);
-        park_wake(*word);
+        auto* const notice = static_cast<grace_notice_t*>(c);
+        notice->held.release(notice->held.ctx);
+        notice->passed.store(1, std::memory_order_release);
+        park_wake(notice->passed);
     };
     if (on_callback_thread() || graph::detail_qsbr::rec().depth != 0 ||
-        !graph::reclaim_policy_t::kDefersToDispatchExit ||
-        !graph::detail_qsbr::retire(&passed, pass))
+        !graph::reclaim_policy_t::kDefersToDispatchExit)
         return;
-    park_wait(passed, std::uint32_t{0}, std::memory_order_acquire);
+    // A second try is needed only while every slot is mid-fill or mid-drain on another thread,
+    // one slot per thread: with fewer threads than slots, the first try always lands.
+    while (!graph::detail_qsbr::retire(&n, pass) &&
+           !graph::detail_qsbr::retire_onto(n.held, &n, pass)) {
+    }
+    park_wait(n.passed, std::uint32_t{0}, std::memory_order_acquire);
 }
 
 }  // namespace
