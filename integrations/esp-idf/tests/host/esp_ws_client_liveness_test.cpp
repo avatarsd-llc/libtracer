@@ -66,6 +66,7 @@
 #include <vector>
 
 #include "fake_esp_transport.hpp"
+#include "libtracer/graph.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/esp_ws_client_link.hpp"
@@ -269,6 +270,15 @@ void test_second_death_reports_again() {
 // ---------------------------------------------------------------------------
 // 3b — COUNTING: the send side's drops and their last cause outlive a connection (#2788).
 // ---------------------------------------------------------------------------
+/** @brief The link's `dropped_tx_cause` noun as its `kind_stats()` publishes it, or `-1` when
+ *         that is not its one noun (#2788). */
+std::uint64_t cause_noun(const tr::net::transport_t& link) {
+    tr::graph::stats_block_t out;
+    link.kind_stats(out);
+    return out.count == 1 && out.members[0].noun == "dropped_tx_cause" ? out.members[0].value
+                                                                       : std::uint64_t(-1);
+}
+
 void test_drops_survive_a_reconnect() {
     std::printf("#2788 the drop count and its last cause survive a reconnect:\n");
     fake_ws::reset();
@@ -278,7 +288,7 @@ void test_drops_survive_a_reconnect() {
         const std::vector<std::byte> big(kBufBytes + 1, std::byte{0x22});
         link->send(std::span<const std::byte>(big));
         tr::net::transport_drop_stats_t d = link->drop_stats();
-        check(d.dropped_tx == 1 && d.dropped_tx_cause == drop_cause_t::OVERSIZE,
+        check(d.dropped_tx == 1 && cause_noun(*link) == std::uint64_t(drop_cause_t::OVERSIZE),
               "a frame past tx_bytes is counted, cause OVERSIZE");
         const int dials_before = fake_ws::connect_count();
         fake_ws::push_frames({close_frame()});
@@ -286,14 +296,14 @@ void test_drops_survive_a_reconnect() {
         const std::vector<std::byte> small(8, std::byte{0x11});
         link->send(std::span<const std::byte>(small));
         d = link->drop_stats();
-        check(d.dropped_tx == 2 && d.dropped_tx_cause == drop_cause_t::LINK_DOWN,
+        check(d.dropped_tx == 2 && cause_noun(*link) == std::uint64_t(drop_cause_t::LINK_DOWN),
               "a send to the down link is counted, cause LINK_DOWN");
         check(fake_ws::sweep_until(
                   *link, [&] { return fake_ws::connect_count() > dials_before && link->link_up(); },
                   5s),
               "the link re-dialed and came up");
         d = link->drop_stats();
-        check(d.dropped_tx == 2 && d.dropped_tx_cause == drop_cause_t::LINK_DOWN &&
+        check(d.dropped_tx == 2 && cause_noun(*link) == std::uint64_t(drop_cause_t::LINK_DOWN) &&
                   link->stats().c.tx_drops == 2,
               "and the new connection kept both the count and the cause");
     }

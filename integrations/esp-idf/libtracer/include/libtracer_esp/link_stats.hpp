@@ -67,7 +67,7 @@
  *     3-strike consecutive counter separately, and its semantics are untouched). On the
  *     server they count since the session was established; on the client, since the link
  *     was constructed: they survive a reconnect, and why the last send was dropped is
- *     `drop_stats().dropped_tx_cause` (#2788).
+ *     the `dropped_tx_cause` noun its `kind_stats()` publishes (#2788).
  *   - the two timestamps are `esp_timer_get_time()` microseconds since boot;
  *     -1 means "never" (no message yet / not connected).
  */

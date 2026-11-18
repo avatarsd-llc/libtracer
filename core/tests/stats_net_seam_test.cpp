@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <cstring>
 #include <expected>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -75,7 +76,13 @@ class counting_link_t : public transport_t {
     [[nodiscard]] tr::net::transport_drop_stats_t drop_stats() const noexcept override {
         return counters;
     }
+    /** @brief A link that names its drops' cause publishes it from its own nouns (#2788). */
+    void kind_stats(tr::graph::stats_block_t& out) const noexcept override {
+        if (cause) out.add("dropped_tx_cause", static_cast<std::uint64_t>(*cause));
+    }
     tr::net::transport_drop_stats_t counters{}; /**< @brief What this link will report. */
+    std::optional<tr::net::drop_cause_t>
+        cause; /**< @brief Its last drop's cause, if it names one. */
 };
 
 /** @brief Read `path:field` as @p caller — the handle+field overload the FWD resolver uses. */
@@ -212,10 +219,8 @@ void test_link_seams() {
     counting_link_t up;
     counting_link_t down;
     up.counters = {.dropped_rx = 3, .malformed_rx = 5, .dropped_tx = 7};
-    down.counters = {.dropped_rx = 11,
-                     .malformed_rx = 0,
-                     .dropped_tx = 0,
-                     .dropped_tx_cause = tr::net::drop_cause_t::NONE};
+    down.counters = {.dropped_rx = 11, .malformed_rx = 0, .dropped_tx = 0};
+    down.cause = tr::net::drop_cause_t::NONE;
     check(router.attach_link("up", up) && router.attach_link("down", down), "two links registered");
 
     const auto up_bytes = read_bytes(g, "/sink:stats.link.up");
@@ -234,13 +239,26 @@ void test_link_seams() {
     check(down_block && down_block->children.size() == 8 &&
               counter(*down_block, "dropped_tx_cause") == 0,
           "a link that keeps a cause adds dropped_tx_cause, NONE before any outbound drop");
+    // The noun comes from the link's kind_stats(), placed right after dropped_tx: the block is
+    // byte-exact, four nouns in order dropped_rx, malformed_rx, dropped_tx, dropped_tx_cause.
+    const char* const cause_none =
+        "0b40700002000a0064726f707065645f7278010008000b0000000000000002000c006d616c666f726d65645f72"
+        "7801000800000000000000000002000a0064726f707065645f7478010008000000000000000000020010006472"
+        "6f707065645f74785f6361757365010008000000000000000000";
+    check(hex(down_bytes) == cause_none, "the cause noun sits right after dropped_tx, byte-exact");
+    if (hex(down_bytes) != cause_none) std::printf("  actual: %s\n", hex(down_bytes).c_str());
     down.counters.dropped_tx = 2;
-    down.counters.dropped_tx_cause = tr::net::drop_cause_t::LINK_DOWN;
+    down.cause = tr::net::drop_cause_t::LINK_DOWN;
     const auto down_after_bytes = read_bytes(g, "/sink:stats.link.down");
     const auto down_after = tr::wire::decode(down_after_bytes);  // borrows the bytes
     check(down_after && counter(*down_after, "dropped_tx") == 2 &&
               counter(*down_after, "dropped_tx_cause") == 2,
           "…and reads the last outbound drop's cause, LINK_DOWN = 2");
+    const char* const cause_down =
+        "0b40700002000a0064726f707065645f7278010008000b0000000000000002000c006d616c666f726d65645f72"
+        "7801000800000000000000000002000a0064726f707065645f7478010008000200000000000000020010006472"
+        "6f707065645f74785f6361757365010008000200000000000000";
+    check(hex(down_after_bytes) == cause_down, "…byte-exact, the same layout with 2 and 2");
 
     // The label plane is deleted (RFC-0029 S3), so its class is no seam at all (RFC-0010
     // erratum, #2244) — the answer an unknown class gets.

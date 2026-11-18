@@ -22,7 +22,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -490,9 +489,10 @@ struct link_memory_t {
 };
 
 /**
- * @brief Why a link last dropped an outbound frame (#2788): the value a drop snapshot's
- *        `dropped_tx_cause` holds, and the `dropped_tx_cause` noun of `:stats.link.<child>`
- *        (RFC-0010 Amendment 6). One byte, stored on the drop arm only.
+ * @brief Why a link last dropped an outbound frame (#2788): the value of the
+ *        `dropped_tx_cause` noun a link that keeps one publishes from its own `kind_stats()`
+ *        in `:stats.link.<child>` (RFC-0010 Amendment 6). One byte, stored on the drop arm
+ *        only; the shared drop snapshot does not carry it.
  */
 enum class drop_cause_t : std::uint8_t {
     NONE = 0,            /**< @brief No outbound frame dropped since the link was constructed. */
@@ -533,9 +533,6 @@ struct transport_drop_stats_t {
     /** @brief Outbound frames the caller believed sent that never reached the wire —
      *         oversize for the peer's cap, no peer/dead socket, or a refused gather. */
     std::uint64_t dropped_tx = 0;
-    /** @brief The cause of the last frame counted in @ref dropped_tx (#2788); empty on a
-     *         link whose @ref drop_tally_t does not record one. */
-    std::optional<drop_cause_t> dropped_tx_cause = std::nullopt;
 };
 
 /**
@@ -564,7 +561,8 @@ struct drop_classes_t {
  * Sampled per the snapshot-coherence clause of core/STYLE.md §Introspection.
  *
  * With @ref drop_classes_t::dropped_tx_cause, an outbound drop is counted together with its
- * cause, and the last one is kept (one relaxed byte store beside the count).
+ * cause, and the last one is kept (one relaxed byte store beside the count), read through
+ * @ref dropped_tx_cause rather than the snapshot.
  *
  * @tparam Classes The classes this link can drop; all three by default.
  */
@@ -612,9 +610,14 @@ class drop_tally_t {
             s.malformed_rx = malformed_rx_.load(std::memory_order_relaxed);
         if constexpr (Classes.dropped_tx)
             s.dropped_tx = dropped_tx_.load(std::memory_order_relaxed);
-        if constexpr (Classes.dropped_tx_cause)
-            s.dropped_tx_cause = dropped_tx_cause_.load(std::memory_order_relaxed);
         return s;
+    }
+
+    /** @brief The cause of the last outbound drop, `NONE` before the first (#2788). */
+    [[nodiscard]] drop_cause_t dropped_tx_cause() const noexcept
+        requires(Classes.dropped_tx_cause)
+    {
+        return dropped_tx_cause_.load(std::memory_order_relaxed);
     }
 
    private:

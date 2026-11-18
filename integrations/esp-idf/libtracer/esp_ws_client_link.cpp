@@ -33,6 +33,7 @@
 #include "freertos/FreeRTOS.h"
 #include "libtracer/config.hpp"
 #include "libtracer/frame_ingress.hpp"
+#include "libtracer/graph.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source_backend.hpp"
 #include "libtracer/mem_string.hpp"
@@ -928,6 +929,10 @@ struct esp_ws_client_link_t::resume_t {
         return link.write_locked(f, off);
     }
 };
+
+void esp_ws_client_link_t::kind_stats(graph::stats_block_t& out) const noexcept {
+    out.add("dropped_tx_cause", static_cast<std::uint64_t>(drops_.dropped_tx_cause()));
+}
 
 void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
     // One span through the gathered path — the one implementation (#1620 (a)).

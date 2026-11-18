@@ -270,7 +270,7 @@ struct esp_ws_client_config_t {
      * @brief Largest outbound payload a send admits (one frame). A larger outbound frame
      *        is DROPPED whole — counted on `stats().c.tx_drops` and LOGGED with both sizes
      *        (#959), since the same counter also moves when the peer is down; its cause reads
-     *        `OVERSIZE` in `drop_stats().dropped_tx_cause` (#2788).
+     *        `OVERSIZE` in its `dropped_tx_cause` noun (#2788).
      */
     std::size_t tx_bytes = 2048;
     /** @brief Recv-thread stack in bytes, HONORED (#900): the recv thread runs in-call
@@ -635,7 +635,8 @@ class esp_ws_client_link_t final : public transport_t {
      * `stats().c.tx_drops`. It survives a reconnect (#2788), so the drops that preceded a
      * connection loss are still there after the re-dial.
      *
-     * `dropped_tx_cause`: why the last of them was lost (#2788). `OVERSIZE`: past `tx_bytes`.
+     * `dropped_tx_cause` (published by @ref kind_stats): why the last of them was lost (#2788).
+     * `OVERSIZE`: past `tx_bytes`.
      * `LINK_DOWN`: no connection stood, or the frame still waited when it went down. `SHED`:
      * a full lane ring, the `tx_bytes` budget for waiting frames, or a refused `memory.io`
      * block. `TRANSPORT_ERROR`: the socket failed the write. No write here waits (#2787), so
@@ -644,6 +645,10 @@ class esp_ws_client_link_t final : public transport_t {
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
         return drops_.snapshot();
     }
+
+    /** @brief The `dropped_tx_cause` noun (RFC-0010 Amendment 6), which the router places
+     *         right after the three nouns of @ref drop_stats; its codes are `drop_cause_t`'s. */
+    void kind_stats(graph::stats_block_t& out) const noexcept override;
 
     /**
      * @name The `core/STYLE.md` §Introspection spellings of this link's two ceilings
