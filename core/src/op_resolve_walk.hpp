@@ -149,6 +149,14 @@ struct arena_node {
     [[nodiscard]] static bool spans_intact() noexcept { return true; }
 
     /**
+     * @brief Whether a `body()` span outlives the node it came from (#2871). True here: it
+     *        views the decoded arena, which the terminus holds until the resolve returns, and
+     *        every read of a NAME body happens inside the resolve. So @ref selector_to_field
+     *        lets the step names view the arena and copies nothing.
+     */
+    static constexpr bool kBodyOutlivesNode = true;
+
+    /**
      * @brief The trailer-excluded whole TLV as a fresh OWNED segment (the ADR-0041 §2 ownership
      *        copy of a borrowed arena span — the span tier always copies its bytes, since the arena
      *        outlives nothing).
@@ -401,26 +409,37 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
  * under a `:subscribers` head and answers INVALID_PATH anywhere else, as a malformed index_mode
  * does.
  */
-/** @brief Where @ref selector_to_field copies the step names: every step at its bound. */
-using field_names_t = std::array<char, kMaxFieldDepth * kMaxSegmentBytes>;
+/**
+ * @brief Where @ref selector_to_field copies the step names for node type @p N: every step at
+ *        its bound when a body dies with its node (the rope tier, #2286), nothing when it
+ *        outlives it (the arena tier, #2871). The buffer sits on the in-call delivery path's
+ *        stack, held across the write, so a tier that needs no copy does not pay its 512 B.
+ */
+template <class N>
+using field_names_t =
+    std::array<char, N::kBodyOutlivesNode ? 0 : kMaxFieldDepth * kMaxSegmentBytes>;
 
 template <class N>
-[[nodiscard]] result_t<field_path_t> selector_to_field(const N& field, field_names_t& names) {
+[[nodiscard]] result_t<field_path_t> selector_to_field(const N& field, field_names_t<N>& names) {
     field_path_t fp;
-    char* at = names.data();
+    [[maybe_unused]] char* at = names.data();
     auto ch = field.children();
     std::optional<N> cur = ch.next();
     while (cur) {  // one level per NAME + its 0/1/2 trailing VALUEs
         if (cur->type() != type_t::NAME) return std::unexpected(status_t::INVALID_PATH);
-        // A step's name is copied into @p names, which the caller holds for the resolve: a
-        // rope-tier NAME node flattens into a cache of its own that dies with the node. A level
-        // past kMaxFieldDepth, or a name past a segment's bound, is refused.
+        // A level past kMaxFieldDepth, or a name past a segment's bound, is refused.
         const std::string_view name = detail::as_string_view(cur->body());
-        if (name.size() > kMaxSegmentBytes ||
-            !fp.steps.push_back(field_step_t{.name = {at, name.size()}}))
+        if (name.size() > kMaxSegmentBytes || !fp.steps.push_back(field_step_t{.name = name}))
             return std::unexpected(status_t::INVALID_PATH);
-        at = std::ranges::copy(name, at).out;
         field_step_t& step = fp.steps[fp.steps.size() - 1];
+        // The name views the request's body where that body outlives the resolve (the arena
+        // tier). A rope-tier NAME node flattens into a cache of its own that dies with the
+        // node, so there the name is copied into @p names, which the caller holds for the
+        // resolve.
+        if constexpr (!N::kBodyOutlivesNode) {
+            step.name = {at, name.size()};
+            at = std::ranges::copy(name, at).out;
+        }
         // vals[1] is the index_mode, vals[0] the u32 index; each VALUE read shifts in from the
         // right. The u8 index_mode is the low byte of its u32 load (`load_le` is LE and reads
         // the absent bytes as zero), so one load width serves both.
@@ -1076,7 +1095,7 @@ template <class N>
 
     // Decode the optional :field selector (its `[*]` deferral included). A request without
     // one decodes to the empty path, which is the vertex value itself.
-    field_names_t names;  // the selector's step names, held for the resolve
+    field_names_t<N> names;  // the selector's step names, held for the resolve
     const result_t<field_path_t> field = req.selector ? selector_to_field(*req.selector, names)
                                                       : result_t<field_path_t>{field_path_t{}};
 

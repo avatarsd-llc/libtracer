@@ -126,7 +126,10 @@ FOOTPRINT_PINS = {
     # the off build's cost is accepted. Main's pin plus the measured delta.
     # 33,465 -> 33,567 B (+102): rulings 86/116/117, #2788: the WS client link's kind_stats()
     # and the dropped_tx_cause literal; every other row and the RAM stay at main.
-    "WebSocket (httpd server + client link)": 33567,
+    # 33,567 -> 33,509 B (-58, #2871): the framing's unfragmented message goes through the
+    # assembler, one message path instead of two, and the framing's frames merge into the
+    # ingress's. Every other row and the RAM stay at main.
+    "WebSocket (httpd server + client link)": 33509,
 }
 
 

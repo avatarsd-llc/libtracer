@@ -10,7 +10,7 @@
  * arena's node table, its open-node stack, and the reply's iov table. The open-node stack now
  * threads through the node table itself, and the reply gathers into the caller's inline table,
  * so the request costs exactly ONE draw (the node table) and a rope-tier request or forward of
- * a few links costs none. Only a reply wider than `kMaxInlineIov` links spills into the source,
+ * a few links costs none. Only a reply wider than its inline table (4 links) spills into the source,
  * which `try_probe_window_test` pins.
  *
  * The instrument counts every `try_alloc` the router's `rx` plane serves. The link's state

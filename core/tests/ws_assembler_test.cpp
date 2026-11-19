@@ -150,6 +150,12 @@ int main() {
          false,
          {{op_t::BINARY, false, 5, status_t::PENDING, 0, 0},
           {op_t::CONT, true, 6, status_t::OVERSIZE, 0, 0}}},
+        {"an unfragmented BINARY completes at once, uncharged, and drops a stale message (#2871)",
+         kCost,
+         true,
+         {{op_t::BINARY, true, 7, status_t::COMPLETE, 7, 0},
+          {op_t::BINARY, false, 0, status_t::REFUSED, 0, 0},
+          {op_t::BINARY, true, 3, status_t::COMPLETE, 3, 2}}},
     };
     for (const row_t& row : rows) run(row);
 

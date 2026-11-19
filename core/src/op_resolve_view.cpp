@@ -114,6 +114,13 @@ class view_node {
     [[nodiscard]] bool spans_intact() const noexcept { return seam_ == nullptr || !seam_->refused; }
 
     /**
+     * @brief Whether a `body()` span outlives the node it came from (#2871). False here: it
+     *        views this node's flatten cache, which dies with the node, so @ref
+     *        selector_to_field copies the step names into the resolve's own buffer (#2286).
+     */
+    static constexpr bool kBodyOutlivesNode = false;
+
+    /**
      * @brief The trailer-excluded whole TLV as a fresh OWNED segment (ADR-0053 ⑤): a multi-link
      *        value is flattened ONCE and adopted — not materialized into the node cache and then
      *        copied a second time by the shared `own_tlv`.

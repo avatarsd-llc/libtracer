@@ -65,6 +65,8 @@ on:
       - "tools/check_esp_thread_id.py"
       - "tools/rv32_footprint.py"
       - "tools/esp_size_gate.py"
+      - "tools/esp_stack_gate.py"
+      - "tools/tests/test_esp_stack_gate.py"
       - "tools/check_no_heap.py"
       - "core/tests/footprint/**"
       - ".github/workflows/esp-idf.yml"
@@ -88,6 +90,11 @@ on:
 # grows past its pin (TRANSPORT_ROWS there), or when the build's compiler is not the one
 # the pins were measured with (PINNED_TOOLCHAIN there). The component total above stays
 # tracked.
+#
+# The one pinned stack figure (#2871): the WebSocket client's receive path, from its rx loop
+# through the in-call delivery of a peer's write and its ack, per delivery arm (borrowed and
+# owning). tools/esp_stack_gate.py reads it from transport_footprint's call graph and fails
+# the job on esp32c6 when a row grows past its pin (STACK_PINS there).
 #
 # ONE IMAGE PINNED BY DIGEST, THE REST ON THE MOVING TAG (#2830). A pin holds for one
 # compiler, so the two jobs that compare pins, full-node and transport-footprint, build in
@@ -551,11 +558,31 @@ jobs:
             --target esp32c6 \
             --out-json footprint-transports-esp32c6.json
 
+      - name: WebSocket client rx stack (worst static path per delivery arm, pinned)
+        # #2871: the client delivers in-call on its receive task, whose stack the application
+        # sizes once. This image is built with -fstack-usage and -fcallgraph-info=su (its
+        # CMakeLists), which change no code; the gate reads the call graph and fails a row
+        # over its esp32c6 pin. A raise needs a maintainer ruling.
+        shell: bash
+        working-directory: integrations/esp-idf/examples/transport_footprint
+        run: |
+          . "${IDF_PATH}/export.sh"
+          CXX=$(sed -n 's/^set(CMAKE_CXX_COMPILER "\(.*\)")$/\1/p' build/CMakeFiles/*/CMakeCXXCompiler.cmake | head -n1)
+          python3 -m unittest discover -s "${GITHUB_WORKSPACE}/tools/tests" -p "test_esp_stack_gate.py"
+          python3 "${GITHUB_WORKSPACE}/tools/esp_stack_gate.py" \
+            --build build \
+            --toolchain "$("$CXX" --version | head -n1)" \
+            --target esp32c6 \
+            --cxxfilt riscv32-esp-elf-c++filt \
+            --out-json stack-ws-client-rx-esp32c6.json
+
       - name: Upload footprint artifact
         uses: actions/upload-artifact@v4
         with:
           name: footprint-transports-esp32c6
-          path: integrations/esp-idf/examples/transport_footprint/footprint-transports-esp32c6.json
+          path: |
+            integrations/esp-idf/examples/transport_footprint/footprint-transports-esp32c6.json
+            integrations/esp-idf/examples/transport_footprint/stack-ws-client-rx-esp32c6.json
       - name: Clean this job's workspace off the host runner
         # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
         # worktrees and temp files so the shared runner tmpfs does not fill, and hands the

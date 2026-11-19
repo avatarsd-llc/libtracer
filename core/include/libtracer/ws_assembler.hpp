@@ -92,9 +92,11 @@ struct ws_assembler_t {
      * @brief Chain one owning data fragment (BINARY or CONT) into the message.
      *
      * Returns the completed message as a rope when this fragment finishes one, `PENDING`
-     * otherwise. The assembler is idle again after every outcome but `PENDING`, so a link
-     * that delivers the message touches no assembler state afterwards: delivery may run code
-     * that tears the link down.
+     * otherwise. An unfragmented message (a BINARY with FIN) is COMPLETE at once as the one
+     * view over its segment: no chain and no charge, since the frame's own header check
+     * already bounded it (#2871: one message path, so the framing holds one rope). The assembler is
+     * idle again after every outcome but `PENDING`, so a link that delivers the message touches no
+     * assembler state afterwards: delivery may run code that tears the link down.
      *
      * @param op    The fragment's opcode: BINARY or CONT.
      * @param fin   Its FIN bit.
@@ -104,10 +106,12 @@ struct ws_assembler_t {
      *              past the cap a few bytes at a time across a million CONTs (#872).
      */
     result_t on_piece(ws::opcode_t op, bool fin, view::view_t piece, std::size_t cap) {
-        if (op == ws::opcode_t::BINARY)
+        if (op == ws::opcode_t::BINARY) {
             reset();
-        else if (!assembling())
+            if (fin) return {status_t::COMPLETE, view::rope_t{std::move(piece)}};
+        } else if (!assembling()) {
             return {};  // stray
+        }
         // Written as a subtraction because `charged + cost` can wrap. `charged <= cap` holds
         // by induction (every earlier fragment passed this same test), so the difference is
         // well-defined; the header check holds `piece.length` to the cap, so `cost` cannot

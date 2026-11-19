@@ -67,8 +67,14 @@ struct ws_framing_t {
         return {ingress_header_t::kind_t::BODY, h.size, h.len};
     }
 
-    /** @brief One whole body, in its exact segment (empty when the source refused it). */
-    [[nodiscard]] bool body(tr::view::rx_block_t& blk, std::size_t len) const {
+    /**
+     * @brief One whole body, in its exact segment (empty when the source refused it).
+     *
+     * Always inlined, together with the data step below, into the ingress's one advance step
+     * (#2871): each has that single call site, so the merge costs no code, and it takes their
+     * two frames off the in-call delivery path's stack.
+     */
+    [[nodiscard, gnu::always_inline]] bool body(tr::view::rx_block_t& blk, std::size_t len) const {
         if (len != 0 && !blk.seg) {
             // The receiving link's source refused the body (backpressure): the message is
             // shed and counted, the connection lives and re-syncs at the next BINARY. A
@@ -95,15 +101,11 @@ struct ws_framing_t {
     }
 
     /**
-     * @brief One data frame's bytes: an unfragmented message goes up as the one view over its
-     *        segment, a fragment is chained by the assembler until its message completes.
+     * @brief One data frame's bytes: the assembler completes an unfragmented message at once,
+     *        as the one view over its segment, and chains a fragment until its message
+     *        completes. A BINARY mid-assembly drops the stale message (§5.4).
      */
-    [[nodiscard]] bool data(tr::view::view_t piece) const {
-        if (end.frame.op == ws::opcode_t::BINARY && end.frame.fin) {
-            end.assembler.reset();  // a BINARY mid-assembly drops the stale message (§5.4)
-            end.hand_up(tr::view::rope_t{std::move(piece)});
-            return true;
-        }
+    [[nodiscard, gnu::always_inline]] bool data(tr::view::view_t piece) const {
         ws_assembler_t::result_t r =
             end.assembler.on_piece(end.frame.op, end.frame.fin, std::move(piece), end.cap());
         // Fragments summing past the cap get the answer a single over-cap frame gets, so the
