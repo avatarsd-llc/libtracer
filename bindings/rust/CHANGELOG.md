@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An oversize TLV length is `FrameInvalid` (#2885).** This aligns `decode` with RFC-0001 §C.3 and RFC-0002. When a TLV does not fit the bytes at hand, a declared `length` above the new `MAX_TLV_BYTES` (16 MiB, the C++ reference's default) is now `Error::FrameInvalid`, and any other length is still `Error::FrameTruncated`. A TLV that fits decodes as before, whatever its length.
+
 ### Removed (breaking)
 
 - The `path_ref` builder and its crate-root re-export (#2435). The crate has built no `0x14 PATH_REF` for any frame since #2245 retired it as an address, so only tests called it. Decode is unchanged: `decode` and `encode` still apply the `PATH_REF` stride rule, and `PathRefElement`, `path_ref_element`, `type_code::PATH_REF`, `PATH_REF_ELEMENT_BYTES` and `MAX_PATH_REF_ELEMENTS` stay. A caller that must spell one builds the `Tlv` by struct literal.

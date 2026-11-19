@@ -32,6 +32,10 @@
 ============================================================================]]--
 
 local M = {}
+
+-- The largest TLV length a short frame may declare (MAX_TLV_BYTES, RFC-0001 §C.3): 16 MiB,
+-- the C++ reference's default kMaxTlvBytes.
+M.MAX_TLV_BYTES = 16 * 1024 * 1024
 M.VERSION = "0.1.0"
 
 --============================================================================
@@ -325,6 +329,13 @@ function M.parse(b, off, depth, maxdepth)
   node.payload_len = node.length
 
   if avail < total then
+    -- Only a TLV that does not fit is classified (RFC-0001 §C.3, #2885): a length above
+    -- MAX_TLV_BYTES is tr::frame::invalid, so there is nothing to reassemble; any other is
+    -- a short frame that waits for more bytes.
+    if node.length > M.MAX_TLV_BYTES then
+      node.invalid = "length above MAX_TLV_BYTES (tr::frame::invalid)"
+      return node
+    end
     node.err = "truncated frame"
     node.need_more = total - avail
     return node
