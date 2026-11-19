@@ -1096,6 +1096,18 @@ struct default_config_t {
     static constexpr std::size_t kUdpStackScratchBytes = 0;
 
     /**
+     * @brief The largest TLV `length` the codec treats as a short frame rather than an invalid
+     *        one (`MAX_TLV_BYTES`, RFC-0001 §C.3, annex 01 §Truncation handling); 16 MiB.
+     *
+     * Read only when a TLV does not fit the bytes at hand. A declared `length` above it is
+     * `tr::frame::invalid`, and any other length that does not fit is `tr::frame::truncated`.
+     * A TLV that fits decodes whatever its length, so the bound costs nothing on the success
+     * path and allocates nothing. A NARROW build may lower it to its largest frame. Override
+     * fragment: `static constexpr std::uint32_t kMaxTlvBytes = 4096;`
+     */
+    static constexpr std::uint32_t kMaxTlvBytes = 16u * 1024u * 1024u;
+
+    /**
      * @brief Frames a link's receive context may consume back to back before it waits for
      *        its core to go idle once; `0` = no frame budget (ADR-0085).
      *
@@ -1455,6 +1467,8 @@ inline constexpr bool kCreationHooks = config_t::kCreationHooks;
 inline constexpr bool kSessionAdmission = config_t::kSessionAdmission;
 /** @brief @ref default_config_t::kUdpStackScratchBytes for this build. */
 inline constexpr std::size_t kUdpStackScratchBytes = config_t::kUdpStackScratchBytes;
+/** @brief @ref default_config_t::kMaxTlvBytes for this build. */
+inline constexpr std::uint32_t kMaxTlvBytes = config_t::kMaxTlvBytes;
 
 namespace detail_guard {
 
