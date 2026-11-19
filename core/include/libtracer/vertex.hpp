@@ -2575,8 +2575,9 @@ class vertex_t {
         if (b == nullptr) return out;
         const std::span<pub_edge_t> all = b->published();
         out.reserve(all.size());
+        const view::view_t* const views = b->published_views();
         for (std::size_t i = 0; i < all.size(); ++i) {
-            const view::view_t& v = b->pub.load(std::memory_order_relaxed)->views()[i];
+            const view::view_t& v = views[i];
             if (!all[i].cleared && v.owner) out.push_back(v);
         }
         return out;
@@ -2592,8 +2593,9 @@ class vertex_t {
         if (b == nullptr) return true;
         const std::span<pub_edge_t> all = b->published();
         if (!out.reserve(all.size())) return false;
+        const view::view_t* const views = b->published_views();
         for (std::size_t i = 0; i < all.size(); ++i) {
-            const view::view_t& v = b->pub.load(std::memory_order_relaxed)->views()[i];
+            const view::view_t& v = views[i];
             if (!all[i].cleared && v.owner) (void)out.push_back(v);  // reserved
         }
         return true;
@@ -3476,8 +3478,8 @@ class vertex_t {
      * and a cleared slot's dead entry is dropped. With @p at a slot index (and @p fill then
      * non-null), the new edge @p fill becomes slot @p at's entry, in slot order, in place of
      * whatever entry that slot had: an add into a free slot, or a replace whose displaced edge
-     * leaves in the same exchange. Sized for the current array's entries plus @p fill, in one pass,
-     * so a cleared slot costs no capacity either.
+     * leaves in the same exchange. Sized for the surviving live entries plus @p fill, so a
+     * cleared slot costs no capacity, and a rebuild that leaves no entry publishes no array.
      *
      * **ONE allocation total** (#1442): the array itself. The rebuild is O(edges) and always
      * will be — #635 bought lock-free fan-out with an immutable published array, so appending
@@ -3492,7 +3494,11 @@ class vertex_t {
     [[nodiscard]] bool try_publish_edges(edge_block_t& b, const subscriber_t* fill = nullptr,
                                          std::size_t at = kNoSlot) noexcept {
         const std::span<pub_edge_t> old = b.published();
-        const std::size_t n = old.size() + static_cast<std::size_t>(at != kNoSlot);
+        // Sized by what survives: every live entry other than the one being replaced, plus
+        // the fill. Cleared entries are dropped here, so a vertex whose last edge was cleared
+        // publishes no array at all.
+        std::size_t n = static_cast<std::size_t>(at != kNoSlot);
+        for (const pub_edge_t& e : old) n += static_cast<std::size_t>(e.slot != at && !e.cleared);
         edge_pub_t* np = nullptr;
         if (n != 0) {
             np = alloc_edge_pub(b.source(), n);
@@ -3519,6 +3525,7 @@ class vertex_t {
             // `pending` is the fill's slot until it is placed, then (or with no fill) a value no
             // entry's slot reaches, so the one test both places it and stops.
             std::size_t pending = at;
+            const view::view_t* const old_views = b.published_views();
             for (std::size_t i = 0; i < old.size(); ++i) {
                 const pub_edge_t& e = old[i];
                 if (e.slot >= pending) {
@@ -3526,8 +3533,7 @@ class vertex_t {
                     pending = kNoSlot;
                 }
                 if (e.slot != at && !e.cleared)
-                    put(e, b.pub.load(std::memory_order_relaxed)->views()[i],
-                        e.active.load(std::memory_order_relaxed), e.slot);
+                    put(e, old_views[i], e.active.load(std::memory_order_relaxed), e.slot);
             }
             if (pending != kNoSlot) put(*fill, fill->source_view, true, at);
         }

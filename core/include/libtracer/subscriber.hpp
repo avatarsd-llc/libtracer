@@ -171,7 +171,7 @@ using subscriber_fn_t = void (*)(void* ctx, const value_t& value);
  *        caller state per edge.
  *
  * **Build then freeze.** An admission door fills one of these through
- * @ref subscriber_t::ensure_remote while the record is still private to its stack-local
+ * @ref subscriber_t::make_remote while the record is still private to its stack-local
  * `subscriber_t`; the slot verb then moves it in, and from the first
  * `%vertex_t::try_publish_edges` onward the record is READ-ONLY. Nothing in the tree
  * writes it after admission — `index_link_vertex`'s key choice, `evict_link_edges`' link
@@ -393,7 +393,7 @@ class remote_ptr_t {
      * @brief The shared record, MUTABLE — the admission door's BUILD phase and nothing else.
      *
      * Legal only while the caller is the record's sole holder, which is what
-     * @ref subscriber_t::ensure_remote asserts. Once a publish has cloned the handle, the
+     * @ref subscriber_t::make_remote asserts. Once a publish has cloned the handle, the
      * record is bytes a pinned reader may be copying with no lock and no pin on the record
      * itself — a write here would be a data race the deep copy used to make impossible.
      */
@@ -593,7 +593,7 @@ struct subscriber_t {
      */
     view::view_t source_view{};
     /** @brief The cold wire/gate half (#380 §3) — null for the plain in-process edge;
-     *         allocated by @ref ensure_remote when a route/link/caller is
+     *         allocated by @ref make_remote when a route/link/caller is
      *         stored (pay-for-what-you-use, ADR-0021). SHARED with every published entry
      *         that names this slot (#1442), never copied into one. */
     remote_ptr_t remote;
@@ -609,7 +609,7 @@ struct subscriber_t {
     /** @brief NOT copyable, exactly as it was while the cold half was a `std::unique_ptr`
      *         (#380 §3). The handle that replaced it IS copyable — that is the point — so
      *         the ban is stated rather than inherited: a copied slot would share a cold half
-     *         that @ref ensure_remote is then entitled to write. */
+     *         that @ref make_remote is then entitled to write. */
     subscriber_t(const subscriber_t&) = delete;
     /** @brief NOT copy-assignable — see the copy constructor. */
     subscriber_t& operator=(const subscriber_t&) = delete;
@@ -674,6 +674,9 @@ static_assert(sizeof(void*) != 8 || sizeof(subscriber_remote_t) == 88,
 static_assert(sizeof(void*) != 8 || alignof(subscriber_remote_t) == 8,
               "the COLD edge half is 8-aligned; it is refcount-owned off to the side, so its "
               "address is stable across a slot-vector reallocation");
+static_assert(sizeof(void*) != 4 || sizeof(subscriber_remote_t) == 52,
+              "the COLD edge half is 52 B on ILP32 plus its caller bytes (#2737) — price any "
+              "growth against the per-edge RAM");
 static_assert(sizeof(void*) != 8 || sizeof(remote_ptr_t) == 8,
               "the cold-half handle is ONE pointer — a wider one (a std::shared_ptr) is paid "
               "for out of pub_edge_t, on the delivery path");
@@ -1062,6 +1065,12 @@ struct edge_block_t {
         return p == nullptr ? std::span<pub_edge_t>{}
                             : std::span<pub_edge_t>(p->entries(), p->count);
     }
+    /** @brief The published array's retained views, parallel to @ref published (#2737); null
+     *         with no array. Read under the stripe lock, like @ref published. */
+    [[nodiscard]] view::view_t* published_views() const noexcept {
+        edge_pub_t* const p = pub.load(std::memory_order_relaxed);
+        return p == nullptr ? nullptr : p->views();
+    }
 
     /** @brief An empty block drawing from @p src. */
     explicit edge_block_t(mem::block_source_t& from) noexcept : src(&from) {}
@@ -1086,6 +1095,10 @@ struct edge_block_t {
         }
     }
 };
+static_assert(sizeof(void*) != 8 || sizeof(edge_block_t) == 32,
+              "the edge block is 32 B on LP64 (#2737: it no longer carries a slot table)");
+static_assert(sizeof(void*) != 4 || sizeof(edge_block_t) == 20,
+              "the edge block is 20 B on ILP32 (#2737: it no longer carries a slot table)");
 
 /** @brief Push @p p onto @p head — a wait-free-on-x86 Treiber push; the mutator's thread
  *         runs it OUTSIDE every lock, so no free ever happens under the stripe mutex. */

@@ -58,11 +58,16 @@ class gate_source_t final : public tr::mem::block_source_t {
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
         if (armed_ && allow_ == 0) return nullptr;
         if (armed_) --allow_;
-        return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+        void* const p = ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+        live_ += p != nullptr;
+        return p;
     }
     void release(void* p, std::size_t, std::size_t align) noexcept override {
+        --live_;
         ::operator delete(p, std::align_val_t{align});
     }
+    /** @brief Blocks served and not yet released. */
+    [[nodiscard]] std::size_t live() const noexcept { return live_; }
     /** @brief Serve @p allow more blocks, then refuse. */
     void arm(std::size_t allow) noexcept {
         armed_ = true;
@@ -76,6 +81,7 @@ class gate_source_t final : public tr::mem::block_source_t {
    private:
     bool armed_ = false;    /**< @brief Refusing past the budget? */
     std::size_t allow_ = 0; /**< @brief Blocks left before refusing. */
+    std::size_t live_ = 0;  /**< @brief Blocks served and not yet released. */
 };
 
 /** @brief A one-byte write payload. */
@@ -265,6 +271,24 @@ void test_retire_gives_each_hold_back_once() {
           "the suspended edge and the live one gave their holds back, the cleared one not again");
 }
 
+/** @brief (5) Clearing the last edge publishes no array: an empty one would hold a block. */
+void test_last_clear_publishes_no_array() {
+    std::printf("clearing the last edge leaves no published array behind:\n");
+    gate_source_t gate;
+    graph_t g{gate};
+    const vertex_handle_t v = g.register_vertex(path_t("/c"), role_t::STORED_VALUE);
+    int a = 0;
+    const auto bump = [](void* ctx, const value_t&) { ++*static_cast<int*>(ctx); };
+    const auto first = g.subscribe(path_t("/c"), bump, &a);
+    check(first.has_value() && g.unsubscribe(*first).has_value(), "a first subscribe and clear");
+    const std::size_t idle = gate.live();  // the edge block stays, drawn on the first subscribe
+    const auto sa = g.subscribe(path_t("/c"), bump, &a);
+    check(sa.has_value() && published(v) == 1 && gate.live() == idle + 1,
+          "one edge publishes one array block");
+    check(g.unsubscribe(*sa).has_value() && published(v) == 0 && gate.live() == idle,
+          "its clear releases the array and publishes none in its place");
+}
+
 }  // namespace
 
 int main() {
@@ -272,5 +296,6 @@ int main() {
     test_refused_replace_changes_nothing();
     test_cleared_under_pressure_stays_cleared();
     test_retire_gives_each_hold_back_once();
+    test_last_clear_publishes_no_array();
     return tr::testing::summary("edge_slot_table");
 }
