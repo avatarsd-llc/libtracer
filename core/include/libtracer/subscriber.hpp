@@ -189,7 +189,7 @@ using subscriber_fn_t = void (*)(void* ctx, const value_t& value);
  */
 struct subscriber_remote_t {
     /** @brief A record drawn from @p src whose @ref caller is the @p caller_len bytes that
-     *         follow it in the same block (#2737). Built only by @ref make_remote_record. */
+     *         follow it in the same block (#2737). Built only by @ref subscriber_t::make_remote. */
     subscriber_remote_t(mem::block_source_t& src, std::uint32_t caller_len) noexcept
         : source(&src), caller_len(caller_len) {}
 
