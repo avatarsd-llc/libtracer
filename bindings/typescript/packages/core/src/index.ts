@@ -22,6 +22,7 @@ export {
   isPathRefType,
   PATH_REF_ELEMENT_BYTES,
   MAX_PATH_REF_ELEMENTS,
+  MAX_TLV_BYTES,
   ERROR,
   CodecError,
   decode,

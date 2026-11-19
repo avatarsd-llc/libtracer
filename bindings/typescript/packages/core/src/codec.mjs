@@ -342,6 +342,14 @@ export function crc16ccitt(data) {
   return c;
 }
 
+/**
+ * @brief The largest TLV `length` a short frame may declare (`MAX_TLV_BYTES`, RFC-0001 §C.3):
+ * 16 MiB, as the C++ reference's default `kMaxTlvBytes`. A TLV that does not fit and declares
+ * more is `FRAME_INVALID` rather than `FRAME_TRUNCATED`; a TLV that fits decodes whatever its
+ * length.
+ */
+export const MAX_TLV_BYTES = 16 * 1024 * 1024;
+
 /* --------------------------------------------------------------- decode --- */
 
 /**
@@ -373,7 +381,11 @@ function parseOne(buf) {
   const tsSize = opt.ts ? (opt.tf ? 4 : 8) : 0;
   const crcSize = opt.cr ? (opt.cw ? 2 : 4) : 0;
   const total = header + length + tsSize + crcSize;
-  if (buf.length < total) throw new CodecError(ERROR.FRAME_TRUNCATED);
+  // Only a TLV that does not fit is classified (RFC-0001 §C.3, annex 01 §Truncation handling):
+  // a declared length above MAX_TLV_BYTES is INVALID, any other is a short frame (#2885).
+  if (buf.length < total) {
+    throw new CodecError(length > MAX_TLV_BYTES ? ERROR.FRAME_INVALID : ERROR.FRAME_TRUNCATED);
+  }
 
   /** @type {Tlv} */
   const tlv = {
