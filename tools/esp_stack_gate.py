@@ -67,16 +67,16 @@ from esp_size_gate import PINNED_TARGET, PINNED_TOOLCHAIN  # noqa: E402  (one to
 # with PINNED_TOOLCHAIN in the image esp-idf.yml pins by digest (#2830). A raise needs a
 # maintainer ruling; a cut re-pins down.
 STACK_PINS = {
-    # #2871: 6,336 B at 9964668f0, cut by 832 B. The arena tier no longer copies selector names
+    # #2871: 6,048 B at 9964668f0, cut by 832 B. The arena tier no longer copies selector names
     # into a 512 B buffer, the reply table carries 4 stack entries, not 16, and the framing's
     # body/data/hand_up frames merge into the ingress's. (On the receive and terminus path
     # alone, before the graph's hooks were resolved: 4,080 B at v0.21.0, 5,232 B at
     # 9964668f0, 4,496 B here.)
-    "borrowed": 5504,
-    # #2871: 7,152 B at 9964668f0, cut by 352 B by the same reply table and framing merges; the
+    "borrowed": 5216,
+    # #2871: 6,864 B at 9964668f0, cut by 352 B by the same reply table and framing merges; the
     # multi-link terminus (rope tier) keeps its name copy. (Receive and terminus path alone:
     # 5,776 B at v0.21.0, 6,048 B at 9964668f0, 5,792 B here.)
-    "owning": 6800,
+    "owning": 6512,
 }
 
 ROOT = r"^tr::net::esp_ws_client_link_t::recv_loop\(\)$"
@@ -90,16 +90,21 @@ INDIRECT_EDGES = (
     ("receiver thunk",
      r"^tr::net::esp_ws_client_link_t::(recv_loop|framing_end_t)|receiver_slot|frame_ingress"
      r"|ws_framing", f"{SPAN_THUNK}|{ROPE_THUNK}"),
-    # The graph's write hooks the router installs: remote delivery and a fired await. Any
-    # graph or vertex frame with an indirect call may make them (a small inline member such
-    # as `vertex_t::wake_waiters` lands in its caller), so all of them resolve: an extra
-    # edge can only overestimate.
-    ("graph write hooks", r"^([^(]* )?tr::graph::(graph_t|vertex_t)::",
-     r"^tr::net::fwd_router_t::(await_fired_thunk\(|fwd_router_t\(.*"
-     r"lambda\(void\*, tr::graph::remote_delivery_t)"),
+    # The graph's write hooks the router installs. A remote edge's delivery is made only by
+    # `dispatch_edge_remote` (kept out of line), into the router's remote-delivery lambda.
+    ("remote delivery", r"^([^(]* )?tr::graph::graph_t::dispatch_edge_remote\(",
+     r"^tr::net::fwd_router_t::fwd_router_t\(.*lambda\(void\*, tr::graph::remote_delivery_t"),
+    # A fired await is woken by `vertex_t::wake_waiters`, small enough to land in its callers:
+    # the vertex's own members and the graph's write and publish steps. Frames that call only
+    # an application handler (`read_handler_gated`) are not callers: a ratchet must not carry
+    # a path that cannot run, or a real one could grow into its margin unseen.
+    ("await fired", r"^([^(]* )?tr::graph::(vertex_t::|graph_t::(handler_write|publish_value"
+     r"|relay_write)\()", r"^tr::net::fwd_router_t::await_fired_thunk\("),
     # The router's sends into each link's own (a reply or a refusal, a remote delivery, an
     # await's answer, a forward hop): any router frame, member or file-local, may make one.
-    ("router sends", r"^([^(]* )?tr::net::(fwd_router_t::|\(anonymous namespace\)::)",
+    # A file-local caller is matched with its TU, so another file's helpers do not count.
+    ("router sends", r"^([^(]* )?tr::net::fwd_router_t::"
+     r"|^fwd_router\.cpp:([^(]* )?tr::net::\(anonymous namespace\)::",
      r"^tr::net::(esp_ws_client_link_t|httpd_ws_link_t|can_transport_t)::send(_on)?\("),
     # The CAN transport's frames into its raw link, the TWAI link this image links.
     ("CAN raw link", r"^tr::net::can_transport_t::", r"^tr::net::twai_link_t::write_raw\("),
@@ -136,13 +141,23 @@ INDIRECT = "__indirect_call"
 
 
 def _norm(title: str) -> str:
-    """A node's symbol: GCC prefixes a TU-local or inline one with its source file's path."""
-    return re.sub(r"^[^:]*\.(?:c|cc|cpp|cxx|s|S):", "", title)
+    """A node's symbol: GCC prefixes a TU-local or inline one with its source file's path.
+
+    The path is dropped, so an inline function emitted in several TUs is one node, except for
+    an anonymous-namespace symbol: that one is TU-local by definition and keeps its file's
+    base name (`fwd_router.cpp:_ZN...`, demangled as `fwd_router.cpp:tr::net::(anonymous
+    namespace)::...`), so an edge can name the TU it means.
+    """
+    m = re.match(r"^(?:[^:]*/)?([^:/]*\.(?:c|cc|cpp|cxx|s|S)):", title)
+    if not m:
+        return title
+    rest = title[m.end():]
+    return f"{m.group(1)}:{rest}" if "_GLOBAL__N_" in rest else rest
 
 
 def _base(name: str) -> str:
     """A demangled name without its parameter list (the text from its first `(`)."""
-    return name.split("(", 1)[0]
+    return re.split(r"\((?!anonymous namespace\))", name, maxsplit=1)[0]
 
 
 def load(ci_texts: list[str]) -> tuple[dict[str, tuple[int, str]], dict[str, set[str]]]:
@@ -192,7 +207,7 @@ def worst_path(frames: dict[str, tuple[int, str]], edges: dict[str, set[str]],
                            f"{len(dsts)} target(s); both must be found")
         for s in srcs:
             edges[s] |= dsts
-        resolved.append((label, len(srcs), sorted(name(d) for d in dsts)))
+        resolved.append((label, sorted(name(c) for c in srcs), sorted(name(d) for d in dsts)))
     platform = re.compile(PLATFORM_CUTS)
     cut = re.compile(ARM_CUTS[arm] if reported_only else f"{ARM_CUTS[arm]}|{REPORTED_ONLY_CUTS}")
     roots = [s for s in syms if s in frames and re.search(ROOT, name(s))]
@@ -284,9 +299,13 @@ def main(argv: list[str] | None = None) -> int:
         lines.append(f"| {row} | {r['total']:,} B | {pin_txt} | {verdict} |")
     lines += ["", f"Toolchain: `{args.toolchain}`; pins measured with `{PINNED_TOOLCHAIN}`.", "",
               "Indirect edges resolved:", ""]
-    for label, n_src, dsts in next(iter(rows.values()))[2]["edges"]:
-        lines.append(f"- {label}: {n_src} caller(s) -> {len(dsts)} target(s)")
-    lines.append("")
+    for label, srcs, dsts in next(iter(rows.values()))[2]["edges"]:
+        lines.append(f"- {label}: {len(srcs)} caller(s) -> {len(dsts)} target(s)")
+    lines += ["", "<details><summary>Indirect edges: callers and targets</summary>", "", "```"]
+    for label, srcs, dsts in next(iter(rows.values()))[2]["edges"]:
+        lines += [f"{label}:"] + [f"  from {_base(c)}" for c in srcs]
+        lines += [f"  to   {_base(d)}" for d in dsts]
+    lines += ["```", "</details>", ""]
     for row, (_arm, _pinned, r) in rows.items():
         lines += [f"<details><summary>{row}: {r['total']:,} B</summary>", "", "```"]
         acc = 0

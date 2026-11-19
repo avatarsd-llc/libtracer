@@ -10,9 +10,10 @@ identity "demangler" stands in for c++filt:
 * a TU-local node's file prefix is dropped, and an inline function emitted in two TUs keeps
   its larger frame;
 * the worst path follows direct calls, and an indirect call only where the gate resolves one:
-  the receive side into the arm's router thunk, the graph's write hooks into the router's await
-  and remote-delivery thunks, the router into the link's send, and CAN into its raw link; an
-  edge that resolves no caller or no target fails the run;
+  the receive side into the arm's router thunk, a remote edge into the router's delivery
+  lambda, a woken await into its thunk, the router (and only fwd_router.cpp's file-local
+  helpers) into the link's send, and CAN into its raw link; an edge that resolves no caller or
+  no target fails the run;
 * each arm leaves out the other arm's thunk, the platform's frames and the reported-only paths;
 * the gate fails a row over its pin, a build by another compiler, a walk that misses an arm's
   anchor frame, and an unbounded dynamic frame on the path; a recursion is cut and named.
@@ -143,9 +144,34 @@ class StackGateTest(unittest.TestCase):
         self.assertEqual([n for _, n in path][-5:], [WRITE, WAKE, AWAIT_THUNK, ANSWER, SEND])
 
     def test_a_remote_edge_walks_into_the_router_lambda_and_its_delivery(self):
-        frames = dict(FRAMES, **{SEND: 3000, AWAIT_THUNK: 0, ANSWER: 0})
+        frames = dict(FRAMES, **{SEND: 3000})
         _total, path = run([ci(frames, EDGES + [(WRITE, REMOTE_EDGE)])], "borrowed")
         self.assertEqual([n for _, n in path][-4:], [REMOTE_EDGE, REMOTE, DELIVER, SEND])
+
+    def test_a_frame_that_calls_only_an_app_handler_resolves_no_hook(self):
+        gated = "tr::graph::graph_t::read_handler_gated(M) const"
+        frames = dict(FRAMES, **{SEND: 0, gated: 3000})
+        edges = EDGES + [(WRITE, gated), (gated, gate.INDIRECT)]
+        _total, path = run([ci(frames, edges)], "borrowed")
+        self.assertEqual(path[-1][1], gated)
+
+    def test_a_file_local_send_caller_counts_only_in_the_router_tu(self):
+        mangled = "_ZN2tr3net12_GLOBAL__N_14helpEv"
+        frames = dict(FRAMES, **{SEND: 3000})
+        for tu, sends in (("fwd_router.cpp", True), ("other.cpp", False)):
+            texts = [ci(frames, EDGES),
+                     ci({mangled: 16, WRITE: 128}, [(mangled, gate.INDIRECT), (WRITE, mangled)],
+                        tu=tu)]
+            loaded = gate.load(texts)
+            names = {s: s for s in set(loaded[0]) | set(loaded[1])}
+            key = f"{tu}:{mangled}"
+            names[key] = f"{tu}:tr::net::(anonymous namespace)::help()"
+            with self.subTest(tu=tu):
+                self.assertIn(key, loaded[0])
+                r = gate.worst_path(*loaded, names, "borrowed")
+                # Through the helper, the send sits below the deep resolver; elsewhere the
+                # worst path is the terminus's own send and never visits the helper.
+                self.assertEqual(names[key] in [n for _b, _q, n in r["path"]], sends)
 
     def test_a_can_send_walks_into_its_raw_link(self):
         frames = dict(FRAMES, **{SEND: 0, CAN_SEND: 3000})
@@ -153,9 +179,9 @@ class StackGateTest(unittest.TestCase):
         self.assertEqual([n for _, n in path][-3:], [TERM, CAN_SEND, TWAI])
 
     def test_an_edge_that_resolves_nothing_fails_closed(self):
-        # No target (both router thunks renamed), no caller (no graph frame calls through a
-        # pointer), and no CAN raw link.
-        for gone in ({AWAIT_THUNK, REMOTE}, {WAKE, REMOTE_EDGE}, {TWAI}):
+        # Each edge's one target or caller renamed away: either router thunk, the remote
+        # edge's dispatcher, the await's waker, the CAN raw link.
+        for gone in ({AWAIT_THUNK}, {REMOTE}, {REMOTE_EDGE}, {WAKE}, {TWAI}):
             frames = {k: v for k, v in FRAMES.items() if k not in gone}
             edges = [e for e in EDGES if not gone & set(e)]
             with self.subTest(gone=sorted(gone)), self.assertRaises(KeyError):
@@ -167,7 +193,9 @@ class StackGateTest(unittest.TestCase):
 
     def test_main_lists_the_edges_it_resolved(self):
         _rc, out = gate_main([ci(FRAMES, EDGES)])
-        self.assertIn("- graph write hooks: 2 caller(s) -> 2 target(s)", out)
+        self.assertIn("- remote delivery: 1 caller(s) -> 1 target(s)", out)
+        self.assertIn("- await fired: 1 caller(s) -> 1 target(s)", out)
+        self.assertIn(f"  from {gate._base(DELIVER)}", out)
         self.assertIn("- router sends: 3 caller(s) -> 2 target(s)", out)
 
     def test_inline_frames_merge_across_tus_at_their_largest(self):
