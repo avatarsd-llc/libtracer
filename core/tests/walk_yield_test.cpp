@@ -122,7 +122,9 @@ void test_walks_yield(int walks) {
     });
     // The writer is counted while it waits and uncounted once it holds the lock, so a count of
     // one with `wrote` still false is exactly "blocked behind the parked walks".
-    wait_for([&] { return f.waiting() == 1; });
+    // `wrote` ends the wait too, so a walk parked outside its hold (the hook has no vertex to
+    // name, so the park is by call count) fails here instead of hanging.
+    wait_for([&] { return f.waiting() == 1 || wrote.load(); });
     check(!wrote.load(), "the writer is blocked behind the parked walks");
 
     if (walks == 1) {

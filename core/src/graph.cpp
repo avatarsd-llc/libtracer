@@ -4184,9 +4184,8 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
         // a peer can drive to exhaustion.
         mem::block_array_t<work_t> stack(*tables_);
         // `nodes` draws from the same store. A lambda cannot return the error, so a refused
-        // child push latches `refused` and the loop propagates it after each visit. A refusal
-        // does not stop the sibling loop: the read answers BACKPRESSURE either way, and one
-        // latch without a guard keeps the walk's branch count down.
+        // child push latches `refused` and the loop propagates it after each visit. A waiting
+        // writer (#2846) latches it too, and answers the same BACKPRESSURE.
         bool refused = false;
         if (!stack.push_back(work_t{.v = root, .parent = 0}))
             return std::unexpected(status_t::BACKPRESSURE);
@@ -4210,6 +4209,9 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
             // pre-order equal to the emitted wire order.
             const auto first = static_cast<std::ptrdiff_t>(stack.size());
             w.v->for_each_child([this, caller, idx, &stack, &refused](vertex_t& c) {
+                // A refused push, or a writer now waiting (#2846): stop growing, so a wide
+                // node keeps a writer waiting one child, not its whole width.
+                if ((refused |= map_writer_waiting())) return;
                 // THE membership predicate, the same one both `:children[]` doors take
                 // (@ref vertex_t::enumerable_member): placeholders are not members, and
                 // neither is an enumeration-hidden child. The composed read is an
@@ -4222,9 +4224,8 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
                 if (!acl_allows(&c, caller, acl_right_t::READ)) return;  // PRUNE the subtree
                 refused |= !stack.push_back(work_t{.v = &c, .parent = idx});
             });
-            // Yield to a waiting writer after each node (#2846), so an exclusive locker waits
-            // one node visit, not every overlapping walk. Nothing is kept: the caller retries
-            // the whole read. It answers as a refused draw does, so it rides the same latch.
+            // Yield to a waiting writer after each node too (#2846): a childless node never
+            // runs the lambda above. Nothing is kept: the caller retries the whole read.
             refused |= map_writer_waiting();
             if (refused) return std::unexpected(status_t::BACKPRESSURE);
             std::reverse(stack.data() + first, stack.data() + stack.size());
