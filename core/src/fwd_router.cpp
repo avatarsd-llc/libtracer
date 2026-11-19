@@ -2181,8 +2181,16 @@ namespace {
 using reply_iov_t = iov_table_t<std::span<const std::byte>>;
 
 /**
+ * @brief The stack entries a reply table carries (#2871): an acknowledgement is one to three
+ *        links (its head, and a value's links), and a wider reply draws its table from the
+ *        receiving link's own source. The table sits in the terminus's frame, under the
+ *        in-call delivery of the write, so its width is paid on that path's deepest stack.
+ */
+constexpr std::size_t kReplyInlineIov = 4;
+
+/**
  * @brief Gather a terminus reply's links into @p iov — the reply egress's scatter-gather
- *        table: the caller's stack entries while the reply has at most @ref kMaxInlineIov
+ *        table: the caller's stack entries while the reply has at most @ref kReplyInlineIov
  *        links, a block on the ADR-0065 failable seam past that (#1570, #2264).
  *
  * The LAST migratable `-fno-exceptions` probe window on the reply path. Both termini used to
@@ -2309,7 +2317,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
         // is a transient cost of THIS peer's request, charged on the receive thread, so it
         // belongs where the arena is charged — one peer's replies cannot then exhaust the
         // control budget the whole node's mutations share.
-        std::array<std::span<const std::byte>, kMaxInlineIov> inline_iov;
+        std::array<std::span<const std::byte>, kReplyInlineIov> inline_iov;
         reply_iov_t iov(inline_iov, rx_for(inbound_ctx));
         const auto table = gather_reply_iov(*reply, iov);
         if (table.empty()) {
@@ -2391,7 +2399,7 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
         // growth failure. This tier is where the unbounded case actually lives — a rope-tier
         // terminus resolves composed reads straight off the rope — so the absence of a fixed
         // bound here is load-bearing, not defensive.
-        std::array<std::span<const std::byte>, kMaxInlineIov> inline_iov;
+        std::array<std::span<const std::byte>, kReplyInlineIov> inline_iov;
         reply_iov_t iov(inline_iov, rx_for(inbound_ctx));
         const auto table = gather_reply_iov(*reply, iov);
         if (table.empty()) {
@@ -2811,7 +2819,7 @@ void fwd_router_t::answer_await(pending_await_t& p) {
     }
     // The waiter's own source, not its link's: the fire may land after the link it arrived
     // over was removed, when nothing may be read through that link any more (#1941).
-    std::array<std::span<const std::byte>, kMaxInlineIov> inline_iov;
+    std::array<std::span<const std::byte>, kReplyInlineIov> inline_iov;
     reply_iov_t iov(inline_iov, *p.source);
     const auto table = gather_reply_iov(reply, iov);
     if (table.empty()) {

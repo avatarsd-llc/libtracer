@@ -114,6 +114,13 @@ class view_node {
     [[nodiscard]] bool spans_intact() const noexcept { return seam_ == nullptr || !seam_->refused; }
 
     /**
+     * @brief Whether a `body()` span outlives the node it came from (#2871). False here: it
+     *        views this node's flatten cache, which dies with the node, so @ref
+     *        selector_to_field copies the step names into the resolve's own buffer (#2286).
+     */
+    static constexpr bool kBodyOutlivesNode = false;
+
+    /**
      * @brief The trailer-excluded whole TLV as a fresh OWNED segment (ADR-0053 ⑤): a multi-link
      *        value is flattened ONCE and adopted — not materialized into the node cache and then
      *        copied a second time by the shared `own_tlv`.
@@ -282,6 +289,12 @@ class view_node {
     mutable view::view_t cache_{};
     mutable bool cached_ = false;
 };
+
+// The rope tier's NAME bodies view each node's own flatten cache, which dies with the node, so
+// its selector names MUST be copied for the resolve (#2286). op_resolve_view_test's field
+// selectors, swept across every link split, read them after their nodes are gone: borrowing
+// here is a use-after-free that its ASan run reports (#2871).
+static_assert(!view_node::kBodyOutlivesNode, "rope-tier NAME bodies die with their node");
 
 }  // namespace
 

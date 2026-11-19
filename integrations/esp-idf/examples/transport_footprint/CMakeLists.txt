@@ -11,4 +11,8 @@ cmake_minimum_required(VERSION 3.16)
 set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../libtracer")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# Each object's static frames and call edges (*.su, *.ci), for tools/esp_stack_gate.py's
+# WebSocket client rx stack rows (#2871). Neither option changes the generated code, so the
+# size rows read from this image's map stay what they were.
+idf_build_set_property(COMPILE_OPTIONS "-fstack-usage;-fcallgraph-info=su" APPEND)
 project(transport_footprint)

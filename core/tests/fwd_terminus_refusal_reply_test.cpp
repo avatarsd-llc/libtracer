@@ -446,14 +446,14 @@ void test_egress_refusal_is_answered() {
  *        so the echoed routes are gathered from more than one span.
  *
  * A small reply gathers into the inline table and never asks the source (#2264), so the read
- * is of a composed root whose reply is wider than `kMaxInlineIov` links: that table spills.
+ * is of a composed root whose reply is wider than its inline table (4 links): that table spills.
  */
 void test_rope_tier_refusal_is_answered() {
     std::printf("the rope-tier terminus answers its refusal arms too:\n");
     graph_t g;
     (void)g.register_vertex(*path_t::parse("/sensor"), role_t::STORED_VALUE);
     // Eight children: each is two links (header-and-name, LKV), so the reply is 18 links,
-    // past kMaxInlineIov.
+    // past the reply's inline table.
     for (const char* c : {"a", "b", "c", "d", "e", "f", "g", "h"}) {
         const auto cv =
             g.register_vertex(*path_t::parse(std::string("/sensor/") + c), role_t::STORED_VALUE);

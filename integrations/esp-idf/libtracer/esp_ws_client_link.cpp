@@ -450,9 +450,10 @@ struct esp_ws_client_link_t::framing_end_t {
      *        TLV and is not delivered.
      *
      * Counted and marked BEFORE the delivery, which runs the app in-call on this thread: the
-     * app may send from it, and no lock is held across it.
+     * app may send from it, and no lock is held across it. Always inlined into its one call
+     * site, the framing's `data`, so its frame merges into the ingress's (#2871).
      */
-    void hand_up(view::rope_t message) const {
+    [[gnu::always_inline]] void hand_up(view::rope_t message) const {
         const std::size_t len = message.total_length();
         if (len == 0) return;
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
