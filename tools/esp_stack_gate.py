@@ -39,7 +39,12 @@ What the path counts, and what it leaves out, is fixed here so the number means 
 * The platform's frames (newlib, FreeRTOS, lwIP, the heap, locks, logging, assert) are left out
   (PLATFORM_CUTS, matched on the function's name without its parameters): their depth is
   IDF's and does not move with a library change.
-* A call back into a function already on the path is cut there and named in the report.
+* A call back into a function already on the path is cut there and named in the report. The
+  walk memoizes each function's worst path below it, so a function first reached under a cut
+  keeps that answer when it is reached again elsewhere: it can leave out a path through an
+  ancestor. On this graph that only drops a recursion, which no finite stack holds anyway.
+* Every indirect edge must resolve at least one caller and one target, or the run fails: a
+  renamed hook must not shrink the path into a pass. The report lists what each resolved.
 
 Exit 0 = every pinned row within its pin (or reported only, off esp32c6), 1 = broken input,
 a row over its pin, a missing anchor, an unbounded dynamic frame, or an esp32c6 build by
@@ -62,16 +67,16 @@ from esp_size_gate import PINNED_TARGET, PINNED_TOOLCHAIN  # noqa: E402  (one to
 # with PINNED_TOOLCHAIN in the image esp-idf.yml pins by digest (#2830). A raise needs a
 # maintainer ruling; a cut re-pins down.
 STACK_PINS = {
-    # #2871: 6,048 B at 9964668f0, cut by 832 B. The arena tier no longer copies selector names
+    # #2871: 6,336 B at 9964668f0, cut by 832 B. The arena tier no longer copies selector names
     # into a 512 B buffer, the reply table carries 4 stack entries, not 16, and the framing's
     # body/data/hand_up frames merge into the ingress's. (On the receive and terminus path
     # alone, before the graph's hooks were resolved: 4,080 B at v0.21.0, 5,232 B at
     # 9964668f0, 4,496 B here.)
-    "borrowed": 5216,
-    # #2871: 6,864 B at 9964668f0, cut by 352 B by the same reply table and framing merges; the
+    "borrowed": 5504,
+    # #2871: 7,152 B at 9964668f0, cut by 352 B by the same reply table and framing merges; the
     # multi-link terminus (rope tier) keeps its name copy. (Receive and terminus path alone:
     # 5,776 B at v0.21.0, 6,048 B at 9964668f0, 5,792 B here.)
-    "owning": 6512,
+    "owning": 6800,
 }
 
 ROOT = r"^tr::net::esp_ws_client_link_t::recv_loop\(\)$"
@@ -82,22 +87,27 @@ ROPE_THUNK = r"(attach_link|add_child)\(.*lambda\(void\*, tr::view::rope_t"
 # every function matching the second.
 INDIRECT_EDGES = (
     # The receive side's sink call, into the router's receiver thunks.
-    (r"^tr::net::esp_ws_client_link_t::(recv_loop|framing_end_t)|receiver_slot|frame_ingress"
+    ("receiver thunk",
+     r"^tr::net::esp_ws_client_link_t::(recv_loop|framing_end_t)|receiver_slot|frame_ingress"
      r"|ws_framing", f"{SPAN_THUNK}|{ROPE_THUNK}"),
-    # The graph's write hooks the router installs: remote delivery and a fired await.
-    (r"^tr::graph::(graph_t::dispatch_edge_remote|vertex_t::wake_waiters)\(",
+    # The graph's write hooks the router installs: remote delivery and a fired await. Any
+    # graph or vertex frame with an indirect call may make them (a small inline member such
+    # as `vertex_t::wake_waiters` lands in its caller), so all of them resolve: an extra
+    # edge can only overestimate.
+    ("graph write hooks", r"^([^(]* )?tr::graph::(graph_t|vertex_t)::",
      r"^tr::net::fwd_router_t::(await_fired_thunk\(|fwd_router_t\(.*"
      r"lambda\(void\*, tr::graph::remote_delivery_t)"),
-    # The router's sends into each link's own: a reply or a refusal, a remote delivery, an
-    # await's answer, and a forward hop to another link.
-    (r"tr::net::(fwd_router_t::(resolve_terminus|answer_await|deliver_remote|route_fwd_forward)"
-     r"|\(anonymous namespace\)::(emit_refusal_reply|reject_bus_name_hop))",
+    # The router's sends into each link's own (a reply or a refusal, a remote delivery, an
+    # await's answer, a forward hop): any router frame, member or file-local, may make one.
+    ("router sends", r"^([^(]* )?tr::net::(fwd_router_t::|\(anonymous namespace\)::)",
      r"^tr::net::(esp_ws_client_link_t|httpd_ws_link_t|can_transport_t)::send(_on)?\("),
+    # The CAN transport's frames into its raw link, the TWAI link this image links.
+    ("CAN raw link", r"^tr::net::can_transport_t::", r"^tr::net::twai_link_t::write_raw\("),
 )
 PLATFORM_CUTS = (r"__assert_func|esp_log|^abort$|heap_caps|malloc|calloc|realloc|pvPortMalloc"
                  r"|xQueue|xTask|vPort|lock_acquire|_lock_|pthread_|gettimeofday"
                  r"|esp_system_abort|connect_once|printf|__cxa|operator new|std::__throw"
-                 r"|^lwip_|^netconn_|^tcpip_|^sys_|_socket$|^esp_|^rtc_|^getrandom$")
+                 r"|^lwip_|^netconn_|^tcpip_|^sys_|^[a-z_]+_socket$|^esp_|^rtc_|^getrandom$")
 # What the pinned rows leave out and the "all in-call paths" rows walk.
 REPORTED_ONLY_CUTS = r"^tr::graph::graph_t::write_branch\("
 # Each arm leaves out the other arm's receiver and thunk.
@@ -110,7 +120,9 @@ ANCHORS = {
     "borrowed": (SPAN_THUNK, r"^tr::net::fwd_router_t::on_frame_impl\(",
                  r"^tr::net::fwd_router_t::resolve_terminus\(",
                  r"^tr::graph::op_resolver_t::resolve\("),
-    "owning": (ROPE_THUNK, r"^tr::net::fwd_router_t::on_frame_rope_impl\("),
+    "owning": (ROPE_THUNK, r"^tr::net::fwd_router_t::on_frame_rope_impl\(",
+               r"^tr::net::fwd_router_t::resolve_terminus",
+               r"^tr::graph::op_resolver_t::resolve\("),
 }
 # (row, arm, also walk the reported-only paths, pinned)
 ROWS = (("borrowed", "borrowed", False, True), ("owning", "owning", False, True),
@@ -170,11 +182,17 @@ def worst_path(frames: dict[str, tuple[int, str]], edges: dict[str, set[str]],
     name = lambda s: names.get(s, s)  # noqa: E731
     edges = {k: set(v) for k, v in edges.items()}
     syms = sorted(set(frames) | set(edges))
-    for callers, targets in INDIRECT_EDGES:
+    resolved = []
+    for label, callers, targets in INDIRECT_EDGES:
         dsts = {s for s in syms if s in frames and re.search(targets, name(s))}
-        for s in syms:
-            if INDIRECT in edges.get(s, ()) and re.search(callers, name(s)):
-                edges[s] |= dsts
+        srcs = [s for s in syms if INDIRECT in edges.get(s, ()) and re.search(callers, name(s))]
+        # Fail closed: an edge that resolves nothing would shrink every row into a pass.
+        if not dsts or not srcs:
+            raise KeyError(f"indirect edge {label!r} resolved {len(srcs)} caller(s) and "
+                           f"{len(dsts)} target(s); both must be found")
+        for s in srcs:
+            edges[s] |= dsts
+        resolved.append((label, len(srcs), sorted(name(d) for d in dsts)))
     platform = re.compile(PLATFORM_CUTS)
     cut = re.compile(ARM_CUTS[arm] if reported_only else f"{ARM_CUTS[arm]}|{REPORTED_ONLY_CUTS}")
     roots = [s for s in syms if s in frames and re.search(ROOT, name(s))]
@@ -211,6 +229,7 @@ def worst_path(frames: dict[str, tuple[int, str]], edges: dict[str, set[str]],
         "missing": [a for a in ANCHORS[arm] if not any(re.search(a, name(s)) for s in path)],
         "unbounded": [name(s) for s in path if frames.get(s, (0, ""))[1] == "dynamic"],
         "recursion": sorted((name(a), name(b)) for a, b in cycles if a in on_path),
+        "edges": resolved,
     }
 
 
@@ -259,10 +278,15 @@ def main(argv: list[str] | None = None) -> int:
             verdict = "FAIL (over its pin: a raise needs a maintainer ruling)"
             failed.append(f"{row}: {r['total']:,} B > pin {pin:,} B")
         else:
-            verdict = "PASS" if r["total"] == pin else f"PASS ({pin - r['total']:,} B under: re-pin down)"
+            under = pin - r["total"]
+            verdict = "PASS" if under == 0 else f"PASS ({under:,} B under: re-pin down)"
         pin_txt = f"{pin:,} B" if pin is not None else "n/a"
         lines.append(f"| {row} | {r['total']:,} B | {pin_txt} | {verdict} |")
-    lines += ["", f"Toolchain: `{args.toolchain}`; pins measured with `{PINNED_TOOLCHAIN}`.", ""]
+    lines += ["", f"Toolchain: `{args.toolchain}`; pins measured with `{PINNED_TOOLCHAIN}`.", "",
+              "Indirect edges resolved:", ""]
+    for label, n_src, dsts in next(iter(rows.values()))[2]["edges"]:
+        lines.append(f"- {label}: {n_src} caller(s) -> {len(dsts)} target(s)")
+    lines.append("")
     for row, (_arm, _pinned, r) in rows.items():
         lines += [f"<details><summary>{row}: {r['total']:,} B</summary>", "", "```"]
         acc = 0
