@@ -392,6 +392,54 @@ void test_subscribe() {
     report(drive<vertex_handle_t>(setup, op, untouched), "subscribe");
 }
 
+/** @brief `POINT{NAME b, POINT{NAME x, VALUE 0xCC}}`: a branch write landing on `/b/x`. */
+std::vector<std::byte> branch_b_x() {
+    using tr::wire::opt_t;
+    using tr::wire::type_t;
+    const std::byte cc{0xCC};
+    std::vector<std::byte> x_body;
+    tr::wire::emit_name(x_body, "x");
+    tr::wire::emit_tlv(x_body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&cc, 1));
+    std::vector<std::byte> b_body;
+    tr::wire::emit_name(b_body, "b");
+    tr::wire::emit_tlv(b_body, type_t::POINT, opt_t{.pl = true}, x_body);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, b_body);
+    return out;
+}
+
+/**
+ * @brief A branch write: the decode arena, the root key, the plan and the landing sites all
+ *        draw from the table source, not a stack array (#2879), and an exhausted decode
+ *        refuses with BACKPRESSURE and a counted drop rather than TYPE_MISMATCH.
+ */
+void test_branch_write() {
+    std::printf("branch write — decode arena, root key, plan, landing sites:\n");
+    const std::vector<std::byte> branch = branch_b_x();
+    const auto setup = [](graph_t& g) {
+        (void)g.register_vertex(*path_t::parse("/b/x"), role_t::STORED_VALUE);
+        return g.register_vertex(*path_t::parse("/b"), role_t::STORED_VALUE);
+    };
+    const auto op = [&branch](graph_t& g, vertex_handle_t& b) {
+        return verdict(g.write(b, make_value(branch)));
+    };
+    const auto untouched = [](graph_t& g, vertex_handle_t&) {
+        return !g.read(*path_t::parse("/b/x")).has_value();
+    };
+    report(drive<vertex_handle_t>(setup, op, untouched), "branch write");
+
+    gate_source_t src;
+    graph_t g{src};
+    const vertex_handle_t b = setup(g);
+    const std::uint64_t oom0 = g.delivery_drops().out_of_memory;
+    src.arm(0);
+    const auto r = g.write(b, make_value(branch));
+    src.disarm();
+    check(!r && r.error() == status_t::BACKPRESSURE,
+          "an exhausted branch decode refuses with BACKPRESSURE, not TYPE_MISMATCH");
+    check(g.delivery_drops().out_of_memory == oom0 + 1, "...and counts the drop");
+}
+
 /** @brief Retirement: the cleanup key, the moved-out slot tables and the seam park. */
 void test_retire() {
     std::printf("retire — cleanup key, slot-table list, seam park:\n");
@@ -1009,6 +1057,7 @@ int main() {
     test_anchor();
     test_subscribe();
     test_retire();
+    test_branch_write();
     test_set_policy();
     test_app_field_store();
     test_intent_document();

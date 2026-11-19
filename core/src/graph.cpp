@@ -2736,29 +2736,27 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
                                    ? status_t::BACKPRESSURE
                                    : status_t::TYPE_MISMATCH);
     }
-    // The #477 residual is CLOSED (#588). This used to be a
-    // `std::pmr::monotonic_buffer_resource` over the same stack buffer, whose overflow
-    // leg drew from the THROWING default upstream — so a branch tree bigger than the
-    // slab reached `__cxa_throw`'s abort() stub on a -fno-exceptions node. A
-    // `bump_source_t` carves from the same buffer and, past it, falls back to the
-    // NOTHROW heap source: capability is unchanged (a big tree still decodes), but
-    // exhaustion is now a value. No node-counting pre-pass was needed after all — the
-    // seam alone was the missing piece.
-    // The overflow leg draws from the graph's injected control seam, not the global heap:
-    // a bounded node that injected `ctl` gets its own store here too, and the default
-    // (heap_source) reproduces today's behaviour exactly.
-    std::array<std::byte, 4096> stack;
-    mem::bump_source_t src(stack, *tables_);
+    // The decode and the plan draw their scratch from the injected table source, not a stack
+    // array (#2879): a write that never takes this path budgets no frame for it, and a bounded
+    // node's own store caps a branch tree as it caps every other table. Exhaustion is a
+    // resource event, so it refuses the write with BACKPRESSURE and counts the drop; a value
+    // the decode rejects for its shape stays TYPE_MISMATCH. `decode_into` reports a refused
+    // draw as TLV_NESTING_TOO_DEEP ("exceeds this receiver's decode resources", RFC-0006).
+    mem::block_source_t& src = *tables_;
     const std::expected<wire::tlv_arena_t, wire::err_t> arena =
         wire::decode_into(head->bytes(), src);
-    if (!arena) return std::unexpected(status_t::TYPE_MISMATCH);
+    if (!arena) {
+        const bool spent = arena.error() == wire::err_t::TLV_NESTING_TOO_DEEP;
+        count_drop(drop_reason_t::OUT_OF_MEMORY, std::uint64_t{spent});  // a shape refusal adds 0
+        return std::unexpected(spent ? status_t::BACKPRESSURE : status_t::TYPE_MISMATCH);
+    }
     const wire::tlv_arena_t& a = *arena;
 
     // The written tree is rooted AT `v`: render its full key once (ADR-0057
     // render-on-demand) — the node-key prefix of the whole decomposition plan. The key
     // render and its parse copy are NOTHROW (#477): OOM soft-fails the branch write as
     // BACKPRESSURE, the injected-resource status, never an abort on the writer thread.
-    mem::bytes_t root_key_bytes(src);  // the plan's scratch shares the decode's frame
+    mem::bytes_t root_key_bytes(src);  // the plan's scratch draws from the same source
     if (!try_build_key(v, root_key_bytes)) return std::unexpected(status_t::BACKPRESSURE);
     const std::span<const std::byte> root_key = mem::as_span(root_key_bytes);
     // post-order; plan.back() is the root. Its blocks come from the injected source (#873
