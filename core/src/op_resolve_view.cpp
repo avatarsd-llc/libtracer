@@ -290,6 +290,12 @@ class view_node {
     mutable bool cached_ = false;
 };
 
+// The rope tier's NAME bodies view each node's own flatten cache, which dies with the node, so
+// its selector names MUST be copied for the resolve (#2286). op_resolve_view_test's field
+// selectors, swept across every link split, read them after their nodes are gone: borrowing
+// here is a use-after-free that its ASan run reports (#2871).
+static_assert(!view_node::kBodyOutlivesNode, "rope-tier NAME bodies die with their node");
+
 }  // namespace
 
 result_t<view::rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd,

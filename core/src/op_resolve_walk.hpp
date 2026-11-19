@@ -150,9 +150,12 @@ struct arena_node {
 
     /**
      * @brief Whether a `body()` span outlives the node it came from (#2871). True here: it
-     *        views the decoded arena, which the terminus holds until the resolve returns, and
-     *        every read of a NAME body happens inside the resolve. So @ref selector_to_field
-     *        lets the step names view the arena and copies nothing.
+     *        views the `tlv_arena_t` that `op_resolver_t::resolve` takes by reference, which
+     *        its caller owns across the call (the `arena` local in `fwd_router_t::
+     *        resolve_terminus`, released only after the reply is sent), and its bytes view
+     *        that caller's frame, held as long. The field path built from the names is local
+     *        to `resolve_node`, so every read of a NAME body happens inside that call, and
+     *        @ref selector_to_field lets the step names view the arena and copies nothing.
      */
     static constexpr bool kBodyOutlivesNode = true;
 

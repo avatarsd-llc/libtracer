@@ -10,8 +10,8 @@
  * arena's node table, its open-node stack, and the reply's iov table. The open-node stack now
  * threads through the node table itself, and the reply gathers into the caller's inline table,
  * so the request costs exactly ONE draw (the node table) and a rope-tier request or forward of
- * a few links costs none. Only a reply wider than its inline table (4 links) spills into the source,
- * which `try_probe_window_test` pins.
+ * a few links costs none. Only a reply wider than its inline table (4 links) spills into the
+ * source, which `try_probe_window_test` and the wide-reply case below pin.
  *
  * The instrument counts every `try_alloc` the router's `rx` plane serves. The link's state
  * source stays the heap, so nothing else is counted.
@@ -198,6 +198,68 @@ void test_forward_draws() {
     }
 }
 
+/**
+ * @brief An acknowledged terminus WRITE costs no rx draw beyond the request's own (#2871): the
+ *        ack is one link, so it gathers into the reply's inline table.
+ */
+void test_ack_draws(bool ropes, int expected) {
+    counting_source_t rx;
+    graph_t g{tr::mem::heap_source()};
+    (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    rec_link_t in(ropes);
+    fwd_router_t router(g, {.rx = &rx});
+    (void)router.attach_link("in", in);
+    const auto req =
+        b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"origin"}), {}, value_tlv(64));
+
+    in.inject(req);  // warm
+    (void)rx.take();
+    in.sent = 0;
+    constexpr int kRequests = 8;
+    for (int i = 0; i < kRequests; ++i) in.inject(req);
+    const int draws = rx.take();
+    std::printf("  %s acknowledged WRITE: %d rx draws / %d requests, ack of %zu link(s)\n",
+                ropes ? "rope" : "span", draws, kRequests, in.iov_entries);
+    check(in.sent == kRequests && in.iov_entries == 1, "every WRITE was acknowledged, in one link");
+    check(draws == expected * kRequests,
+          ropes ? "rope-tier ack: no rx draw" : "span-tier ack: the arena's draw only");
+}
+
+/**
+ * @brief A reply one link wider than its inline table (#2871): a READ of a value shared as four
+ *        links answers in five, and that table takes exactly ONE draw from the receiving link's
+ *        source, on either tier, on top of the request's own.
+ */
+void test_wide_reply_draws(bool ropes, int request_draws) {
+    counting_source_t rx;
+    graph_t g{tr::mem::heap_source()};
+    const auto v = g.register_vertex(*path_t::parse("/sensor/blob"), role_t::STORED_VALUE);
+    (void)g.set_policy(v, {.share_hint = tr::graph::share_hint_t::SHARE});
+    const std::vector<std::byte> tlv = value_tlv(64);
+    tr::view::rope_t value;
+    for (std::size_t off = 0; off < tlv.size(); off += tlv.size() / 4) {
+        const std::size_t n = std::min(tlv.size() / 4, tlv.size() - off);
+        tr::view::segment_ptr_t seg = tr::view::heap_alloc(n);
+        std::memcpy(seg->bytes.data(), tlv.data() + off, n);
+        value.append(tr::view::view_t::over(std::move(seg)));
+    }
+    (void)g.write(v, std::move(value));
+    rec_link_t in(ropes);
+    fwd_router_t router(g, {.rx = &rx});
+    (void)router.attach_link("in", in);
+    const auto req = b_fwd(fwd_op_t::READ, b_path({"sensor", "blob"}), b_path({"origin"}));
+
+    in.inject(req);  // warm
+    (void)rx.take();
+    in.sent = 0;
+    in.inject(req);
+    const int draws = rx.take();
+    std::printf("  %s READ, value shared as 4 links: reply of %zu links, %d rx draw(s)\n",
+                ropes ? "rope" : "span", in.iov_entries, draws);
+    check(in.sent == 1 && in.iov_entries == 5, "the reply is five links");
+    check(draws == request_draws + 1, "a five-link reply's table is one draw from the rx source");
+}
+
 }  // namespace
 
 int main() {
@@ -205,5 +267,9 @@ int main() {
     test_read_draws(/*ropes=*/false, /*expected=*/1);  // the arena node table, nothing else
     test_read_draws(/*ropes=*/true, /*expected=*/0);   // no arena, inline reply table
     test_forward_draws();
+    test_ack_draws(/*ropes=*/false, /*expected=*/1);
+    test_ack_draws(/*ropes=*/true, /*expected=*/0);
+    test_wide_reply_draws(/*ropes=*/false, /*request_draws=*/1);
+    test_wide_reply_draws(/*ropes=*/true, /*request_draws=*/0);
     return tr::testing::summary("terminus_rx_draws");
 }

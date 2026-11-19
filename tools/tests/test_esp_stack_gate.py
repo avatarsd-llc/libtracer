@@ -11,12 +11,18 @@ identity "demangler" stands in for c++filt:
   its larger frame;
 * the worst path follows direct calls, and an indirect call only where the gate resolves one:
   the receive side into the arm's router thunk, and the terminus into the link's send;
-* each arm leaves out the other arm's thunk, the platform's frames and the branch write.
+* each arm leaves out the other arm's thunk, the platform's frames and the reported-only paths;
+* the gate fails a row over its pin, a build by another compiler, a walk that misses an arm's
+  anchor frame, and an unbounded dynamic frame on the path; a recursion is cut and named.
 
 Run with ``python3 -m unittest discover -s tools/tests`` (no third-party deps).
 """
+import contextlib
+import io
 import os
+import pathlib
 import sys
+import tempfile
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -36,24 +42,52 @@ WRITE = "tr::graph::graph_t::write(D)"
 BRANCH = "tr::graph::graph_t::write_branch(E)"
 SEND = "tr::net::esp_ws_client_link_t::send(F)"
 ASSERT = "__assert_func"
+TOOLCHAIN = gate.PINNED_TOOLCHAIN
 
 
-def ci(nodes, edges, tu="a.cpp"):
-    """@brief One `.ci` file: {name: frame bytes} nodes, [(src, dst)] edges, prefixed by @p tu."""
+def ci(nodes, edges, tu="a.cpp", qual=None):
+    """@brief One `.ci` file: {name: frame bytes} nodes, [(src, dst)] edges, prefixed by @p tu.
+
+    @p qual maps a name to its GCC qualifier (default `static`).
+    """
+    qual = qual or {}
     out = [f'graph: {{ title: "{tu}"']
     for n, b in nodes.items():
         out.append(f'node: {{ title: "/src/{tu}:{n}" label: "{n}\\n/src/{tu}:1:1\\n{b} bytes '
-                   f'(static)" }}')
+                   f'({qual.get(n, "static")})" }}')
     for s, d in edges:
         dst = gate.INDIRECT if d == gate.INDIRECT else f"/src/{tu}:{d}"
         out.append(f'edge: {{ sourcename: "/src/{tu}:{s}" targetname: "{dst}" label: "x" }}')
     return "\n".join(out + ["}"])
 
 
-def run(texts, arm):
+def run(texts, arm, reported_only=False):
+    """@brief The gate's walk over @p texts: (total, [(bytes, name)]) for @p arm."""
     frames, edges = gate.load(texts)
     names = {s: s for s in set(frames) | set(edges)}
-    return gate.worst_path(frames, edges, names, arm)
+    r = gate.worst_path(frames, edges, names, arm, reported_only)
+    return r["total"], [(b, n) for b, _q, n in r["path"]]
+
+
+def walk(texts, arm):
+    """@brief The gate's full result for @p arm."""
+    frames, edges = gate.load(texts)
+    return gate.worst_path(frames, edges, {s: s for s in set(frames) | set(edges)}, arm)
+
+
+def gate_main(texts, target="esp32c6", toolchain=TOOLCHAIN):
+    """@brief Run the gate's `main` over @p texts in a temp build dir: (exit code, output).
+
+    The names are already demangled, so `cat` stands in for c++filt.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        for i, t in enumerate(texts):
+            pathlib.Path(d, f"t{i}.ci").write_text(t)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = gate.main(["--build", d, "--toolchain", toolchain, "--target", target,
+                            "--cxxfilt", "cat"])
+        return rc, out.getvalue()
 
 
 FRAMES = {RECV: 200, INGRESS: 250, SPAN: 64, ROPE: 80, IMPL: 600, ROPE_IMPL: 608, TERM: 560,
@@ -90,6 +124,67 @@ class StackGateTest(unittest.TestCase):
         other = ci({TERM: 700}, [], tu="b.cpp")
         total, _ = run([ci(FRAMES, EDGES), other], "borrowed")
         self.assertEqual(total, 200 + 250 + 64 + 600 + 700 + 880 + 128)
+
+    def test_reported_only_rows_walk_the_cut_paths(self):
+        total, path = run([ci(FRAMES, EDGES)], "borrowed", reported_only=True)
+        self.assertEqual(path[-1][1], BRANCH)
+        self.assertEqual(total, 200 + 250 + 64 + 600 + 560 + 880 + 128 + 4500)
+
+    def test_platform_cut_matches_the_name_without_its_parameters(self):
+        name = "tr::graph::graph_t::write2(heap_caps_t)"
+        frames = dict(FRAMES, **{name: 9000})
+        _total, path = run([ci(frames, EDGES + [(WRITE, name)])], "borrowed")
+        self.assertEqual(path[-1][1], name)
+
+    def test_recursion_is_cut_and_named(self):
+        r = walk([ci(FRAMES, EDGES + [(WRITE, IMPL)])], "borrowed")
+        self.assertIn((WRITE, IMPL), r["recursion"])
+
+    def test_qualifier_is_kept_and_unbounded_dynamic_is_flagged(self):
+        r = walk([ci(FRAMES, EDGES, qual={RESOLVE: "dynamic"})], "borrowed")
+        self.assertIn((880, "dynamic", RESOLVE), r["path"])
+        self.assertEqual(r["unbounded"], [RESOLVE])
+        r = walk([ci(FRAMES, EDGES, qual={RESOLVE: "dynamic,bounded"})], "borrowed")
+        self.assertEqual(r["unbounded"], [])
+
+    def test_missing_anchor_is_named(self):
+        frames = {k: v for k, v in FRAMES.items() if k != TERM}
+        edges = [e for e in EDGES if TERM not in e] + [(IMPL, RESOLVE)]
+        r = walk([ci(frames, edges)], "borrowed")
+        self.assertEqual(r["missing"], [gate.ANCHORS["borrowed"][2]])
+
+    def test_main_passes_at_or_under_the_pins(self):
+        rc, out = gate_main([ci(FRAMES, EDGES)])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("re-pin down", out)  # the fixture is far under the real pins
+
+    def test_main_fails_a_row_over_its_pin(self):
+        frames = dict(FRAMES, **{RESOLVE: 20000})
+        rc, out = gate_main([ci(frames, EDGES)])
+        self.assertEqual(rc, 1)
+        self.assertIn("over its pin", out)
+
+    def test_main_fails_another_toolchain_on_esp32c6_only(self):
+        rc, out = gate_main([ci(FRAMES, EDGES)], toolchain="g++ 99")
+        self.assertEqual(rc, 1)
+        self.assertIn("not the pinned toolchain", out)
+        rc, _ = gate_main([ci(FRAMES, EDGES)], target="esp32s3", toolchain="g++ 99")
+        self.assertEqual(rc, 0)
+
+    def test_main_fails_a_missing_anchor_and_an_unbounded_frame(self):
+        frames = {k: v for k, v in FRAMES.items() if k != TERM}
+        edges = [e for e in EDGES if TERM not in e] + [(IMPL, RESOLVE)]
+        rc, out = gate_main([ci(frames, edges)])
+        self.assertEqual(rc, 1)
+        self.assertIn("missing anchor", out)
+        rc, out = gate_main([ci(FRAMES, EDGES, qual={IMPL: "dynamic"})])
+        self.assertEqual(rc, 1)
+        self.assertIn("unbounded dynamic frame", out)
+
+    def test_main_fails_without_call_graph_files(self):
+        rc, out = gate_main([])
+        self.assertEqual(rc, 1)
+        self.assertIn("no -fcallgraph-info", out)
 
     def test_missing_root_is_an_error(self):
         frames = {k: v for k, v in FRAMES.items() if k != RECV}
