@@ -116,7 +116,8 @@
       "value": 3,
       "goal": 2,
       "moved_by": "#2737 (the slot table and the caller's own block are gone: 5 -> 3 blocks; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone))",
-      "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks."
+      "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks.",
+      "waiver": "Ruling 121, on #2876 (subscription RAM cut): the 2-block aim is waived at 3 blocks because the bytes meet the target (542 -> 238 B). The one block that would reach 2, a one-entry array riding the edge block's own room, saves at most 16 B at one subscriber and costs +96 B (x86-64) / +48 B (rv32) at two or more, so it was dropped."
     },
     {
       "id": "ws remote subscription, blocks",
@@ -128,7 +129,8 @@
       "value": 3,
       "goal": 2,
       "moved_by": "#2737 (the slot table and the caller's own block are gone: 5 -> 3 blocks; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone))",
-      "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks."
+      "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks.",
+      "waiver": "Ruling 121, on #2876 (subscription RAM cut): the 2-block aim is waived at 3 blocks because the bytes meet the target (542 -> 238 B). The one block that would reach 2, a one-entry array riding the edge block's own room, saves at most 16 B at one subscriber and costs +96 B (x86-64) / +48 B (rv32) at two or more, so it was dropped."
     },
     {
       "id": "udp remote subscription, blocks",
@@ -140,7 +142,8 @@
       "value": 3,
       "goal": 2,
       "moved_by": "#2737 (the slot table and the caller's own block are gone: 5 -> 3 blocks; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone))",
-      "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks."
+      "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks.",
+      "waiver": "Ruling 121, on #2876 (subscription RAM cut): the 2-block aim is waived at 3 blocks because the bytes meet the target (542 -> 238 B). The one block that would reach 2, a one-entry array riding the edge block's own room, saves at most 16 B at one subscriber and costs +96 B (x86-64) / +48 B (rv32) at two or more, so it was dropped."
     },
     {
       "id": "ws-server peer after a 16 KiB frame",
