@@ -84,13 +84,6 @@ using tr::wire::path_pair_t;
 using tr::wire::type_t;
 using bytes_t = std::vector<std::byte>;
 
-/** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
-std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view c,
-                                                       tr::mem::bytes_t& out, std::uint64_t&) {
-    const auto* p = reinterpret_cast<const std::byte*>(c.data());
-    return tr::testing::subject_into(out, std::vector<std::byte>(p, p + c.size()));
-}
-
 /** @brief An `:acl` that admits `admin` to everything and nobody else. */
 bytes_t admin_only_acl() {
     const auto* p = reinterpret_cast<const std::byte*>("admin");
@@ -249,45 +242,65 @@ void bracketed_terminus_ops() {
 
 /**
  * @brief The retire-and-revive cycles each concurrent case runs at least. The cases are bounded
- *        by work, not by time (#2843). A terminus case counts the operations made inside a
- *        `retire` call and runs on past this until it has @ref kTerminusFloor of them, to at most
- *        @ref kMaxCycles. The role-flip case runs exactly this many, each holding `/t` retired
- *        until a whole write has run against it.
+ *        by work, not by time (#2843). A terminus case runs on past this until it has counted
+ *        @ref kTerminusFloor operations inside a `retire` call, to at most @ref kMaxCycles. The
+ *        role-flip case runs exactly this many, each holding `/t` retired until a whole write
+ *        has run against it.
  */
 constexpr int kCycles = 4000;
 
-/** @brief The cycle cap: a terminus case that counts fewer than its floor by then fails. */
+/** @brief The cycle cap. The gated phase reaches a terminus case's floor within its first
+ *         @ref kTerminusFloor cycles, so this cap is never reached unless the case breaks off;
+ *         it stays as the work bound on the loop. */
 constexpr int kMaxCycles = 20000;
 
-/** @brief The fewest such operations each concurrent case must count. */
-constexpr std::size_t kInsideFloor = 32;
-
 /**
- * @brief The fewest operations a terminus case must make inside a `retire` call: @ref
- *        kInsideFloor in a TSan build, none in any other.
+ * @brief The fewest operations a terminus case must count inside a `retire` call, in every
+ *        build.
  *
- * A terminus op counts only if it starts after a `retire` call does and returns before that
- * call does. Under TSan every op and every retire is slow, and each terminus case passes the
- * floor within @ref kCycles (56 to 2600 per case, measured). In an optimized build a retire takes
- * about as long as one op, so whether an op fits inside one is down to scheduling: on a
- * RelWithDebInfo build the count ranged from 2 to about 3000 per case, and running up to ten
- * times as many cycles still left some runs short. The window itself is covered in every build
- * by the bracketed case above, which parks an op inside its access check across a retire; this
- * concurrent case is the TSan check of the lock-free registration read, and it still checks
- * that no op inside a retire reaches the handler in every build.
+ * Counting free-running ops left this floor to scheduling: a busy runner sometimes fitted too
+ * few ops into a cycle's window (21 of 32 in one TSan run, #2867). So until the floor is reached,
+ * each cycle is gated: the subject lookup (@ref span_gate_t) PARKS the sender's op inside its
+ * access check, the cycle calls `retire` while it is parked, and only after `retire` has
+ * returned does it let the op go on. Every gated cycle therefore counts one op that provably
+ * spans a real retire, and scheduling can delay a cycle but never cost it its overlap: the floor
+ * is reached in exactly this many cycles. Each wait is on one op and ends when that op's
+ * `on_frame` returns; nothing reads a clock, and ctest's timeout is the backstop. Once the floor
+ * is reached the sender runs free again, so TSan still sees the unforced race on the lock-free
+ * registration read, and the handler check holds for every op either way.
  */
-#ifdef LIBTRACER_TEST_TSAN
-constexpr std::size_t kTerminusFloor = kInsideFloor;
-#else
-constexpr std::size_t kTerminusFloor = 0;
-#endif
+constexpr std::size_t kTerminusFloor = 32;
+
+/** @brief The concurrent case's subject lookup (ADR-0018): the caller IS the subject, and while a
+ * window is gated, `p0`'s first resolution in it parks until that window's retire has returned. */
+struct span_gate_t {
+    std::atomic<std::uint32_t> window{0}; /**< @brief The gated window, or 0. */
+    std::atomic<std::uint32_t> parked{0}; /**< @brief The window an op last parked in. */
+    std::atomic<std::uint32_t> left{0};   /**< @brief The window whose retire has returned. */
+    std::uint32_t spanned = 0;            /**< @brief Sender-only: this op parked in that window. */
+};
+
+/** @brief @ref span_gate_t's lookup. */
+std::expected<void, tr::wire::err_t> park_across_retire(void* ctx, std::string_view caller,
+                                                        tr::mem::bytes_t& out, std::uint64_t&) {
+    auto& gate = *static_cast<span_gate_t*>(ctx);
+    const std::uint32_t w = gate.window.load(std::memory_order_acquire);
+    if (w != 0 && caller == "p0" && gate.parked.load(std::memory_order_acquire) != w) {
+        gate.spanned = w;
+        gate.parked.store(w, std::memory_order_release);
+        while (gate.left.load(std::memory_order_acquire) != w) std::this_thread::yield();
+    }
+    const auto* p = reinterpret_cast<const std::byte*>(caller.data());
+    return tr::testing::subject_into(out, std::vector<std::byte>(p, p + caller.size()));
+}
 
 /** @brief A terminus WRITE made inside a retire never reaches the handler. */
 void no_terminus_mid_retire(bool pair) {
     std::printf("a %s terminus WRITE inside a retire never reaches the handler:\n",
                 pair ? "PAIR" : "NAME");
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
+    span_gate_t gate;
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {park_across_retire, &gate});
     fwd_router_t router{g};
     const path_t at("/t");
     const path_t acl_at("/t:acl");
@@ -314,6 +327,7 @@ void no_terminus_mid_retire(bool pair) {
     std::atomic<bool> stop{false};
     std::atomic<std::size_t> bad{0};
     std::atomic<std::size_t> inside{0};
+    std::atomic<std::uint32_t> done{0};  // the window whose parked op has returned, counted
     std::thread sender([&] {
         while (!stop.load(std::memory_order_acquire)) {
             const auto e = g.vertex_slot_at(index);
@@ -321,19 +335,30 @@ void no_terminus_mid_retire(bool pair) {
             const bytes_t frame = write_to_t(pair, *e);
             const std::uint32_t s0 = seq.load(std::memory_order_acquire);
             const std::size_t n0 = calls.load(std::memory_order_acquire);
+            gate.spanned = 0;
             router.on_frame("p0", frame);
             const std::size_t n1 = calls.load(std::memory_order_acquire);
             const std::uint32_t s1 = seq.load(std::memory_order_acquire);
-            if (s0 != s1 || (s0 & 1u) == 0) continue;
-            inside.fetch_add(1, std::memory_order_relaxed);
-            if (n1 != n0) bad.fetch_add(1, std::memory_order_relaxed);
+            // Inside: parked across a retire, or (free-running) begun and ended in one window.
+            if (gate.spanned != 0 || (s0 == s1 && (s0 & 1u) != 0)) {
+                inside.fetch_add(1, std::memory_order_relaxed);
+                if (n1 != n0) bad.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (gate.spanned != 0) done.store(gate.spanned, std::memory_order_release);
         }
     });
     for (int i = 0; i < kMaxCycles && (i < kCycles || inside.load() < kTerminusFloor); ++i) {
         const auto h = g.find(at.key());
-        if (!h) break;
-        seq.fetch_add(1, std::memory_order_acq_rel);  // odd: a retire is in progress
+        if (!h || !g.vertex_slot_at(index)) break;
+        // Until the floor is reached, an op is parked across the retire (kTerminusFloor).
+        const bool gated = inside.load(std::memory_order_relaxed) < kTerminusFloor;
+        const std::uint32_t s = seq.fetch_add(1, std::memory_order_acq_rel) + 1;  // odd: open
+        if (gated) gate.window.store(s, std::memory_order_release);
+        while (gated && gate.parked.load(std::memory_order_acquire) != s) std::this_thread::yield();
         (void)g.retire(*h);
+        gate.left.store(s, std::memory_order_release);  // the parked op may go on
+        while (gated && done.load(std::memory_order_acquire) != s) std::this_thread::yield();
+        gate.window.store(0, std::memory_order_release);
         seq.fetch_add(1, std::memory_order_acq_rel);  // even: it has returned
         revive();
     }
