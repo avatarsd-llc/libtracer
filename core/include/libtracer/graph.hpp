@@ -1946,8 +1946,8 @@ class graph_t {
      * @return false when the table source refused the snapshot (#1778), or when a thread was
      *         waiting to take the map lock exclusively and the snapshot yielded to it (#2846):
      *         @p fn was called for nothing, and a retry may succeed. A walk either visits every
-     *         vertex or none. A steady stream of exclusive lockers can refuse a walk repeatedly;
-     * retry pacing is the caller's.
+     *         vertex or none. A steady stream of exclusive lockers can refuse a walk
+     *         repeatedly; retry pacing is the caller's.
      *
      * Concurrency: the {key, vertex} snapshot is taken under ONE shared `map_mutex_` hold and
      * `fn` runs OUTSIDE it — the same two-phase discipline @ref evict_link_edges and the
@@ -2450,8 +2450,8 @@ class graph_t {
      * the resolver callback — runs O(nodes) times per composed read **under the shared
      * `map_mutex_`**; a resolver MUST NOT re-enter graph mutation APIs (self-deadlock).
      *
-     * The walk yields to a thread waiting to take the map lock exclusively (#2846): after the
-     * node it is visiting it answers `BACKPRESSURE`, keeping nothing, so a vertex registration,
+     * The walk yields to a thread waiting to take the map lock exclusively (#2846): at the next
+     * child or node it answers `BACKPRESSURE`, keeping nothing, so a vertex registration,
      * `retire` or `collect` waits about one node visit, not every overlapping walk. A retry
      * completes once no writer waits. A steady stream of exclusive lockers can refuse a walk
      * repeatedly; retry pacing is the caller's.
