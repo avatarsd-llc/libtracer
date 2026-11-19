@@ -239,13 +239,18 @@ def check_vector(case: Path, backend: LuaBackend, verbose: bool, rendered: set) 
     got = backend.decode(hexstr)
     frame = got["frame"]
 
-    # A `reject` vector is a FRAME-CODEC reject (reserved bit / sentinel): the
-    # decoder MUST flag it invalid. Note `fwd-wildcard-reject` is NOT one of
-    # these — it is codec-valid, rejected only at the graph resolution layer.
-    reject = bool(exp.get("reject"))
+    # A `reject` vector is a FRAME-CODEC reject: the decoder MUST flag it invalid
+    # (reserved bit / sentinel), or, for FRAME_TRUNCATED, report the bytes it is
+    # still missing — the dissector's reassembly signal, not an invalid frame.
+    # Note `fwd-wildcard-reject` is NOT one of these — it is codec-valid,
+    # rejected only at the graph resolution layer.
+    reject = exp.get("reject")
     if reject:
-        if not frame.get("invalid"):
-            fails.append(f"reject vector ({exp['reject']}) was not flagged invalid")
+        if reject == "FRAME_TRUNCATED":
+            if not frame.get("need_more"):
+                fails.append("reject vector (FRAME_TRUNCATED) did not report missing bytes")
+        elif not frame.get("invalid"):
+            fails.append(f"reject vector ({reject}) was not flagged invalid")
         if verbose:
             print(f"  [{'PASS' if not fails else 'FAIL'}] "
                   f"{case.parent.name}/{case.name}: {got['summary']}")

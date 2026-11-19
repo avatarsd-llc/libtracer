@@ -27,6 +27,9 @@
 #include <cstdio>
 #include <cstring>
 #include <expected>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string>
@@ -132,6 +135,14 @@ void test_record_is_byte_exact() {
         "01002000"          // VALUE, len=0x0020 (32)
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";  // the key
     check(hex(bytes) == expect, "the bytes are exactly the RFC-0011 §B worked example");
+
+    // The `tlv-types/identity-ed25519` conformance vector is these bytes (#2731).
+    std::ifstream vf(std::filesystem::path{LIBTRACER_VECTORS_DIR} / "tlv-types" /
+                         "identity-ed25519" / "input.bin",
+                     std::ios::binary);
+    const std::string vec((std::istreambuf_iterator<char>(vf)), std::istreambuf_iterator<char>());
+    check(vec.size() == bytes.size() && std::memcmp(vec.data(), bytes.data(), vec.size()) == 0,
+          "and they equal the tlv-types/identity-ed25519 vector byte for byte");
 
     // And it decodes to the shape §B fixes: two members, in the fixed order.
     const auto dec = tr::wire::decode(bytes);

@@ -23,5 +23,5 @@ be expressed. The latch carries no new wire bytes of its own (reference/05 §SUB
 is observable as delivery *timing*, which is why the request is what this vector pins.
 
 ```
-04402b0006400a0002000600636c69656e740b40190002000f0064656c69766572795f706f6c696379010002002000
+044028000600070006636c69656e740b40190002000f0064656c69766572795f706f6c696379010002002000
 ```

@@ -1,0 +1,12 @@
+{
+  "name": "unknown-core-type-nested",
+  "category": "tlv-types",
+  "hex": "07400C001F000200AABB020002006F6B",
+  "total_bytes": 16,
+  "decoded": {
+    "type": "0x07 POINT",
+    "structured": true,
+    "meaning": "POINT{ 0x1F <AA BB>, NAME \"ok\" } — an unassigned core-range code nested inside a structured TLV, followed by a known sibling. A decoder treats the unknown child as opaque bytes and continues to the NAME after it (reference/01 §Handling unknown type codes).",
+    "note": "Structured TLV, opt.PL=1, no trailers."
+  }
+}

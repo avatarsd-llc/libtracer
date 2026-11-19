@@ -1862,6 +1862,7 @@ add_test(NAME graph COMMAND graph_test)
 add_executable(identity_test identity_test.cpp)
 target_link_libraries(identity_test PRIVATE libtracer)
 libtracer_test_warnings(identity_test)
+target_compile_definitions(identity_test PRIVATE LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME identity COMMAND identity_test)
 
 # #1503 step 5 / RFC-0010 Amendment 1 — the node-scoped `:stats` seam census: one READ is
@@ -3019,6 +3020,8 @@ if(LIBTRACER_NET_PLANE)
     add_executable(empty_src_unacked_test empty_src_unacked_test.cpp)
     target_link_libraries(empty_src_unacked_test PRIVATE libtracer)
     libtracer_test_warnings(empty_src_unacked_test)
+    target_compile_definitions(empty_src_unacked_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     add_test(NAME empty_src_unacked COMMAND empty_src_unacked_test)
 
     # #2042 — a forwarded write's RESULT reaches the originator behind node 0's link: a REPLY

@@ -1,0 +1,12 @@
+{
+  "name": "unknown-core-type-outer",
+  "category": "tlv-types",
+  "hex": "1F000300AABBCC",
+  "total_bytes": 7,
+  "decoded": {
+    "type": "0x1F (unassigned)",
+    "structured": false,
+    "meaning": "An outer TLV whose type is the unassigned core-range code 0x1F, opaque body AA BB CC. A codec decodes it as an unknown core-range code and skips it by its declared length (reference/01 §Handling unknown type codes).",
+    "note": "What a receiving node answers is not claimed here: a bare outer TLV carries no src, and only the retired 0x11-0x13 have a specific answer rule. See description.md."
+  }
+}
