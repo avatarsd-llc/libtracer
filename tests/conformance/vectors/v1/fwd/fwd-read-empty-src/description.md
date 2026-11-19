@@ -33,5 +33,5 @@ The frame decodes, and only a terminus can tell a `READ` from a `WRITE`. The man
 ## Bound by
 
 C++ `core/tests/empty_src_unacked_test.cpp`, `test_conformance_vectors`, which feeds these bytes
-to a router: zero frames go out, and nothing is read. The same frame with a one-segment `src` is
+to a router: zero frames go out. The same frame with a one-segment `src` is
 the positive control and draws exactly one reply.

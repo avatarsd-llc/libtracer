@@ -17,18 +17,22 @@ FWD{ op=0x80, dst=/sensor/temp, src=/reply-ep }: op byte 0x80, whose low six bit
 
 ## The rule this pins
 
-annex 05 §Reserved range: the `op` byte's opcode is `op & 0x3F`, and bits 7 and 6 are reserved
-and MUST be zero. RFC-0004 §B defines opcodes 0 to 3. A forwarder masks the byte and never
-switches on it, so it routes this frame on unchanged. The terminus owns the verdict: a byte that
-names no defined operation answers `ERROR{tr::schema::type_mismatch}` (`0x0030`) along `src`.
-That is the answer annex 01 §Handling unknown type codes gives an unknown code when a return path
-exists. It is never a silent drop, because silence looks like a dead link to the origin.
+annex 05 §Reserved range (RFC-0029 §5.3): the `op` byte's opcode is `op & 0x3F`, and bits 7 and
+6 are reserved and MUST be zero. RFC-0004 §B defines opcodes 0 to 3. A forwarder masks the byte
+and never switches on it, so it routes this frame on unchanged.
+
+This byte sets a reserved bit, so no conformant origin sends it.
+
+The answer is the reference terminus's behaviour, not normative text: it answers
+`ERROR{tr::schema::type_mismatch}` (`0x0030`) along `src` (#904, #2245), the answer annex 01
+§Handling unknown type codes gives an unknown code when a return path exists, rather than a
+silent drop.
 
 ## Why this is an `input.bin` case
 
 The frame decodes, so a codec has nothing to refuse. The manifest declares
 `"malformed_input": true`, because the C++ legality pre-pass reads the raw `op` byte and refuses
-any value above 3.
+any value above 3, a set reserved bit included.
 
 ## Bound by
 

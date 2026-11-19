@@ -44,13 +44,9 @@ was banked and scored `ok` on every core. The pre-pass covers three things:
   reserved bit 7 or 6 is not a defined `op`, and a `READ` or `AWAIT` whose `src` is a
   zero-length `PATH` is illegal (RFC-0004 Amendment 2).
 
-`run-all.py` also checks that every bare hex dump in a `description.md` (a fenced block of
-hex digits only) equals the case's `.bin` file. An annotated byte breakdown is prose and is
-not compared.
-
-Some vectors bank such bytes on purpose. These are an address that a hop MUST refuse
-but can still carry, so a codec has nothing to reject and they are not `reject.bin`
-cases. Such a vector declares it in its manifest with a top-level boolean:
+Some vectors bank such bytes on purpose. These are an address, an op byte or a `src` that
+a terminus refuses but a hop still carries, so a codec has nothing to reject and they are
+not `reject.bin` cases. Such a vector declares it in its manifest with a top-level boolean:
 
 ```json
 "malformed_input": true
@@ -61,6 +57,10 @@ and the message names the flag. A flag on a legal `input.bin` also fails, becaus
 stale flag would excuse the next real defect. The flag is absent (never `false`) on
 every other vector, and it is the only manifest key the pre-pass reads. Other cores
 may ignore it: their round-trip contract below is unchanged.
+
+`run-all.py` also checks that every bare hex dump in a `description.md` (a fenced block of
+hex digits only) equals the case's `.bin` file. An annotated byte breakdown is prose and is
+not compared.
 
 The **C++ reference is golden**: when the wire changes, it blesses new/updated
 vectors and every other core must match them.

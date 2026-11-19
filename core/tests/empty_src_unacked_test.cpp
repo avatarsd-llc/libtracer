@@ -508,8 +508,6 @@ void unacked_stream_is_not_a_drop() {
     check(link.count() == 1, "  control: and is answered from the stack");
 }
 
-}  // namespace
-
 /** @brief The raw bytes of a conformance vector's `input.bin`. */
 std::vector<std::byte> vector_bytes(std::string_view case_dir) {
     std::ifstream f(std::filesystem::path{LIBTRACER_VECTORS_DIR} / case_dir / "input.bin",
@@ -537,11 +535,20 @@ void test_conformance_vectors() {
     (void)graph.write(v, make_value(b_value_u32(kSeed)));
     (void)link.drain();
 
-    router.on_frame("cli", vector_bytes("fwd/fwd-write-unacknowledged"));
+    const std::vector<std::byte> write = vector_bytes("fwd/fwd-write-unacknowledged");
+    const std::vector<std::byte> read = vector_bytes("fwd/fwd-read-empty-src");
+    const auto wdec = tr::wire::decode(write);
+    const auto rdec = tr::wire::decode(read);
+    check(write.size() == 37 && wdec && wdec->type == tr::wire::type_t::FWD,
+          "  the unacknowledged-write vector loads: a 37-byte FWD");
+    check(read.size() == 29 && rdec && rdec->type == tr::wire::type_t::FWD,
+          "  the empty-src READ vector loads: a 29-byte FWD");
+
+    router.on_frame("cli", write);
     check(stored_u32(graph, v) == 1234u, "  the unacknowledged write was APPLIED");
     check(link.count() == 0, "  and ZERO frames were emitted");
 
-    router.on_frame("cli", vector_bytes("fwd/fwd-read-empty-src"));
+    router.on_frame("cli", read);
     check(link.count() == 0, "  the empty-src READ: ZERO frames emitted");
 
     // Controls: the same frames with a one-segment `src` each draw exactly one reply.
@@ -552,6 +559,8 @@ void test_conformance_vectors() {
     router.on_frame("cli", b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_src_wired()));
     check(link.count() == 2, "  control: a wired-src READ DOES answer");
 }
+
+}  // namespace
 
 int main() {
     std::printf("RFC-0004 Amendment 2 — empty src = unacknowledged (#1502)\n\n");

@@ -16,9 +16,9 @@ stable harness error name is `FRAME_TRUNCATED` (`tr::frame::truncated`).
 5 bytes total.
 
 annex 01 §Truncation handling separates two failures: a frame that ends before its declared
-length is `tr::frame::truncated`, and a header that declares `length > MAX_TLV_BYTES`
-(recommended 16 MiB) is `tr::frame::invalid`. 65535 bytes is far below that bound, so this frame
-is short, not oversize. A decoder that reports `INVALID` for every large length fails this
+length is `tr::frame::truncated`, and a header that declares `length > MAX_TLV_BYTES` is
+`tr::frame::invalid`. 65535 bytes is below the recommended 16 MiB `MAX_TLV_BYTES`, so this
+frame is short, not oversize. A decoder that reports `INVALID` for every large length fails this
 vector. `framing/truncated-length-overrun` is the small-length companion.
 
 The harness checks the error name itself, so this vector needs no separate host test.

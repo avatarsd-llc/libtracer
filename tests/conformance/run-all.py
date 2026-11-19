@@ -96,6 +96,9 @@ def stale_hex_dumps(vectors_dir: Path, vectors: list[str]) -> list[str]:
             continue
         bins = [case / n for n in ("input.bin", "reject.bin") if (case / n).exists()]
         data = bins[0].read_bytes()
+        # An odd-length block cannot be a byte dump, so it is skipped. A block of decimal
+        # digits only (a count, a year) also matches the hex class and is compared as a dump:
+        # no description carries one today, and a new one fails here loudly, not silently.
         for block in HEX_BLOCK.findall(md.read_text(encoding="utf-8")):
             digits = re.sub(r"\s", "", block)
             if re.fullmatch(r"[0-9A-Fa-f]+", digits) and len(digits) % 2 == 0:
