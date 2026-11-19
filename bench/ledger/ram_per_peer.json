@@ -79,11 +79,10 @@
       "source": "measured",
       "arm": "tcp-remote-sub",
       "metric": "per_sub",
-      "value": 542,
+      "value": 238,
       "goal": null,
-      "moved_by": "#2673 (the vertex's own-subs count moves into the edge block: edge_block_t 48 -> 56 B, charged at slab class 64, drawn on a vertex's first subscription; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone))",
-      "waiver": "Ruling 74 (2026-11-11): net 0 B per subscribed vertex (edge_block_t 48->56 = slab 64, vertex_t 72->64), -16 B per plain vertex; total graph RAM holds or falls in every census row.",
-      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it. This row prices ONLY a subscribe on a vertex that already exists (the arm registers its vertices before the window opens), so it carries the edge block's +16 B (#2673) but not the vertex header's -16 B; the census subscribed-leaf row prices both and is unchanged."
+      "moved_by": "#2737 (the slot table is gone, its view rides the published array's tail; the caller rides the cold half's block: 542 -> 238 B; previously #2673 (the vertex's own-subs count moves into the edge block: edge_block_t 48 -> 56 B, charged at slab class 64, drawn on a vertex's first subscription; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)))",
+      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2737 (x86-64): edge block 32 B (slab 32), one-entry published array 16 + 56 + 24 = 96 B, cold half 88 B + caller (slab 96), plus about 14 B amortized link-index growth. The two owned segments the resolver copies the SUBSCRIBER TLV and the return route into are drawn from the default value backend, which this arm does not count."
     },
     {
       "id": "ws remote subscription",
@@ -91,11 +90,10 @@
       "source": "measured",
       "arm": "ws-remote-sub",
       "metric": "per_sub",
-      "value": 542,
+      "value": 238,
       "goal": null,
-      "moved_by": "#2673 (the vertex's own-subs count moves into the edge block: edge_block_t 48 -> 56 B, charged at slab class 64, drawn on a vertex's first subscription; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone))",
-      "waiver": "Ruling 74 (2026-11-11): net 0 B per subscribed vertex (edge_block_t 48->56 = slab 64, vertex_t 72->64), -16 B per plain vertex; total graph RAM holds or falls in every census row.",
-      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it. This row prices ONLY a subscribe on a vertex that already exists (the arm registers its vertices before the window opens), so it carries the edge block's +16 B (#2673) but not the vertex header's -16 B; the census subscribed-leaf row prices both and is unchanged."
+      "moved_by": "#2737 (the slot table is gone, its view rides the published array's tail; the caller rides the cold half's block: 542 -> 238 B; previously #2673 (the vertex's own-subs count moves into the edge block: edge_block_t 48 -> 56 B, charged at slab class 64, drawn on a vertex's first subscription; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)))",
+      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2737 (x86-64): edge block 32 B (slab 32), one-entry published array 16 + 56 + 24 = 96 B, cold half 88 B + caller (slab 96), plus about 14 B amortized link-index growth. The two owned segments the resolver copies the SUBSCRIBER TLV and the return route into are drawn from the default value backend, which this arm does not count."
     },
     {
       "id": "udp remote subscription",
@@ -103,11 +101,10 @@
       "source": "measured",
       "arm": "udp-remote-sub",
       "metric": "per_sub",
-      "value": 542,
+      "value": 238,
       "goal": null,
-      "moved_by": "#2673 (the vertex's own-subs count moves into the edge block: edge_block_t 48 -> 56 B, charged at slab class 64, drawn on a vertex's first subscription; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone))",
-      "waiver": "Ruling 74 (2026-11-11): net 0 B per subscribed vertex (edge_block_t 48->56 = slab 64, vertex_t 72->64), -16 B per plain vertex; total graph RAM holds or falls in every census row.",
-      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it. This row prices ONLY a subscribe on a vertex that already exists (the arm registers its vertices before the window opens), so it carries the edge block's +16 B (#2673) but not the vertex header's -16 B; the census subscribed-leaf row prices both and is unchanged."
+      "moved_by": "#2737 (the slot table is gone, its view rides the published array's tail; the caller rides the cold half's block: 542 -> 238 B; previously #2673 (the vertex's own-subs count moves into the edge block: edge_block_t 48 -> 56 B, charged at slab class 64, drawn on a vertex's first subscription; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)))",
+      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2737 (x86-64): edge block 32 B (slab 32), one-entry published array 16 + 56 + 24 = 96 B, cold half 88 B + caller (slab 96), plus about 14 B amortized link-index growth. The two owned segments the resolver copies the SUBSCRIBER TLV and the return route into are drawn from the default value backend, which this arm does not count."
     },
     {
       "id": "tcp remote subscription, blocks",
@@ -116,9 +113,9 @@
       "arm": "tcp-remote-sub",
       "metric": "sub_blocks",
       "unit": "blocks",
-      "value": 5,
+      "value": 3,
       "goal": 2,
-      "moved_by": "#1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)",
+      "moved_by": "#2737 (the slot table and the caller's own block are gone: 5 -> 3 blocks; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone))",
       "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks."
     },
     {
@@ -128,9 +125,9 @@
       "arm": "ws-remote-sub",
       "metric": "sub_blocks",
       "unit": "blocks",
-      "value": 5,
+      "value": 3,
       "goal": 2,
-      "moved_by": "#1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)",
+      "moved_by": "#2737 (the slot table and the caller's own block are gone: 5 -> 3 blocks; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone))",
       "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks."
     },
     {
@@ -140,9 +137,9 @@
       "arm": "udp-remote-sub",
       "metric": "sub_blocks",
       "unit": "blocks",
-      "value": 5,
+      "value": 3,
       "goal": 2,
-      "moved_by": "#1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)",
+      "moved_by": "#2737 (the slot table and the caller's own block are gone: 5 -> 3 blocks; previously #1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone))",
       "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks."
     },
     {

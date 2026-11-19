@@ -813,11 +813,6 @@ the memo's 23 bits.
 :members:
 ```
 
-```{doxygenstruct} tr::graph::subscriber_slot_t
-:project: libtracer
-:members:
-```
-
 ```{doxygenstruct} tr::graph::pub_edge_t
 :project: libtracer
 :members:

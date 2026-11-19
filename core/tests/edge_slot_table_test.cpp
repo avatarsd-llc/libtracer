@@ -1,16 +1,16 @@
 /**
  * @file
  * @brief #1622 (L7): a vertex stores its subscriber table ONCE — the published edge array holds
- *        each edge's dispatch fields, and the slot table keeps only what no publisher reads.
+ *        each edge's dispatch fields, and since #2737 it is the slot table itself.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * What is pinned, each with the half that keeps it from passing vacuously:
  *
- *   1. The slot record is the cold remainder only: 32 B on LP64 and 16 B on ILP32, against the
- *      80 B and 44 B record it replaces, while the published entry the fan-out walks keeps its
- *      width (56 B and 32 B).
+ *   1. There is no slot table (#2737): the published array holds each slot's retained view
+ *      in a tail after the entries, so the published entry the fan-out walks keeps its width
+ *      (56 B and 32 B) and the edge block carries only the table's length.
  *   2. A `:subscribers[N]` replace is all or nothing. At every point the table source can refuse
  *      it, either the write answers BACKPRESSURE and the vertex is exactly as it was (the old
  *      edge still delivers, the count and the read-back are unchanged), or it succeeds and the
@@ -116,18 +116,18 @@ std::size_t published(vertex_handle_t h) {
     return std::bit_cast<tr::graph::vertex_t*>(h)->published_edges();
 }
 
-/** @brief (1) The census: the slot record is the cold remainder, the hot entry is unchanged. */
+/** @brief (1) The census: no slot table, and the hot entry is unchanged (#2737). */
 void test_census() {
-    std::printf("the slot table keeps only what no publisher reads:\n");
-    constexpr std::size_t slot = sizeof(tr::graph::subscriber_slot_t);
+    std::printf("the published array is the slot table:\n");
     constexpr std::size_t entry = sizeof(tr::graph::pub_edge_t);
-    std::printf("  subscriber_slot_t %zu B, pub_edge_t %zu B\n", slot, entry);
+    constexpr std::size_t block = sizeof(tr::graph::edge_block_t);
+    std::printf("  pub_edge_t %zu B, edge_block_t %zu B\n", entry, block);
     if constexpr (sizeof(void*) == 8) {
-        check(slot == 32, "a slot is 32 B on LP64 (it was an 80 B subscriber_t)");
         check(entry == 56, "a published entry stays 56 B on LP64");
+        check(block == 32, "the edge block is 32 B on LP64 (it carried a slot table)");
     } else {
-        check(slot == 16, "a slot is 16 B on ILP32 (it was a 44 B subscriber_t)");
         check(entry == 32, "a published entry stays 32 B on ILP32");
+        check(block == 20, "the edge block is 20 B on ILP32 (it carried a slot table)");
     }
 }
 

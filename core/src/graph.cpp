@@ -905,9 +905,9 @@ void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
         // pointer, so it is never freed here. The park's other end is the public collect(),
         // which the embedder calls at a moment it knows no reader holds a seam (#576); the
         // graph's own teardown is a growth backstop only. Under map_mutex_.
-        // Parking links the seam into an intrusive chain, and the slot table moves into room
+        // Parking links the seam into an intrusive chain, and the edge array moves into room
         // `retire` reserved, so neither step can fail mid-walk (#1778).
-        detached_edges_t table(*tables_);
+        detached_edges_t table;
         (void)store_intent_document(&x, {});  // a clear: draws nothing, cannot fail
         if (value_handlers_t* seam = x.revert_to_placeholder(table))
             (void)park_.push_back({{seam, nullptr}});  // reserved: cannot fail
@@ -1840,7 +1840,7 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // before the resolver runs (#905). It used to be a resolver return value (`nullopt`),
     // whose natural reading ("I cannot name this caller") meant "grant everything", every
     // gate included. A remote op carries the inbound link's NAME, so it cannot spell
-    // this arm: it carries its caller through `ensure_remote(src)->caller`. #974 was a second,
+    // this arm: it carries its caller through `make_remote(src, caller)`. #974 was a second,
     // since-deleted net-plane write path (the COMPACT terminus, #1951) that once carried none:
     // unattributed, it landed here and was waved through every ACE. Any net-plane write path
     // must carry a caller for that reason.
@@ -1947,8 +1947,8 @@ bool graph_t::may_write_slot(vertex_t* v, std::size_t slot, std::string_view cal
     if (!acl_allows(v, caller, acl_right_t::READ)) return false;
     // Rule 1: a slot past the end, a cleared slot and an edge with an empty stored context
     // have no holder, so each is the owner's alone, and the lookup never runs on it (#905).
-    if (edge == nullptr || edge->caller.empty()) return false;
-    const std::string_view held = edge->caller.view();
+    if (edge == nullptr || edge->caller().empty()) return false;
+    const std::string_view held = edge->caller();
     const auto settled = subject_lookup_.get_settled(kHookSettleReads);
     if (!settled) return false;
     const auto lookup = *settled;
@@ -2157,7 +2157,7 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
         remote_delivery_t{.link = r->link,
                           .return_route = r->return_route,
                           .reverse_route = r->reverse_route,
-                          .caller = r->caller,
+                          .caller = r->caller(),
                           .lane = {.key = r, .depth = r->lane_depth, .reliable = r->lane_reliable}},
         value);
 }
@@ -3558,7 +3558,7 @@ void graph_t::release_admission(const remote_ptr_t& remote, const vertex_t* v) c
     if (remote)
         session = remote->link.valid() && name.fn != nullptr
                       ? name.fn(name.ctx, remote->link, scratch)
-                      : remote->caller.view();
+                      : remote->caller();
     // The hold and the charge of this one edge, as `release_edges` gives back n of them. Not
     // through it: called here, the RELEASE folds away in a build without the seam and takes
     // the name above with it, where an out-of-line call would still have to be handed one.
@@ -3884,8 +3884,8 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // A wire subscriber always carries the cold half; it and the caller name draw from the
     // table source (#1885), and a refusal there is BACKPRESSURE before anything was admitted.
     // The link is a pair, not a name (#1941): delivery resolves it without a string compare.
-    subscriber_remote_t* const r = s.ensure_remote(*tables_);
-    if (r == nullptr || !r->caller.assign(gate_ctx)) return std::unexpected(status_t::BACKPRESSURE);
+    subscriber_remote_t* const r = s.make_remote(*tables_, gate_ctx);
+    if (r == nullptr) return std::unexpected(status_t::BACKPRESSURE);
     r->link = link_pair;
     r->return_route = std::move(return_route);
     // The completed reverse bound route (RFC-0024 §7.1 amendment 1) — empty for every

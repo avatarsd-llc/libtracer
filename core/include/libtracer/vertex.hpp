@@ -976,7 +976,7 @@ class vertex_t {
         if (children_ != nullptr) tr::mem::drop_in(children_->sorted.source(), children_);
         if (vertex_ext_t* e = ext_.load(std::memory_order_acquire)) tr::mem::drop_in(*e->src, e);
         if (edge_block_t* b = edges_.load(std::memory_order_acquire))
-            tr::mem::drop_in(b->slots.source(), b);
+            tr::mem::drop_in(b->source(), b);
     }
 
     /**
@@ -2049,20 +2049,19 @@ class vertex_t {
             const std::lock_guard lock(vertex_stripe_of(this).m);
             b = ensure_edges(tables);
             if (b == nullptr) return kNoSlot;  // OOM on the block itself: admit nothing
-            tr::mem::block_array_t<subscriber_slot_t>& subs = b->slots;
-            // The lowest cleared slot, or one past the end (#1533 folded the search loop).
-            idx = static_cast<std::size_t>(
-                std::find_if(subs.begin(), subs.end(),
-                             [](const subscriber_slot_t& x) { return !x.active; }) -
-                subs.begin());
+            // The lowest free slot: the first index the live entries, in slot order, skip — or
+            // one past the end of the table (#2737: there is no table to search).
+            idx = 0;
+            for (const pub_edge_t& e : b->published()) {
+                if (e.cleared) continue;
+                if (e.slot != idx) break;
+                ++idx;
+            }
             // A published entry names its slot in the liveness padding (#1533): 16 bits on
-            // ILP32, so a narrow target refuses the slot it could not name. A new slot joins
-            // the table cleared and is occupied only once its edge is published (#1622).
-            if (idx == subs.size() && (idx > pub_edge_t::kMaxSlot || !subs.push_back({})))
-                return kNoSlot;
-            if (!try_publish_edges(*b, &s, idx)) return kNoSlot;  // nothing was occupied
-            subs[idx] = {
-                .source_view = std::move(s.source_view), .policy = s.policy, .active = true};
+            // ILP32, so a narrow target refuses the slot it could not name. The table grows
+            // only once the edge is published, so a refused add leaves it as it was.
+            if (idx > pub_edge_t::kMaxSlot || !try_publish_edges(*b, &s, idx)) return kNoSlot;
+            b->slot_count = std::max(b->slot_count, static_cast<std::uint32_t>(idx + 1));
             if (latch != nullptr && s.policy.durability_request()) {
                 if (value_ref_t lkv = lkv_.load()) {
                     latch->value = std::move(lkv);
@@ -2104,18 +2103,21 @@ class vertex_t {
             const std::lock_guard lock(vertex_stripe_of(this).m);
             b = edges_locked();
             if (b == nullptr) return false;
-            if (idx >= b->slots.size() || !b->slots[idx].active) return false;
-            pub_edge_t& e = entry_of(*b, idx);
+            const std::size_t at = live_entry(*b, idx);
+            if (at == kNoSlot) return false;
+            edge_pub_t* const p = b->pub.load(std::memory_order_relaxed);
+            pub_edge_t& e = p->entries()[at];
             if (expect != nullptr && e.remote.get() != expect) return false;
             if (retired_ctx != nullptr) *retired_ctx = e.callback_ctx;
             if (retired_remote != nullptr) *retired_remote = e.remote;  // a share of the record
             if (was_suspended != nullptr)
                 *was_suspended = !e.active.load(std::memory_order_relaxed);
-            // RECLAIM in place, not merely deactivate: the slot's `source_view` segment pin is
+            // RECLAIM in place, not merely deactivate: the slot's retained view's segment pin is
             // released here, so an unsubscribed edge keeps no frame segment alive. The slot
-            // SHELL stays — RFC-0009 §D.2 makes `:subscribers[]` indices stable, so the table
-            // must not shrink.
-            b->slots[idx] = {};
+            // stays in the table — RFC-0009 §D.2 makes `:subscribers[]` indices stable, so
+            // `slot_count` never shrinks.
+            e.cleared = true;
+            p->views()[at] = {};
             // Stop delivering to it AT ONCE and unconditionally (#635): the monotone bit is
             // allocation-free, so an unsubscribe can never fail to take effect. Republishing
             // is what releases the entry's target key and cold half, and it is allowed to
@@ -2195,22 +2197,21 @@ class vertex_t {
             const std::lock_guard lock(vertex_stripe_of(this).m);
             b = edges_locked();
             if (b == nullptr) return edge_replace_t::OUT_OF_RANGE;
-            if (idx >= b->slots.size()) return edge_replace_t::OUT_OF_RANGE;
-            const bool was_active = b->slots[idx].active;
+            if (idx >= b->slot_count) return edge_replace_t::OUT_OF_RANGE;
+            const std::size_t at = live_entry(*b, idx);
+            const bool was_active = at != kNoSlot;
             // Read the displaced entry BEFORE the republish retires its array: once retired,
             // another mutator's scan may free it.
             bool was_suspended = false;
             remote_ptr_t displaced;
             if (was_active) {
-                const pub_edge_t& old = entry_of(*b, idx);
+                const pub_edge_t& old = b->published()[at];
                 was_suspended = !old.active.load(std::memory_order_relaxed);
                 displaced = old.remote;
             }
             if (displaced.get() != expect) return edge_replace_t::EDGE_CHANGED;
             if (!try_publish_edges(*b, &s, idx)) return edge_replace_t::REFUSED;
             if (displaced_remote != nullptr) *displaced_remote = std::move(displaced);
-            b->slots[idx] = {
-                .source_view = std::move(s.source_view), .policy = s.policy, .active = true};
             if (latch != nullptr && s.policy.durability_request()) {
                 if (value_ref_t lkv = lkv_.load()) {
                     latch->value = std::move(lkv);
@@ -2255,9 +2256,9 @@ class vertex_t {
     edge_suspend_t set_edge_suspended(std::size_t idx, bool suspended) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         edge_block_t* const b = edges_locked();
-        if (b == nullptr || idx >= b->slots.size() || !b->slots[idx].active)
-            return edge_suspend_t::NOT_FOUND;
-        std::atomic<bool>& live = entry_of(*b, idx).active;
+        const std::size_t at = b == nullptr ? kNoSlot : live_entry(*b, idx);
+        if (at == kNoSlot) return edge_suspend_t::NOT_FOUND;
+        std::atomic<bool>& live = b->published()[at].active;
         if (live.load(std::memory_order_relaxed) != suspended) return edge_suspend_t::UNCHANGED;
         live.store(!suspended, std::memory_order_release);
         return edge_suspend_t::CHANGED;
@@ -2279,8 +2280,9 @@ class vertex_t {
     [[nodiscard]] std::optional<bool> edge_suspended(std::size_t idx) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const edge_block_t* b = edges_locked();
-        if (b == nullptr || idx >= b->slots.size() || !b->slots[idx].active) return std::nullopt;
-        return !entry_of(*b, idx).active.load(std::memory_order_relaxed);
+        const std::size_t at = b == nullptr ? kNoSlot : live_entry(*b, idx);
+        if (at == kNoSlot) return std::nullopt;
+        return !b->published()[at].active.load(std::memory_order_relaxed);
     }
 
     /**
@@ -2338,17 +2340,19 @@ class vertex_t {
             if (b == nullptr) return 0;
             // The edges' dispatch fields live in the published entries (#1622), one per
             // occupied slot; a cleared slot's dead entry is skipped by its slot's flag.
+            edge_pub_t* const p = b->pub.load(std::memory_order_relaxed);
             for (pub_edge_t& e : b->published()) {
-                if (!b->slots[e.slot].active || e.remote == nullptr) continue;
+                if (e.cleared || e.remote == nullptr) continue;
                 // The link this edge was ADMITTED over — see the declaration comment: the
                 // stored link's pair (#1941), or the caller of a field-write that named none
                 // (#943).
                 if (e.remote->link.valid() ? !same_link(e.remote->link, pair)
-                                           : e.remote->caller.view() != link)
+                                           : e.remote->caller() != link)
                     continue;
                 routed += static_cast<std::size_t>(!e.remote->return_route.empty());
                 suspended += static_cast<std::size_t>(!e.active.load(std::memory_order_relaxed));
-                b->slots[e.slot] = {};  // frees the slot's retained view in place
+                e.cleared = true;
+                p->views()[&e - p->entries()] = {};  // frees the retained view in place
                 e.active.store(false, std::memory_order_release);  // the departed peer stops
                 ++n;
             }
@@ -2398,8 +2402,9 @@ class vertex_t {
             const std::lock_guard lock(vertex_stripe_of(this).m);
             b = edges_locked();
             if (b == nullptr) return 0;
+            edge_pub_t* const p = b->pub.load(std::memory_order_relaxed);
             for (pub_edge_t& e : b->published()) {
-                if (!b->slots[e.slot].active || e.remote == nullptr) continue;
+                if (e.cleared || e.remote == nullptr) continue;
                 // The stored link, not the caller fallback. A route implies a link
                 // (`subscribe_wire` refuses either empty), but a link does not imply a route:
                 // a field-write edge stores its arrival link with none (#2135). Such an edge
@@ -2432,7 +2437,8 @@ class vertex_t {
                 }
                 if (!hit) continue;
                 suspended += static_cast<std::size_t>(!e.active.load(std::memory_order_relaxed));
-                b->slots[e.slot] = {};  // frees the slot's retained view in place
+                e.cleared = true;
+                p->views()[&e - p->entries()] = {};  // frees the retained view in place
                 e.active.store(false, std::memory_order_release);  // the refused route stops
                 ++n;
             }
@@ -2537,9 +2543,10 @@ class vertex_t {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const edge_block_t* b = edges_locked();
         if (b == nullptr) return std::nullopt;
-        const tr::mem::block_array_t<subscriber_slot_t>& subs = b->slots;
-        if (idx < subs.size() && subs[idx].active && subs[idx].source_view.owner)
-            return subs[idx].source_view;  // clone (refcount bump)
+        const std::size_t at = live_entry(*b, idx);
+        if (at == kNoSlot) return std::nullopt;
+        const view::view_t& v = b->pub.load(std::memory_order_relaxed)->views()[at];
+        if (v.owner) return v;  // clone (refcount bump)
         return std::nullopt;
     }
 
@@ -2554,8 +2561,9 @@ class vertex_t {
     [[nodiscard]] remote_ptr_t edge_holder(std::size_t idx) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const edge_block_t* b = edges_locked();
-        if (b == nullptr || idx >= b->slots.size() || !b->slots[idx].active) return {};
-        return entry_of(*b, idx).remote;
+        const std::size_t at = b == nullptr ? kNoSlot : live_entry(*b, idx);
+        if (at == kNoSlot) return {};
+        return b->published()[at].remote;
     }
 
     /** @brief Every active slot's stored SUBSCRIBER view, in slot order (the
@@ -2565,9 +2573,12 @@ class vertex_t {
         std::vector<view::view_t> out;
         const edge_block_t* b = edges_locked();
         if (b == nullptr) return out;
-        out.reserve(b->slots.size());
-        for (const subscriber_slot_t& s : b->slots)
-            if (s.active && s.source_view.owner) out.push_back(s.source_view);
+        const std::span<pub_edge_t> all = b->published();
+        out.reserve(all.size());
+        for (std::size_t i = 0; i < all.size(); ++i) {
+            const view::view_t& v = b->pub.load(std::memory_order_relaxed)->views()[i];
+            if (!all[i].cleared && v.owner) out.push_back(v);
+        }
         return out;
     }
 
@@ -2579,9 +2590,12 @@ class vertex_t {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const edge_block_t* b = edges_locked();
         if (b == nullptr) return true;
-        if (!out.reserve(b->slots.size())) return false;
-        for (const subscriber_slot_t& s : b->slots)
-            if (s.active && s.source_view.owner) (void)out.push_back(s.source_view);  // reserved
+        const std::span<pub_edge_t> all = b->published();
+        if (!out.reserve(all.size())) return false;
+        for (std::size_t i = 0; i < all.size(); ++i) {
+            const view::view_t& v = b->pub.load(std::memory_order_relaxed)->views()[i];
+            if (!all[i].cleared && v.owner) (void)out.push_back(v);  // reserved
+        }
         return true;
     }
 
@@ -2642,8 +2656,8 @@ class vertex_t {
      *       the old pointer, so the graph parks it and the embedder frees the park through
      *       `graph_t::collect()` (#576). The per-vertex stripe lock is taken internally.
      *
-     * @param gone Receives this vertex's whole subscriber table — its slot table and its
-     *        published edge array, both MOVED out, never copied, so it cannot fail: the graph
+     * @param gone Receives this vertex's whole subscriber table — its published edge array,
+     *        MOVED out, never copied, and the table emptied (#2737), so it cannot fail: the graph
      *        gives each ROUTED edge's link hold back and drops the record once its locks are
      *        released (#1816, #1778, #1622). Left empty when this vertex has no edge block.
      * @return the detached seam block to park, or nullptr if this vertex had none.
@@ -3429,22 +3443,26 @@ class vertex_t {
     }
 
     /**
-     * @brief The published entry of the OCCUPIED slot @p idx — the one place its dispatch fields
-     *        live (#1622). Call with the stripe lock held, for a slot whose `active` is set.
+     * @brief Where in the published array slot @p idx's LIVE entry sits — the one place its
+     *        dispatch fields and retained view live (#1622, #2737) — or @ref kNoSlot when the
+     *        slot is not occupied (past the table, never filled, or cleared). Call with the
+     *        stripe lock held.
      *
      * Its liveness bit is what an unsubscribe, an eviction, a suspend and a resume flip, and
      * that flip is allocation-free and therefore infallible, which is the point: an unsubscribe
      * must stop a delivery even when the compacting republish behind it cannot allocate. The
      * array is in slot order with at most one entry per slot, so the entry is found by a binary
      * search on its index; an occupied slot always has one, because an add or a replace
-     * publishes its edge or changes nothing.
+     * publishes its edge or changes nothing. The answer indexes `entries()` and `views()` of the
+     * current array alike.
      */
-    [[nodiscard]] static pub_edge_t& entry_of(const edge_block_t& b, std::size_t idx) noexcept {
+    [[nodiscard]] static std::size_t live_entry(const edge_block_t& b, std::size_t idx) noexcept {
         const std::span<pub_edge_t> all = b.published();
         const auto e = std::partition_point(all.begin(), all.end(),
                                             [idx](const pub_edge_t& x) { return x.slot < idx; });
-        assert(e != all.end() && "an occupied slot has a published entry");
-        return *e;
+        return e != all.end() && e->slot == idx && !e->cleared
+                   ? static_cast<std::size_t>(e - all.begin())
+                   : kNoSlot;
     }
 
     /**
@@ -3477,13 +3495,16 @@ class vertex_t {
         const std::size_t n = old.size() + static_cast<std::size_t>(at != kNoSlot);
         edge_pub_t* np = nullptr;
         if (n != 0) {
-            np = alloc_edge_pub(b.slots.source(), n);
+            np = alloc_edge_pub(b.source(), n);
             if (np == nullptr) return false;
             pub_edge_t* const dst = np->entries();
+            view::view_t* const dst_views = np->views();
             // Every field COPY-CONSTRUCTED in place, never assigned over a default (see above).
             // The cold half is SHARED, not copied (#1442): the entry names the admitting
-            // door's record instead of reproducing it.
-            const auto put = [np, dst](const auto& e, bool live, std::size_t slot) noexcept {
+            // door's record instead of reproducing it. The retained view is a refcount clone.
+            const auto put = [np, dst, dst_views](const auto& e, const view::view_t& v, bool live,
+                                                  std::size_t slot) noexcept {
+                ::new (static_cast<void*>(dst_views + np->count)) view::view_t(v);
                 ::new (static_cast<void*>(dst + np->count)) pub_edge_t{
                     .callback = e.callback,
                     .callback_ctx = e.callback_ctx,
@@ -3498,15 +3519,17 @@ class vertex_t {
             // `pending` is the fill's slot until it is placed, then (or with no fill) a value no
             // entry's slot reaches, so the one test both places it and stops.
             std::size_t pending = at;
-            for (const pub_edge_t& e : old) {
+            for (std::size_t i = 0; i < old.size(); ++i) {
+                const pub_edge_t& e = old[i];
                 if (e.slot >= pending) {
-                    put(*fill, true, at);
+                    put(*fill, fill->source_view, true, at);
                     pending = kNoSlot;
                 }
-                if (e.slot != at && b.slots[e.slot].active)
-                    put(e, e.active.load(std::memory_order_relaxed), e.slot);
+                if (e.slot != at && !e.cleared)
+                    put(e, b.pub.load(std::memory_order_relaxed)->views()[i],
+                        e.active.load(std::memory_order_relaxed), e.slot);
             }
-            if (pending != kNoSlot) put(*fill, true, at);
+            if (pending != kNoSlot) put(*fill, fill->source_view, true, at);
         }
         // seq_cst, not release: this exchange and the pinned reader's validating load must
         // share ONE total order for the announce/scan protocol to hold (see pin_t::acquire).
