@@ -191,6 +191,12 @@ add_executable(bench_retire_park bench_retire_park.cpp)
 target_link_libraries(bench_retire_park PRIVATE libtracer)
 target_compile_options(bench_retire_park PRIVATE -Wall -Wextra)
 
+# #2846: an exclusive map-lock holder's latency while N threads run subtree walks; a walk
+# yields to a waiting writer, so the latency should not grow with N. Diagnostic, not a gate.
+add_executable(bench_walk_writer bench_walk_writer.cpp)
+target_link_libraries(bench_walk_writer PRIVATE libtracer)
+target_compile_options(bench_walk_writer PRIVATE -Wall -Wextra)
+
 # The LKV slot under concurrency (ADR-0064 2, #604): today's atomic<shared_ptr> against a
 # no-reclamation ceiling, epoch-based reclamation and hazard pointers, in three shapes, plus
 # the same question on the real graph_t::write path. The ADR's own closing consequence names

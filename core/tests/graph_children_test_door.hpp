@@ -1,7 +1,7 @@
 /**
  * @file
  * @brief Test-only access to `graph_t`'s flat `:children` serialize, the oracle the folded
- *        listing is diffed against (#2437).
+ *        listing is diffed against (#2437), and to its waiting-writer count (#2846).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -12,6 +12,9 @@
  */
 #ifndef LIBTRACER_TESTS_GRAPH_CHILDREN_TEST_DOOR_HPP
 #define LIBTRACER_TESTS_GRAPH_CHILDREN_TEST_DOOR_HPP
+
+#include <atomic>
+#include <cstdint>
 
 #include "libtracer/graph.hpp"
 
@@ -26,6 +29,12 @@ struct graph_children_test_door_t {
     static result_t<value_ref_t> read_children_materialized(const graph_t& g,
                                                             graph::vertex_handle_t v) {
         return g.read_children_materialized(v);
+    }
+
+    /** @brief How many threads wait to take @p g's map lock exclusively (#2846): what a
+     *         subtree walk yields to. A test waits on it to know a writer is counted. */
+    static std::uint32_t map_writers_waiting(const graph_t& g) noexcept {
+        return g.map_writers_waiting_.load(std::memory_order_relaxed);
     }
 };
 

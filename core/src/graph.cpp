@@ -625,13 +625,22 @@ result_t<vertex_handle_t> graph_t::register_vertex_key(std::span<const std::byte
     return register_vertex_key_span(key, role, handlers, schema_catalog, std::move(policy));
 }
 
+std::unique_lock<tr::shared_mutex_t> graph_t::lock_map_exclusive() const {
+    // Counted only while waiting: a walk that sees the count yields (#2846), and one that
+    // starts after the lock is taken simply blocks on its shared hold.
+    map_writers_waiting_.fetch_add(1, std::memory_order_relaxed);
+    std::unique_lock lock(map_mutex_);
+    map_writers_waiting_.fetch_sub(1, std::memory_order_relaxed);
+    return lock;
+}
+
 result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     std::span<const std::byte> key, role_t role, const handlers_t& handlers,
     std::span<const std::byte> schema_catalog, vertex_policy_t policy) {
     // Refused BEFORE the descent, so an illegal policy registers nothing — not even the
     // placeholder levels a descent would create.
     if (!policy_legal(role, policy)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-    const std::unique_lock lock(map_mutex_);
+    const auto lock = lock_map_exclusive();
     // Descend the Composite tree (ADR-0057), creating unregistered PLACEHOLDER nodes for
     // missing intermediate levels — invisible to find/read_children until a registration
     // fills them in place (matching the flat map, where intermediates did not exist).
@@ -826,7 +835,7 @@ result_t<void> graph_t::set_creation_hook(vertex_handle_t parent, creation_hook_
     vertex_t* const v = parent.get();
     // The unique map lock: `publish` requires it, and it orders the install against a
     // retirement, which clears the flag under the same hold.
-    const std::unique_lock lock(map_mutex_);
+    const auto lock = lock_map_exclusive();
     if (v == nullptr || !v->registered()) return std::unexpected(status_t::NOT_FOUND);
     // Republished into the vertex's own node with only the hook replaced: its filters carry
     // over unchanged when it has any, and a node left by a previous occupant contributes none.
@@ -951,7 +960,7 @@ static bool anchor_record(std::string_view id, mem::bytes_t& rec) noexcept {
 result_t<vertex_handle_t> graph_t::register_session_anchor(std::string_view id) {
     mem::bytes_t rec(*tables_);
     if (!anchor_record(id, rec)) return std::unexpected(status_t::BACKPRESSURE);
-    const std::unique_lock lock(map_mutex_);
+    const auto lock = lock_map_exclusive();
     vertex_t* node = anchor_root()->child_by_record(mem::as_span(rec));
     if (node == nullptr) {
         // FIRST sight of this id: one allocation, one slot, forever. Every later arrival on
@@ -1190,7 +1199,7 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
     }
     gone_edges_t gone(*tables_);  // the slot tables the retirement dropped (#1816, #1778)
     {
-        const std::unique_lock lock(map_mutex_);
+        const auto lock = lock_map_exclusive();
         // Idempotent (§B.4): an already-retired / never-filled placeholder is a no-op.
         if (!root->registered()) return {};
         // One entry per vertex the walk can visit, reserved BEFORE anything changes, so a
@@ -1280,7 +1289,7 @@ void graph_t::collect() {
         {
             // Under the map lock: nothing but the take, one compare per entry. The lock is what
             // serialises us against retire_subtree's append; no user code runs under it.
-            const std::unique_lock lock(map_mutex_);
+            const auto lock = lock_map_exclusive();
             auto& p = park_;
             for (; n < kBatch && n < p.size() && h.past(p[n].epoch); ++n) taken[n] = p[n].release;
             p.erase_front(n);
@@ -1299,7 +1308,7 @@ result_t<void> graph_t::park_release(retired_callback_t release) {
 }
 
 result_t<void> graph_t::reserve_park() {
-    const std::unique_lock lock(map_mutex_);
+    const auto lock = lock_map_exclusive();
     // Room for every entry parked or reserved, plus this one. A park that must grow takes at
     // least twice its capacity (as `retire` grows it), so an owner that reserves per context
     // (one per connection) does not regrow the park per context; a need that fits reserves
@@ -1315,13 +1324,13 @@ result_t<void> graph_t::reserve_park() {
 }
 
 void graph_t::unreserve_park() noexcept {
-    const std::unique_lock lock(map_mutex_);
+    const auto lock = lock_map_exclusive();
     assert(park_tail_.reserved != 0 && "unreserve_park without a reservation");
     --park_tail_.reserved;
 }
 
 void graph_t::park_reserved(retired_callback_t release) noexcept {
-    const std::unique_lock lock(map_mutex_);
+    const auto lock = lock_map_exclusive();
     assert(park_tail_.reserved != 0 && "park_reserved without a reservation");
     --park_tail_.reserved;
     // A null hook has nothing to run, so nothing is parked. It must not be: a null hook is how
@@ -1452,7 +1461,7 @@ result_t<void> graph_t::hide_from_enumeration(vertex_handle_t vh) {
     // every `:children[]` walk under the SHARED lock, so writing it under the unique lock is
     // what keeps a listing from being gathered half-hidden. It is set once, at mint, on a
     // control-plane path — nothing here is hot.
-    const std::unique_lock lock(map_mutex_);
+    const auto lock = lock_map_exclusive();
     if (v == nullptr || !v->registered()) return std::unexpected(status_t::NOT_FOUND);
     v->mark_enumeration_hidden();
     return {};
@@ -1684,7 +1693,7 @@ result_t<void> graph_t::set_policy(vertex_handle_t v, vertex_policy_t policy) {
     // registered is a placeholder whose members the next registration at its path names its
     // unset ones with, so a policy landing there would reach that occupant. Refused like the
     // other owner-side verbs. `apply_policy` runs under this hold at registration too.
-    const std::unique_lock lock(map_mutex_);
+    const auto lock = lock_map_exclusive();
     if (vx == nullptr || !vx->registered()) return std::unexpected(status_t::NOT_FOUND);
     // Only the members the caller names move (#2239): every other one is named with what the
     // vertex holds, which is legal by construction.
@@ -1706,7 +1715,7 @@ result_t<void> graph_t::set_intent_document(vertex_handle_t v, std::string_view 
     // The unique map lock, the hold registration and retirement take (#2669): a vertex no longer
     // registered is refused, so a document cannot outlive the retirement that cleared it and
     // reach the next occupant at the address. Refused like `set_policy`.
-    const std::unique_lock lock(map_mutex_);
+    const auto lock = lock_map_exclusive();
     if (v.get() == nullptr || !v.get()->registered()) return std::unexpected(status_t::NOT_FOUND);
     if (!store_intent_document(v.get(), doc)) return std::unexpected(status_t::BACKPRESSURE);
     return {};
@@ -3916,7 +3925,9 @@ result_t<view::view_t> graph_t::read_children(vertex_t* v) const {
         // PATH — the RFC removes `NAME` from `PATH` bodies only and leaves the type and its
         // decoder standing everywhere else — so the member is RE-FRAMED here rather than
         // borrowed: same wire shape as before this RFC, one header write per child.
-        v->for_each_child([&members, &staged](const vertex_t& c) {
+        v->for_each_child([this, &members, &staged](const vertex_t& c) {
+            // A waiting writer goes first (#2846): the listing yields as BACKPRESSURE.
+            staged = staged && !map_writer_waiting();
             if (!staged || !c.enumerable_member()) return;
             const std::span<const std::byte> seg = child_segment(c);
             const std::size_t body = kNameHeaderBytes + seg.size();
@@ -4083,7 +4094,10 @@ result_t<value_ref_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     bool oom = false;
     {
         const std::shared_lock lock(map_mutex_);
-        v->for_each_child([&members, &members_len, &oom, &hdr_backend](const vertex_t& c) {
+        v->for_each_child([this, &members, &members_len, &oom, &hdr_backend](const vertex_t& c) {
+            // A waiting writer goes first (#2846): the listing yields as BACKPRESSURE, which
+            // is the answer a refused draw gives, so it rides the same latch.
+            oom = oom || map_writer_waiting();
             // THE membership predicate, shared verbatim with `read_children` — placeholders
             // and enumeration-hidden children (the RFC-0014 §3 creator endpoint) are not
             // members on either door.
@@ -4169,9 +4183,10 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
         // peer-chosen (it picks which composed root to READ), so this is exactly the growth
         // a peer can drive to exhaustion.
         mem::block_array_t<work_t> stack(*tables_);
-        // `nodes` draws from the same store. A lambda cannot return the error, so the child
-        // push latches `oom` and the loop propagates it after each visit.
-        bool oom = false;
+        // `nodes` draws from the same store. A lambda cannot return the error, so a refused
+        // child push latches `refused` and the loop propagates it after each visit. A waiting
+        // writer (#2846) latches it too, and answers the same BACKPRESSURE.
+        bool refused = false;
         if (!stack.push_back(work_t{.v = root, .parent = 0}))
             return std::unexpected(status_t::BACKPRESSURE);
         while (!stack.empty()) {
@@ -4193,8 +4208,10 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
             // visits siblings in for_each_child's sorted order, keeping the array's
             // pre-order equal to the emitted wire order.
             const auto first = static_cast<std::ptrdiff_t>(stack.size());
-            w.v->for_each_child([this, caller, idx, &stack, &oom](vertex_t& c) {
-                if (oom) return;  // a prior sibling push failed — stop growing
+            w.v->for_each_child([this, caller, idx, &stack, &refused](vertex_t& c) {
+                // A refused push, or a writer now waiting (#2846): stop growing, so a wide
+                // node keeps a writer waiting one child, not its whole width.
+                if ((refused |= map_writer_waiting())) return;
                 // THE membership predicate, the same one both `:children[]` doors take
                 // (@ref vertex_t::enumerable_member): placeholders are not members, and
                 // neither is an enumeration-hidden child. The composed read is an
@@ -4205,9 +4222,12 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
                 // exactly what makes the §6 `conn:schema` probe the discovery route.
                 if (!c.enumerable_member()) return;
                 if (!acl_allows(&c, caller, acl_right_t::READ)) return;  // PRUNE the subtree
-                if (!stack.push_back(work_t{.v = &c, .parent = idx})) oom = true;
+                refused |= !stack.push_back(work_t{.v = &c, .parent = idx});
             });
-            if (oom) return std::unexpected(status_t::BACKPRESSURE);
+            // Yield to a waiting writer after each node too (#2846): a childless node never
+            // runs the lambda above. Nothing is kept: the caller retries the whole read.
+            refused |= map_writer_waiting();
+            if (refused) return std::unexpected(status_t::BACKPRESSURE);
             std::reverse(stack.data() + first, stack.data() + stack.size());
         }
     }

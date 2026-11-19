@@ -331,6 +331,13 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "rate flat as it fills. A diagnostic, not a gate.",
         "cycles/s per window · last/first"),
     instrument_t(
+        "bench_walk_writer.cpp", "inproc", (),
+        "Times a vertex registration, which takes the map lock exclusively, while 0, 1, 2, 4 "
+        "or 8 threads run composed reads over a 99,856-vertex branch: since #2846 a walk "
+        "yields to the waiting writer, so the latency should not grow with the reader count. "
+        "A diagnostic, not a gate.",
+        "writer µs p50 / max · walks · yields"),
+    instrument_t(
         "bench_chain_delivery_pair.cpp", "framed", (),
         "Stream delivery over the RFC-0029 PAIR chain at 1 and 3 hops, 64 B to 16 KiB, "
         "unbatched and with BATCH, with the reply leg priced separately. A report, not a gate.",

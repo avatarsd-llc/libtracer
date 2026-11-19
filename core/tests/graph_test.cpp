@@ -1254,28 +1254,40 @@ void test_for_each_vertex_concurrent_register() {
     // instead of pinning the interleaving it exists to prove (#1343).
     while (written.load(std::memory_order_relaxed) == 0) std::this_thread::yield();
 
+    // A walk that meets the writer waiting for the map lock yields (#2846): it returns false
+    // having visited nothing, and the next round retries. A completed walk must still see
+    // every pre-existing vertex exactly once.
     int pre_seen = 0;
     bool ordered = true;
+    bool complete_walks_whole = true;
+    bool yields_empty = true;
     for (int round = 0; round < 200; ++round) {
         std::string prev;
         bool first = true;
         pre_seen = 0;
-        g.for_each_vertex([&](tr::wire::key_view_t key, tr::graph::vertex_handle_t) {
-            // Compared on the KEY BYTES — the order for_each_vertex actually promises.
-            const std::string raw(reinterpret_cast<const char*>(key.bytes().data()),
-                                  key.bytes().size());
-            if (!first && !(prev < raw)) ordered = false;  // strictly ascending, no dupes
-            first = false;
-            prev = raw;
-            if (spell(key).rfind("/pre/v", 0) == 0) ++pre_seen;
-        });
-        if (pre_seen != kPre || !ordered) break;
+        const bool done =
+            g.for_each_vertex([&](tr::wire::key_view_t key, tr::graph::vertex_handle_t) {
+                // Compared on the KEY BYTES — the order for_each_vertex actually promises.
+                const std::string raw(reinterpret_cast<const char*>(key.bytes().data()),
+                                      key.bytes().size());
+                if (!first && !(prev < raw)) ordered = false;  // strictly ascending, no dupes
+                first = false;
+                prev = raw;
+                if (spell(key).rfind("/pre/v", 0) == 0) ++pre_seen;
+            });
+        yields_empty = yields_empty && (done || (first && pre_seen == 0));
+        complete_walks_whole = complete_walks_whole && (!done || pre_seen == kPre);
+        if (!complete_walks_whole || !ordered) break;
     }
     stop.store(true, std::memory_order_relaxed);
     writer.join();
     check(written.load() > 0, "the writer really did register concurrently with the walks");
 
-    check(pre_seen == kPre, "every vertex registered BEFORE the walk is visited, exactly once");
+    check(complete_walks_whole,
+          "every vertex registered BEFORE a completed walk is visited, exactly once");
+    check(yields_empty, "a walk that yielded to the writer visited nothing");
+    check(g.for_each_vertex([](tr::wire::key_view_t, tr::graph::vertex_handle_t) {}),
+          "with no writer waiting, the walk completes");
     check(ordered, "the visit order stays strictly ascending under concurrent registration");
 }
 
