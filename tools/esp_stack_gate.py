@@ -76,14 +76,15 @@ STACK_PINS = {
     # array. Between write_impl and fan_out the worst path is now write_branch (384) and
     # fan_out_slice (80) instead of handler_write_deliver, deliver_vertex and bubble_up (288),
     # so the pin moves to 5,392 B; no frame that was pinned before grew. The path through a
-    # branch write fell from 9,536 B to 5,392 B.
-    "borrowed": 5392,
+    # branch write fell from 9,536 B to 5,392 B. Then cut by 96 B: the decode is scoped and
+    # parse_branch_node kept out of line, so write_branch's frame is 288 B, not 384 B.
+    "borrowed": 5296,
     # #2871: 6,864 B at 9964668f0, cut by 352 B by the same reply table and framing merges; the
     # multi-link terminus (rope tier) keeps its name copy. (Receive and terminus path alone:
     # 5,776 B at v0.21.0, 6,048 B at 9964668f0, 5,792 B here.)
     # #2879 (Ruling 128): the same widening, +176 B by the same two frames; the path through a
-    # branch write fell from 10,832 B to 6,688 B.
-    "owning": 6688,
+    # branch write fell from 10,832 B to 6,688 B, then 6,592 B by the same 96 B cut.
+    "owning": 6592,
 }
 
 ROOT = r"^tr::net::esp_ws_client_link_t::recv_loop\(\)$"

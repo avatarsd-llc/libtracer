@@ -277,8 +277,8 @@ struct esp_ws_client_config_t {
      *         delivery through the graph's on_write seam, the deep path. 0 = the platform
      *         pthread default.
      *
-     *  libtracer uses at most 5,392 B of the calling task's stack on `recv_loop`, borrowed
-     *  arm (`memory.rx` unset), and at most 6,688 B on the owning arm (`memory.rx` set):
+     *  libtracer uses at most 5,296 B of the calling task's stack on `recv_loop`, borrowed
+     *  arm (`memory.rx` unset), and at most 6,592 B on the owning arm (`memory.rx` set):
      *  the worst static path on esp32c6, branch writes included, pinned by
      *  `tools/esp_stack_gate.py` (#2871, #2879). The platform's frames and an application
      *  handler's or subscriber's own frames are not counted in it. */
