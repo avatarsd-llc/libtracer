@@ -23,7 +23,7 @@ has overrun its buffer, so a successful decode is a conformance failure.
 
 The harness checks the error name itself, so this vector needs no separate host test.
 
-The oversize-length case has no vector yet. TODO(#2885): bank `01 08 FF FF FF FF`, a
-long-form (`LL = 1`) length of `0xFFFFFFFF`, as `FRAME_INVALID` (`tr::frame::invalid`) once the
-codec's compile-time `MAX_TLV_BYTES` bound lands. `framing/truncated-length-max-u16` is the
-short-form case: `0xFFFF` is below the bound and stays `FRAME_TRUNCATED`.
+The oversize-length case is `framing/length-oversize-reject`: a long-form (`LL = 1`) length of
+`0xFFFFFFFF` is above `MAX_TLV_BYTES`, and every header declaring more than the bound is
+`FRAME_INVALID`, whole or short. `framing/truncated-length-max-u16` is the short-form case:
+`0xFFFF` is below the bound and stays `FRAME_TRUNCATED`.

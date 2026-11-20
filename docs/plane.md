@@ -354,7 +354,7 @@ behaviour with no wire bytes has no vector and belongs in your own test suite.
 | Timestamp trailer | [annex 01 §Timestamp form](reference/01-data-format.md#timestamp-form) | `crc/value-ts-abs-crc32c`, `tlv-types/value-ts-abs`, `framing/relative-ts-nested` |
 | Reserved `opt` bits refused | [annex 01 §Handling unknown type codes](reference/01-data-format.md#handling-unknown-type-codes) | `framing/reserved-bit0-reject`, `framing/reserved-bit7-reject` |
 | Iterative parse | [annex 01 §Iterative parsing](reference/01-data-format.md#iterative-parsing-requirement) | `framing/opt-all-bits-nested` |
-| Truncated or invalid frame | [annex 01 §Truncation](reference/01-data-format.md#truncation-handling) | `framing/truncated-length-overrun`, `framing/truncated-length-max-u16`, `framing/type-zero-reject`; an oversize `length`: [#2885](https://github.com/avatarsd-llc/libtracer/issues/2885) |
+| Truncated or invalid frame | [annex 01 §Truncation](reference/01-data-format.md#truncation-handling) | `framing/truncated-length-overrun`, `framing/truncated-length-max-u16`, `framing/type-zero-reject`, `framing/length-oversize-reject` |
 | Unknown type codes skipped | [annex 01 §Handling unknown type codes](reference/01-data-format.md#handling-unknown-type-codes) | `tlv-types/unknown-core-type-outer`, `tlv-types/unknown-core-type-nested` |
 | Retired codes answered | [annex 05 §Reserved range](reference/05-protocol-tlvs.md#reserved-range-0x0f--0x1f) | `tlv-types/retired-route-handle-advertise`, `-compact`, `-handle-nack` |
 | Core TLV payloads | [annex 05](reference/05-protocol-tlvs.md) | `tlv-types/*` |
