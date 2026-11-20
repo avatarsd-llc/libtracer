@@ -283,25 +283,27 @@ struct router_planes_t {
     mem::mem_backend_t* egress = &mem::net_backend();
 
     /**
-     * @brief The backend for the two allocations a REMOTE SUBSCRIBE keeps for the LIFE OF THE
-     * SUBSCRIPTION — the source `SUBSCRIBER` TLV and "the ONE route copy of the subscription's
-     * life" (ADR-0041 §2). A DEDICATED injection for the reason @p egress is one: @p flat is
-     * documented and sized against per-operation FLATTEN bytes, and these are neither per-
-     * operation nor flattens. Their live set is the SUBSCRIPTION POPULATION, so a host that size-
-     * classes @p flat finds the classes filled by a set that never returns and has nothing left
-     * for the churn they were cut for — the classes stop working exactly when a client is
-     * attached, which is the only time they are needed.
+     * @brief The source for what a REMOTE SUBSCRIBE keeps for the LIFE OF THE SUBSCRIPTION — the
+     * source `SUBSCRIBER` TLV, "the ONE route copy of the subscription's life" (ADR-0041 §2) and
+     * the completed reverse chain, together ONE block the edge keeps three windows into (#2875).
+     * A DEDICATED injection for the reason @p egress is one: @p flat is documented and sized
+     * against per-operation FLATTEN bytes, and this block is neither per-operation nor a flatten.
+     * Its live set is the SUBSCRIPTION POPULATION, so a host that size-classes @p flat would find
+     * the classes filled by a set that never returns and nothing left for the churn they were cut
+     * for — the classes stop working exactly when a client is attached (#1610).
      *
-     * DEFAULTS TO NULL, meaning "@p flat" — where both have always been taken. An un-injected
-     * router is byte-for-byte unchanged, so this costs nothing to ignore. A host that injects it
-     * can send these to a plain heap arm: one alloc and one free per subscription is not churn and
-     * wants no class.
+     * DEFAULTS TO NULL, meaning @p link_src: the router's long-lived link plane, which a peer's
+     * subscription is long-lived link state of. A node that bounds @p link_src therefore bounds
+     * its subscriptions too, and its census counts them (#2875). A host that injects this plane
+     * can send the block to a plain heap arm instead: one alloc and one free per subscription is
+     * not churn and wants no class.
      *
      * Sized against the subscription population, NOT a concurrency factor. Exhaustion is answered
      * by value — a `BACKPRESSURE` on the subscribe, which simply does not bind. MUST be thread-
-     * safe on the same terms as @p flat. Must outlive the router.
+     * safe on the same terms as @p flat: the block goes back on whichever thread drops the
+     * subscription's last window. Must outlive the router.
      */
-    mem::mem_backend_t* retained = nullptr;
+    mem::block_source_t* retained = nullptr;
 };
 
 /**
@@ -346,11 +348,11 @@ class fwd_router_t {
      */
     explicit fwd_router_t(graph::graph_t& graph, const router_planes_t& planes = {})
         : graph_(graph),
+          // The terminus tier draws flatten from the SAME seam (#766), reply egress from
+          // `egress` (#795), and subscription-scoped retention from `retained` (#1610), else
+          // from the long-lived link plane (#2875).
           resolver_(graph, planes.flat, planes.egress,
-                    planes.retained),  // the terminus tier draws flatten from
-                                       // the SAME seam (#766), reply egress from
-                                       // `egress` (#795), and subscription-scoped
-                                       // retention from `retained` (#1610)
+                    planes.retained != nullptr ? planes.retained : planes.link_src),
           link_src_(planes.link_src),
           rx_(planes.rx),
           flat_(planes.flat),
