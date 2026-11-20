@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <expected>
 #include <span>
 #include <vector>
 
@@ -130,6 +131,69 @@ std::vector<std::byte> hostile_frame(std::uint8_t type, std::uint8_t opt, std::u
     return b;
 }
 
+/**
+ * @brief A span cursor whose `size()` is 32 bits wide: `parse_header` takes its size type from
+ *        the cursor, so this runs rv32's bound arithmetic, end to end, on a 64-bit host (#2885).
+ */
+struct narrow_cursor_t : tr::wire::grammar::span_cursor_t {
+    [[nodiscard]] std::uint32_t size() const noexcept {
+        return static_cast<std::uint32_t>(tr::wire::grammar::span_cursor_t::size());
+    }
+};
+
+/** @brief `parse_header`'s verdict on @p buf at the cursor width @p Cursor. */
+template <class Cursor>
+std::expected<tr::wire::grammar::header_t, tr::wire::err_t> parse_at(
+    const std::vector<std::byte>& buf) {
+    return tr::wire::grammar::parse_header(Cursor{std::span<const std::byte>(buf)});
+}
+
+/**
+ * @brief #2885 at one cursor width: a declared length above `kMaxTlvBytes` is `FRAME_INVALID`
+ *        on every header, whole or short; a short TLV at or under it is `FRAME_TRUNCATED`.
+ */
+template <class Cursor>
+void check_length_classification(const char* width) {
+    using tr::wire::err_t;
+    constexpr std::uint32_t kMax = tr::graph::kMaxTlvBytes;
+    std::printf(" %s cursor — the length bound (#2885, kMaxTlvBytes = %u):\n", width,
+                static_cast<unsigned>(kMax));
+    // The conformance vector's bytes: VALUE, LL, length 0xFFFFFFFF, nothing after.
+    const auto huge = parse_at<Cursor>(hostile_frame(0x01, 0x08, 0xFFFFFFFFu, 6));
+    check(!huge && huge.error() == err_t::FRAME_INVALID, "LL length 0xFFFFFFFF is FRAME_INVALID");
+    // The hostile #921 frame, trailers and all, is oversize too.
+    const auto hostile = parse_at<Cursor>(hostile_frame(0x01, 0x38, 0xFFFFFFFFu, 32));
+    check(!hostile && hostile.error() == err_t::FRAME_INVALID,
+          "length 0xFFFFFFFF with TS + CR is FRAME_INVALID");
+    const auto above = parse_at<Cursor>(hostile_frame(0x01, 0x08, kMax + 1u, 64));
+    check(!above && above.error() == err_t::FRAME_INVALID,
+          "one byte above kMaxTlvBytes is FRAME_INVALID");
+    const auto at = parse_at<Cursor>(hostile_frame(0x01, 0x08, kMax, 64));
+    check(!at && at.error() == err_t::FRAME_TRUNCATED,
+          "exactly kMaxTlvBytes, short, is FRAME_TRUNCATED");
+    // `01 00 FF FF AA`, the framing/truncated-length-max-u16 vector (`hostile_frame` writes a
+    // u32 length, so it is spelled out here).
+    const std::vector<std::byte> u16{std::byte{0x01}, std::byte{0x00}, std::byte{0xFF},
+                                     std::byte{0xFF}, std::byte{0xAA}};
+    const auto short16 = parse_at<Cursor>(u16);
+    check(!short16 && short16.error() == err_t::FRAME_TRUNCATED,
+          "u16 length 0xFFFF, short, is FRAME_TRUNCATED");
+    // An ordinary TLV that fits decodes as before.
+    const std::vector<std::byte> fits_buf{std::byte{0x01}, std::byte{0x00}, std::byte{0x03},
+                                          std::byte{0x00}, std::byte{0xAA}, std::byte{0xBB},
+                                          std::byte{0xCC}};
+    const auto ok = parse_at<Cursor>(fits_buf);
+    check(ok && ok->total == 7 && ok->length == 3, "a TLV that fits still parses (total = 7)");
+    // The bound applies on EVERY header (ruling 127): a whole TLV of exactly kMaxTlvBytes is
+    // accepted, and a whole TLV one byte longer is FRAME_INVALID though every byte is present.
+    const auto whole_at = parse_at<Cursor>(hostile_frame(0x01, 0x08, kMax, 6u + kMax));
+    check(whole_at && whole_at->total == std::size_t{kMax} + 6u,
+          "a whole TLV of exactly kMaxTlvBytes parses (total = kMaxTlvBytes + 6)");
+    const auto whole_above = parse_at<Cursor>(hostile_frame(0x01, 0x08, kMax + 1u, 7u + kMax));
+    check(!whole_above && whole_above.error() == err_t::FRAME_INVALID,
+          "a whole TLV of kMaxTlvBytes + 1 is FRAME_INVALID: the bound is not a fit check");
+}
+
 }  // namespace
 
 int main() {
@@ -155,8 +219,8 @@ int main() {
         const auto buf = hostile_frame(0x01, 0x38, 0xFFFFFFFFu, 32);
         const tr::wire::grammar::span_cursor_t cur{std::span<const std::byte>(buf)};
         const auto h = tr::wire::grammar::parse_header(cur);
-        check(!h && h.error() == tr::wire::err_t::FRAME_TRUNCATED,
-              "the hostile frame is FRAME_TRUNCATED on this host too");
+        check(!h && h.error() == tr::wire::err_t::FRAME_INVALID,
+              "the hostile frame is refused on this host too (FRAME_INVALID: oversize, #2885)");
     }
     {
         // A well-formed opaque TLV: header 4, length 3, no trailer — total 7.
@@ -168,6 +232,9 @@ int main() {
         check(h.has_value() && h->total == 7 && h->header == 4 && h->length == 3,
               "a well-formed TLV still parses (total = 7)");
     }
+
+    check_length_classification<narrow_cursor_t>("32-bit");
+    check_length_classification<tr::wire::grammar::span_cursor_t>("64-bit");
 
     return tr::testing::summary("grammar_bounds");
 }

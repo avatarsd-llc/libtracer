@@ -29,6 +29,7 @@
 #include <type_traits>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/config.hpp"
 #include "libtracer/crc.hpp"
 #include "libtracer/error.hpp"
 #include "libtracer/mem_source.hpp"
@@ -250,7 +251,8 @@ struct header_t {
  * @brief Parse + validate ONE TLV header and its trailer at offset 0 of @p cur.
  *
  * Applies the whole grammar — minimum size, `type == 0x00` reject, reserved-bit
- * reject, `LL` length width, the `PATH_REF` fixed-stride body shape (RFC-0024
+ * reject, `LL` length width, a length above `kMaxTlvBytes` (`FRAME_INVALID`), the
+ * `PATH_REF` fixed-stride body shape (RFC-0024
  * §4.2/§4.3), trailer sizing, and the two-span CRC (payload ++
  * timestamp, fed without concatenation) — but does **not** recurse into a
  * structured payload's children; the sink's iterative walk does that. On success
@@ -268,7 +270,11 @@ struct header_t {
 template <class Cursor>
 [[nodiscard]] std::expected<header_t, err_t> parse_header(
     const Cursor& cur, crc_check_t crc_policy = crc_check_t::VERIFY) {
-    const std::size_t avail = cur.size();
+    // The cursor's own size type: `std::size_t` for every shipped cursor, so the bound below
+    // runs at the target's width; a test cursor with a 32-bit `size()` runs rv32's arithmetic
+    // on a 64-bit host (`grammar_bounds_test`).
+    using size_type = decltype(cur.size());
+    const size_type avail = cur.size();
     if (avail < 4) return std::unexpected(err_t::FRAME_TRUNCATED);
 
     const std::uint8_t type_b = cur.byte_at(0);
@@ -277,7 +283,7 @@ template <class Cursor>
     if (opt_t::reserved_set(opt_b)) return std::unexpected(err_t::FRAME_INVALID);
 
     const opt_t opt = opt_t::decode(opt_b);
-    const std::size_t header = opt.ll ? 6u : 4u;
+    const size_type header = opt.ll ? 6u : 4u;
     if (avail < header) return std::unexpected(err_t::FRAME_TRUNCATED);
 
     // u32, not u64: the `LL` width caps a wire length at 4 bytes, so this narrow is exact
@@ -288,17 +294,22 @@ template <class Cursor>
     // the way every other type's is. PL/LL forbidden, length a whole number of elements, count
     // at or under the §4.3 bound. Shape only — what an element MEANS is L4's (path_ref.hpp).
     // Only 0x14 carries that body: the reverse list (0x15) is a PATH body since #2245.
-    if (is_path_ref_type(static_cast<type_t>(type_b)) &&
-        !path_ref_body_valid(opt.pl, opt.ll, static_cast<std::size_t>(length))) {
+    // The length bound joins it (RFC-0001 §C.3, annex 01 §Truncation handling, #2885): a
+    // declared length above `kMaxTlvBytes` is INVALID on every header, whether or not the TLV
+    // fits. Both sides read header fields only, never a body byte, so the non-short-circuit `|`
+    // is safe on a TLV that does not fit and merges the bound into this one branch.
+    if ((is_path_ref_type(static_cast<type_t>(type_b)) &&
+         !path_ref_body_valid(opt.pl, opt.ll, static_cast<std::size_t>(length))) |
+        (length > graph::kMaxTlvBytes)) {
         return std::unexpected(err_t::FRAME_INVALID);
     }
-    const std::size_t ts_size = opt.ts ? (opt.tf ? 4u : 8u) : 0u;
-    const std::size_t crc_size = opt.cr ? (opt.cw ? 2u : 4u) : 0u;
+    const size_type ts_size = opt.ts ? (opt.tf ? 4u : 8u) : 0u;
+    const size_type crc_size = opt.cr ? (opt.cw ? 2u : 4u) : 0u;
     // The total-size bound, taken without ever forming a value that can wrap (#921):
     // a 32-bit `std::size_t` cannot hold `header + 0xFFFFFFFF + trailer`, and the sum
     // this replaces was narrowed BEFORE the compare — small enough to pass this very
     // check, after which `walk` read a payload span far past the buffer.
-    std::size_t total = 0;
+    size_type total = 0;
     if (!total_size_fits(avail, header, length, ts_size, crc_size, total)) {
         return std::unexpected(err_t::FRAME_TRUNCATED);
     }

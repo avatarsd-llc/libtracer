@@ -1,0 +1,9 @@
+{
+  "name": "length-oversize-reject",
+  "category": "framing",
+  "hex": "0108FFFFFFFF",
+  "total_bytes": 6,
+  "reject": "FRAME_INVALID",
+  "decoded": null,
+  "meaning": "A VALUE with LL=1 whose u32 length is 0xFFFFFFFF, with no payload. The declared length is above MAX_TLV_BYTES (recommended 16 MiB), so the frame is oversize, not short: tr::frame::invalid (RFC-0001 §C.3; RFC-0002; docs/reference/01-data-format.md §Truncation handling). A successful decode of this frame is a conformance FAILURE."
+}
