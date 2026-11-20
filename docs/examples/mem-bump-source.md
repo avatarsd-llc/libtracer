@@ -10,8 +10,7 @@ be wired at all.
 ## What to notice
 
 - **It is a scope-lifetime object.** Construct it, do one unit of work, drop it or `reset()` it.
-  The branch-write decode does exactly that with a 4 KiB stack buffer; so does
-  [`wire_arena_decode`](wire-arena-decode.md).
+  [`wire_arena_decode`](wire-arena-decode.md) does exactly that.
 - **Parked as a long-lived seam it dies, and the number is arithmetic rather than anecdote.**
   An 8 KiB bump source wired as a router's `rx`, decoding a 53-byte FWD, decoded **6 frames and
   rejected the next 194** — 8192 bytes divided by the arena footprint of one decode of that

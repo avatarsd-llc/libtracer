@@ -239,27 +239,28 @@ exists and fails as a value where it does not (`mem_source.hpp:bump_source_t`).
 
 ## The decode arena
 
-The branch-write decode allocates its arena on the calling thread's stack and names the graph's
-injected failable seam as the overflow upstream:
+The branch-write decode draws its arena from the graph's injected table source, not from the
+calling thread's stack (#2879; before it, a 4 KiB stack array fronted that source):
 
 ```cpp
-std::array<std::byte, 4096> stack;
-mem::bump_source_t src(stack, *ctl_);
+mem::block_source_t& src = *tables_;
 ```
 
 (`core/src/graph.cpp:graph_t::write_branch`.) Three properties follow, and each closes a different failure mode:
 
-- **A bounded node that injected `ctl` gets its own store here too.** The overflow leg draws from
-  that injection rather than from the global heap, so the node's memory bound covers **this
-  arena** (`graph.cpp:graph_t::write_branch`). Read that literally: it is a statement about the decode arena, not
+- **A bounded node that injected its table source gets its own store here too.** The arena draws
+  from that injection rather than from the global heap, so the node's memory bound covers **this
+  arena** (`graph.cpp:graph_t::write_branch`), and a task that delivers writes budgets no stack
+  frame for it. Read that literally: it is a statement about the decode arena, not
   a general one about every allocation near it. Each seam is covered because it was injected and
   the site was pointed at it, one site at a time — the router's flattens went uncovered for a
   release precisely because they looked like they were included in a sentence like this one (#730).
-- **The default is unbounded.** `ctl_` defaults to `default_root()` (the host slab pool over the
+- **The default is unbounded.** `tables_` defaults to `default_root()` (the host slab pool over the
   platform heap, #1777), so a host that injects nothing sees the same capability it had with an
   unbounded resource.
-- **Exhaustion is a value.** A tree larger than the slab still decodes where the upstream can serve
-  it, and where the upstream cannot, `decode_into` returns an error the caller converts to a status.
+- **Exhaustion is a value.** A tree decodes where the source can serve it, and where it cannot,
+  `decode_into` reports the refused draw as `TLV_NESTING_TOO_DEEP`, which the write answers as
+  `BACKPRESSURE` and counts as an `out_of_memory` delivery drop.
 
 The arena is *structure* storage — a node array and the walk's open-node stacks — so its size is
 independent of the payload's byte count. No node-counting pre-pass exists, and none is needed: the
@@ -281,7 +282,7 @@ defines for "exceeds this receiver's decode resources".
 | Field-write flatten into the value backend | `core/src/graph.cpp:graph_t::apply_delivery_mode` | same two-verdict split as the branch-write row above |
 | Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:graph_t::write_branch` | `false` → `BACKPRESSURE` |
 | Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:graph_t::write_branch` | `false` → `BACKPRESSURE` |
-| Branch-write decode arena | `core/src/graph.cpp:graph_t::write_branch` | decode error → `TYPE_MISMATCH` |
+| Branch-write decode arena | `core/src/graph.cpp:graph_t::write_branch` | a refused draw (`TLV_NESTING_TOO_DEEP`) → `BACKPRESSURE` and an `out_of_memory` drop (#2879); a value refused for its shape → `TYPE_MISMATCH` |
 | Per-delivery frame build | *deleted* (#885) — the delivery leg gathers off a stack head (`core/src/fwd_router.cpp:fwd_router_t::deliver_remote`) instead of building a frame | n/a: there is nothing left to refuse |
 | Bus-name rejection reply flatten (cold) | flatten `core/src/fwd_router.cpp:fwd_router_t::on_frame_rope_impl`, answered by the `wire::tlv_node_t::over` opening `reject_bus_name_hop` | the frame is **dropped** by value — no reply |
 | Terminus per-node span materialize (rope tier) | flatten `core/src/op_resolve_view.cpp:view_node::ensure_cache`, answered at `core/src/op_resolve_walk.hpp:if (!req.src.spans_intact()) return` / `core/src/op_resolve_walk.hpp:if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE)` | a refusal on the reply's own route bytes ⇒ `BACKPRESSURE` by value ⇒ counted in `assemble_dropped` and answered `STATUS{BACKPRESSURE}` by the router's stack emitter, which reads the route from the request's own bytes (#2256); anywhere else before dispatch ⇒ an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` reply |
