@@ -1457,6 +1457,10 @@ inline constexpr std::uint32_t kMaxTlvBytes = config_t::kMaxTlvBytes;
 static_assert(kMaxTlvBytes >= 0xFFFFu,
               "kMaxTlvBytes is at least 0xFFFF: a short (LL = 0) length is a short frame, never "
               "FRAME_INVALID (framing/truncated-length-max-u16)");
+static_assert(
+    kMaxTlvBytes < 0xFFFFFFFFu,
+    "kMaxTlvBytes is below 0xFFFFFFFF: an LL length of 0xFFFFFFFF is always FRAME_INVALID "
+    "(framing/length-oversize-reject)");
 
 namespace detail_guard {
 
