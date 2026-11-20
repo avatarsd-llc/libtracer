@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cstddef>
@@ -170,7 +171,7 @@ using subscriber_fn_t = void (*)(void* ctx, const value_t& value);
  *        caller state per edge.
  *
  * **Build then freeze.** An admission door fills one of these through
- * @ref subscriber_t::ensure_remote while the record is still private to its stack-local
+ * @ref subscriber_t::make_remote while the record is still private to its stack-local
  * `subscriber_t`; the slot verb then moves it in, and from the first
  * `%vertex_t::try_publish_edges` onward the record is READ-ONLY. Nothing in the tree
  * writes it after admission — `index_link_vertex`'s key choice, `evict_link_edges`' link
@@ -187,8 +188,26 @@ using subscriber_fn_t = void (*)(void* ctx, const value_t& value);
  * ones being retired. A republish now copies a pointer and increments @ref refs.
  */
 struct subscriber_remote_t {
-    /** @brief An empty record whose name and own block come from @p src (#1885). */
-    explicit subscriber_remote_t(mem::block_source_t& src) noexcept : caller(src) {}
+    /** @brief A record drawn from @p src whose @ref caller is the @p caller_len bytes that
+     *         follow it in the same block (#2737). Built only by @ref subscriber_t::make_remote. */
+    subscriber_remote_t(mem::block_source_t& src, std::uint32_t caller_len) noexcept
+        : source(&src), caller_len(caller_len) {}
+
+    /**
+     * @brief The caller context this edge was created under (#81, ADR-0026 fan-in gate).
+     *
+     * The inbound link NAME for a remote subscribe, empty for a locally-wired edge. A
+     * fan-out re-dispatch into a LOCAL target vertex is gated by the TARGET's `:acl` WRITE
+     * right under this context — the subscription's creator is the "writer" the target
+     * authorizes. A REMOTE subscriber's fan-in gate runs on the peer instead (its
+     * `FWD{WRITE}` terminus checks the same right).
+     *
+     * The bytes sit in the record's own block, right after it (#2737): until then they were a
+     * `mem::string_t` with a block of its own, the remote subscription's fifth.
+     */
+    [[nodiscard]] std::string_view caller() const noexcept {
+        return {reinterpret_cast<const char*>(this + 1), caller_len};
+    }
 
     /**
      * @brief The link the subscribe arrived on, as a pair (`%link_pair_t`: its connection
@@ -209,9 +228,7 @@ struct subscriber_remote_t {
      * by the name it was handed.
      *
      * FIRST, where the retired `pub_remote_t` put its link, so the DELIVERY path
-     * (`graph_t::dispatch_edge_remote`) reads its first word where it always did. The record
-     * is returned to the source its @ref caller draws from (`caller.source()`), so it carries
-     * no pointer of its own for it.
+     * (`graph_t::dispatch_edge_remote`) reads its first word where it always did.
      */
     link_pair_t link{};
     /**
@@ -250,24 +267,14 @@ struct subscriber_remote_t {
      * subscribe, refcount clones per delivery snapshot.
      */
     view::view_t reverse_route{};
-    /**
-     * @brief The caller context this edge was created under (#81, ADR-0026 fan-in gate).
-     *
-     * The inbound link NAME for a remote subscribe, empty for a locally-wired edge. A
-     * fan-out re-dispatch into a LOCAL target vertex is gated by the TARGET's `:acl` WRITE
-     * right under this context — the subscription's creator is the "writer" the target
-     * authorizes. A REMOTE subscriber's fan-in gate runs on the peer instead (its
-     * `FWD{WRITE}` terminus checks the same right).
-     */
-    mem::string_t caller;
+    /** @brief The source the record (and its @ref caller bytes) came from, and is returned to. */
+    mem::block_source_t* source;
     /**
      * @brief Intrusive refcount (#1442): how many holders name this record — the slot, plus
      *        one per PUBLISHED edge array whose entry points at it.
      *
-     * **Rides the record's existing TAIL PADDING and therefore costs zero bytes.**
-     * @ref caller ends at offset 96 and the record is 8-aligned, so a 4-byte counter lands
-     * at 96 and `sizeof` stays the pinned 104 B (120 B before #1941 stored the link as a
-     * pair rather than a name). That is why the shape is an
+     * **Rides the padding after @ref source and therefore costs zero bytes.** That is why
+     * the shape is an
      * intrusive count and not a `std::shared_ptr`: a 16-byte handle would have widened
      * @ref subscriber_t (pinned at 80 B) AND @ref pub_edge_t, whose width was measured at
      * **+23 %** on the fan-out-1024 publish the last time it grew — the fix would have been
@@ -287,13 +294,15 @@ struct subscriber_remote_t {
      * already uses, guarded binding included (a core with no atomic RMW, #1722).
      */
     view::detail::ref_count_t refs{1};
+    /** @brief The length of @ref caller, whose bytes follow the record (#2737). */
+    std::uint32_t caller_len = 0;
     /**
      * @brief The local vertex's retention depth when this edge was admitted, saturated at
      *        65535 — the depth of the per-peer ring its deliveries wait in (ADR-0087 §2,
      *        #2144; @ref delivery_lane_t). `1` is a SAMPLE.
      *
-     * Rides the tail padding after @ref refs with @ref lane_reliable, so `sizeof` stays the
-     * pinned 104 B. Written once at admission, like every other field here.
+     * Rides the tail padding with @ref lane_reliable. Written once at admission, like every
+     * other field here.
      */
     std::uint16_t lane_depth = 1;
     /** @brief The local vertex's §4.4 arm when this edge was admitted (see @ref lane_depth). */
@@ -384,7 +393,7 @@ class remote_ptr_t {
      * @brief The shared record, MUTABLE — the admission door's BUILD phase and nothing else.
      *
      * Legal only while the caller is the record's sole holder, which is what
-     * @ref subscriber_t::ensure_remote asserts. Once a publish has cloned the handle, the
+     * @ref subscriber_t::make_remote asserts. Once a publish has cloned the handle, the
      * record is bytes a pinned reader may be copying with no lock and no pin on the record
      * itself — a write here would be a data race the deep copy used to make impossible.
      */
@@ -395,7 +404,11 @@ class remote_ptr_t {
      *         lifetime (an unsubscribe), never per delivery, so its body stays off the
      *         per-edge path that inlines @ref reset. */
     [[gnu::noinline, gnu::cold]] static void free_record(subscriber_remote_t* p) noexcept {
-        mem::drop_in(p->caller.source(), p);  // the record and its name share one source
+        // The record and its caller bytes are one block (#2737).
+        mem::block_source_t* const src = p->source;
+        const std::size_t bytes = sizeof(subscriber_remote_t) + p->caller_len;
+        p->~subscriber_remote_t();
+        src->release(p, bytes, alignof(subscriber_remote_t));
     }
 
     subscriber_remote_t* p_ = nullptr; /**< @brief The shared record, or null. */
@@ -554,11 +567,12 @@ struct target_binding_t {
  * docs/reference/02 §dispatch + 04 §write fanout. The wire/gate members live in the
  * lazily-allocated @ref remote half (#380 §3).
  *
- * `vertex_t::add_edge` and `replace_edge` take one and split it between the vertex's two
- * tables, so each field is kept exactly once: the dispatch fields (callback pair, target key,
- * binding, cold half) go into the slot's @ref pub_edge_t, which the fan-out reads, and the rest
- * (@ref source_view, @ref policy) into its @ref subscriber_slot_t. Until #1622 the slot table
- * kept this whole record as well, 80 B per slot of which 48 B repeated the published entry.
+ * `vertex_t::add_edge` and `replace_edge` take one into the vertex's published edge array,
+ * so each field is kept exactly once: the dispatch fields (callback pair, target key, binding,
+ * cold half) go into the slot's @ref pub_edge_t, which the fan-out reads, and @ref source_view
+ * into the array's view tail beside it (`%edge_pub_t::views`). @ref policy is read at
+ * admission only (the durability latch) and kept nowhere. Until #1622 a slot table kept this
+ * whole record as well, and until #2737 it kept the view, the policy and an occupied flag.
  */
 struct subscriber_t {
     target_key_t target_key;            /**< @brief Canonical PATH key (null ⇒ callback-only). */
@@ -579,7 +593,7 @@ struct subscriber_t {
      */
     view::view_t source_view{};
     /** @brief The cold wire/gate half (#380 §3) — null for the plain in-process edge;
-     *         allocated by @ref ensure_remote when a route/link/caller is
+     *         allocated by @ref make_remote when a route/link/caller is
      *         stored (pay-for-what-you-use, ADR-0021). SHARED with every published entry
      *         that names this slot (#1442), never copied into one. */
     remote_ptr_t remote;
@@ -595,7 +609,7 @@ struct subscriber_t {
     /** @brief NOT copyable, exactly as it was while the cold half was a `std::unique_ptr`
      *         (#380 §3). The handle that replaced it IS copyable — that is the point — so
      *         the ban is stated rather than inherited: a copied slot would share a cold half
-     *         that @ref ensure_remote is then entitled to write. */
+     *         that @ref make_remote is then entitled to write. */
     subscriber_t(const subscriber_t&) = delete;
     /** @brief NOT copy-assignable — see the copy constructor. */
     subscriber_t& operator=(const subscriber_t&) = delete;
@@ -607,51 +621,33 @@ struct subscriber_t {
     ~subscriber_t() = default;
 
     /**
-     * @brief The cold half, allocated on first use (admission-time only — never on a
-     *        dispatch path), and MUTABLE only because the caller is still its sole holder.
+     * @brief Build the cold half with @p caller as its context (admission-time only — never on
+     *        a dispatch path), and hand it back MUTABLE because the caller is its sole holder.
      *
      * The build phase of build-then-freeze (#1442). Every in-tree door fills a stack-local
      * @ref subscriber_t and only then hands it to `vertex_t::add_edge` / `replace_edge`, so
      * nothing has cloned the handle yet; the assertion states that rather than trusting it,
      * because a write reached after a publish would mutate bytes a pinned reader may be
-     * copying under no lock.
+     * copying under no lock. A record already held is replaced.
      *
-     * The record and its two names draw from @p src, the graph's table source (#1885).
-     * @retval nullptr @p src refused the record; the slot is unchanged (BACKPRESSURE).
+     * ONE block from @p src, the graph's table source (#1885): the record and the caller's
+     * bytes after it (#2737).
+     * @retval nullptr @p src refused the record; the slot holds no cold half (BACKPRESSURE).
      */
-    [[nodiscard]] subscriber_remote_t* ensure_remote(mem::block_source_t& src) noexcept {
-        if (remote == nullptr)
-            remote = remote_ptr_t::adopt(mem::make_in<subscriber_remote_t>(src, src));
+    [[nodiscard]] subscriber_remote_t* make_remote(mem::block_source_t& src,
+                                                   std::string_view caller) noexcept {
         assert(remote.use_count() <= 1 &&
                "the subscription cold half is immutable once published (#1442)");
+        void* const raw = src.try_alloc(sizeof(subscriber_remote_t) + caller.size(),
+                                        alignof(subscriber_remote_t));
+        remote = {};
+        if (raw == nullptr) return nullptr;
+        remote = remote_ptr_t::adopt(
+            ::new (raw) subscriber_remote_t(src, static_cast<std::uint32_t>(caller.size())));
+        std::copy_n(caller.data(), caller.size(),
+                    static_cast<char*>(raw) + sizeof(subscriber_remote_t));
         return remote.mutable_get();
     }
-};
-
-/**
- * @brief The cold remainder of one `:subscribers[N]` slot — what the slot table keeps, and
- *        only what no publisher reads (#1622).
- *
- * The dispatch fields of an active slot live in exactly one place, the slot's entry in the
- * vertex's published `%edge_pub_t` array, which a mutation rebuilds from the array it
- * displaces. What remains here is read only under the stripe lock: the retained SUBSCRIBER
- * view a `:subscribers[N]` read hands back, the delivery policy, and whether the slot is
- * occupied at all. A cleared slot is a default-constructed one; the table never shrinks, because
- * RFC-0009 §D.2 makes the indices stable.
- */
-struct subscriber_slot_t {
-    /** @brief A view, a policy word and a flag: nothing points into the record, so the slot
-     *         table grows by `memcpy` and its growth releases nothing
-     * (`%mem::bitwise_relocatable`). */
-    using bitwise_relocatable_t = void;
-    /** @brief The SUBSCRIBER TLV view the slot was written from (@ref subscriber_t::source_view),
-     *         empty for in-process sugar that carries none. */
-    view::view_t source_view{};
-    /** @brief The slot's delivery policy (@ref subscriber_t::policy). */
-    delivery_policy_t policy{};
-    /** @brief Is the slot occupied? Then the current published array holds exactly one entry
-     *         naming it; a cleared slot may still have a dead one until the next republish. */
-    bool active = false;
 };
 
 /**
@@ -665,24 +661,22 @@ struct subscriber_slot_t {
  *
  * #1442 moved the cold half from owned-per-holder to refcount-shared and left both of its
  * numbers unchanged: the handle is one pointer, as the `std::unique_ptr` was, and the intrusive
- * count fits the cold record's pre-existing tail padding. A future member that pushes
- * @ref subscriber_remote_t past 120 B evicts the counter into a word of its own and costs 8,
- * not 4 — that is the growth this pin is here to price.
+ * count fits the cold record's pre-existing padding. #2737 replaced the caller's
+ * `mem::string_t` (32 B and a block of its own) with a source pointer and a length, the bytes
+ * riding the record's own block: 104 -> 88 B plus the caller. A member that does not fit the
+ * remaining 5 B of tail padding costs 8 — that is the growth this pin is here to price.
  */
 static_assert(sizeof(void*) != 8 || sizeof(subscriber_t) == 80,
               "the door's edge record is 80 B — see #380 §3; move new members to the cold half");
-static_assert(sizeof(void*) != 8 || sizeof(subscriber_slot_t) == 32,
-              "a slot is 32 B on LP64 — dispatch fields belong in pub_edge_t, once (#1622)");
-static_assert(sizeof(void*) != 4 || sizeof(subscriber_slot_t) == 16,
-              "a slot is 16 B on ILP32 — dispatch fields belong in pub_edge_t, once (#1622)");
-static_assert(std::is_nothrow_move_constructible_v<subscriber_slot_t>,
-              "the slot table grows by MOVE");
-static_assert(sizeof(void*) != 8 || sizeof(subscriber_remote_t) == 104,
-              "the COLD edge half is 104 B since its link is a pair, not a name (#1941) — "
-              "price any growth against the per-edge RAM");
+static_assert(sizeof(void*) != 8 || sizeof(subscriber_remote_t) == 88,
+              "the COLD edge half is 88 B plus its caller bytes since the caller rides its tail "
+              "(#2737) — price any growth against the per-edge RAM");
 static_assert(sizeof(void*) != 8 || alignof(subscriber_remote_t) == 8,
               "the COLD edge half is 8-aligned; it is refcount-owned off to the side, so its "
               "address is stable across a slot-vector reallocation");
+static_assert(sizeof(void*) != 4 || sizeof(subscriber_remote_t) == 52,
+              "the COLD edge half is 52 B on ILP32 plus its caller bytes (#2737) — price any "
+              "growth against the per-edge RAM");
 static_assert(sizeof(void*) != 8 || sizeof(remote_ptr_t) == 8,
               "the cold-half handle is ONE pointer — a wider one (a std::shared_ptr) is paid "
               "for out of pub_edge_t, on the delivery path");
@@ -747,7 +741,7 @@ struct edge_view_t {
      *         empty for a locally-wired edge. */
     [[nodiscard]] std::string_view caller() const noexcept {
         const subscriber_remote_t* r = remote.get();
-        return r != nullptr ? std::string_view(r->caller) : std::string_view{};
+        return r != nullptr ? r->caller() : std::string_view{};
     }
     /**
      * @brief Does this edge have a REMOTE-delivery leg — i.e. a stored return route?
@@ -851,10 +845,11 @@ class edge_snapshot_t {
  * @brief One entry of a PUBLISHED edge array: the hot dispatch fields, a liveness bit and the
  *        slot index the entry mirrors.
  *
- * **The ONE copy of the slot's dispatch fields (#1622).** The slot table keeps only the cold
- * remainder (@ref subscriber_slot_t); a republish copies the surviving entries out of the array
- * it displaces, plus the one edge an add or a replace brings, so no second copy of these fields
- * exists anywhere to fall out of step with this one.
+ * **The ONE copy of the slot's dispatch fields (#1622), and since #2737 the ONE record of the
+ * slot at all.** There is no slot table: a republish copies the surviving entries out of the
+ * array it displaces, plus the one edge an add or a replace brings, so no second copy of these
+ * fields exists anywhere to fall out of step with this one. A slot is occupied exactly when the
+ * current array holds an entry naming it whose @ref cleared is false.
  *
  * Written once, before the array is published, and never touched again — that is what lets a
  * reader copy it out with no lock. The `active` bit is the ONE mutable word. For a removed
@@ -879,11 +874,10 @@ class edge_snapshot_t {
  * clear: that
  * is what makes a toggle a flip — no republish, no allocation, no failure — at the price of one
  * skipped entry per write for each suspended edge (the load-and-skip the loop already does).
- * That is why the entry names its slot: the array no longer mirrors the slot table one-for-one,
- * so the flip finds its entry by @ref slot (entries are in slot order). The index rides the
- * padding after
- * `active` (32 bits on LP64, 16 on ILP32, see @ref slot_index_t), so the entry's width — the
- * copy loop's bandwidth, 56 B and 32 B — and the loop's own loads are unchanged on both.
+ * That is why the entry names its slot: the flip finds its entry by @ref slot (entries are in
+ * slot order). The index and @ref cleared ride the padding after `active` (32 bits on LP64, 16 on
+ * ILP32, see @ref slot_index_t), so the entry's width — the copy loop's bandwidth, 56 B and
+ * 32 B — and the loop's own loads are unchanged on both.
  */
 struct pub_edge_t {
     /**
@@ -914,6 +908,15 @@ struct pub_edge_t {
      */
     remote_ptr_t remote;
     std::atomic<bool> active{true}; /**< @brief Monotone true -> false liveness bit. */
+    /**
+     * @brief The slot was cleared (an unsubscribe or an eviction) and this is its DEAD entry,
+     *        waiting for the next republish to drop it (#2737: the slot table's occupied flag).
+     *
+     * Written and read only under the stripe lock, never by the pinned copy loop, which reads
+     * @ref active alone: a cleared entry's @ref active is already false. Rides the padding
+     * after @ref active, so the entry keeps its width.
+     */
+    bool cleared = false;
     /** @brief The slot index this entry mirrors (#1533). Written before publish, never after;
      *         read only by the liveness flip, under the stripe lock. */
     slot_index_t slot = 0;
@@ -929,9 +932,11 @@ static_assert(sizeof(void*) != 4 || sizeof(pub_edge_t) == 32,
  *        @ref vertex_t::snapshot_edges copies out under an edge pin instead of the stripe
  *        mutex.
  *
- * One allocation: this header immediately followed by `count` inline @ref pub_edge_t, in slot
- * order, at most one per slot index: one per occupied slot (its bit clear while suspended),
- * plus a dead entry for any slot cleared since the last successful republish. The
+ * One allocation: this header immediately followed by `capacity` inline @ref pub_edge_t, in
+ * slot order, at most one per slot index: one per occupied slot (its bit clear while suspended),
+ * plus a dead entry for any slot cleared since the last successful republish; then `capacity`
+ * views, @ref views, the entries' retained SUBSCRIBER records (#2737). The views sit AFTER the
+ * entries rather than in them so the copy loop's stride stays the entry's width. The
  * array is never resized, never reordered and never freed while any participant announces it
  * (`%edge_pin.hpp`); a control-plane mutation publishes a NEW array and pushes this one onto
  * the owning block's retire list. `retire_next` is touched only once the array is off the
@@ -951,7 +956,31 @@ struct alignas(pub_edge_t) edge_pub_t {
     [[nodiscard]] const pub_edge_t* entries() const noexcept {
         return std::launder(reinterpret_cast<const pub_edge_t*>(this + 1));
     }
+    /**
+     * @brief The retained SUBSCRIBER view of entry `i`, at `views()[i]` (#2737): the record a
+     *        `:subscribers[N]` read hands back, empty for in-process sugar that carries none.
+     *
+     * Constructed with its entry and destroyed with it. Read and written only under the stripe
+     * lock, never by the pinned copy loop: a clear releases it in place, so an unsubscribed
+     * edge keeps no frame segment alive while its dead entry waits for the next republish.
+     */
+    [[nodiscard]] view::view_t* views() noexcept {
+        return std::launder(reinterpret_cast<view::view_t*>(entries() + capacity));
+    }
+    /** @brief The retained views, const. */
+    [[nodiscard]] const view::view_t* views() const noexcept {
+        return std::launder(reinterpret_cast<const view::view_t*>(entries() + capacity));
+    }
 };
+
+static_assert(alignof(view::view_t) <= alignof(pub_edge_t) &&
+                  sizeof(pub_edge_t) % alignof(view::view_t) == 0,
+              "the view tail starts aligned right after the entries");
+
+/** @brief The bytes an edge array of @p n entries takes: header, entries, views (#2737). */
+[[nodiscard]] constexpr std::size_t edge_pub_bytes(std::size_t n) noexcept {
+    return sizeof(edge_pub_t) + n * (sizeof(pub_edge_t) + sizeof(view::view_t));
+}
 
 /**
  * @brief Allocate an UNFILLED edge array of @p n entries, NOTHROW.
@@ -961,7 +990,7 @@ struct alignas(pub_edge_t) edge_pub_t {
  * @return Null on OOM (#477 — the control-plane verb soft-fails; nothing is published).
  */
 [[nodiscard]] inline edge_pub_t* alloc_edge_pub(mem::block_source_t& src, std::size_t n) noexcept {
-    void* raw = src.try_alloc(sizeof(edge_pub_t) + n * sizeof(pub_edge_t), alignof(edge_pub_t));
+    void* raw = src.try_alloc(edge_pub_bytes(n), alignof(edge_pub_t));
     if (raw == nullptr) return nullptr;
     edge_pub_t* const p = ::new (raw) edge_pub_t{};
     p->capacity = static_cast<std::uint32_t>(n);
@@ -973,8 +1002,12 @@ struct alignas(pub_edge_t) edge_pub_t {
 inline void destroy_edge_pub(mem::block_source_t& src, edge_pub_t* p) noexcept {
     if (p == nullptr) return;
     pub_edge_t* e = p->entries();
-    for (std::uint32_t i = p->count; i-- > 0;) e[i].~pub_edge_t();
-    const std::size_t bytes = sizeof(edge_pub_t) + p->capacity * sizeof(pub_edge_t);
+    view::view_t* v = p->views();
+    for (std::uint32_t i = p->count; i-- > 0;) {
+        v[i].~view_t();
+        e[i].~pub_edge_t();
+    }
+    const std::size_t bytes = edge_pub_bytes(p->capacity);
     p->~edge_pub_t();
     src.release(p, bytes, alignof(edge_pub_t));
 }
@@ -988,16 +1021,18 @@ inline void destroy_edge_pub(mem::block_source_t& src, edge_pub_t* p) noexcept {
  * itself is never displaced or reclaimed, only its published arrays are, which is why
  * `snapshot_edges` may load it with a plain acquire and no pin at all.
  *
- * Each slot field is stored ONCE (#1622). @ref slots is the `:subscribers[N]` slot table,
- * index-stable per RFC-0009 §D.2 and mutated only under the vertex stripe mutex; it holds the
- * cold remainder of each slot. @ref pub holds every occupied slot's dispatch fields, and is
- * what publishers read without any lock. The two agree because the only verbs that bring a new
- * edge (`vertex_t::add_edge`, `replace_edge`) publish it or change nothing.
+ * Each slot field is stored ONCE (#1622). @ref pub holds every occupied slot's dispatch fields
+ * and retained view, and is what publishers read without any lock. Since #2737 there is no
+ * separate slot table: the `:subscribers[N]` table is @ref slot_count slots long (index-stable
+ * per RFC-0009 §D.2, mutated only under the vertex stripe mutex), and a slot below it is
+ * occupied exactly when @ref pub holds a live entry naming it. The table's first growth alone
+ * used to draw 8 slots, 256 B on LP64, for a vertex's first subscriber.
  */
 struct edge_block_t {
-    /** @brief The slot table (stripe-locked). Its source served this block and serves every
-     *         published array too (#1778). */
-    mem::block_array_t<subscriber_slot_t> slots;
+    /** @brief The source that served this block and serves every published array (#1778).
+     *         Never written after construction: `scan_retired_edges` reads it outside the
+     *         stripe lock (#1919). */
+    mem::block_source_t* const src;
     std::atomic<edge_pub_t*> pub{nullptr}; /**< @brief The published array (null ⇒ no edges). */
     std::atomic<edge_pub_t*> retired{nullptr}; /**< @brief Displaced arrays awaiting a scan. */
     /**
@@ -1010,6 +1045,18 @@ struct edge_block_t {
      * (`vertex_t::reserve_edges`), so a raise always finds it.
      */
     std::atomic<std::uint32_t> own_subs{0};
+    /**
+     * @brief How many `:subscribers[N]` slots the table has: one past the highest slot ever
+     *        occupied since the vertex last retired (stripe-locked).
+     *
+     * The table never shrinks (RFC-0009 §D.2), so a slot cleared below this stays an empty
+     * slot an indexed write may FILL, and an index at or past it names no slot at all. It
+     * rides the padding after @ref own_subs.
+     */
+    std::uint32_t slot_count = 0;
+
+    /** @brief The source every block of this edge state comes from. */
+    [[nodiscard]] mem::block_source_t& source() const noexcept { return *src; }
 
     /** @brief The current array's entries, in slot order; empty when nothing is published.
      *         Call with the stripe lock held. */
@@ -1018,9 +1065,15 @@ struct edge_block_t {
         return p == nullptr ? std::span<pub_edge_t>{}
                             : std::span<pub_edge_t>(p->entries(), p->count);
     }
+    /** @brief The published array's retained views, parallel to @ref published (#2737); null
+     *         with no array. Read under the stripe lock, like @ref published. */
+    [[nodiscard]] view::view_t* published_views() const noexcept {
+        edge_pub_t* const p = pub.load(std::memory_order_relaxed);
+        return p == nullptr ? nullptr : p->views();
+    }
 
     /** @brief An empty block drawing from @p src. */
-    explicit edge_block_t(mem::block_source_t& src) noexcept : slots(src) {}
+    explicit edge_block_t(mem::block_source_t& from) noexcept : src(&from) {}
     edge_block_t(const edge_block_t&) = delete;
     edge_block_t& operator=(const edge_block_t&) = delete;
 
@@ -1034,14 +1087,18 @@ struct edge_block_t {
      * on the joined-threads side of that line.
      */
     ~edge_block_t() {
-        destroy_edge_pub(slots.source(), pub.exchange(nullptr, std::memory_order_acq_rel));
+        destroy_edge_pub(*src, pub.exchange(nullptr, std::memory_order_acq_rel));
         for (edge_pub_t* p = retired.exchange(nullptr, std::memory_order_acq_rel); p != nullptr;) {
             edge_pub_t* next = p->retire_next;
-            destroy_edge_pub(slots.source(), p);
+            destroy_edge_pub(*src, p);
             p = next;
         }
     }
 };
+static_assert(sizeof(void*) != 8 || sizeof(edge_block_t) == 32,
+              "the edge block is 32 B on LP64 (#2737: it no longer carries a slot table)");
+static_assert(sizeof(void*) != 4 || sizeof(edge_block_t) == 20,
+              "the edge block is 20 B on ILP32 (#2737: it no longer carries a slot table)");
 
 /** @brief Push @p p onto @p head — a wait-free-on-x86 Treiber push; the mutator's thread
  *         runs it OUTSIDE every lock, so no free ever happens under the stripe mutex. */
@@ -1078,7 +1135,7 @@ inline void scan_retired_edges(edge_block_t& b) noexcept {
             p->retire_next = keep;
             keep = p;
         } else {
-            destroy_edge_pub(b.slots.source(), p);
+            destroy_edge_pub(b.source(), p);
         }
         p = next;
     }
@@ -1090,10 +1147,10 @@ inline void scan_retired_edges(edge_block_t& b) noexcept {
 }
 
 /**
- * @brief A retired vertex's edges, detached whole: its slot table and the published array that
- *        holds the edges' dispatch fields (#1816, #1622).
+ * @brief A retired vertex's edges, detached whole: the published array that holds the edges'
+ *        dispatch fields (#1816, #1622, #2737).
  *
- * `vertex_t::revert_to_placeholder` MOVES both out under the stripe lock, which cannot fail and
+ * `vertex_t::revert_to_placeholder` MOVES it out under the stripe lock, which cannot fail and
  * releases nothing there; `graph_t::retire` then reads the routed edges' links with every graph
  * lock released, to give their holds back. The array is off the vertex but not yet on its retire
  * list, so nothing frees it while it is read here; a reader may still be copying it under a pin,
@@ -1101,18 +1158,16 @@ inline void scan_retired_edges(edge_block_t& b) noexcept {
  */
 class detached_edges_t {
    public:
-    /** @brief Pointers and an array of them, none into the object, so the retire batch grows
-     *         by `memcpy` and its growth reaches no destructor (`%mem::bitwise_relocatable`). */
+    /** @brief Two pointers, none into the object, so the retire batch grows by `memcpy` and
+     *         its growth reaches no destructor (`%mem::bitwise_relocatable`). */
     using bitwise_relocatable_t = void;
-    /** @brief Nothing detached; the slot table, when one is moved in, keeps @p src. */
-    explicit detached_edges_t(mem::block_source_t& src) noexcept : slots_(src) {}
+    /** @brief Nothing detached. */
+    detached_edges_t() noexcept = default;
     detached_edges_t(const detached_edges_t&) = delete;
     detached_edges_t& operator=(const detached_edges_t&) = delete;
     /** @brief Take @p other's edges, leaving it with none. */
     detached_edges_t(detached_edges_t&& other) noexcept
-        : block_(std::exchange(other.block_, nullptr)),
-          pub_(std::exchange(other.pub_, nullptr)),
-          slots_(std::move(other.slots_)) {}
+        : block_(std::exchange(other.block_, nullptr)), pub_(std::exchange(other.pub_, nullptr)) {}
     detached_edges_t& operator=(detached_edges_t&&) = delete;
     /** @brief Hand the array back to its block's retire list and scan it. */
     ~detached_edges_t() {
@@ -1121,15 +1176,15 @@ class detached_edges_t {
         scan_retired_edges(*block_);
     }
 
-    /** @brief Detach @p b's array and slot table into this (empty) record. Call with the
-     *         stripe lock held. */
+    /** @brief Detach @p b's array into this (empty) record and empty its slot table. Call with
+     *         the stripe lock held. */
     void take(edge_block_t& b) noexcept {
         block_ = &b;
         // seq_cst, as every exchange of the slot is (see `pin_t::acquire`).
         pub_ = b.pub.exchange(nullptr, std::memory_order_seq_cst);
-        // The move leaves b's table empty with its source untouched: `scan_retired_edges`
-        // reads that source outside the stripe lock, so nothing here may write it (#1919).
-        slots_ = std::move(b.slots);
+        // The table goes with its edges; b's source is untouched: `scan_retired_edges` reads it
+        // outside the stripe lock, so nothing here may write it (#1919).
+        b.slot_count = 0;
     }
     /** @brief Call @p fn once per edge that was occupying a slot (suspended ones included),
      *         skipping a cleared slot's dead entry. */
@@ -1137,13 +1192,12 @@ class detached_edges_t {
     void for_each_edge(F fn) const {
         if (pub_ == nullptr) return;
         for (const pub_edge_t& e : std::span<const pub_edge_t>(pub_->entries(), pub_->count))
-            if (slots_[e.slot].active) fn(e);
+            if (!e.cleared) fn(e);
     }
 
    private:
-    edge_block_t* block_ = nullptr;               /**< @brief The block the array came from. */
-    edge_pub_t* pub_ = nullptr;                   /**< @brief The detached array, or null. */
-    mem::block_array_t<subscriber_slot_t> slots_; /**< @brief The detached slot table. */
+    edge_block_t* block_ = nullptr; /**< @brief The block the array came from. */
+    edge_pub_t* pub_ = nullptr;     /**< @brief The detached array, or null. */
 };
 
 }  // namespace tr::graph

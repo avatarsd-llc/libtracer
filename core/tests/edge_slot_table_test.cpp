@@ -1,16 +1,16 @@
 /**
  * @file
  * @brief #1622 (L7): a vertex stores its subscriber table ONCE — the published edge array holds
- *        each edge's dispatch fields, and the slot table keeps only what no publisher reads.
+ *        each edge's dispatch fields, and since #2737 it is the slot table itself.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * What is pinned, each with the half that keeps it from passing vacuously:
  *
- *   1. The slot record is the cold remainder only: 32 B on LP64 and 16 B on ILP32, against the
- *      80 B and 44 B record it replaces, while the published entry the fan-out walks keeps its
- *      width (56 B and 32 B).
+ *   1. There is no slot table (#2737): the published array holds each slot's retained view
+ *      in a tail after the entries, so the published entry the fan-out walks keeps its width
+ *      (56 B and 32 B) and the edge block carries only the table's length.
  *   2. A `:subscribers[N]` replace is all or nothing. At every point the table source can refuse
  *      it, either the write answers BACKPRESSURE and the vertex is exactly as it was (the old
  *      edge still delivers, the count and the read-back are unchanged), or it succeeds and the
@@ -58,11 +58,16 @@ class gate_source_t final : public tr::mem::block_source_t {
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
         if (armed_ && allow_ == 0) return nullptr;
         if (armed_) --allow_;
-        return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+        void* const p = ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+        live_ += p != nullptr;
+        return p;
     }
     void release(void* p, std::size_t, std::size_t align) noexcept override {
+        --live_;
         ::operator delete(p, std::align_val_t{align});
     }
+    /** @brief Blocks served and not yet released. */
+    [[nodiscard]] std::size_t live() const noexcept { return live_; }
     /** @brief Serve @p allow more blocks, then refuse. */
     void arm(std::size_t allow) noexcept {
         armed_ = true;
@@ -76,6 +81,7 @@ class gate_source_t final : public tr::mem::block_source_t {
    private:
     bool armed_ = false;    /**< @brief Refusing past the budget? */
     std::size_t allow_ = 0; /**< @brief Blocks left before refusing. */
+    std::size_t live_ = 0;  /**< @brief Blocks served and not yet released. */
 };
 
 /** @brief A one-byte write payload. */
@@ -116,18 +122,18 @@ std::size_t published(vertex_handle_t h) {
     return std::bit_cast<tr::graph::vertex_t*>(h)->published_edges();
 }
 
-/** @brief (1) The census: the slot record is the cold remainder, the hot entry is unchanged. */
+/** @brief (1) The census: no slot table, and the hot entry is unchanged (#2737). */
 void test_census() {
-    std::printf("the slot table keeps only what no publisher reads:\n");
-    constexpr std::size_t slot = sizeof(tr::graph::subscriber_slot_t);
+    std::printf("the published array is the slot table:\n");
     constexpr std::size_t entry = sizeof(tr::graph::pub_edge_t);
-    std::printf("  subscriber_slot_t %zu B, pub_edge_t %zu B\n", slot, entry);
+    constexpr std::size_t block = sizeof(tr::graph::edge_block_t);
+    std::printf("  pub_edge_t %zu B, edge_block_t %zu B\n", entry, block);
     if constexpr (sizeof(void*) == 8) {
-        check(slot == 32, "a slot is 32 B on LP64 (it was an 80 B subscriber_t)");
         check(entry == 56, "a published entry stays 56 B on LP64");
+        check(block == 32, "the edge block is 32 B on LP64 (it carried a slot table)");
     } else {
-        check(slot == 16, "a slot is 16 B on ILP32 (it was a 44 B subscriber_t)");
         check(entry == 32, "a published entry stays 32 B on ILP32");
+        check(block == 20, "the edge block is 20 B on ILP32 (it carried a slot table)");
     }
 }
 
@@ -265,6 +271,24 @@ void test_retire_gives_each_hold_back_once() {
           "the suspended edge and the live one gave their holds back, the cleared one not again");
 }
 
+/** @brief (5) Clearing the last edge publishes no array: an empty one would hold a block. */
+void test_last_clear_publishes_no_array() {
+    std::printf("clearing the last edge leaves no published array behind:\n");
+    gate_source_t gate;
+    graph_t g{gate};
+    const vertex_handle_t v = g.register_vertex(path_t("/c"), role_t::STORED_VALUE);
+    int a = 0;
+    const auto bump = [](void* ctx, const value_t&) { ++*static_cast<int*>(ctx); };
+    const auto first = g.subscribe(path_t("/c"), bump, &a);
+    check(first.has_value() && g.unsubscribe(*first).has_value(), "a first subscribe and clear");
+    const std::size_t idle = gate.live();  // the edge block stays, drawn on the first subscribe
+    const auto sa = g.subscribe(path_t("/c"), bump, &a);
+    check(sa.has_value() && published(v) == 1 && gate.live() == idle + 1,
+          "one edge publishes one array block");
+    check(g.unsubscribe(*sa).has_value() && published(v) == 0 && gate.live() == idle,
+          "its clear releases the array and publishes none in its place");
+}
+
 }  // namespace
 
 int main() {
@@ -272,5 +296,6 @@ int main() {
     test_refused_replace_changes_nothing();
     test_cleared_under_pressure_stays_cleared();
     test_retire_gives_each_hold_back_once();
+    test_last_clear_publishes_no_array();
     return tr::testing::summary("edge_slot_table");
 }

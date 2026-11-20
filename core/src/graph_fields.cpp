@@ -706,9 +706,8 @@ struct graph_t::field_surface_t {
         // the write carried a link.
         std::string_view session;
         if (!ctx.subject.empty()) {
-            subscriber_remote_t* const r = s.ensure_remote(g.table_source());
-            if (r == nullptr || !r->caller.assign(ctx.subject))
-                return std::unexpected(status_t::BACKPRESSURE);
+            subscriber_remote_t* const r = s.make_remote(g.table_source(), ctx.subject);
+            if (r == nullptr) return std::unexpected(status_t::BACKPRESSURE);
             r->link = ctx.session_link;
             session = ctx.session_link.valid() ? ctx.session : ctx.subject;
         }

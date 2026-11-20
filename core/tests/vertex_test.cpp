@@ -221,13 +221,12 @@ void test_slot_write_checked_against_its_edge() {
     vertex_t v{role_t::STORED_VALUE, key_of({0x05}), {}};
     const auto mk_edge = [](std::string_view caller) {
         subscriber_t s;
-        tr::graph::subscriber_remote_t* r = s.ensure_remote(tr::mem::heap_source());
-        if (r != nullptr) (void)r->caller.assign(caller);
+        (void)s.make_remote(tr::mem::heap_source(), caller);
         return s;
     };
     check(v.add_edge(mk_edge("a")) == 0, "a's edge lands in slot 0");
     const tr::graph::remote_ptr_t seen = v.edge_holder(0);  // the holder check
-    check(seen != nullptr && seen->caller.view() == "a", "the check sees a's edge");
+    check(seen != nullptr && seen->caller() == "a", "the check sees a's edge");
     check(v.clear_edge(0), "a clears its own slot");
     check(v.add_edge(mk_edge("b")) == 0, "b's append reuses the cleared slot 0");
 
@@ -235,7 +234,7 @@ void test_slot_write_checked_against_its_edge() {
           "a replace checked against a's edge does not land on b's");
     check(!v.clear_edge(0, nullptr, nullptr, nullptr, seen.get()), "…and neither does a clear");
     const tr::graph::remote_ptr_t now = v.edge_holder(0);
-    check(now != nullptr && now->caller.view() == "b", "b's edge still holds slot 0");
+    check(now != nullptr && now->caller() == "b", "b's edge still holds slot 0");
 
     check(v.replace_edge(0, mk_edge("b"), now.get()) == vertex_t::edge_replace_t::REPLACED_ACTIVE,
           "a replace checked against the edge it lands on proceeds");
