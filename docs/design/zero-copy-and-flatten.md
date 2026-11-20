@@ -31,11 +31,11 @@ A fourth copy is bounded rather than structural: reply-route synthesis (`tlv_sli
 `core/src/fwd_reply.hpp:emit_cursor_t::tlv_sliced`) emits rewritten route wires — tens of bytes, never
 payload-scaled.
 
-The 4096-byte decode arena (`core/src/graph.cpp:graph_t::write_branch`) is **structure storage, not a payload copy**:
+The branch-write decode arena (`core/src/graph.cpp:graph_t::write_branch`) is **structure storage, not a payload copy**:
 it backs the `arena_tlv_t` node array and the grammar walk stacks, whose existence is independent
 of where the field bytes come from. The rope cursor is a byte source, so it does not remove the
-arena; only a streaming decode does, and that **relocates** the bytes from stack to pool rather
-than eliminating them. Net device RAM is unchanged; what drops is the scarce stack high-water.
+arena; only a streaming decode does. Since #2879 the arena draws from the graph's table source,
+not a 4 KiB stack array, so it no longer sits on the receive task's stack high-water.
 
 ---
 
@@ -86,7 +86,7 @@ identifiers for the rest of this page.
 | ① | Ingress ownership — `flatten` (`core/src/rope.cpp:rope_t::flatten_core`), pull-path frame ingress into the accepted segment (`core/src/transport_tcp.cpp:tcp_transport_t::on_conn`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
 | ② | Branch write — `value.try_materialize(*value_backend_)` (`core/src/graph.cpp:graph_t::write_branch`) | no — refcount bump | yes (one flatten to feed the span cursor) | Fallback | Multi-link leg: yes, via a rope-native branch decode |
 | ③ | Field write — the twin of ② (`core/src/graph.cpp:graph_t::write(vertex_handle_t vh,`) | no — refcount bump | yes | Fallback | Same as ② |
-| ④ | 4096-byte decode arena (`core/src/graph.cpp:graph_t::write_branch`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
+| ④ | Branch-write decode arena, drawn from the table source since #2879 (`core/src/graph.cpp:graph_t::write_branch`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
 | ⑤ | `own_wire` mutation ownership — `sub.flatten(backend())` (`core/src/op_resolve_view.cpp:view_node::own_wire`) | no — a single link is still COPIED, through the same backend (`core/src/op_resolve_view.cpp:view_node::own_wire`, #793) | yes — flattens the multi-link subrope | Structural for *mutated* values | No — this step *is* the ownership copy; it still owns |
 | ⑥ | Per-node parse contiguity — `ensure_cache` → `wire().materialize(backend())` (`core/src/op_resolve_view.cpp:wire().materialize(backend())`) | no — a single-link node adopts | only per **straddling** node | Fallback, span-node-shaped | Yes — rope-native node accessors remove it |
 | ⑦ | `deliver_rope` span fallback (`core/include/libtracer/receiver_slot.hpp:receiver_slot_t::deliver_rope`) | no | yes — only when no rope sink is installed; a refused materialize now DROPS the frame rather than handing the sink an empty span (#917) | Fallback — the cost of a span-only sink | Yes — installing the rope sink removes it; see §4.1 |
@@ -102,7 +102,7 @@ migration is therefore insurance against fragmented-transport load, not a single
 
 ---
 
-## 3. The 4096-byte decode arena
+## 3. The branch-write decode arena
 
 ### 3.1 Two costs at one site
 
@@ -111,8 +111,7 @@ migration is therefore insurance against fragmented-transport load, not a single
 const std::expected<view_t, tr::view::flatten_err_t> head =    // A: the flatten
     value.try_materialize(*value_backend_);
 head.error() == NO_MEMORY ? BACKPRESSURE : TYPE_MISMATCH       //    (paraphrased)
-std::array<std::byte, 4096> stack;                             // B: the arena
-mem::bump_source_t src(stack, *ctl_);
+mem::block_source_t& src = *tables_;                           // B: the arena
 wire::decode_into(head->bytes(), src);
 ```
 
@@ -126,16 +125,16 @@ empty view and the site had to guess from `head.empty() && total_length() != 0`.
 values are single-link until the rope-native branch decode lands, Cost A does not fire on
 single-link traffic. It is a fallback.
 
-**Cost B, the arena (`graph.cpp:graph_t::write_branch`)** is the `std::array<std::byte, 4096>` backing `decode_into`'s node
+**Cost B, the arena (`graph.cpp:graph_t::write_branch`)** is the storage behind `decode_into`'s node
 array (`std::pmr::vector<arena_tlv_t>`) plus the grammar walk stack and the open-node stack. It is
-structure-only scratch, allocated on every branch write regardless of link count, on the deepest
-thread — the httpd/WS receive task.
+structure-only scratch, drawn on every branch write regardless of link count. Until #2879 it was a
+4 KiB stack array on the deepest thread, the httpd/WS receive task; it now draws from the graph's
+table source and is given back when the write returns.
 
 `sizeof(arena_tlv_t)` is **48 bytes on an LP64 host** (compiled against
 `core/include/libtracer/tlv_arena.hpp:arena_tlv_t`; the two `std::span` members dominate at 16 bytes
-each), so 4096 bytes holds roughly 85 nodes before the node vector alone exhausts the slab, and
-fewer once the walk stacks take their share. On a 32-bit target both spans halve and the node is
-correspondingly smaller; that figure has not been compiled here and is not asserted.
+each), so a tree's draw grows with its node count. On a 32-bit target both spans halve and the node
+is correspondingly smaller; that figure has not been compiled here and is not asserted.
 
 ### 3.2 Why the rope cursor does not remove the arena
 
@@ -169,20 +168,20 @@ The rope cursor is a precondition for move 1 and irrelevant to move 2.
 
 ### 3.3 Stack, not heap
 
-Move 2 does not eliminate the RAM; it **relocates** it. The node array and walk stacks must live
-somewhere during decode, and taking them off `stack.data()` pushes those transient bytes into the
-injected pool or heap. **Net device RAM is unchanged.** What drops is the scarce stack high-water:
-a flat 4096 bytes — a `std::array` reserves its whole frame slot whether filled or not — off the
-deep receive task.
+Move 2 would not eliminate the RAM, and #2879 did not either: the node array and walk stacks must
+live somewhere during decode. #2879 **relocated** them from a flat 4 KiB stack array — a
+`std::array` reserves its whole frame slot whether filled or not — to the graph's table source,
+drawn only while a branch write runs. What dropped is the scarce stack high-water on the deep
+receive task: `write_branch`'s own frame went from 4,800 B to 640 B (host GCC, `-Os`).
 
-A stack budget for that task counts two such buffers, not one. The decode arena is the only one
-this document covers; the other is frame ingress's stack scratch
+The other stack buffer on that task is frame ingress's stack scratch
 (`core/include/libtracer/frame_ingress.hpp:frame_ingress_t::read`, ADR-0087 §1): 1,152 B
 (`kIngressReadAheadBytes`) on the stream servers' poll thread and in the WS client's receive
 loop, and 256 B on the TCP dial loop, which reads no further than each prefix and uses it only to
 read past a body the source refused. Every byte it takes is moved into its frame's exact segment
 before the read returns, so it holds nothing between reads. It is not a decode arena and carries
-no structure, but it occupies the same frames, and neither has a measured per-task high-water.
+no structure, but it occupies the same frames. The WS client's receive path is measured and
+pinned per delivery arm by `tools/esp_stack_gate.py` (#2871), branch writes included (#2879).
 
 That receive task is the binding constraint on a single-core, RAM-constrained node. In the ESP-IDF
 WS integration, servicing a graph request in-call was measured overflowing an 8 KB stack and needing
@@ -194,27 +193,20 @@ task itself; the 8 KB the deep path was measured overflowing is the other half o
 measurement, at `integrations/esp-idf/libtracer/httpd_ws_link.cpp:kMeasuredOverflowStack`, and the 4 KB platform
 default is named at
 `integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:the batch apply overflows the 4 KB httpd default`). Against a 4096-byte
-default the arena is a full half of the frame, and it is the single largest consumer on the write
-path. A 4 KB stack-high-water reclaim is the real saving even though total RAM is flat.
+default the stack arena was a full half of the frame and the single largest consumer on the write
+path, which is why #2879 moved it to the table source.
 
 ### 3.4 Arena exhaustion
 
-The overflow leg does not draw from a throwing upstream. `core/src/graph.cpp:graph_t::write_branch` reads
-
-```
-std::array<std::byte, 4096> stack;
-mem::bump_source_t src(stack, *ctl_);
-```
-
-`bump_source_t` (`core/include/libtracer/mem_source.hpp:bump_source_t`) carves from that stack buffer and,
-past it, falls back to the graph's injected control seam `ctl_`
-(`core/include/libtracer/graph.hpp:graph_t::control_source`, `control_source()`), whose default is the NOTHROW heap
-source. Capability is unchanged — a branch tree larger than the slab still decodes — and
-**exhaustion is a value, not an abort**: the write soft-fails as `TYPE_MISMATCH`
-(`core/src/graph.cpp:graph_t::write_branch`), which is *not* `BACKPRESSURE` — this decode cannot distinguish "the
-value did not parse" from "the arena ran out" and does not try, so the block seam's reject belongs
-to the operation rather than to the seam. A bounded node that injects its own control source gets
-the arena overflow drawn from that store too. No node-counting pre-pass exists, and none is
+The arena does not draw from a throwing upstream. `core/src/graph.cpp:graph_t::write_branch` draws from the
+graph's injected table source (`core/include/libtracer/graph.hpp:graph_t::table_source`), whose default is the
+host slab pool over the platform heap, and **exhaustion is a value**. `decode_into` reports a
+refused draw as `TLV_NESTING_TOO_DEEP` ("exceeds this receiver's decode resources", RFC-0006). A
+refused draw for the decode, the root key, the plan or the sites answers `BACKPRESSURE` and is
+counted once, as an `out_of_memory` delivery drop (#2879; the value flatten and vertex creation
+are not counted there); a value the decode refuses for its shape stays
+`TYPE_MISMATCH` and counts nothing. A bounded node that
+injects its own table source gets the arena drawn from that store. No node-counting pre-pass exists, and none is
 needed ([#477], [#588]).
 
 Streaming the decode (§3.2 move 2) changes where the walk stack is drawn from, not whether
@@ -264,7 +256,8 @@ demand. The escape hatch is the consumer's, not the router's.
 
 1. **Rope-native branch and field decode** (§3.2 move 1) — point the branch and field write paths at
    a rope-aware node type instead of `decode_into` + `materialize`. Removes ②③.
-2. **Streaming branch decode** (§3.2 move 2) — removes ④'s on-stack arena.
+2. **Streaming branch decode** (§3.2 move 2) — removes ④'s node array (its draw from the table
+   source; the stack array went with #2879).
 3. **Rope-native node accessors for the walk** — `ensure_cache`
    (`core/src/op_resolve_view.cpp:wire().materialize(backend())`) flattens each *accessed* node whose own subrope
    straddles a link. Converting `wire()` / `body()` from `std::span` to rope-native readers (fields
@@ -370,7 +363,7 @@ the gate.
 
 | Rank | Change | Removes | Saving | Fires on the single-link path? | Gate |
 |:--:|--------|---------|-------------|:--:|-------------|
-| **1** | Streaming branch decode (walk-callback driven, no node array) | ④, the on-stack 4096-byte arena | ~4 KB stack high-water off the deepest task, the binding constraint. RAM relocates stack→pool rather than disappearing. | yes — always paid | Latency: the walk stack becomes pool- or heap-drawn |
+| **1** | Streaming branch decode (walk-callback driven, no node array) | ④'s node array | The stack high-water half **LANDED with #2879**: the arena draws from the table source, not a 4 KiB stack array. What remains is the node array's pool draw. | yes — always paid | Latency: the walk stack becomes pool- or heap-drawn |
 | **2** | WS receive into a pooled segment, deliver owning — **LANDED for the ESP `esp_http_server` link, opt-in** (#1565: `httpd_ws_link_t`'s `rx_backend`, unfragmented frames; borrowed stays the default) | ⑧'s per-frame `new[]`; the borrowed-then-store copy | One allocation per WS frame per session removed, and the rope tier gets an owned segment | yes — every WS frame | Changes the WS delivery contract, which is why it is opt-in and per link rather than a flip; the pool is the INTEGRATOR's injection, not a library buffer |
 | **3** | Rope-native branch and field node type | ②③, the multi-link branch/field flatten | Nothing on single-link, which is a refcount bump; one flatten becomes a refcount bump on fragmented POINT writes | **no — multi-link only** | Ratification-gated sink type (ADR-0041 §2); needs rank 1 to matter |
 | **4** | Rope-native walk accessors plus a scatter-gather reply head | ⑥, the per-straddling-node `ensure_cache` | On straddling route TLVs, fuses flatten and memcpy into one gather | **no — multi-link only** | Converts the shared span-based `resolve_node` concept — non-local |

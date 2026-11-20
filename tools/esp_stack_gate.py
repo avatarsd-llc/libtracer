@@ -21,9 +21,9 @@ delivery arm:
 Each of those two rows is compared with its pin in STACK_PINS, the way tools/esp_size_gate.py
 compares the per-transport flash rows: on esp32c6, built by PINNED_TOOLCHAIN (shared with that
 gate, since both read the same pinned-digest image). A row over its pin fails; a row under it
-passes and says to re-pin down. Raising a pin needs a maintainer ruling. Each arm also has an
-"all in-call paths" row, another in-call path the gate reports and does not pin
-(REPORTED_ONLY_CUTS lists what the pinned rows leave out).
+passes and says to re-pin down. Raising a pin needs a maintainer ruling. Every in-call path
+is pinned, branch writes included (#2879): their decode draws from the graph's table source,
+not a stack array, so no path is left out of a row.
 
 A row fails, whatever its total, when the walk did not reach the arm's anchor frames
 (ANCHORS: a renamed function or a lost edge must not shrink the path into a pass), or when a
@@ -72,11 +72,19 @@ STACK_PINS = {
     # body/data/hand_up frames merge into the ingress's. (On the receive and terminus path
     # alone, before the graph's hooks were resolved: 4,080 B at v0.21.0, 5,232 B at
     # 9964668f0, 4,496 B here.)
-    "borrowed": 5216,
+    # #2879 (Ruling 128): the row widens to branch writes, which no longer carry a 4 KiB stack
+    # array. Between write_impl and fan_out the worst path is now write_branch (384) and
+    # fan_out_slice (80) instead of handler_write_deliver, deliver_vertex and bubble_up (288),
+    # so the pin moves to 5,392 B; no frame that was pinned before grew. The path through a
+    # branch write fell from 9,536 B to 5,392 B. Then cut by 96 B: the decode is scoped and
+    # parse_branch_node kept out of line, so write_branch's frame is 288 B, not 384 B.
+    "borrowed": 5296,
     # #2871: 6,864 B at 9964668f0, cut by 352 B by the same reply table and framing merges; the
     # multi-link terminus (rope tier) keeps its name copy. (Receive and terminus path alone:
     # 5,776 B at v0.21.0, 6,048 B at 9964668f0, 5,792 B here.)
-    "owning": 6512,
+    # #2879 (Ruling 128): the same widening, +176 B by the same two frames; the path through a
+    # branch write fell from 10,832 B to 6,688 B, then 6,592 B by the same 96 B cut.
+    "owning": 6592,
 }
 
 ROOT = r"^tr::net::esp_ws_client_link_t::recv_loop\(\)$"
@@ -113,8 +121,6 @@ PLATFORM_CUTS = (r"__assert_func|esp_log|^abort$|heap_caps|malloc|calloc|realloc
                  r"|xQueue|xTask|vPort|lock_acquire|_lock_|pthread_|gettimeofday"
                  r"|esp_system_abort|connect_once|printf|__cxa|operator new|std::__throw"
                  r"|^lwip_|^netconn_|^tcpip_|^sys_|^[a-z_]+_socket$|^esp_|^rtc_|^getrandom$")
-# What the pinned rows leave out and the "all in-call paths" rows walk.
-REPORTED_ONLY_CUTS = r"^tr::graph::graph_t::write_branch\("
 # Each arm leaves out the other arm's receiver and thunk.
 ARM_CUTS = {
     "borrowed": rf"deliver_rope|receiver_slot_t<>::deliver\(|{ROPE_THUNK}",
@@ -129,10 +135,6 @@ ANCHORS = {
                r"^tr::net::fwd_router_t::resolve_terminus",
                r"^tr::graph::op_resolver_t::resolve\("),
 }
-# (row, arm, also walk the reported-only paths, pinned)
-ROWS = (("borrowed", "borrowed", False, True), ("owning", "owning", False, True),
-        ("borrowed, all in-call paths", "borrowed", True, False),
-        ("owning, all in-call paths", "owning", True, False))
 
 NODE_RE = re.compile(r'node: \{ title: "([^"]+)" label: "([^"]*)"')
 EDGE_RE = re.compile(r'edge: \{ sourcename: "([^"]+)" targetname: "([^"]+)"')
@@ -188,7 +190,7 @@ def demangle(symbols: list[str], cxxfilt: str) -> dict[str, str]:
 
 
 def worst_path(frames: dict[str, tuple[int, str]], edges: dict[str, set[str]],
-               names: dict[str, str], arm: str, reported_only: bool = False) -> dict:
+               names: dict[str, str], arm: str) -> dict:
     """The worst static path from ROOT for @p arm.
 
     @return {"total", "path": [(bytes, qualifier, name)], "missing": [anchor regex],
@@ -209,7 +211,7 @@ def worst_path(frames: dict[str, tuple[int, str]], edges: dict[str, set[str]],
             edges[s] |= dsts
         resolved.append((label, sorted(name(c) for c in srcs), sorted(name(d) for d in dsts)))
     platform = re.compile(PLATFORM_CUTS)
-    cut = re.compile(ARM_CUTS[arm] if reported_only else f"{ARM_CUTS[arm]}|{REPORTED_ONLY_CUTS}")
+    cut = re.compile(ARM_CUTS[arm])
     roots = [s for s in syms if s in frames and re.search(ROOT, name(s))]
     if len(roots) != 1:
         raise KeyError(f"expected one {ROOT!r} in the call graph, found {len(roots)}")
@@ -264,8 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         frames, edges = load(texts)
         names = demangle(sorted(set(frames) | set(edges)), args.cxxfilt)
-        rows = {row: (arm, pinned, worst_path(frames, edges, names, arm, wide))
-                for row, arm, wide, pinned in ROWS}
+        rows = {arm: worst_path(frames, edges, names, arm) for arm in STACK_PINS}
     except (KeyError, OSError, subprocess.CalledProcessError) as e:
         print(f"::error::esp32c6 WS client rx stack gate could not read the call graph: {e}")
         return 1
@@ -275,15 +276,13 @@ def main(argv: list[str] | None = None) -> int:
     lines = ["## WebSocket client rx path, worst static stack (#2871)", "",
              f"| Row | Stack | {PINNED_TARGET} pin | Verdict |", "|---|---:|---:|---|"]
     failed = []
-    for row, (arm, pinned, r) in rows.items():
-        pin = STACK_PINS.get(row) if pinned else None
+    for row, r in rows.items():
+        pin = STACK_PINS[row]
         broken = ([f"missing anchor {a}" for a in r["missing"]]
                   + [f"unbounded dynamic frame in {n[:80]}" for n in r["unbounded"]])
         if broken:
             verdict = "FAIL (" + "; ".join(broken) + ")"
             failed.append(f"{row}: " + "; ".join(broken))
-        elif pin is None:
-            verdict = "REPORTED (not pinned)"
         elif not compared:
             verdict = f"REPORTED (pins hold for {PINNED_TARGET} only)"
         elif not toolchain_ok:
@@ -295,18 +294,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             under = pin - r["total"]
             verdict = "PASS" if under == 0 else f"PASS ({under:,} B under: re-pin down)"
-        pin_txt = f"{pin:,} B" if pin is not None else "n/a"
-        lines.append(f"| {row} | {r['total']:,} B | {pin_txt} | {verdict} |")
+        lines.append(f"| {row} | {r['total']:,} B | {pin:,} B | {verdict} |")
     lines += ["", f"Toolchain: `{args.toolchain}`; pins measured with `{PINNED_TOOLCHAIN}`.", "",
               "Indirect edges resolved:", ""]
-    for label, srcs, dsts in next(iter(rows.values()))[2]["edges"]:
+    for label, srcs, dsts in next(iter(rows.values()))["edges"]:
         lines.append(f"- {label}: {len(srcs)} caller(s) -> {len(dsts)} target(s)")
     lines += ["", "<details><summary>Indirect edges: callers and targets</summary>", "", "```"]
-    for label, srcs, dsts in next(iter(rows.values()))[2]["edges"]:
+    for label, srcs, dsts in next(iter(rows.values()))["edges"]:
         lines += [f"{label}:"] + [f"  from {_base(c)}" for c in srcs]
         lines += [f"  to   {_base(d)}" for d in dsts]
     lines += ["```", "</details>", ""]
-    for row, (_arm, _pinned, r) in rows.items():
+    for row, r in rows.items():
         lines += [f"<details><summary>{row}: {r['total']:,} B</summary>", "", "```"]
         acc = 0
         for b, qual, n in r["path"]:
@@ -323,12 +321,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.out_json:
         with open(args.out_json, "w", encoding="utf-8") as f:
             json.dump({"target": args.target, "toolchain": args.toolchain,
-                       "rows": [{"row": row, "arm": arm, "stack_bytes": r["total"],
-                                 "pin_bytes": STACK_PINS.get(row) if pinned else None,
+                       "rows": [{"row": row, "arm": row, "stack_bytes": r["total"],
+                                 "pin_bytes": STACK_PINS[row],
                                  "missing_anchors": r["missing"], "recursion": r["recursion"],
                                  "path": [{"frame": b, "qualifier": q, "fn": n}
                                           for b, q, n in r["path"]]}
-                                for row, (arm, pinned, r) in rows.items()]}, f, indent=2)
+                                for row, r in rows.items()]}, f, indent=2)
     if failed:
         print(f"::error::the esp32c6 WebSocket client rx stack rows failed (#2871): "
               f"{'; '.join(failed)}")

@@ -73,11 +73,11 @@ def ci(nodes, edges, tu="a.cpp", qual=None):
     return "\n".join(out + ["}"])
 
 
-def run(texts, arm, reported_only=False):
+def run(texts, arm):
     """@brief The gate's walk over @p texts: (total, [(bytes, name)]) for @p arm."""
     frames, edges = gate.load(texts)
     names = {s: s for s in set(frames) | set(edges)}
-    r = gate.worst_path(frames, edges, names, arm, reported_only)
+    r = gate.worst_path(frames, edges, names, arm)
     return r["total"], [(b, n) for b, _q, n in r["path"]]
 
 
@@ -105,12 +105,11 @@ def gate_main(texts, target="esp32c6", toolchain=TOOLCHAIN):
 # The hook, send and CAN nodes sit off the path (nothing calls them) unless a test links them,
 # so every indirect edge resolves and the base path stays the receive and terminus path.
 FRAMES = {RECV: 200, INGRESS: 250, SPAN: 64, ROPE: 80, IMPL: 600, ROPE_IMPL: 608, TERM: 560,
-          RESOLVE: 880, WRITE: 128, BRANCH: 4500, SEND: 176, ASSERT: 300, WAKE: 32,
-          REMOTE_EDGE: 48, AWAIT_THUNK: 16, REMOTE: 0, ANSWER: 240, DELIVER: 208, CAN_SEND: 48,
-          TWAI: 48}
+          RESOLVE: 880, WRITE: 128, SEND: 176, ASSERT: 300, WAKE: 32, REMOTE_EDGE: 48,
+          AWAIT_THUNK: 16, REMOTE: 0, ANSWER: 240, DELIVER: 208, CAN_SEND: 48, TWAI: 48}
 EDGES = [(RECV, INGRESS), (INGRESS, gate.INDIRECT), (SPAN, IMPL), (ROPE, ROPE_IMPL),
          (ROPE_IMPL, IMPL), (IMPL, TERM), (TERM, RESOLVE), (TERM, gate.INDIRECT),
-         (RESOLVE, WRITE), (WRITE, BRANCH), (WRITE, ASSERT), (WAKE, gate.INDIRECT),
+         (RESOLVE, WRITE), (WRITE, ASSERT), (WAKE, gate.INDIRECT),
          (REMOTE_EDGE, gate.INDIRECT), (AWAIT_THUNK, ANSWER), (ANSWER, gate.INDIRECT),
          (REMOTE, DELIVER), (DELIVER, gate.INDIRECT), (CAN_SEND, gate.INDIRECT)]
 
@@ -203,10 +202,11 @@ class StackGateTest(unittest.TestCase):
         total, _ = run([ci(FRAMES, EDGES), other], "borrowed")
         self.assertEqual(total, 200 + 250 + 64 + 600 + 700 + 880 + 128)
 
-    def test_reported_only_rows_walk_the_cut_paths(self):
-        total, path = run([ci(FRAMES, EDGES)], "borrowed", reported_only=True)
+    def test_branch_writes_are_on_the_pinned_rows(self):
+        frames = dict(FRAMES, **{BRANCH: 640})
+        total, path = run([ci(frames, EDGES + [(WRITE, BRANCH)])], "borrowed")
         self.assertEqual(path[-1][1], BRANCH)
-        self.assertEqual(total, 200 + 250 + 64 + 600 + 560 + 880 + 128 + 4500)
+        self.assertEqual(total, 200 + 250 + 64 + 600 + 560 + 880 + 128 + 640)
 
     def test_platform_cut_matches_the_name_without_its_parameters(self):
         name = "tr::graph::graph_t::write2(heap_caps_t)"

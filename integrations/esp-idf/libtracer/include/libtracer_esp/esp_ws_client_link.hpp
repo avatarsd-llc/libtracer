@@ -275,7 +275,13 @@ struct esp_ws_client_config_t {
     std::size_t tx_bytes = 2048;
     /** @brief Recv-thread stack in bytes, HONORED (#900): the recv thread runs in-call
      *         delivery through the graph's on_write seam, the deep path. 0 = the platform
-     *         pthread default. */
+     *         pthread default.
+     *
+     *  libtracer uses at most 5,296 B of the calling task's stack on `recv_loop`, borrowed
+     *  arm (`memory.rx` unset), and at most 6,592 B on the owning arm (`memory.rx` set):
+     *  the worst static path on esp32c6, branch writes included, pinned by
+     *  `tools/esp_stack_gate.py` (#2871, #2879). The platform's frames and an application
+     *  handler's or subscriber's own frames are not counted in it. */
     std::size_t recv_stack = 0;
     /**
      * @brief The link's memory (@ref link_memory_t, #1661), as `httpd_ws_link_t` takes it.

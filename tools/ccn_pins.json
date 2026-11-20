@@ -21,9 +21,10 @@
     },
     "tr::graph::graph_t::write_branch": {
       "ccn": [
-        27
+        29
       ],
-      "file": "core/src/graph.cpp"
+      "file": "core/src/graph.cpp",
+      "note": "Raised 27 -> 29 by ruling (#2879): +1 for mapping a refused table-source draw to a counted BACKPRESSURE (Ruling 124), +1 for the root-NAME check guard that scoping the decode arena needs (the scoping cut 96 B of esp32c6 stack). graph.cpp total 788 -> 790."
     },
     "tr::graph::parse_branch_node": {
       "ccn": [

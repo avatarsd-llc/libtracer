@@ -392,6 +392,97 @@ void test_subscribe() {
     report(drive<vertex_handle_t>(setup, op, untouched), "subscribe");
 }
 
+/** @brief `POINT{NAME b, POINT{NAME x, VALUE 0xCC}}`: a branch write landing on `/b/x`. */
+std::vector<std::byte> branch_b_x() {
+    using tr::wire::opt_t;
+    using tr::wire::type_t;
+    const std::byte cc{0xCC};
+    std::vector<std::byte> x_body;
+    tr::wire::emit_name(x_body, "x");
+    tr::wire::emit_tlv(x_body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&cc, 1));
+    std::vector<std::byte> b_body;
+    tr::wire::emit_name(b_body, "b");
+    tr::wire::emit_tlv(b_body, type_t::POINT, opt_t{.pl = true}, x_body);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, b_body);
+    return out;
+}
+
+/** @brief `POINT{NAME b, VALUE 0xCC, VALUE 0xCC}`: two VALUEs on one node, a shape refusal. */
+std::vector<std::byte> branch_two_values() {
+    using tr::wire::opt_t;
+    using tr::wire::type_t;
+    const std::byte cc{0xCC};
+    std::vector<std::byte> body;
+    tr::wire::emit_name(body, "b");
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&cc, 1));
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&cc, 1));
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, body);
+    return out;
+}
+
+/**
+ * @brief A branch write: the decode arena, the root key, the plan and the landing sites all
+ *        draw from the table source, not a stack array (#2879). A refused draw anywhere in it
+ *        answers BACKPRESSURE and is counted once; a shape refusal is TYPE_MISMATCH and counts
+ *        nothing.
+ */
+void test_branch_write() {
+    std::printf("branch write — decode arena, root key, plan, landing sites:\n");
+    const std::vector<std::byte> branch = branch_b_x();
+    const auto setup = [](graph_t& g) {
+        (void)g.register_vertex(*path_t::parse("/b/x"), role_t::STORED_VALUE);
+        return g.register_vertex(*path_t::parse("/b"), role_t::STORED_VALUE);
+    };
+    const auto op = [&branch](graph_t& g, vertex_handle_t& b) {
+        return verdict(g.write(b, make_value(branch)));
+    };
+    const auto untouched = [](graph_t& g, vertex_handle_t&) {
+        return !g.read(*path_t::parse("/b/x")).has_value();
+    };
+    report(drive<vertex_handle_t>(setup, op, untouched), "branch write");
+
+    gate_source_t src;
+    graph_t g{src};
+    const vertex_handle_t b = setup(g);
+    const std::uint64_t oom0 = g.delivery_drops().out_of_memory;
+    src.arm(0);
+    const auto r = g.write(b, make_value(branch));
+    src.disarm();
+    check(!r && r.error() == status_t::BACKPRESSURE,
+          "an exhausted branch decode refuses with BACKPRESSURE, not TYPE_MISMATCH");
+    check(g.delivery_drops().out_of_memory == oom0 + 1, "...and counts the drop");
+
+    // Every budget short of the write's need, whichever draw it stops at, counts exactly once.
+    std::size_t refused = 0;
+    bool counted_once = true;
+    bool fits = false;
+    for (std::size_t n = 0; n < 64; ++n) {
+        gate_source_t s;
+        graph_t gn{s};
+        const vertex_handle_t bn = setup(gn);
+        const std::uint64_t before = gn.delivery_drops().out_of_memory;
+        s.arm(n);
+        const auto rn = gn.write(bn, make_value(branch));
+        s.disarm();
+        fits = rn.has_value();
+        if (fits) break;
+        ++refused;
+        counted_once = counted_once && rn.error() == status_t::BACKPRESSURE &&
+                       gn.delivery_drops().out_of_memory == before + 1;
+    }
+    check(refused > 1 && counted_once,
+          "every refused draw answers BACKPRESSURE and counts out_of_memory once");
+    check(fits, "...and the first budget that covers the write lands it");
+
+    const std::uint64_t oom1 = g.delivery_drops().out_of_memory;
+    const auto shape = g.write(b, make_value(branch_two_values()));
+    check(!shape && shape.error() == status_t::TYPE_MISMATCH,
+          "a branch with two VALUEs on one node answers TYPE_MISMATCH");
+    check(g.delivery_drops().out_of_memory == oom1, "...and counts no out_of_memory drop");
+}
+
 /** @brief Retirement: the cleanup key, the moved-out slot tables and the seam park. */
 void test_retire() {
     std::printf("retire — cleanup key, slot-table list, seam park:\n");
@@ -1009,6 +1100,7 @@ int main() {
     test_anchor();
     test_subscribe();
     test_retire();
+    test_branch_write();
     test_set_policy();
     test_app_field_store();
     test_intent_document();
