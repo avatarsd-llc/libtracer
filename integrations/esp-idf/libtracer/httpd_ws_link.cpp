@@ -981,9 +981,6 @@ struct httpd_ws_link_t::session_t {
      *         `inbound_tally` while the session's frame is delivered, and reset at the claim.
      *         No byte when the READ budget is off. */
     [[no_unique_address]] session_read_tally_t read_tally{};
-    /** @brief This session's share of the current drain (ADR-0085, #2891): reset at the claim,
-     *         written only on the httpd task. No byte when the build does not pace. */
-    [[no_unique_address]] session_drain_tally_t drain{};
     bool open = false; /**< @brief True between handshake and close. */
     /**
      * @brief The peer's ROUTABLE name — `p<slot>~<gen>` (ADR-0073 §2, #426, #994).
@@ -1169,6 +1166,10 @@ struct httpd_ws_link_t::session_t {
      * mean "admitted at the transport level, serving nothing".
      */
     bool auth_pending = false;
+    /** @brief This session's share of the current drain (ADR-0085, #2891): reset at the claim,
+     *         written only on the httpd task. No byte when the build does not pace; it sits in the
+     *         padding after `auth_pending`, so the slot does not grow on 32- or 64-bit targets. */
+    [[no_unique_address]] session_drain_tally_t drain{};
     /**
      * @brief The application's `now` at the first liveness check that saw this session
      *        (#2257, peers_m_); @ref kAuthUnseen until one has.
