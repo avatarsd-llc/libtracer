@@ -30,7 +30,8 @@
  * so it can be pinned (#2171); the #2136 goal is 0, a peer that drops back to its idle base.
  *
  * The `<kind>-remote-sub` arms price a REMOTE SUBSCRIPTION (#2171): a node (graph, router
- * and one server link of that kind, every source counted) and one raw peer that has already
+ * and one server link of that kind, every long-lived source counted, the router's link plane
+ * included since #2875) and one raw peer that has already
  * subscribed once, so the link's first-subscription draws are outside the window. The peer
  * then sends K `:subscribers[]` appends, one per vertex, and the arm reads the live balance
  * and the block count before and after: `per_sub` is the bytes, `sub_blocks` the blocks one more
@@ -618,7 +619,9 @@ sub_sample_t run_remote_sub_arm(Make make, Port port, Dial dial, Push push) {
         frames[i] = subscribe_frame(names[i]);
     }
     tr::graph::graph_t g(g_graph);
-    tr::net::fwd_router_t router(g);
+    // The router's link plane, counted: a remote subscription's retained block is drawn from
+    // it (#2875), so the window sees it. It is the plane's default source, through the counter.
+    tr::net::fwd_router_t router(g, {.link_src = &g_net});
     auto link = make();
     if (!router.attach_link("in", *link)) return out;
     std::vector<tr::graph::vertex_handle_t> v;

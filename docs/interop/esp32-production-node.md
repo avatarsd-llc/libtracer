@@ -80,9 +80,9 @@ so a device recipe sizes one slab where it used to wire four arguments. Beside i
 `fwd_router_t`: the failable `link_src` source its long-lived link state draws from, the
 failable `rx` source, the `flat` byte backend its rope flattens draw from, the
 `egress` byte backend the terminus reply head draws from, and the `retained`
-backend a remote SUBSCRIBE's two life-of-the-subscription allocations draw from
+source a remote SUBSCRIBE's one life-of-the-subscription block draws from
 (`core/include/libtracer/fwd_router.hpp:router_planes_t`, the `router_planes_t` aggregate; `egress` is #795 / ADR-0074,
-`retained` is #1610 and defaults to `flat` when un-injected).
+`retained` is #1610 and defaults to `link_src` when un-injected, #2875).
 Each is its own injection because each one's live set is governed by a different
 quantity — threads inside the router, replies in flight, flattens in flight, and
 the subscription population respectively — and a slab is sized against that

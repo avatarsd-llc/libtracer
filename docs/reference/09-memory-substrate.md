@@ -328,13 +328,15 @@ sizes a slab against that quantity and a shared seam silently re-scopes it.
 | `rx` | threads that can be inside the router | fixed slots |
 | `egress` | replies in flight | fixed slots |
 | `flat` | per-operation flattens in flight | fixed slots / byte budget |
-| `retained` | **the subscription population** | scales with subscribers |
+| `retained` (default `link_src`) | **the subscription population** | scales with subscribers |
 
-`retained` ([#1610](https://github.com/avatarsd-llc/libtracer/issues/1610)) is the backend for
-the two allocations a remote SUBSCRIBE keeps for the life of the subscription: the source
-`SUBSCRIBER` TLV and the ONE route copy ([ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md) §2).
+`retained` ([#1610](https://github.com/avatarsd-llc/libtracer/issues/1610)) is the source for
+what a remote SUBSCRIBE keeps for the life of the subscription: the source `SUBSCRIBER` TLV, the
+ONE route copy ([ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md) §2)
+and the completed reverse chain. Since [#2875](https://github.com/avatarsd-llc/libtracer/issues/2875)
+they are ONE block, and the edge keeps three windows into it.
 It was split out of `flat` for the reason `egress` was: `flat` is documented and sized against
-per-operation FLATTEN bytes, and these are neither per-operation nor flattens.
+per-operation FLATTEN bytes, and this block is neither per-operation nor a flatten.
 
 The failure the split prevents is specific and was measured on an MCU node. A host that puts
 static size classes in front of `flat` finds them filled by a set that never returns — one
@@ -344,10 +346,13 @@ exactly when a client is attached, which is the only time they are needed. Growi
 not fix it: the population they would have to chase is the subscriber count, which is the same
 unbounded quantity that made `flat` a byte budget rather than a fixed pool.
 
-**`retained` defaults to null, meaning `flat`** — where both allocations have always been
-taken. An un-injected router is byte-for-byte unchanged, so the seam costs nothing to ignore.
-A host that injects it typically points it at a plain counted heap arm: one allocation and one
-free per subscription is not churn and wants no class.
+**`retained` defaults to null, meaning `link_src`** (#2875), the router's long-lived link plane:
+a peer's subscription is long-lived state of the link it arrived on, so a node that bounds and
+counts `link_src` bounds and counts its subscriptions too, and a refusal there answers the
+subscribe `BACKPRESSURE`. Before #2875 the default was `flat`, which kept the block outside the
+plane a bounded node sizes for long-lived state. A host that injects `retained` typically points
+it at a plain counted heap arm: one allocation and one free per subscription is not churn and
+wants no class. A bare `graph::op_resolver_t` given no `retained` still draws from its `flat`.
 
 Note this is a *lifetime* split, not a hint. [ADR-0016](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)
 rejected a shared cross-backend hint vocabulary as a bloat vector, and that rejection stands:
