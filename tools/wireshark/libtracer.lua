@@ -33,7 +33,7 @@
 
 local M = {}
 
--- The largest TLV length a short frame may declare (MAX_TLV_BYTES, RFC-0001 §C.3): 16 MiB,
+-- The largest TLV length a header may declare (MAX_TLV_BYTES, RFC-0001 §C.3): 16 MiB,
 -- the C++ reference's default kMaxTlvBytes.
 M.MAX_TLV_BYTES = 16 * 1024 * 1024
 M.VERSION = "0.1.0"

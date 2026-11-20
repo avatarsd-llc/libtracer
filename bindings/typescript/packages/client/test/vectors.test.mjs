@@ -768,7 +768,7 @@ test('path/path-reserved-brackets: codec carries the bytes, the validator refuse
   }
 });
 
-test('#2885: a short TLV declaring MAX_TLV_BYTES is truncated; one byte more is invalid', () => {
+test('#2885: a short TLV declaring MAX_TLV_BYTES is truncated; one byte more is invalid, short or whole', () => {
   const frame = (len) => {
     const b = new Uint8Array(6);
     b[0] = 0x01;
@@ -778,4 +778,8 @@ test('#2885: a short TLV declaring MAX_TLV_BYTES is truncated; one byte more is 
   };
   assert.throws(() => decode(frame(MAX_TLV_BYTES)), (e) => e.code === ERROR.FRAME_TRUNCATED);
   assert.throws(() => decode(frame(MAX_TLV_BYTES + 1)), (e) => e.code === ERROR.FRAME_INVALID);
+  // The bound applies on every header: a whole TLV one byte over is invalid too.
+  const whole = new Uint8Array(6 + MAX_TLV_BYTES + 1);
+  whole.set(frame(MAX_TLV_BYTES + 1));
+  assert.throws(() => decode(whole), (e) => e.code === ERROR.FRAME_INVALID);
 });
