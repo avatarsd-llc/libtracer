@@ -72,11 +72,18 @@ STACK_PINS = {
     # body/data/hand_up frames merge into the ingress's. (On the receive and terminus path
     # alone, before the graph's hooks were resolved: 4,080 B at v0.21.0, 5,232 B at
     # 9964668f0, 4,496 B here.)
-    "borrowed": 5216,
+    # #2879 (Ruling 128): the row widens to branch writes, which no longer carry a 4 KiB stack
+    # array. Between write_impl and fan_out the worst path is now write_branch (384) and
+    # fan_out_slice (80) instead of handler_write_deliver, deliver_vertex and bubble_up (288),
+    # so the pin moves to 5,392 B; no frame that was pinned before grew. The path through a
+    # branch write fell from 9,536 B to 5,392 B.
+    "borrowed": 5392,
     # #2871: 6,864 B at 9964668f0, cut by 352 B by the same reply table and framing merges; the
     # multi-link terminus (rope tier) keeps its name copy. (Receive and terminus path alone:
     # 5,776 B at v0.21.0, 6,048 B at 9964668f0, 5,792 B here.)
-    "owning": 6512,
+    # #2879 (Ruling 128): the same widening, +176 B by the same two frames; the path through a
+    # branch write fell from 10,832 B to 6,688 B.
+    "owning": 6688,
 }
 
 ROOT = r"^tr::net::esp_ws_client_link_t::recv_loop\(\)$"
