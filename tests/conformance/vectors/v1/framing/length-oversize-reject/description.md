@@ -21,8 +21,9 @@ receiver can hold, so the answer is `INVALID` and not `TRUNCATED`, though the by
 early. The companion `framing/truncated-length-max-u16` declares `0xFFFF`, which is below the
 bound, and stays `FRAME_TRUNCATED`.
 
-The bound is consulted only for a TLV that does not fit the bytes at hand. A TLV that fits
-decodes whatever its length.
+The bound applies to every header: a TLV declaring more than `MAX_TLV_BYTES` is `INVALID` even
+when all of its bytes are present. These bytes happen to be short too, and the answer is still
+`INVALID`, because the header check comes before the fit check.
 
 The harness checks the error name itself. The C++ codec's two size widths are bound by
 `core/tests/grammar_bounds_test.cpp`.

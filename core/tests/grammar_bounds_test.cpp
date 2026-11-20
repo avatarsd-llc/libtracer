@@ -149,14 +149,14 @@ std::expected<tr::wire::grammar::header_t, tr::wire::err_t> parse_at(
 }
 
 /**
- * @brief #2885 at one cursor width: a TLV that does not fit is `FRAME_INVALID` when its length
- *        is above `kMaxTlvBytes` and `FRAME_TRUNCATED` otherwise; one that fits decodes.
+ * @brief #2885 at one cursor width: a declared length above `kMaxTlvBytes` is `FRAME_INVALID`
+ *        on every header, whole or short; a short TLV at or under it is `FRAME_TRUNCATED`.
  */
 template <class Cursor>
 void check_length_classification(const char* width) {
     using tr::wire::err_t;
     constexpr std::uint32_t kMax = tr::graph::kMaxTlvBytes;
-    std::printf(" %s cursor — oversize vs short (#2885, kMaxTlvBytes = %u):\n", width,
+    std::printf(" %s cursor — the length bound (#2885, kMaxTlvBytes = %u):\n", width,
                 static_cast<unsigned>(kMax));
     // The conformance vector's bytes: VALUE, LL, length 0xFFFFFFFF, nothing after.
     const auto huge = parse_at<Cursor>(hostile_frame(0x01, 0x08, 0xFFFFFFFFu, 6));
@@ -178,12 +178,20 @@ void check_length_classification(const char* width) {
     const auto short16 = parse_at<Cursor>(u16);
     check(!short16 && short16.error() == err_t::FRAME_TRUNCATED,
           "u16 length 0xFFFF, short, is FRAME_TRUNCATED");
-    // The success path is unchanged: a TLV that fits decodes, its length unexamined.
+    // An ordinary TLV that fits decodes as before.
     const std::vector<std::byte> fits_buf{std::byte{0x01}, std::byte{0x00}, std::byte{0x03},
                                           std::byte{0x00}, std::byte{0xAA}, std::byte{0xBB},
                                           std::byte{0xCC}};
     const auto ok = parse_at<Cursor>(fits_buf);
     check(ok && ok->total == 7 && ok->length == 3, "a TLV that fits still parses (total = 7)");
+    // The bound applies on EVERY header (ruling 127): a whole TLV of exactly kMaxTlvBytes is
+    // accepted, and a whole TLV one byte longer is FRAME_INVALID though every byte is present.
+    const auto whole_at = parse_at<Cursor>(hostile_frame(0x01, 0x08, kMax, 6u + kMax));
+    check(whole_at && whole_at->total == std::size_t{kMax} + 6u,
+          "a whole TLV of exactly kMaxTlvBytes parses (total = kMaxTlvBytes + 6)");
+    const auto whole_above = parse_at<Cursor>(hostile_frame(0x01, 0x08, kMax + 1u, 7u + kMax));
+    check(!whole_above && whole_above.error() == err_t::FRAME_INVALID,
+          "a whole TLV of kMaxTlvBytes + 1 is FRAME_INVALID: the bound is not a fit check");
 }
 
 }  // namespace

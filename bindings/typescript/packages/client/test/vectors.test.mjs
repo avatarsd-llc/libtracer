@@ -21,6 +21,7 @@ import {
   TYPE,
   PATH_REF_ELEMENT_BYTES,
   MAX_PATH_REF_ELEMENTS,
+  MAX_TLV_BYTES,
 } from '@avatarsd-llc/libtracer';
 import {
   LibtracerClient,
@@ -765,4 +766,16 @@ test('path/path-reserved-brackets: codec carries the bytes, the validator refuse
   for (const c of '/:.[]*?') {
     assert.throws(() => encodePath([`a${c}b`]), RangeError, `"a${c}b" must be refused`);
   }
+});
+
+test('#2885: a short TLV declaring MAX_TLV_BYTES is truncated; one byte more is invalid', () => {
+  const frame = (len) => {
+    const b = new Uint8Array(6);
+    b[0] = 0x01;
+    b[1] = 0x08;
+    new DataView(b.buffer).setUint32(2, len, true);
+    return b;
+  };
+  assert.throws(() => decode(frame(MAX_TLV_BYTES)), (e) => e.code === ERROR.FRAME_TRUNCATED);
+  assert.throws(() => decode(frame(MAX_TLV_BYTES + 1)), (e) => e.code === ERROR.FRAME_INVALID);
 });

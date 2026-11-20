@@ -1982,3 +1982,26 @@ fn path_reserved_brackets() {
         );
     }
 }
+
+/// #2885: a short TLV declaring exactly `MAX_TLV_BYTES` is truncated; one byte more is invalid.
+#[test]
+fn oversize_length_boundary() {
+    let frame = |len: u64| {
+        let l = len as u32;
+        let mut b = vec![0x01, 0x08];
+        b.extend_from_slice(&l.to_le_bytes());
+        b
+    };
+    assert_eq!(
+        libtracer::decode(&frame(libtracer::MAX_TLV_BYTES))
+            .unwrap_err()
+            .name(),
+        "FRAME_TRUNCATED"
+    );
+    assert_eq!(
+        libtracer::decode(&frame(libtracer::MAX_TLV_BYTES + 1))
+            .unwrap_err()
+            .name(),
+        "FRAME_INVALID"
+    );
+}
