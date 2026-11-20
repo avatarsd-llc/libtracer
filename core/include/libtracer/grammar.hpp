@@ -27,6 +27,7 @@
 #include <limits>
 #include <span>
 #include <type_traits>
+#include <utility>
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
@@ -307,11 +308,15 @@ template <class Cursor>
     // check, after which `walk` read a payload span far past the buffer.
     // Only a TLV that does not fit is classified (RFC-0001 §C.3, annex 01 §Truncation
     // handling): a declared length above `kMaxTlvBytes` is INVALID, any other is a short
-    // frame. A TLV that fits decodes whatever its length.
+    // frame. A TLV that fits decodes whatever its length. The two codes are adjacent, so the
+    // verdict is one add rather than a second branch (#2885).
+    static_assert(std::to_underlying(err_t::FRAME_INVALID) ==
+                  std::to_underlying(err_t::FRAME_TRUNCATED) + 1);
     size_type total = 0;
     if (!total_size_fits(avail, header, length, ts_size, crc_size, total)) {
-        return std::unexpected(length > graph::kMaxTlvBytes ? err_t::FRAME_INVALID
-                                                            : err_t::FRAME_TRUNCATED);
+        return std::unexpected(
+            static_cast<err_t>(std::to_underlying(err_t::FRAME_TRUNCATED) +
+                               static_cast<std::uint16_t>(length > graph::kMaxTlvBytes)));
     }
 
     if (opt.cr && crc_policy == crc_check_t::VERIFY) {

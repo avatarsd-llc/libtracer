@@ -171,13 +171,17 @@ void check_length_classification(const char* width) {
     const auto at = parse_at<Cursor>(hostile_frame(0x01, 0x08, kMax, 64));
     check(!at && at.error() == err_t::FRAME_TRUNCATED,
           "exactly kMaxTlvBytes, short, is FRAME_TRUNCATED");
-    std::vector<std::byte> u16 = hostile_frame(0x01, 0x00, 0xFFFFu, 5);
-    u16[4] = std::byte{0xAA};  // `01 00 FF FF AA`, the framing/truncated-length-max-u16 vector
+    // `01 00 FF FF AA`, the framing/truncated-length-max-u16 vector (`hostile_frame` writes a
+    // u32 length, so it is spelled out here).
+    const std::vector<std::byte> u16{std::byte{0x01}, std::byte{0x00}, std::byte{0xFF},
+                                     std::byte{0xFF}, std::byte{0xAA}};
     const auto short16 = parse_at<Cursor>(u16);
     check(!short16 && short16.error() == err_t::FRAME_TRUNCATED,
           "u16 length 0xFFFF, short, is FRAME_TRUNCATED");
     // The success path is unchanged: a TLV that fits decodes, its length unexamined.
-    std::vector<std::byte> fits_buf = hostile_frame(0x01, 0x00, 3u, 7);
+    const std::vector<std::byte> fits_buf{std::byte{0x01}, std::byte{0x00}, std::byte{0x03},
+                                          std::byte{0x00}, std::byte{0xAA}, std::byte{0xBB},
+                                          std::byte{0xCC}};
     const auto ok = parse_at<Cursor>(fits_buf);
     check(ok && ok->total == 7 && ok->length == 3, "a TLV that fits still parses (total = 7)");
 }
