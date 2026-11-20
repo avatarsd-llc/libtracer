@@ -119,7 +119,8 @@ FOOTPRINT_PINS = {
     # 70 B is the out-of-line copy of the inline `mem::string_t::assign`. On base the linker
     # kept graph.cpp's copy of that COMDAT; #2737 moves the cold half's caller off `string_t`,
     # so graph.cpp no longer emits one and the kept copy is transport_can.cpp's. The library
-    # total falls 183,607 -> 183,201 B on full_node.
+    # total falls 183,607 -> 183,201 B on transport_footprint (181,388 -> 180,974 B on
+    # full_node).
     "CAN (transport_can + TWAI link)": 14376,
     # 33,387 -> 33,513 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys
     # back ~110 B.
