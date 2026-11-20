@@ -542,6 +542,83 @@ void test_retired_route_handle_vectors_skip_by_length() {
     }
 }
 
+/** @brief The two unassigned-code vectors (reference/01 §Handling unknown type codes, #2731). */
+constexpr std::string_view kUnknownOuterVector = "tlv-types/unknown-core-type-outer";
+constexpr std::string_view kUnknownNestedVector = "tlv-types/unknown-core-type-nested";
+
+/**
+ * @brief An unassigned core-range code decodes as opaque and is stepped over by its declared
+ *        length, whether it is the outer TLV or a child of a structured one (#2731).
+ *
+ * The codec half of the `tlv-types/unknown-core-type-*` vectors: the outer frame keeps its type
+ * byte and the frame after it in the same buffer still parses; the nested one is skipped and its
+ * known sibling is read.
+ */
+void test_unknown_type_vectors_skip_by_length() {
+    std::printf("the unknown-code vectors skip by their declared length:\n");
+    const std::vector<std::byte> outer = vector_bytes(kUnknownOuterVector);
+    const auto d = tr::wire::decode(outer);
+    check(d && static_cast<std::uint8_t>(d->type) == 0x1F && !d->opt.pl && d->payload.size() == 3,
+          "the outer 0x1F frame decodes as an opaque TLV under its own code");
+    check(d && tr::wire::encode(*d) == outer, "and re-encodes byte for byte");
+    const std::vector<std::byte> after = b_value_u32(0x0A0B0C0Du);
+    std::vector<std::byte> buf = outer;
+    buf.insert(buf.end(), after.begin(), after.end());
+    const auto hdr = tr::wire::grammar::parse_header(tr::wire::grammar::span_cursor_t{buf});
+    check(hdr && hdr->total == outer.size(), "its header declares exactly its own length");
+    const std::size_t skip = hdr ? hdr->total : buf.size();
+    const auto next = tr::wire::decode(std::span<const std::byte>(buf).subspan(skip));
+    check(next && next->type == type_t::VALUE &&
+              tr::detail::load_le<std::uint32_t>(next->payload) == 0x0A0B0C0Du,
+          "and the frame after it still parses");
+
+    const std::vector<std::byte> nested = vector_bytes(kUnknownNestedVector);
+    const auto n = tr::wire::decode(nested);
+    check(n && n->type == type_t::POINT && n->children.size() == 2,
+          "the POINT decodes both children, the unknown one included");
+    check(n && n->children.size() == 2 && static_cast<std::uint8_t>(n->children[0].type) == 0x1F &&
+              n->children[0].payload.size() == 2 && n->children[1].type == type_t::NAME &&
+              tr::detail::as_string_view(n->children[1].payload) == "ok",
+          "the 0x1F child is opaque and the NAME after it is read");
+    check(n && tr::wire::encode(*n) == nested, "and the POINT re-encodes byte for byte");
+}
+
+/**
+ * @brief An unassigned outer code does not poison the link it arrives on (#2731).
+ *
+ * The behaviour half of `tlv-types/unknown-core-type-outer`: the frame is not served, nothing
+ * goes out on any other link, nothing is written, and a `FWD` after it on the same link is
+ * served as before. Whether the arrival link gets an answer is deliberately not asserted (a bare
+ * outer TLV carries no `src`; only the retired codes have an answer rule).
+ */
+void test_unknown_outer_type_keeps_the_link() {
+    std::printf("an unassigned outer code leaves the link working:\n");
+    graph_t graph;
+    fwd_router_t router(graph);
+    fake_link_t link;
+    fake_link_t other;
+    (void)router.attach_link("client", link);
+    (void)router.attach_link("other", other);
+    const auto p = path_t::parse("/sensor/temp");
+    auto v = graph.register_vertex(*p, role_t::STORED_VALUE);
+    const std::vector<std::byte> before = b_value_u32(0x11111111);
+    (void)graph.write(v, make_value(before));
+
+    link.inject(vector_bytes(kUnknownOuterVector));
+    link.drain();
+    check(other.drain().empty(), "nothing went out on any other link");
+    const auto lkv = graph.read(*p);
+    const tr::view::view_t flat = lkv ? (*lkv)->flatten() : tr::view::view_t{};
+    check(lkv && std::equal(flat.bytes().begin(), flat.bytes().end(), before.begin(), before.end()),
+          "and nothing was written");
+
+    link.inject(b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"client"}),
+                      b_field_subscribers_append(), b_subscriber(b_path({"client"}), false)));
+    link.drain();
+    (void)graph.write(v, make_value(b_value_u32(0x01020304)));
+    check(link.drain().size() == 1, "a FWD after the unknown frame is served as before");
+}
+
 /**
  * @brief The retired route-handle frames an older peer may still SEND (ADVERTISE 0x11, COMPACT
  *        0x12, HANDLE_NACK 0x13) are retired types (RFC-0032 §6.1): each is counted in
@@ -618,5 +695,7 @@ int main() {
     test_retired_compact_opt_in_is_unknown();
     test_retired_route_handle_vectors_skip_by_length();
     test_retired_label_frames_are_unknown();
+    test_unknown_type_vectors_skip_by_length();
+    test_unknown_outer_type_keeps_the_link();
     return tr::testing::summary("fwd_fanout");
 }

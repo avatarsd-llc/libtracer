@@ -220,8 +220,9 @@ std::optional<std::string> packed_path_illegal(std::span<const std::byte> body) 
 
 /**
  * @brief Why a `FWD` is not a legal frame, or `nullopt` if it is — RFC-0004 §B's child order
- *        `{ op, dst, [FIELD], src, [kind] … }`, with a defined opcode and `kind ∈ {RESULT,
- *        ERROR}` REQUIRED on a `REPLY`.
+ *        `{ op, dst, [FIELD], src, [kind] … }`, with a defined opcode in the raw `op` byte, a
+ *        non-empty `src` on a `READ` or `AWAIT`, and `kind ∈ {RESULT, ERROR}` REQUIRED on a
+ *        `REPLY`.
  *
  * Deliberately the HEAD only: what follows `src` (payload, `await_timeout`, the reverse list)
  * is op- and flag-dependent and already parsed by the terminus; the head is what every
@@ -234,10 +235,11 @@ std::optional<std::string> fwd_illegal(const tlv_t& t) {
         return c.type == type_t::VALUE && !c.opt.pl && c.payload.size() == 1;
     };
     if (ch.empty() || !is_u8_value(ch[0])) return "FWD's first child is not a u8 VALUE op";
-    const auto opcode = static_cast<std::uint8_t>(std::to_integer<std::uint8_t>(ch[0].payload[0]) &
-                                                  tr::graph::kFwdOpcodeMask);
+    // The RAW byte: bits 7-6 are reserved and MUST be zero (RFC-0029 §5.3), so a set bit names
+    // no operation, as the terminus reads it. Only a forwarder masks.
+    const auto opcode = std::to_integer<std::uint8_t>(ch[0].payload[0]);
     if (opcode > static_cast<std::uint8_t>(tr::graph::fwd_op_t::REPLY))
-        return "FWD op names no defined operation (RFC-0004 §B)";
+        return "FWD op names no defined operation, or sets a reserved bit (RFC-0004 §B)";
     // `dst` and `src` MAY each be a `PATH_REF` (RFC-0024 §9.1's amendment of RFC-0004 §B).
     const auto is_address = [](const tlv_t& c) {
         return c.type == type_t::PATH || c.type == type_t::PATH_REF;
@@ -247,6 +249,11 @@ std::optional<std::string> fwd_illegal(const tlv_t& t) {
     ++i;
     if (i < ch.size() && ch[i].type == type_t::FIELD) ++i;
     if (i >= ch.size() || !is_address(ch[i])) return "FWD src is missing or not a PATH / PATH_REF";
+    // A zero-length `src` asks for no reply, and only a WRITE may (RFC-0004 Amendment 2).
+    if ((opcode == static_cast<std::uint8_t>(tr::graph::fwd_op_t::READ) ||
+         opcode == static_cast<std::uint8_t>(tr::graph::fwd_op_t::AWAIT)) &&
+        ch[i].payload.empty() && ch[i].children.empty())
+        return "FWD READ / AWAIT has a zero-length src (RFC-0004 Amendment 2)";
     ++i;
     if (opcode != static_cast<std::uint8_t>(tr::graph::fwd_op_t::REPLY)) return std::nullopt;
     if (i >= ch.size() || !is_u8_value(ch[i]))

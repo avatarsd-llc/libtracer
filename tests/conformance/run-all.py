@@ -79,6 +79,35 @@ def run_harness(name: str, cmd: list[str], vectors_dir: Path) -> dict[str, bool]
     return results
 
 
+HEX_BLOCK = re.compile(r"```[a-z]*\n(.*?)```", re.S)
+
+
+def stale_hex_dumps(vectors_dir: Path, vectors: list[str]) -> list[str]:
+    """The vectors whose description.md carries a bare hex dump (a fenced block of hex digits
+    and whitespace only) that differs from the case's input.bin or reject.bin (#2731).
+
+    The .bin file is the vector; the dump is its human copy. Annotated byte breakdowns are
+    prose, not dumps, and are not compared."""
+    stale = []
+    for v in vectors:
+        case = vectors_dir / v
+        md = case / "description.md"
+        if not md.exists():
+            continue
+        bins = [case / n for n in ("input.bin", "reject.bin") if (case / n).exists()]
+        data = bins[0].read_bytes()
+        # An odd-length block cannot be a byte dump, so it is skipped. A block of decimal
+        # digits only (a count, a year) also matches the hex class and is compared as a dump:
+        # no description carries one today, and a new one fails here loudly, not silently.
+        for block in HEX_BLOCK.findall(md.read_text(encoding="utf-8")):
+            digits = re.sub(r"\s", "", block)
+            if re.fullmatch(r"[0-9A-Fa-f]+", digits) and len(digits) % 2 == 0:
+                if bytes.fromhex(digits) != data:
+                    stale.append(v)
+                    break
+    return stale
+
+
 def main() -> int:
     reg = json.loads(REGISTRY.read_text())
     vectors_dir = (REPO / reg["vectors_dir"]).resolve()
@@ -134,6 +163,12 @@ def main() -> int:
         gate_ok = False
     for n, note in pending:
         print(f"  {n}: pending (disabled) — {note}")
+
+    stale = stale_hex_dumps(vectors_dir, vectors)
+    for v in stale:
+        print(f"  {v}: description.md hex dump differs from its .bin file")
+    if stale:
+        gate_ok = False
 
     # --- coverage audit (non-gating report; ADR-0028 / #60 coverage half) ---
     audit = HERE / "coverage_audit.py"

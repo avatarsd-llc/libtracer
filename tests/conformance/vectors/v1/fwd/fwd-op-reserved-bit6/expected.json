@@ -1,0 +1,13 @@
+{
+  "name": "fwd-op-reserved-bit6",
+  "category": "fwd",
+  "hex": "0F402200010001004006000C000673656E736F720474656D7006000900087265706C792D6570",
+  "total_bytes": 38,
+  "malformed_input": true,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=0x40, dst=/sensor/temp, src=/reply-ep } — op byte 0x40: reserved bit 6 set. Bits 7-6 of the op byte are reserved and MUST be zero (annex 05; RFC-0029 §5.3). The reference terminus answers ERROR{tr::schema::type_mismatch} (0x0030) along src (#904, #2245); that answer is implementation behaviour, not normative text.",
+    "note": "Not a reject.bin case: the frame decodes, and a forwarder masks the op byte (op & 0x3F) and routes it on unchanged. The refusal is the terminus's. See description.md."
+  }
+}

@@ -103,6 +103,17 @@ void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
 
 using tr::testing::b_fwd;
 
+/** @brief The raw bytes of a file — a conformance vector's `input.bin`. */
+std::vector<std::byte> read_file(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+    std::vector<std::byte> out(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i)
+        out[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
+    return out;
+}
+
 /**
  * @brief Arena-decode + resolve (ADR-0041): mirrors fwd_router_t's terminus wiring — decode_into
  *        from the (default) resource, resolve over the arena.
@@ -363,6 +374,22 @@ void test_await_field_selector_is_enotty() {
               "AWAIT :stats.mem.control -> ERROR (the census READS fine; the await does not)");
         check(status_error_code(r.children[4]) == 0x0031 /*tr::schema::not_found*/,
               "... SCHEMA_NOT_FOUND, never flow::timeout — a counter can never wake a wait");
+    }
+
+    // The `fwd/fwd-await-field-not-found` conformance vector's own bytes (#2731): the same
+    // :stats.mem.control selector, with no await_timeout, refused before any wait.
+    {
+        const auto f = read_file(std::filesystem::path{LIBTRACER_VECTORS_DIR} / "fwd" /
+                                 "fwd-await-field-not-found" / "input.bin");
+        auto reply = tr::testing::with_expiry(
+            g, 0, [&] { return resolve_bytes(resolver, f); }, &tr::testing::end_every_await);
+        check(reply.has_value(), "the fwd-await-field-not-found vector resolves");
+        if (reply) {
+            const auto d = decode_reply(*reply);
+            check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR) &&
+                      status_error_code(d.tlv.children[4]) == 0x0031 /*tr::schema::not_found*/,
+                  "... and answers ERROR{SCHEMA_NOT_FOUND}, as the vector says");
+        }
     }
 
     // CONTROL — passes with or without the fix. Ordinary await must still time out.
@@ -949,16 +976,6 @@ void test_store_ref_concurrent() {
     check(rd.has_value(), "vertex still reads cleanly after the churn");
 }
 
-std::vector<std::byte> read_file(const std::filesystem::path& p) {
-    std::ifstream f(p, std::ios::binary);
-    const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
-                                std::istreambuf_iterator<char>());
-    std::vector<std::byte> out(raw.size());
-    for (std::size_t i = 0; i < raw.size(); ++i)
-        out[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
-    return out;
-}
-
 void test_wildcard_and_not_local() {
     std::printf("[*] on a data target -> INVALID_PATH; dst not local -> NOT_FOUND:\n");
     graph_t g;
@@ -1035,6 +1052,20 @@ void test_undefined_opcode_answers_addressed_error() {
               "undefined opcode => kind=ERROR");
         check(status_error_code(r.children[4]) == 0x0030 /*tr::schema::type_mismatch*/,
               "... and the code is schema::type_mismatch (the format's unknown-code verdict)");
+    }
+
+    // The `fwd/fwd-op-*` conformance vectors' own bytes (#2731): opcode 4, and READ with
+    // reserved bit 6 or bit 7 set, answer the same addressed ERROR.
+    for (const char* name : {"fwd-op-undefined", "fwd-op-reserved-bit6", "fwd-op-reserved-bit7"}) {
+        const auto f =
+            read_file(std::filesystem::path{LIBTRACER_VECTORS_DIR} / "fwd" / name / "input.bin");
+        auto reply = resolve_bytes(resolver, f);
+        check(reply.has_value(), "the fwd-op vector produced a REPLY");
+        if (!reply) continue;
+        const auto d = decode_reply(*reply);
+        check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR) &&
+                  status_error_code(d.tlv.children[4]) == 0x0030 /*tr::schema::type_mismatch*/,
+              "... ERROR{schema::type_mismatch}, as the vector says");
     }
 
     // CONTROL — a plain defined opcode is untouched.

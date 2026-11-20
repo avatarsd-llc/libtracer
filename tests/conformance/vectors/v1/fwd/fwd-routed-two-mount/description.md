@@ -50,5 +50,5 @@ segment costs `1 + len` rather than `4 + len`.
 Per [HARNESS.md](../../../../HARNESS.md), a vector gates the **codec** only: the harness contract is `encode(decode(input.bin)) == input.bin`, and a static fixture routes nothing. The hop-by-hop consumption above is a *behavioural* claim, so it is bound where it can be false — `core/tests/fwd_two_mount_test.cpp`, which drives three in-process `fwd_router_t` nodes chained by loopback link pairs through the production `transport_vertex_t` wiring and asserts both `strip_k` values and the terminus delivery.
 
 ```
-0f405700010001000006403e00020003006e65740200060075706c696e6b0200010062020003006e65740200060075706c696e6b02000100630200060073656e736f720200040074656d7006400c00020008007265706c792d6570
+0f403c00010001000006002600036e65740675706c696e6b0162036e65740675706c696e6b01630673656e736f720474656d7006000900087265706c792d6570
 ```

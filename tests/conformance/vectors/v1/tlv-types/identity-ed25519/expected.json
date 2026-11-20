@@ -1,0 +1,12 @@
+{
+  "name": "identity-ed25519",
+  "category": "tlv-types",
+  "hex": "0B403800020004006B696E640100010001020003006B657901002000000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F",
+  "total_bytes": 60,
+  "decoded": {
+    "type": "0x0B SETTINGS",
+    "structured": true,
+    "meaning": "The node-identity record served by read <vertex>:identity (reference/05 §:identity): SETTINGS{ NAME \"kind\" VALUE u8=0x01 (ed25519), NAME \"key\" VALUE <32 bytes> }, the 60-byte ed25519 form. The key is the recognisable 00..1F, not a real public key.",
+    "note": "Structured TLV, opt.PL=1, no trailers (at-rest form)."
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "truncated-length-max-u16",
+  "category": "framing",
+  "hex": "0100FFFFAA",
+  "total_bytes": 5,
+  "reject": "FRAME_TRUNCATED",
+  "decoded": null,
+  "meaning": "A VALUE with LL=0 whose u16 length is 0xFFFF, the largest the short form can declare, followed by one byte. 65535 bytes is below the recommended 16 MiB MAX_TLV_BYTES, so the frame is short, not oversize: tr::frame::truncated (docs/reference/01-data-format.md §Truncation handling). A successful decode of this frame is a conformance FAILURE."
+}

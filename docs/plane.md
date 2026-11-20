@@ -354,19 +354,19 @@ behaviour with no wire bytes has no vector and belongs in your own test suite.
 | Timestamp trailer | [annex 01 §Timestamp form](reference/01-data-format.md#timestamp-form) | `crc/value-ts-abs-crc32c`, `tlv-types/value-ts-abs`, `framing/relative-ts-nested` |
 | Reserved `opt` bits refused | [annex 01 §Handling unknown type codes](reference/01-data-format.md#handling-unknown-type-codes) | `framing/reserved-bit0-reject`, `framing/reserved-bit7-reject` |
 | Iterative parse | [annex 01 §Iterative parsing](reference/01-data-format.md#iterative-parsing-requirement) | `framing/opt-all-bits-nested` |
-| Truncated or invalid frame | [annex 01 §Truncation](reference/01-data-format.md#truncation-handling) | missing: [#2731](https://github.com/avatarsd-llc/libtracer/issues/2731) |
-| Unknown type codes skipped | [annex 01 §Handling unknown type codes](reference/01-data-format.md#handling-unknown-type-codes) | missing: [#2731](https://github.com/avatarsd-llc/libtracer/issues/2731) |
+| Truncated or invalid frame | [annex 01 §Truncation](reference/01-data-format.md#truncation-handling) | `framing/truncated-length-overrun`, `framing/truncated-length-max-u16`, `framing/type-zero-reject`; an oversize `length`: [#2885](https://github.com/avatarsd-llc/libtracer/issues/2885) |
+| Unknown type codes skipped | [annex 01 §Handling unknown type codes](reference/01-data-format.md#handling-unknown-type-codes) | `tlv-types/unknown-core-type-outer`, `tlv-types/unknown-core-type-nested` |
 | Retired codes answered | [annex 05 §Reserved range](reference/05-protocol-tlvs.md#reserved-range-0x0f--0x1f) | `tlv-types/retired-route-handle-advertise`, `-compact`, `-handle-nack` |
 | Core TLV payloads | [annex 05](reference/05-protocol-tlvs.md) | `tlv-types/*` |
 | Canonical `PATH` | [annex 03 §Path syntax](reference/03-addressing.md#path-syntax) | `path/path-sensor-temp`, `path/path-deep-255-packed`, `path/path-reserved-brackets` |
 | Stepping over PAIR records | [annex 05 §`0x06`](reference/05-protocol-tlvs.md#0x06--path) | `path/element-pair-encode`, `path/element-pair-bad-len`, `path/path-record-overruns-body` |
 | `FWD` head | [annex 05 §Reserved range](reference/05-protocol-tlvs.md#reserved-range-0x0f--0x1f) | `fwd/fwd-read`, `fwd/fwd-write-value`, `fwd/fwd-await-timeout`, `fwd/fwd-reply-result` |
-| `op` masking and reserved bits | [annex 05 §Reserved range](reference/05-protocol-tlvs.md#reserved-range-0x0f--0x1f) | missing: [#2731](https://github.com/avatarsd-llc/libtracer/issues/2731) |
+| `op` masking and reserved bits | [annex 05 §Reserved range](reference/05-protocol-tlvs.md#reserved-range-0x0f--0x1f) | `fwd/fwd-op-undefined`, `fwd/fwd-op-reserved-bit6`, `fwd/fwd-op-reserved-bit7` |
 | `FIELD` selector | [annex 05 §Reserved range](reference/05-protocol-tlvs.md#reserved-range-0x0f--0x1f) | `field/field-scalar`, `field/field-indexed`, `field/field-append`, `field/field-nested`, `field/field-wildcard` |
 | Replies and errors | [§Error registry](reference/05-protocol-tlvs.md#error-registry-trconcepterror) | `errors/*`, `fwd/fwd-reply-error`, `fwd/reply-error-bare-ignored` |
-| Unacknowledged write | [annex 05 §Reserved range](reference/05-protocol-tlvs.md#reserved-range-0x0f--0x1f) | missing: [#2731](https://github.com/avatarsd-llc/libtracer/issues/2731) |
+| Unacknowledged write | [annex 05 §Reserved range](reference/05-protocol-tlvs.md#reserved-range-0x0f--0x1f) | `fwd/fwd-write-unacknowledged`, `fwd/fwd-read-empty-src` |
 | Unoffered field | [annex 03 §Field-path resolution](reference/03-addressing.md#field-path-resolution) | `settings/removed-knob`, `settings/delivery-mode-not-found` |
-| `await` with a `:field` refused | [annex 05 §`:stats`](reference/05-protocol-tlvs.md#the-seam-census-record--stats) | missing: [#2731](https://github.com/avatarsd-llc/libtracer/issues/2731) |
+| `await` with a `:field` refused | [annex 05 §`:stats`](reference/05-protocol-tlvs.md#the-seam-census-record--stats) | `fwd/fwd-await-field-not-found` |
 | Path handles | [v1 §3.1](spec/v1.md#31-static-path-handle-conformance) | `path/path-sensor-temp` for the bytes; no wire bytes for the API |
 | Delivery stops at the target | [annex 05 §`0x04`](reference/05-protocol-tlvs.md#0x04--subscriber) | no wire bytes |
 
@@ -382,7 +382,7 @@ Each row is all-or-nothing: if you offer it, its rules apply.
 | ACL | the link is not trusted | [annex 05 §`0x0A`](reference/05-protocol-tlvs.md#0x0a--acl) | `acl/*` |
 | Self-description | strangers should integrate it | [annex 05 §`0x07`](reference/05-protocol-tlvs.md#0x07--point) | `tlv-types/point-schema-app`, `schema/*` |
 | Settings and counters | you expose app properties or seam counts | [annex 05 §`0x0B`](reference/05-protocol-tlvs.md#0x0b--settings) | `settings/*` |
-| `:identity` | peers should pin a key | [annex 05 §`:identity`](reference/05-protocol-tlvs.md#the-node-identity-record--identity) | missing: [#2731](https://github.com/avatarsd-llc/libtracer/issues/2731) |
+| `:identity` | peers should pin a key | [annex 05 §`:identity`](reference/05-protocol-tlvs.md#the-node-identity-record--identity) | `tlv-types/identity-ed25519` |
 | Creation | peers may create vertices or connections | [annex 05 §`0x0E`](reference/05-protocol-tlvs.md#0x0e--spec) | `spec/*`, `conn/*` |
 | `BATCH` records | you send many samples at once | [annex 05 §User range](reference/05-protocol-tlvs.md#user-range-0x80--0xff) | `stream/*` |
 | Noise link | the link needs encryption | [annex 23](reference/23-noise-link-binding.md) | `noise/nnpsk0-appendix-a`; first and transport messages missing: [#2424](https://github.com/avatarsd-llc/libtracer/issues/2424), [#2402](https://github.com/avatarsd-llc/libtracer/issues/2402) |

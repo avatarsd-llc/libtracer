@@ -1,0 +1,12 @@
+{
+  "name": "fwd-write-unacknowledged",
+  "category": "fwd",
+  "hex": "0F402100010001000106000C000673656E736F720474656D700600000001000400D2040000",
+  "total_bytes": 37,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=WRITE, dst=/sensor/temp, src=<zero-length PATH>, payload=VALUE u32=1234 } — the unacknowledged write (RFC-0004 Amendment 2): the terminus applies it and emits no frame, on success, refusal and denial alike.",
+    "note": "The src child is present and empty, never omitted (the child run is positional). See description.md."
+  }
+}

@@ -44,7 +44,10 @@
 #include <cstdio>
 #include <cstring>
 #include <expected>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -505,6 +508,58 @@ void unacked_stream_is_not_a_drop() {
     check(link.count() == 1, "  control: and is answered from the stack");
 }
 
+/** @brief The raw bytes of a conformance vector's `input.bin`. */
+std::vector<std::byte> vector_bytes(std::string_view case_dir) {
+    std::ifstream f(std::filesystem::path{LIBTRACER_VECTORS_DIR} / case_dir / "input.bin",
+                    std::ios::binary);
+    const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+    std::vector<std::byte> out(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i)
+        out[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
+    return out;
+}
+
+/**
+ * @brief The `fwd/fwd-write-unacknowledged` and `fwd/fwd-read-empty-src` conformance vectors'
+ *        own bytes (#2731), each against a positive control with a wired `src`.
+ */
+void test_conformance_vectors() {
+    std::printf("the fwd-write-unacknowledged / fwd-read-empty-src vectors:\n");
+    graph_t graph;
+    fwd_router_t router{graph};
+    rec_link_t link;
+    (void)router.attach_link("cli", link);
+    const vertex_handle_t v =
+        graph.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    (void)graph.write(v, make_value(b_value_u32(kSeed)));
+    (void)link.drain();
+
+    const std::vector<std::byte> write = vector_bytes("fwd/fwd-write-unacknowledged");
+    const std::vector<std::byte> read = vector_bytes("fwd/fwd-read-empty-src");
+    const auto wdec = tr::wire::decode(write);
+    const auto rdec = tr::wire::decode(read);
+    check(write.size() == 37 && wdec && wdec->type == tr::wire::type_t::FWD,
+          "  the unacknowledged-write vector loads: a 37-byte FWD");
+    check(read.size() == 29 && rdec && rdec->type == tr::wire::type_t::FWD,
+          "  the empty-src READ vector loads: a 29-byte FWD");
+
+    router.on_frame("cli", write);
+    check(stored_u32(graph, v) == 1234u, "  the unacknowledged write was APPLIED");
+    check(link.count() == 0, "  and ZERO frames were emitted");
+
+    router.on_frame("cli", read);
+    check(link.count() == 0, "  the empty-src READ: ZERO frames emitted");
+
+    // Controls: the same frames with a one-segment `src` each draw exactly one reply.
+    router.on_frame("cli", b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_src_wired(), {},
+                                 b_value_u32(kLoud)));
+    check(stored_u32(graph, v) == kLoud && link.count() == 1,
+          "  control: a wired-src WRITE applies and DOES draw one reply");
+    router.on_frame("cli", b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_src_wired()));
+    check(link.count() == 2, "  control: a wired-src READ DOES answer");
+}
+
 }  // namespace
 
 int main() {
@@ -517,5 +572,6 @@ int main() {
     unknown_dst_dropped_silently();
     payloadless_write_dropped_silently();
     unacked_stream_is_not_a_drop();
+    test_conformance_vectors();
     return tr::testing::summary("empty_src_unacked");
 }

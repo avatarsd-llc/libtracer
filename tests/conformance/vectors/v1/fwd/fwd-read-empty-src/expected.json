@@ -1,0 +1,13 @@
+{
+  "name": "fwd-read-empty-src",
+  "category": "fwd",
+  "hex": "0F401900010001000006000C000673656E736F720474656D7006000000",
+  "total_bytes": 29,
+  "malformed_input": true,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=READ, dst=/sensor/temp, src=<zero-length PATH> } — a READ that asks for an answer and wires no route for it. Malformed (RFC-0004 Amendment 2): the terminus drops it and emits no frame.",
+    "note": "Not a reject.bin case: the frame decodes, and only a terminus can tell a READ from a WRITE. See description.md."
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "fwd-await-field-not-found",
+  "category": "fwd",
+  "hex": "0F404100010001000206000C000673656E736F720474656D7010401B00020005007374617473020003006D656D02000700636F6E74726F6C06000900087265706C792D6570",
+  "total_bytes": 69,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "field": ":stats.mem.control",
+    "meaning": "FWD{ op=AWAIT, dst=/sensor/temp, FIELD :stats.mem.control, src=/reply-ep } — an AWAIT with a FIELD selector. No field is awaitable, so the terminus answers ERROR{tr::schema::not_found} (0x0031) and never waits (reference/05 §:stats).",
+    "note": "A legal frame: the refusal is the terminus's, not the codec's. See description.md."
+  }
+}
