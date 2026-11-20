@@ -434,7 +434,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
     target_link_libraries(httpd_ws_teardown_test PRIVATE libtracer)
     # The fake's socket layer interposes the ONE ::send the link's send override does
     # (see the send-stall target below); every target that links fake_httpd.cpp needs it.
-    target_link_options(httpd_ws_teardown_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    target_link_options(httpd_ws_teardown_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_teardown_test)
     add_test(NAME httpd_ws_teardown COMMAND httpd_ws_teardown_test)
     # Several cases here PROVE a deliberate leak (a teardown that cannot retire the
@@ -467,7 +467,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
     # to the real syscall, so nothing else in the binary changes behaviour. `shutdown` is
     # interposed on the same rule: it is the link's forced close, and the only close path
     # that does not ride the control socket a jammed queue starves.
-    target_link_options(httpd_ws_send_stall_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    target_link_options(httpd_ws_send_stall_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_send_stall_test)
     add_test(NAME httpd_ws_send_stall COMMAND httpd_ws_send_stall_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent the
@@ -490,7 +490,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_session_identity_test PRIVATE libtracer)
     target_link_options(httpd_ws_session_identity_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+        "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_session_identity_test)
     add_test(NAME httpd_ws_session_identity COMMAND httpd_ws_session_identity_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
@@ -514,7 +514,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
             "${CMAKE_CURRENT_SOURCE_DIR}")
         target_link_libraries(httpd_ws_departure_cost_test PRIVATE libtracer)
         target_link_options(httpd_ws_departure_cost_test PRIVATE
-            "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+            "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
         libtracer_test_warnings(httpd_ws_departure_cost_test)
         add_test(NAME httpd_ws_departure_cost COMMAND httpd_ws_departure_cost_test)
         # An adopted link keeps its handler gate BY DESIGN while the server lists a WebSocket
@@ -538,7 +538,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
             "${CMAKE_CURRENT_SOURCE_DIR}")
         target_link_libraries(httpd_ws_session_subject_test PRIVATE libtracer)
         target_link_options(httpd_ws_session_subject_test PRIVATE
-            "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+            "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
         libtracer_test_warnings(httpd_ws_session_subject_test)
         add_test(NAME httpd_ws_session_subject COMMAND httpd_ws_session_subject_test)
         set_tests_properties(httpd_ws_session_subject
@@ -560,7 +560,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_close_peer_test PRIVATE libtracer)
-    target_link_options(httpd_ws_close_peer_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    target_link_options(httpd_ws_close_peer_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_close_peer_test)
     add_test(NAME httpd_ws_close_peer COMMAND httpd_ws_close_peer_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
@@ -583,7 +583,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_peer_tx_test PRIVATE libtracer)
-    target_link_options(httpd_ws_peer_tx_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    target_link_options(httpd_ws_peer_tx_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_peer_tx_test)
     add_test(NAME httpd_ws_peer_tx COMMAND httpd_ws_peer_tx_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
@@ -607,7 +607,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_tx_large_class_test PRIVATE libtracer)
     target_link_options(httpd_ws_tx_large_class_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+        "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_tx_large_class_test)
     add_test(NAME httpd_ws_tx_large_class COMMAND httpd_ws_tx_large_class_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
@@ -630,7 +630,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_alloc_softfail_test PRIVATE libtracer)
     target_link_options(httpd_ws_alloc_softfail_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+        "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_alloc_softfail_test)
     add_test(NAME httpd_ws_alloc_softfail COMMAND httpd_ws_alloc_softfail_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and most
@@ -653,7 +653,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_rx_owned_test PRIVATE libtracer)
     target_link_options(httpd_ws_rx_owned_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+        "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_rx_owned_test)
     add_test(NAME httpd_ws_rx_owned COMMAND httpd_ws_rx_owned_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
@@ -675,7 +675,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_in_call_reply_test PRIVATE libtracer)
     target_link_options(httpd_ws_in_call_reply_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+        "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_in_call_reply_test)
     add_test(NAME httpd_ws_in_call_reply COMMAND httpd_ws_in_call_reply_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
@@ -698,7 +698,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_fanout_alloc_test PRIVATE libtracer)
     target_link_options(httpd_ws_fanout_alloc_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+        "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_fanout_alloc_test)
     add_test(NAME httpd_ws_fanout_alloc COMMAND httpd_ws_fanout_alloc_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
@@ -723,7 +723,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_eviction_lock_test PRIVATE libtracer)
     target_link_options(httpd_ws_eviction_lock_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+        "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_eviction_lock_test)
     add_test(NAME httpd_ws_eviction_lock COMMAND httpd_ws_eviction_lock_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
@@ -746,7 +746,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_keepalive_test PRIVATE libtracer)
     target_link_options(httpd_ws_keepalive_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown" "-Wl,--wrap=setsockopt")
+        "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown" "-Wl,--wrap=setsockopt")
     libtracer_test_warnings(httpd_ws_keepalive_test)
     add_test(NAME httpd_ws_keepalive COMMAND httpd_ws_keepalive_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
@@ -770,7 +770,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
     target_link_libraries(httpd_ws_admission_test PRIVATE libtracer)
     # The fake's socket layer interposes the ONE ::send the link's send override does;
     # every target that links fake_httpd.cpp needs it.
-    target_link_options(httpd_ws_admission_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    target_link_options(httpd_ws_admission_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_admission_test)
     add_test(NAME httpd_ws_admission COMMAND httpd_ws_admission_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
@@ -794,7 +794,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
     target_link_libraries(httpd_ws_auth_test PRIVATE libtracer)
     # The close path writes a CLOSE frame and then shuts the socket down, so this suite needs
     # both interpositions the fake's socket layer provides.
-    target_link_options(httpd_ws_auth_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    target_link_options(httpd_ws_auth_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_auth_test)
     add_test(NAME httpd_ws_auth COMMAND httpd_ws_auth_test)
     # Every case constructs an adopting link, whose teardown leaks the handler gate BY
@@ -813,7 +813,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_counters_test PRIVATE libtracer)
-    target_link_options(httpd_ws_counters_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    target_link_options(httpd_ws_counters_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_counters_test)
     add_test(NAME httpd_ws_counters COMMAND httpd_ws_counters_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent); every
@@ -835,7 +835,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         CONFIG_LIBTRACER_LINK_TRAFFIC_STATS=1)
     target_link_libraries(httpd_ws_counters_traffic_stats_test PRIVATE libtracer)
     target_link_options(httpd_ws_counters_traffic_stats_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+        "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_counters_traffic_stats_test)
     add_test(NAME httpd_ws_counters_traffic_stats COMMAND httpd_ws_counters_traffic_stats_test)
     set_tests_properties(httpd_ws_counters_traffic_stats
@@ -854,7 +854,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_drain_budget_test PRIVATE libtracer)
-    target_link_options(httpd_ws_drain_budget_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown"
+    target_link_options(httpd_ws_drain_budget_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown"
                         "-Wl,--wrap=setsockopt")
     libtracer_test_warnings(httpd_ws_drain_budget_test)
     add_test(NAME httpd_ws_drain_budget COMMAND httpd_ws_drain_budget_test)
@@ -883,7 +883,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_adopted_host_test PRIVATE libtracer)
     target_link_options(httpd_ws_adopted_host_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+        "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_adopted_host_test)
     add_test(NAME httpd_ws_adopted_host COMMAND httpd_ws_adopted_host_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and most

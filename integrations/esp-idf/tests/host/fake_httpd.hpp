@@ -220,8 +220,8 @@ class server_t {
      *
      * The counter answers "did a send happen"; the auth exchange needs "what did it say",
      * because a close CODE is the whole observable distinguishing a refused credential from
-     * an expired deadline (#1184). Recorded only for frames that fully succeeded, which is
-     * the same event @ref note_sent marks.
+     * an expired deadline (#1184). Parsed from @ref wire, so a frame is recorded once every
+     * byte of it is on the wire, whichever write put the last one there.
      */
     struct sent_frame_t {
         int fd = -1;                                 /**< @brief Destination socket. */
@@ -232,8 +232,6 @@ class server_t {
     [[nodiscard]] std::vector<sent_frame_t> sent_frames() const;
     /** @brief Forget the recorded frames (not the @ref frames_sent counter). */
     void clear_sent_frames();
-    /** @brief Record one successfully-sent frame — called by the fake's send-frame API. */
-    void note_sent_frame(int fd, httpd_ws_type_t type, const void* payload, std::size_t len);
 
     /**
      * @brief Script what @p fd's socket writes do, one entry per write; the LAST entry
@@ -242,11 +240,10 @@ class server_t {
      * The only lever #835 needs from the socket layer: a peer whose window is full
      * (TIMEOUT), a peer whose window drains mid-frame (SHORT), and a healthy one (FULL).
      *
-     * One entry is one WRITE, and one frame is TWO writes — header then payload, as
-     * `httpd_ws_send_frame_async` does it (an empty frame is header-only, so one). A
-     * script of `{FULL, TIMEOUT}` therefore stages a frame ANNOUNCED on the wire and then
-     * abandoned, which is a different fault from `{TIMEOUT}` — a frame that never started
-     * (#951). Counting writes per frame is what makes the two expressible at all.
+     * One entry is one WRITE, and one frame of the link's is ONE write, header and payload
+     * gathered (#2891). A frame ANNOUNCED on the wire and then abandoned is a `SHORT` write,
+     * or a frame a non-blocking flush left part-way whose rest then fails; a `{TIMEOUT}` is
+     * a frame that never started (#951).
      */
     void set_send_script(int fd, std::vector<send_result_t> script);
     /** @brief How many socket writes @p fd has taken, whatever they returned. */
@@ -256,9 +253,7 @@ class server_t {
      *        PEER would parse.
      *
      * A short write records only its accepted prefix, which is exactly what makes a torn
-     * frame visible here. The headers of frames written through `httpd_ws_send_frame_async`
-     * are recorded as the fake writes them (zeroes); a link that encodes its own header (the
-     * retained send, RFC-0028 §6.9) is recorded byte-exact.
+     * frame visible here. Every header is recorded byte-exact.
      */
     [[nodiscard]] std::vector<std::byte> wire(int fd) const;
     /** @brief Forget @p fd's recorded byte stream. */
@@ -284,7 +279,6 @@ class server_t {
     esp_err_t trigger_close(int fd);
     [[nodiscard]] httpd_ws_client_info_t fd_info(int fd);
     esp_err_t client_list(std::size_t* fds, int* client_fds);
-    void note_sent();
     /**
      * @brief Refuse further enqueues unconditionally — `cs_send_to_ctrl_sock` returning
      *        < 0, which `httpd_queue_work` maps to `ESP_FAIL`.
@@ -364,6 +358,7 @@ class server_t {
     std::map<int, std::size_t> writes_;
     std::map<int, std::size_t> waited_;          /**< @brief See @ref waited_writes. */
     std::map<int, std::vector<std::byte>> wire_; /**< @brief See @ref wire. */
+    std::map<int, std::size_t> parsed_; /**< @brief Wire bytes already parsed into frames. */
     bool queue_refusing_ = false;
     std::atomic<bool> sustained_ingress_{false}; /**< @brief See set_sustained_ingress. */
     std::size_t queue_cap_ = 0;           /**< @brief 0 = unbounded; see set_queue_capacity. */
