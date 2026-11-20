@@ -250,7 +250,7 @@ std::array<std::byte, 64> payload(std::uint8_t seed) {
 }
 
 /**
- * @brief The socket takes the header and half the payload, then nothing (the re-post that a
+ * @brief The socket takes half the frame, then nothing (the re-post that a
  *        partial write makes finds it full). A blocking write would have counted that as the
  *        #951 desync and condemned the session; a non-blocking one owes the rest, and writes
  *        it before the next frame.
@@ -262,20 +262,20 @@ void test_a_part_written_frame_is_finished_first() {
     drain();
     const auto a = payload(0x10);
     const auto b = payload(0x80);
-    fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL, send_result_t::SHORT,
-                                                      send_result_t::TIMEOUT, send_result_t::FULL});
+    fake_httpd::instance().set_send_script(
+        kStalled, {send_result_t::SHORT, send_result_t::TIMEOUT, send_result_t::FULL});
     fake_httpd::instance().clear_wire(kStalled);
     link->send(std::span<const std::byte>(a));
     drain();
-    check_eq(fake_httpd::instance().wire(kStalled).size(), 2 + a.size() / 2,
-             "the header and half the payload are on the wire");
+    check_eq(fake_httpd::instance().wire(kStalled).size(), (2 + a.size()) / 2,
+             "half the frame, header and payload in one write, is on the wire");
     check(fake_httpd::instance().has_session(kStalled), "and it is NOT a desync: still connected");
     link->send(std::span<const std::byte>(b));
     drain();
     const auto wire = fake_httpd::instance().wire(kStalled);
-    std::vector<std::byte> want(2, std::byte{0});  // the fake writes IDF's header as zeroes
+    std::vector<std::byte> want{std::byte{0x82}, std::byte{64}};  // FIN|BINARY, 64 B
     want.insert(want.end(), a.begin(), a.end());
-    want.insert(want.end(), 2, std::byte{0});
+    want.insert(want.end(), {std::byte{0x82}, std::byte{64}});
     want.insert(want.end(), b.begin(), b.end());
     check(wire == want, "the rest of A went out, then all of B: the stream still parses");
     check_eq(link->stats().sessions_condemned, 0, "no session was condemned");
@@ -294,8 +294,8 @@ void test_a_close_finishes_the_part_written_frame() {
     claim(kStalled);
     drain();
     const auto a = payload(0x20);
-    fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL, send_result_t::SHORT,
-                                                      send_result_t::TIMEOUT, send_result_t::FULL});
+    fake_httpd::instance().set_send_script(
+        kStalled, {send_result_t::SHORT, send_result_t::TIMEOUT, send_result_t::FULL});
     fake_httpd::instance().clear_wire(kStalled);
     link->send(std::span<const std::byte>(a));
     drain();
@@ -472,13 +472,12 @@ void test_a_quiet_producer_still_delivers_the_newest_frame() {
     claim(kHealthy);
     drain();
     const auto a = payload(0x40);
-    std::vector<std::byte> want(2, std::byte{0});  // the fake writes IDF's header as zeroes
+    std::vector<std::byte> want{std::byte{0x82}, std::byte{64}};  // FIN|BINARY, 64 B
     want.insert(want.end(), a.begin(), a.end());
 
     // (a) the socket takes a part on every pass: half, a quarter, an eighth, then the rest.
-    fake_httpd::instance().set_send_script(
-        kStalled, {send_result_t::FULL, send_result_t::SHORT, send_result_t::SHORT,
-                   send_result_t::SHORT, send_result_t::FULL});
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::SHORT, send_result_t::SHORT,
+                                                      send_result_t::SHORT, send_result_t::FULL});
     fake_httpd::instance().clear_wire(kStalled);
     {
         const std::span<const std::byte> one[] = {std::span<const std::byte>(a)};

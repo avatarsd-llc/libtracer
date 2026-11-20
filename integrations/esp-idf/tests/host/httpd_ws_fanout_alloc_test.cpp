@@ -336,14 +336,13 @@ void test_the_fanout_reaches_every_open_peer_exactly_once() {
              "the whole fan-out reached the wire");
     check_eq(link->enqueue_drops() - drops_before, 0,
              "and nothing was dropped: no link-wide depth to fall past (#2095)");
-    // Two writes per frame, not one: `httpd_ws_send_frame_async` puts a frame on the socket
-    // as a header write and a payload write (see fake_httpd's transcription of it).
+    // One write per frame: the link gathers header and payload into one `sendmsg` (#2891).
     for (std::size_t i = 0; i < open_fds.size(); ++i) {
         const std::size_t w = fake_httpd::instance().writes(open_fds[i]) - writes_before[i];
         char what[112];
         std::snprintf(what, sizeof(what), "peer fd=%d was written exactly one frame (%zu writes)",
                       open_fds[i], w);
-        check(w == 2, what);
+        check(w == 1, what);
     }
 
     reset(link);

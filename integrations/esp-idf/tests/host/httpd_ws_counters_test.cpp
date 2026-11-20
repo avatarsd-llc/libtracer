@@ -239,7 +239,7 @@ void test_condemn_is_counted() {
     tr::net::transport_t* const to = link->peer_link(routable);
     check(to != nullptr, "and a directed endpoint");
     fake_httpd::instance().set_send_script(
-        741, {fake_httpd::send_result_t::FULL, fake_httpd::send_result_t::FAIL});
+        741, {fake_httpd::send_result_t::SHORT, fake_httpd::send_result_t::FAIL});
     if (to != nullptr) {
         to->send(std::span<const std::byte>(kBody));
         drain();
@@ -268,11 +268,11 @@ void test_condemned_peer_leaves_the_facet() {
     // Condemn it WITHOUT letting httpd run its select loop — this is the whole gap. The
     // slot is dead and shut, but free_ctx has not run, so the slot is still occupied.
     fake_httpd::instance().set_send_script(
-        760, {fake_httpd::send_result_t::FULL, fake_httpd::send_result_t::FAIL});
+        760, {fake_httpd::send_result_t::SHORT, fake_httpd::send_result_t::FAIL});
     tr::net::transport_t* const to = link->peer_link(name);
     if (to != nullptr) {
         to->send(std::span<const std::byte>(kBody));
-        // EXACTLY ONE work item, and the count matters. That item is the flush whose
+        // EXACTLY the flush items, and the count matters. The last is the flush whose
         // cut-off frame condemns the peer; condemn() then enqueues httpd_sess_trigger_close
         // BEHIND it, and running that second item deletes the session, runs free_ctx ->
         // reclaim_slot, and clears `open` — closing the very gap under test.
@@ -281,9 +281,12 @@ void test_condemned_peer_leaves_the_facet() {
         // not by review: drain() reaped through reap_shut(), and a run_one() LOOP ran the
         // queued close. Each passed with the fix reverted, because by the time they
         // looked, the slot was no longer `open` and the `!dead` filter was irrelevant.
-        // One step leaves the session exactly where condemn() leaves it on silicon: shut
+        // Those steps leave the session exactly where condemn() leaves it on silicon: shut
         // and dead, still holding its slot, waiting for a select round that has not come.
+        // TWO items since a frame is one write (#2891): the first flush puts part of the
+        // frame on the socket and re-posts itself, the second meets the hard error.
         check(fake_httpd::instance().run_one(), "the queued send ran");
+        check(fake_httpd::instance().run_one(), "and its re-posted rest ran");
     }
     check(link->stats().sessions_condemned == 1, "the peer was condemned");
 
