@@ -200,10 +200,12 @@ path, which is why #2879 moved it to the table source.
 
 The arena does not draw from a throwing upstream. `core/src/graph.cpp:graph_t::write_branch` draws from the
 graph's injected table source (`core/include/libtracer/graph.hpp:graph_t::table_source`), whose default is the
-host slab pool over the platform heap, and **exhaustion is a value, not an abort**. `decode_into`
-reports a refused draw as `TLV_NESTING_TOO_DEEP` ("exceeds this receiver's decode resources",
-RFC-0006), and the write answers it as `BACKPRESSURE` and counts an `out_of_memory` delivery drop
-(#2879); a value the decode refuses for its shape stays `TYPE_MISMATCH`. A bounded node that
+host slab pool over the platform heap, and **exhaustion is a value**. `decode_into` reports a
+refused draw as `TLV_NESTING_TOO_DEEP` ("exceeds this receiver's decode resources", RFC-0006). A
+refused draw for the decode, the root key, the plan or the sites answers `BACKPRESSURE` and is
+counted once, as an `out_of_memory` delivery drop (#2879; the value flatten and vertex creation
+are not counted there); a value the decode refuses for its shape stays
+`TYPE_MISMATCH` and counts nothing. A bounded node that
 injects its own table source gets the arena drawn from that store. No node-counting pre-pass exists, and none is
 needed ([#477], [#588]).
 

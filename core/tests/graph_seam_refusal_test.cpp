@@ -408,10 +408,25 @@ std::vector<std::byte> branch_b_x() {
     return out;
 }
 
+/** @brief `POINT{NAME b, VALUE 0xCC, VALUE 0xCC}`: two VALUEs on one node, a shape refusal. */
+std::vector<std::byte> branch_two_values() {
+    using tr::wire::opt_t;
+    using tr::wire::type_t;
+    const std::byte cc{0xCC};
+    std::vector<std::byte> body;
+    tr::wire::emit_name(body, "b");
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&cc, 1));
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&cc, 1));
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, body);
+    return out;
+}
+
 /**
  * @brief A branch write: the decode arena, the root key, the plan and the landing sites all
- *        draw from the table source, not a stack array (#2879), and an exhausted decode
- *        refuses with BACKPRESSURE and a counted drop rather than TYPE_MISMATCH.
+ *        draw from the table source, not a stack array (#2879). A refused draw anywhere in it
+ *        answers BACKPRESSURE and is counted once; a shape refusal is TYPE_MISMATCH and counts
+ *        nothing.
  */
 void test_branch_write() {
     std::printf("branch write — decode arena, root key, plan, landing sites:\n");
@@ -438,6 +453,34 @@ void test_branch_write() {
     check(!r && r.error() == status_t::BACKPRESSURE,
           "an exhausted branch decode refuses with BACKPRESSURE, not TYPE_MISMATCH");
     check(g.delivery_drops().out_of_memory == oom0 + 1, "...and counts the drop");
+
+    // Every budget short of the write's need, whichever draw it stops at, counts exactly once.
+    std::size_t refused = 0;
+    bool counted_once = true;
+    bool fits = false;
+    for (std::size_t n = 0; n < 64; ++n) {
+        gate_source_t s;
+        graph_t gn{s};
+        const vertex_handle_t bn = setup(gn);
+        const std::uint64_t before = gn.delivery_drops().out_of_memory;
+        s.arm(n);
+        const auto rn = gn.write(bn, make_value(branch));
+        s.disarm();
+        fits = rn.has_value();
+        if (fits) break;
+        ++refused;
+        counted_once = counted_once && rn.error() == status_t::BACKPRESSURE &&
+                       gn.delivery_drops().out_of_memory == before + 1;
+    }
+    check(refused > 1 && counted_once,
+          "every refused draw answers BACKPRESSURE and counts out_of_memory once");
+    check(fits, "...and the first budget that covers the write lands it");
+
+    const std::uint64_t oom1 = g.delivery_drops().out_of_memory;
+    const auto shape = g.write(b, make_value(branch_two_values()));
+    check(!shape && shape.error() == status_t::TYPE_MISMATCH,
+          "a branch with two VALUEs on one node answers TYPE_MISMATCH");
+    check(g.delivery_drops().out_of_memory == oom1, "...and counts no out_of_memory drop");
 }
 
 /** @brief Retirement: the cleanup key, the moved-out slot tables and the seam park. */

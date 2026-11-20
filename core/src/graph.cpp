@@ -280,13 +280,15 @@ struct branch_node_t {
  * walk over wire-derived structure could overflow the call stack on a
  * deep-but-admitted frame.
  *
+ * Kept out of line (#2879): inlined, its open-node stack and locals would stay in
+ * write_branch's frame across the landing and fan-out below the parse.
+ *
  * @return Whether a VALUE lands anywhere in the tree, or the strict-shape error.
  */
-[[nodiscard]] result_t<bool> parse_branch_node(const wire::tlv_arena_t& a, std::uint32_t root,
-                                               const view::view_t& frame_view,
-                                               std::span<const std::byte> key,
-                                               mem::block_array_t<branch_node_t>& out,
-                                               mem::block_source_t& src) {
+[[gnu::noinline, nodiscard]] result_t<bool> parse_branch_node(
+    const wire::tlv_arena_t& a, std::uint32_t root, const view::view_t& frame_view,
+    std::span<const std::byte> key, mem::block_array_t<branch_node_t>& out,
+    mem::block_source_t& src) {
     /**
      * @brief One open POINT node: its arena index, the sibling cursor over its
      *        remaining children, its key, and the strict-shape accumulators.
@@ -2736,42 +2738,57 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
                                    ? status_t::BACKPRESSURE
                                    : status_t::TYPE_MISMATCH);
     }
-    // The decode and the plan draw their scratch from the injected table source, not a stack
-    // array (#2879): a write that never takes this path budgets no frame for it, and a bounded
-    // node's own store caps a branch tree as it caps every other table. Exhaustion is a
-    // resource event, so it refuses the write with BACKPRESSURE and counts the drop; a value
-    // the decode rejects for its shape stays TYPE_MISMATCH. `decode_into` reports a refused
-    // draw as TLV_NESTING_TOO_DEEP ("exceeds this receiver's decode resources", RFC-0006).
+    // The decode, the root key, the plan and the sites draw from the injected table source, not
+    // a stack array (#2879): a write that never takes this path budgets no frame for it, and a
+    // bounded node's own store caps a branch tree as it caps every other table. A refused draw
+    // for the decode, the root key, the plan or the sites answers BACKPRESSURE and is counted
+    // once as an out_of_memory drop; a value refused for its shape stays TYPE_MISMATCH and
+    // counts nothing. The flatten above draws from the durable value store, not this scratch,
+    // and vertex creation below is its own path: neither is counted here. `decode_into`
+    // reports a refused draw as TLV_NESTING_TOO_DEEP ("exceeds this receiver's decode
+    // resources", RFC-0006).
     mem::block_source_t& src = *tables_;
-    const std::expected<wire::tlv_arena_t, wire::err_t> arena =
-        wire::decode_into(head->bytes(), src);
-    if (!arena) {
-        const bool spent = arena.error() == wire::err_t::TLV_NESTING_TOO_DEEP;
-        count_drop(drop_reason_t::OUT_OF_MEMORY, std::uint64_t{spent});  // a shape refusal adds 0
-        return std::unexpected(spent ? status_t::BACKPRESSURE : status_t::TYPE_MISMATCH);
-    }
-    const wire::tlv_arena_t& a = *arena;
-
-    // The written tree is rooted AT `v`: render its full key once (ADR-0057
-    // render-on-demand) — the node-key prefix of the whole decomposition plan. The key
-    // render and its parse copy are NOTHROW (#477): OOM soft-fails the branch write as
-    // BACKPRESSURE, the injected-resource status, never an abort on the writer thread.
-    mem::bytes_t root_key_bytes(src);  // the plan's scratch draws from the same source
-    if (!try_build_key(v, root_key_bytes)) return std::unexpected(status_t::BACKPRESSURE);
-    const std::span<const std::byte> root_key = mem::as_span(root_key_bytes);
-    // post-order; plan.back() is the root. Its blocks come from the injected source (#873
-    // phase 1) — the node count is PEER-CHOSEN (the peer picks how deep and how wide the
-    // branch it writes is), so this is exactly the growth a bounded node must be able to cap.
+    // post-order; plan.back() is the root. The branch's shape sets the node count, so this is
+    // the growth a bounded node must be able to cap (#873 phase 1).
     mem::block_array_t<branch_node_t> plan(src);
-    const result_t<bool> parsed = parse_branch_node(a, 0, *head, root_key, plan, src);
-    if (!parsed) return std::unexpected(parsed.error());
-    // The root POINT's leading NAME — which the parse has just shape-checked — must name this
-    // vertex (the written tree is rooted AT `v`); a mismatch is an addressing error, not a
-    // shape error, and it outranks the value-free no-op below.
-    if (!std::ranges::equal(a[wire::tlv_arena_t::first_child(0)].body,
-                            key_view_t{v->name()}.last_segment()))
-        return std::unexpected(status_t::INVALID_PATH);
+    result_t<bool> parsed = false;
+    {
+        // Scoped: the arena and the root key go back to the source before the landing and
+        // fan-out below run, so they never sit under the deepest frames.
+        const std::expected<wire::tlv_arena_t, wire::err_t> arena =
+            wire::decode_into(head->bytes(), src);
+        // The written tree is rooted AT `v`: render its full key once (ADR-0057
+        // render-on-demand), the node-key prefix of the whole plan. NOTHROW (#477).
+        mem::bytes_t root_key_bytes(src);
+        if (!arena) {
+            parsed = std::unexpected(arena.error() == wire::err_t::TLV_NESTING_TOO_DEEP
+                                         ? status_t::BACKPRESSURE
+                                         : status_t::TYPE_MISMATCH);
+        } else if (!try_build_key(v, root_key_bytes)) {
+            parsed = std::unexpected(status_t::BACKPRESSURE);
+        } else {
+            parsed = parse_branch_node(*arena, 0, *head, mem::as_span(root_key_bytes), plan, src);
+        }
+        // The root POINT's leading NAME, which the parse has just shape-checked, must name this
+        // vertex; a mismatch is an addressing error, not a shape error, and it outranks the
+        // value-free no-op below.
+        if (parsed && !std::ranges::equal((*arena)[wire::tlv_arena_t::first_child(0)].body,
+                                          key_view_t{v->name()}.last_segment()))
+            parsed = std::unexpected(status_t::INVALID_PATH);
+    }
+    if (!parsed) {
+        count_drop(drop_reason_t::OUT_OF_MEMORY,
+                   std::uint64_t{parsed.error() == status_t::BACKPRESSURE});
+        return std::unexpected(parsed.error());
+    }
     if (!*parsed) return {};  // a value-free branch is a no-op write
+    // A landing site is a plan node with a VALUE of its own; `sites` lists them so the passes
+    // below walk only those, and each site's outcome lives on its node.
+    mem::block_array_t<branch_node_t*> sites(src);
+    if (!sites.reserve(plan.size())) {
+        count_drop(drop_reason_t::OUT_OF_MEMORY, 1);
+        return std::unexpected(status_t::BACKPRESSURE);
+    }
     // Tag the root ONCE: it lands at `v` itself (already WRITE-gated by write_impl), and its
     // subscription point is notified with the whole written TLV as-is. The notify is
     // move-assigned from a fresh copy: a copy-assignment straight from `*head` trips GCC's
@@ -2782,12 +2799,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     // Admission: resolve every landing vertex and gate WRITE on each BEFORE any store, so a
     // denial or a miss rejects the whole branch with nothing landed. A missing landing site is
     // NOT_FOUND unless its parent's creation hook creates it (RFC-0030 §7.1); a vertex a hook
-    // created stays if a later site refuses, as any registration would. A landing site
-    // is a plan node with a VALUE of its own; `sites` lists them so the passes below walk
-    // only those, and each site's outcome lives on its node. Failable, from the table source
-    // (#477, #1778): a refusal => BACKPRESSURE.
-    mem::block_array_t<branch_node_t*> sites(src);
-    if (!sites.reserve(plan.size())) return std::unexpected(status_t::BACKPRESSURE);
+    // created stays if a later site refuses, as any registration would.
     for (branch_node_t& node : plan) {
         if (node.store.empty()) continue;
         if (node.vx == nullptr) {               // every site but the root, tagged above

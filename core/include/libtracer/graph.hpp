@@ -3131,7 +3131,12 @@ class graph_t {
          *         things. */
         std::uint64_t denied = 0;
         /** @brief The nothrow delivery clone / edge-view copy could not be allocated
-         *         (#477) — one count per delivery shed, whatever the fan-out width. */
+         *         (#477) — one count per delivery shed, whatever the fan-out width. A
+         *         branch `write` or `assign` refused for a table-source draw (its decode,
+         *         root key, plan or sites, #2879) answers `BACKPRESSURE` and counts ONCE
+         *         here, whatever its fan-out: nothing was delivered, so one write refused is
+         *         one count. Its flatten and the creation of a missing vertex are not
+         *         counted here. */
         std::uint64_t out_of_memory = 0;
         /** @brief Deliveries shed because a wide fan-out's snapshot could not be widened
          *         past the inline prefix — a capacity degrade, not an allocation failure

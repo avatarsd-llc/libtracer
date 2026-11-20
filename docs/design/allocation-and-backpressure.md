@@ -259,8 +259,9 @@ mem::block_source_t& src = *tables_;
   platform heap, #1777), so a host that injects nothing sees the same capability it had with an
   unbounded resource.
 - **Exhaustion is a value.** A tree decodes where the source can serve it, and where it cannot,
-  `decode_into` reports the refused draw as `TLV_NESTING_TOO_DEEP`, which the write answers as
-  `BACKPRESSURE` and counts as an `out_of_memory` delivery drop.
+  `decode_into` reports the refused draw as `TLV_NESTING_TOO_DEEP`. A refused draw for the
+  decode, the root key, the plan or the sites answers `BACKPRESSURE` and is counted once, as an
+  `out_of_memory` delivery drop. The value flatten and vertex creation are not counted there.
 
 The arena is *structure* storage — a node array and the walk's open-node stacks — so its size is
 independent of the payload's byte count. No node-counting pre-pass exists, and none is needed: the
@@ -280,9 +281,9 @@ defines for "exceeds this receiver's decode resources".
 | --- | --- | --- |
 | Branch-write flatten into the value backend | `core/src/graph.cpp:graph_t::write_branch` | the refusal's cause (#917): `flatten_err_t::NO_MEMORY` → `BACKPRESSURE`, `NOT_HOST` → `TYPE_MISMATCH` |
 | Field-write flatten into the value backend | `core/src/graph.cpp:graph_t::apply_delivery_mode` | same two-verdict split as the branch-write row above |
-| Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:graph_t::write_branch` | `false` → `BACKPRESSURE` |
-| Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:graph_t::write_branch` | `false` → `BACKPRESSURE` |
-| Branch-write decode arena | `core/src/graph.cpp:graph_t::write_branch` | a refused draw (`TLV_NESTING_TOO_DEEP`) → `BACKPRESSURE` and an `out_of_memory` drop (#2879); a value refused for its shape → `TYPE_MISMATCH` |
+| Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:graph_t::write_branch` | `false` → `BACKPRESSURE`, counted once (#2879) |
+| Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:graph_t::write_branch` | `false` → `BACKPRESSURE`, counted once (#2879) |
+| Branch-write decode arena | `core/src/graph.cpp:graph_t::write_branch` | a refused draw (`TLV_NESTING_TOO_DEEP`) → `BACKPRESSURE`, counted once as an `out_of_memory` drop (#2879); a value refused for its shape → `TYPE_MISMATCH` |
 | Per-delivery frame build | *deleted* (#885) — the delivery leg gathers off a stack head (`core/src/fwd_router.cpp:fwd_router_t::deliver_remote`) instead of building a frame | n/a: there is nothing left to refuse |
 | Bus-name rejection reply flatten (cold) | flatten `core/src/fwd_router.cpp:fwd_router_t::on_frame_rope_impl`, answered by the `wire::tlv_node_t::over` opening `reject_bus_name_hop` | the frame is **dropped** by value — no reply |
 | Terminus per-node span materialize (rope tier) | flatten `core/src/op_resolve_view.cpp:view_node::ensure_cache`, answered at `core/src/op_resolve_walk.hpp:if (!req.src.spans_intact()) return` / `core/src/op_resolve_walk.hpp:if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE)` | a refusal on the reply's own route bytes ⇒ `BACKPRESSURE` by value ⇒ counted in `assemble_dropped` and answered `STATUS{BACKPRESSURE}` by the router's stack emitter, which reads the route from the request's own bytes (#2256); anywhere else before dispatch ⇒ an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` reply |
