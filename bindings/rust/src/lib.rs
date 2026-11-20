@@ -354,10 +354,9 @@ fn write_le(out: &mut Vec<u8>, v: u64, n: usize) {
     }
 }
 
-/// The largest TLV `length` a short frame may declare (`MAX_TLV_BYTES`, RFC-0001 §C.3): 16 MiB,
-/// as the C++ reference's default `kMaxTlvBytes`. A TLV that does not fit and declares more is
-/// [`Error::FrameInvalid`] rather than [`Error::FrameTruncated`]; a TLV that fits decodes
-/// whatever its length.
+/// The largest TLV `length` a header may declare (`MAX_TLV_BYTES`, RFC-0001 §C.3): 16 MiB, as
+/// the C++ reference's default `kMaxTlvBytes`. A declared length above it is
+/// [`Error::FrameInvalid`] on every header, whether or not the TLV's bytes are all present.
 pub const MAX_TLV_BYTES: u64 = 16 * 1024 * 1024;
 
 /* --------------------------------------------------------------- decode --- */
@@ -392,7 +391,11 @@ fn parse_one(buf: &[u8]) -> Result<(Tlv, usize, &[u8]), Error> {
     // The one per-type structural rule (RFC-0024 §4.2/§4.3), through the single predicate
     // `encode` now shares — see `path_ref_body_valid` for the four clauses and why they are
     // shape rather than meaning.
-    if is_path_ref_type(type_b) && !path_ref_body_valid(opt.pl, opt.ll, length) {
+    // A declared length above `MAX_TLV_BYTES` is invalid on every header, before the fit check
+    // (RFC-0001 §C.3, annex 01 §Truncation handling, #2885).
+    if (is_path_ref_type(type_b) && !path_ref_body_valid(opt.pl, opt.ll, length))
+        || length > MAX_TLV_BYTES
+    {
         return Err(Error::FrameInvalid);
     }
     let ts_size = if opt.ts {
@@ -417,15 +420,8 @@ fn parse_one(buf: &[u8]) -> Result<(Tlv, usize, &[u8]), Error> {
     // an over-long length on a short buffer fails the bounds check below rather
     // than wrapping into an out-of-bounds slice.
     let total = header as u64 + length + ts_size + crc_size;
-    // Only a TLV that does not fit is classified (RFC-0001 §C.3, annex 01 §Truncation
-    // handling): a declared length above `MAX_TLV_BYTES` is invalid, any other is a short
-    // frame (#2885).
     if (buf.len() as u64) < total {
-        return Err(if length > MAX_TLV_BYTES {
-            Error::FrameInvalid
-        } else {
-            Error::FrameTruncated
-        });
+        return Err(Error::FrameTruncated);
     }
     let length = length as usize;
     let ts_size = ts_size as usize;

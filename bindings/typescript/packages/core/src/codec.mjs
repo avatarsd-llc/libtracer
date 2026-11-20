@@ -343,10 +343,9 @@ export function crc16ccitt(data) {
 }
 
 /**
- * @brief The largest TLV `length` a short frame may declare (`MAX_TLV_BYTES`, RFC-0001 §C.3):
- * 16 MiB, as the C++ reference's default `kMaxTlvBytes`. A TLV that does not fit and declares
- * more is `FRAME_INVALID` rather than `FRAME_TRUNCATED`; a TLV that fits decodes whatever its
- * length.
+ * @brief The largest TLV `length` a header may declare (`MAX_TLV_BYTES`, RFC-0001 §C.3):
+ * 16 MiB, as the C++ reference's default `kMaxTlvBytes`. A declared length above it is
+ * `FRAME_INVALID` on every header, whether or not the TLV's bytes are all present.
  */
 export const MAX_TLV_BYTES = 16 * 1024 * 1024;
 
@@ -375,17 +374,18 @@ function parseOne(buf) {
   // The one per-type structural rule (RFC-0024 §4.2/§4.3), through the single predicate
   // encode() now shares — see pathRefBodyValid for the four clauses and why they are shape
   // rather than meaning.
-  if (isPathRefType(typeB) && !pathRefBodyValid(opt.pl, opt.ll, length)) {
+  // A declared length above MAX_TLV_BYTES is INVALID on every header, before the fit check
+  // (RFC-0001 §C.3, annex 01 §Truncation handling, #2885).
+  if (
+    (isPathRefType(typeB) && !pathRefBodyValid(opt.pl, opt.ll, length)) ||
+    length > MAX_TLV_BYTES
+  ) {
     throw new CodecError(ERROR.FRAME_INVALID);
   }
   const tsSize = opt.ts ? (opt.tf ? 4 : 8) : 0;
   const crcSize = opt.cr ? (opt.cw ? 2 : 4) : 0;
   const total = header + length + tsSize + crcSize;
-  // Only a TLV that does not fit is classified (RFC-0001 §C.3, annex 01 §Truncation handling):
-  // a declared length above MAX_TLV_BYTES is INVALID, any other is a short frame (#2885).
-  if (buf.length < total) {
-    throw new CodecError(length > MAX_TLV_BYTES ? ERROR.FRAME_INVALID : ERROR.FRAME_TRUNCATED);
-  }
+  if (buf.length < total) throw new CodecError(ERROR.FRAME_TRUNCATED);
 
   /** @type {Tlv} */
   const tlv = {

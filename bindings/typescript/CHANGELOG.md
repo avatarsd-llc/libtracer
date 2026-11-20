@@ -10,10 +10,9 @@ versioning/publish strategy.
 ### Fixed
 
 - **An oversize TLV length is `FRAME_INVALID` (#2885).** This aligns the core package's codec
-  with RFC-0001 §C.3 and RFC-0002. When a TLV does not fit the bytes at hand, a declared
-  `length` above the new exported `MAX_TLV_BYTES` (16 MiB, the C++ reference's default) is now
-  `FRAME_INVALID`, and any other length is still `FRAME_TRUNCATED`. A TLV that fits decodes as
-  before, whatever its length.
+  with RFC-0001 §C.3 and RFC-0002. A declared `length` above the new exported `MAX_TLV_BYTES`
+  (16 MiB, the C++ reference's default) is now `FRAME_INVALID` on every header, whether or not the
+  TLV's bytes are all present. A short TLV at or under it is still `FRAME_TRUNCATED`.
 
 ## [0.22.0] — 2026-11-02
 

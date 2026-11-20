@@ -1081,14 +1081,14 @@ struct default_config_t {
     static constexpr std::size_t kUdpStackScratchBytes = 0;
 
     /**
-     * @brief The largest TLV `length` the codec treats as a short frame rather than an invalid
-     *        one (`MAX_TLV_BYTES`, RFC-0001 §C.3, annex 01 §Truncation handling); 16 MiB.
+     * @brief The largest TLV `length` a header may declare (`MAX_TLV_BYTES`, RFC-0001 §C.3,
+     *        annex 01 §Truncation handling); 16 MiB.
      *
-     * Read only when a TLV does not fit the bytes at hand. A declared `length` above it is
-     * `tr::frame::invalid`, and any other length that does not fit is `tr::frame::truncated`.
-     * A TLV that fits decodes whatever its length, so the bound costs nothing on the success
-     * path and allocates nothing. A NARROW build may lower it to its largest frame. Override
-     * fragment: `static constexpr std::uint32_t kMaxTlvBytes = 4096;`
+     * `parse_header` refuses a declared `length` above it as `tr::frame::invalid` on every
+     * header, whether or not the TLV's bytes are all present, and allocates nothing. The check
+     * shares the header's existing INVALID branch. A NARROW build may lower it, never below
+     * `0xFFFF`, so a short (`LL = 0`) length is never INVALID. Override fragment:
+     * `static constexpr std::uint32_t kMaxTlvBytes = 1024u * 1024u;`
      */
     static constexpr std::uint32_t kMaxTlvBytes = 16u * 1024u * 1024u;
 
@@ -1454,6 +1454,9 @@ inline constexpr bool kSessionAdmission = config_t::kSessionAdmission;
 inline constexpr std::size_t kUdpStackScratchBytes = config_t::kUdpStackScratchBytes;
 /** @brief @ref default_config_t::kMaxTlvBytes for this build. */
 inline constexpr std::uint32_t kMaxTlvBytes = config_t::kMaxTlvBytes;
+static_assert(kMaxTlvBytes >= 0xFFFFu,
+              "kMaxTlvBytes is at least 0xFFFF: a short (LL = 0) length is a short frame, never "
+              "FRAME_INVALID (framing/truncated-length-max-u16)");
 
 namespace detail_guard {
 

@@ -27,9 +27,9 @@
 #include <limits>
 #include <span>
 #include <type_traits>
-#include <utility>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/config.hpp"
 #include "libtracer/crc.hpp"
 #include "libtracer/error.hpp"
 #include "libtracer/mem_source.hpp"
@@ -146,8 +146,7 @@ struct span_cursor_t {
  * header and +3 with a trailer.
  *
  * @param total Receives the total encoded size; untouched when the bound fails.
- * @return False ⇔ the declared TLV does not fit — the caller's FRAME_TRUNCATED, or
- *         FRAME_INVALID for a length above `kMaxTlvBytes`.
+ * @return False ⇔ the declared TLV does not fit — the caller's FRAME_TRUNCATED.
  */
 template <class Size>
 [[nodiscard]] constexpr bool total_size_fits_narrow(Size avail, Size header, std::uint32_t length,
@@ -191,8 +190,7 @@ template <class Size>
  * paying a 32-bit-only cost on a 64-bit target rather than to weaken the bound.
  *
  * @param total Receives the total encoded size; untouched when the bound fails.
- * @return False ⇔ the declared TLV does not fit — the caller's FRAME_TRUNCATED, or
- *         FRAME_INVALID for a length above `kMaxTlvBytes`.
+ * @return False ⇔ the declared TLV does not fit — the caller's FRAME_TRUNCATED.
  */
 template <class Size>
 [[nodiscard]] constexpr bool total_size_fits(Size avail, Size header, std::uint32_t length,
@@ -253,8 +251,8 @@ struct header_t {
  * @brief Parse + validate ONE TLV header and its trailer at offset 0 of @p cur.
  *
  * Applies the whole grammar — minimum size, `type == 0x00` reject, reserved-bit
- * reject, `LL` length width, a length above `kMaxTlvBytes` that does not fit
- * (`FRAME_INVALID`), the `PATH_REF` fixed-stride body shape (RFC-0024
+ * reject, `LL` length width, a length above `kMaxTlvBytes` (`FRAME_INVALID`), the
+ * `PATH_REF` fixed-stride body shape (RFC-0024
  * §4.2/§4.3), trailer sizing, and the two-span CRC (payload ++
  * timestamp, fed without concatenation) — but does **not** recurse into a
  * structured payload's children; the sink's iterative walk does that. On success
@@ -296,8 +294,13 @@ template <class Cursor>
     // the way every other type's is. PL/LL forbidden, length a whole number of elements, count
     // at or under the §4.3 bound. Shape only — what an element MEANS is L4's (path_ref.hpp).
     // Only 0x14 carries that body: the reverse list (0x15) is a PATH body since #2245.
-    if (is_path_ref_type(static_cast<type_t>(type_b)) &&
-        !path_ref_body_valid(opt.pl, opt.ll, static_cast<std::size_t>(length))) {
+    // The length bound joins it (RFC-0001 §C.3, annex 01 §Truncation handling, #2885): a
+    // declared length above `kMaxTlvBytes` is INVALID on every header, whether or not the TLV
+    // fits. Both sides read header fields only, never a body byte, so the non-short-circuit `|`
+    // is safe on a TLV that does not fit and merges the bound into this one branch.
+    if ((is_path_ref_type(static_cast<type_t>(type_b)) &&
+         !path_ref_body_valid(opt.pl, opt.ll, static_cast<std::size_t>(length))) |
+        (length > graph::kMaxTlvBytes)) {
         return std::unexpected(err_t::FRAME_INVALID);
     }
     const size_type ts_size = opt.ts ? (opt.tf ? 4u : 8u) : 0u;
@@ -306,17 +309,9 @@ template <class Cursor>
     // a 32-bit `std::size_t` cannot hold `header + 0xFFFFFFFF + trailer`, and the sum
     // this replaces was narrowed BEFORE the compare — small enough to pass this very
     // check, after which `walk` read a payload span far past the buffer.
-    // Only a TLV that does not fit is classified (RFC-0001 §C.3, annex 01 §Truncation
-    // handling): a declared length above `kMaxTlvBytes` is INVALID, any other is a short
-    // frame. A TLV that fits decodes whatever its length. The two codes are adjacent, so the
-    // verdict is one add rather than a second branch (#2885).
-    static_assert(std::to_underlying(err_t::FRAME_INVALID) ==
-                  std::to_underlying(err_t::FRAME_TRUNCATED) + 1);
     size_type total = 0;
     if (!total_size_fits(avail, header, length, ts_size, crc_size, total)) {
-        return std::unexpected(
-            static_cast<err_t>(std::to_underlying(err_t::FRAME_TRUNCATED) +
-                               static_cast<std::uint16_t>(length > graph::kMaxTlvBytes)));
+        return std::unexpected(err_t::FRAME_TRUNCATED);
     }
 
     if (opt.cr && crc_policy == crc_check_t::VERIFY) {

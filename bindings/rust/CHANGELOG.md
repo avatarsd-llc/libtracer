@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **An oversize TLV length is `FrameInvalid` (#2885).** This aligns `decode` with RFC-0001 §C.3 and RFC-0002. When a TLV does not fit the bytes at hand, a declared `length` above the new `MAX_TLV_BYTES` (16 MiB, the C++ reference's default) is now `Error::FrameInvalid`, and any other length is still `Error::FrameTruncated`. A TLV that fits decodes as before, whatever its length.
+- **An oversize TLV length is `FrameInvalid` (#2885).** This aligns `decode` with RFC-0001 §C.3 and RFC-0002. A declared `length` above the new `MAX_TLV_BYTES` (16 MiB, the C++ reference's default) is now `Error::FrameInvalid` on every header, whether or not the TLV's bytes are all present. A short TLV at or under it is still `Error::FrameTruncated`.
 
 ### Removed (breaking)
 
