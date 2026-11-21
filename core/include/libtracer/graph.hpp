@@ -1944,8 +1944,9 @@ class graph_t {
      *          then sorts. Do not put this on a delivery or write path.
      *
      * @return false when the table source refused the snapshot (#1778), or when a thread was
-     *         waiting to take the map lock exclusively and the snapshot yielded to it (#2846):
-     *         @p fn was called for nothing, and a retry may succeed. A walk either visits every
+     *         waiting to take the map lock exclusively and the snapshot yielded to it (#2846;
+     *         a snapshot started while one waits takes no hold, #2900): @p fn was called for
+     *         nothing, and a retry may succeed. A walk either visits every
      *         vertex or none. A steady stream of exclusive lockers can refuse a walk
      *         repeatedly; retry pacing is the caller's.
      *
@@ -1967,13 +1968,16 @@ class graph_t {
         mem::block_array_t<entry_t> snap(*tables_);
         bool ok = true;
         {
-            const std::shared_lock lock(map_mutex_);
+            const auto lock = lock_map_walk();  // none while a writer waits (#2900)
+            if (!lock) return false;
             vertex_t* const r = root();
+            // Each taken vertex is followed by a yield check (#2846): a waiting writer ends the
+            // snapshot as a refused draw does.
             const auto take = [this, &snap, &ok](vertex_t& c) {
-                ok = ok && !map_writer_waiting();  // yield to a waiting writer (#2846)
                 if (!ok || !c.registered()) return;
                 mem::bytes_t k(*tables_);
-                ok = try_build_key(&c, k) && snap.push_back(entry_t{std::move(k), &c});
+                ok = try_build_key(&c, k) && snap.push_back(entry_t{std::move(k), &c}) &&
+                     !map_writer_waiting();
             };
             take(*r);
             r->for_each_descendant(take);
@@ -2408,7 +2412,8 @@ class graph_t {
      * so the listing is never copied whole.
      *
      * The listing yields to a thread waiting to take the map lock exclusively (#2846): it
-     * answers `BACKPRESSURE`, keeping nothing, and a retry completes once no writer waits.
+     * answers `BACKPRESSURE`, keeping nothing, and one that starts while a writer waits does
+     * not take its shared hold at all (#2900). A retry completes once no writer waits.
      * A steady stream of exclusive lockers can refuse a walk repeatedly; retry pacing is the
      * caller's.
      */
@@ -2451,8 +2456,10 @@ class graph_t {
      * `map_mutex_`**; a resolver MUST NOT re-enter graph mutation APIs (self-deadlock).
      *
      * The walk yields to a thread waiting to take the map lock exclusively (#2846): at the next
-     * child or node it answers `BACKPRESSURE`, keeping nothing, so a vertex registration,
-     * `retire` or `collect` waits about one node visit, not every overlapping walk. A retry
+     * child or node it answers `BACKPRESSURE`, keeping nothing, and a walk that starts while a
+     * writer waits answers it without taking its shared hold (#2900). So a vertex
+     * registration, `retire` or `collect` waits about one node visit per walk already inside,
+     * not every overlapping walk, and walks retrying back to back cannot keep it out. A retry
      * completes once no writer waits. A steady stream of exclusive lockers can refuse a walk
      * repeatedly; retry pacing is the caller's.
      */
@@ -3912,12 +3919,14 @@ class graph_t {
      * @brief How many threads are blocked waiting to take `map_mutex_` exclusively (#2846).
      *
      * Every exclusive hold goes through `lock_map_exclusive`, which counts itself here while
-     * it waits. A subtree walk (`:children`, the composed read, @ref for_each_vertex) reads it
-     * once per node and, seeing a writer, drops what it built and answers `BACKPRESSURE`, so a
-     * writer waits about one node visit rather than every overlapping walk. The lock itself
-     * stays reader-preferring: a writer-preferring one would deadlock a resolver that
-     * re-enters a shared hold. Relaxed throughout: the count is a liveness hint, never a
-     * guard of data.
+     * it waits. A subtree walk (`:children`, the composed read, @ref for_each_vertex) takes
+     * its hold through `lock_map_walk`, which takes none while the count is set (#2900), and
+     * reads it again after each node; seeing a writer, the walk drops what it built and
+     * answers `BACKPRESSURE`. So no walk joins the read phase a writer is waiting out, and
+     * that phase drains: the writer waits about one node visit per walk already inside,
+     * however many walks retry. The lock itself stays reader-preferring: a writer-preferring
+     * one would deadlock a resolver that re-enters a shared hold. Relaxed throughout: the
+     * count is a liveness hint, never a guard of data.
      */
     mutable std::atomic<std::uint32_t> map_writers_waiting_{0};
     /** @brief Take `map_mutex_` exclusively, counted in `map_writers_waiting_` while it
@@ -3927,6 +3936,13 @@ class graph_t {
      *         (#2846). One relaxed load. */
     [[nodiscard]] bool map_writer_waiting() const noexcept {
         return map_writers_waiting_.load(std::memory_order_relaxed) != 0;
+    }
+    /** @brief A subtree walk's shared hold of `map_mutex_`, or none while a writer waits
+     *         (#2900): the walk answers `BACKPRESSURE` on an empty lock without ever having
+     *         joined the read phase, so walks retrying back to back cannot keep it open. */
+    [[nodiscard]] std::shared_lock<tr::shared_mutex_t> lock_map_walk() const {
+        if (map_writer_waiting()) return {};
+        return std::shared_lock{map_mutex_};
     }
     // The Composite vertex tree's root (ADR-0057): an unregistered structural node whose
     // children container (`vertex_t::children_t`) owns every top-level vertex, each child
