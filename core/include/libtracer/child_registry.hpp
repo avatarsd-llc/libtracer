@@ -105,8 +105,7 @@ class child_registry_t {
      * are long-lived control state whose high-water mark is the count of DISTINCT link names
      * ever registered, so a bounded node wants them inside its slab like everything else.
      * `fwd_router_t` points this at its `link_src` for exactly that reason: same lifetime
-     * class as the rest of its link state, and deliberately NOT the per-frame `rx` store, which a
-     * @ref tr::mem::bump_source_t may legitimately be.
+     * class as the rest of its link state, and deliberately NOT the per-frame `rx` store.
      *
      * The default is @ref tr::mem::heap_source, and the process-default composition is
      * byte-for-byte what it was: `heap_source_t` serves a fundamental-alignment request
