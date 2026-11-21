@@ -2,33 +2,35 @@
 //
 /**
  * @file
- * @brief The SUBSCRIPTION-RETAINED seam (#1610): the two allocations a remote SUBSCRIBE keeps
- *        for the life of the subscription can be taken from a backend of the host's choosing.
+ * @brief The SUBSCRIPTION-RETAINED seam (#1610, #2875): what a remote SUBSCRIBE keeps for the
+ *        life of the subscription is ONE block, drawn from a source of the host's choosing.
  *
  * ## What is being defended
  *
- * A remote SUBSCRIBE keeps two allocations until the subscription dies — the source
- * `SUBSCRIBER` TLV and "the ONE route copy of the subscription's life" (ADR-0041 §2). Until
- * this seam existed, both came from `flat`, the backend that also serves every per-operation
- * rope flatten on the forward and terminus paths.
+ * A remote SUBSCRIBE keeps the source `SUBSCRIBER` TLV, "the ONE route copy of the
+ * subscription's life" (ADR-0041 §2) and the completed reverse chain until the subscription
+ * dies. Until #1610 they came from `flat`, the backend that also serves every per-operation
+ * rope flatten on the forward and terminus paths. Until #2875 they were two or three segments,
+ * and a router that was not given the seam took them from `flat`, outside the long-lived link
+ * plane a bounded node sizes and counts.
  *
- * Sharing one backend between them is not a correctness problem — it is a SIZING one, and it
- * is the same sizing problem that made `egress` a dedicated injection. `flat` is documented
- * and sized against per-operation FLATTEN bytes, whose live set is bounded by the threads
- * that can be inside the router. These two are neither per-operation nor flattens: their
- * live set is the SUBSCRIPTION POPULATION. A host that size-classes `flat` therefore finds
- * the classes filled by a set that never returns, with nothing left for the churn they were
- * cut for — the classes stop working exactly when a client is attached.
+ * Sharing `flat` is not a correctness problem — it is a SIZING one, and it is the same sizing
+ * problem that made `egress` a dedicated injection. `flat` is documented and sized against
+ * per-operation FLATTEN bytes, whose live set is bounded by the threads that can be inside the
+ * router. This block is neither per-operation nor a flatten: its live set is the SUBSCRIPTION
+ * POPULATION.
  *
  * ## What the tests assert
  *
- * 1. Injected, the two retained allocations land on `retained` and NOT on `flat`.
- * 2. Un-injected, they land on `flat` exactly as before — the change is additive and an
- *    existing host is byte-unchanged.
+ * 1. Injected, the retained block lands on `retained` — ONE draw — and nothing on `flat`.
+ * 2. Un-injected on a bare resolver, it lands on `flat`.
  * 3. The seam is only for RETENTION: an ordinary WRITE's flatten still comes from `flat`
  *    even when `retained` is injected, so a host cannot accidentally re-scope the hot path.
- * 4. A `retained` that refuses answers by value — the subscribe does not bind, and nothing
- *    aborts.
+ * 4. A `retained` that refuses answers by value — the subscribe does not bind, nothing
+ *    aborts, and nothing falls back to another source.
+ * 5. Through a router that was not given `retained`, the block is drawn from the router's
+ *    `link_src` and held there for the life of the subscription; every other draw of the
+ *    subscribe lands on an injected plane, and none on `flat`.
  */
 #include <cstddef>
 #include <cstdio>
@@ -70,6 +72,19 @@ class counting_backend_t final : public tr::mem::mem_backend_t {
     void destroy(tr::view::segment_t* seg) noexcept override {
         tr::mem::heap_backend().destroy(seg);
     }
+    void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (refuse_) {
+            ++refused;
+            return nullptr;
+        }
+        ++allocs;
+        ++live;
+        return tr::mem::heap_source().try_alloc(bytes, align);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        --live;
+        tr::mem::heap_source().release(p, bytes, align);
+    }
     std::size_t alignment() const noexcept override { return tr::mem::heap_backend().alignment(); }
     std::size_t max_segment_size() const noexcept override {
         return tr::mem::heap_backend().max_segment_size();
@@ -78,6 +93,7 @@ class counting_backend_t final : public tr::mem::mem_backend_t {
 
     int allocs = 0;
     int refused = 0;
+    int live = 0; /**< @brief Raw blocks drawn and not yet released. */
 
    private:
     bool refuse_;
@@ -121,7 +137,7 @@ void build(tr::graph::graph_t& g) {
 }
 
 void injected_retention_leaves_flat_untouched() {
-    std::printf("injected: the retained pair lands on `retained`, never on `flat`:\n");
+    std::printf("injected: the retained block lands on `retained`, never on `flat`:\n");
     tr::graph::graph_t g;
     build(g);
     counting_backend_t flat("flat");
@@ -132,16 +148,16 @@ void injected_retention_leaves_flat_untouched() {
     const auto reply = resolve_bytes(resolver, subscribe_fwd(), "link-a");
     tr::testing::check(reply.has_value(), "the remote subscribe resolves");
 
-    // The SUBSCRIBER TLV and the return route — two, and exactly two.
-    tr::testing::check(retained.allocs == 2,
-                       "`retained` served the SUBSCRIBER TLV and the ONE route copy");
+    // The SUBSCRIBER TLV and the return route — one block, holding both.
+    tr::testing::check(retained.allocs == 1,
+                       "`retained` served ONE block: the SUBSCRIBER TLV and the ONE route copy");
     tr::testing::check(flat.allocs == 0,
                        "`flat` served NOTHING — which is the whole point: a size-classed flat "
                        "front keeps its slots for the churn it was cut for");
 }
 
 void uninjected_retention_still_comes_from_flat() {
-    std::printf("un-injected: byte-unchanged — the pair still comes from `flat`:\n");
+    std::printf("un-injected bare resolver: the block comes from `flat`:\n");
     tr::graph::graph_t g;
     build(g);
     counting_backend_t flat("flat");
@@ -150,9 +166,8 @@ void uninjected_retention_still_comes_from_flat() {
 
     const auto reply = resolve_bytes(resolver, subscribe_fwd(), "link-a");
     tr::testing::check(reply.has_value(), "the remote subscribe resolves");
-    tr::testing::check(flat.allocs == 2,
-                       "an existing host sees exactly what it saw before — the default is not "
-                       "the heap, it is wherever flattens already came from");
+    tr::testing::check(flat.allocs == 1,
+                       "the default is not the heap, it is wherever flattens already came from");
 }
 
 void the_seam_is_for_retention_only() {
@@ -192,6 +207,43 @@ void a_refusing_retained_seam_answers_by_value() {
                        "be the bound this seam exists to express, quietly unbound");
 }
 
+/** @brief A link that drops what it is sent; the test injects frames through its receiver. */
+class null_link_t final : public tr::net::transport_t {
+   public:
+    void send(std::span<const std::byte>) override {}
+    void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
+};
+
+void a_router_draws_the_block_from_its_link_plane() {
+    std::printf("router: the block is the link plane's, for the life of the subscription:\n");
+    counting_backend_t graph_src("graph");
+    tr::graph::graph_t g(graph_src);
+    const tr::graph::vertex_handle_t x =
+        g.register_vertex(path_t("/x"), tr::graph::role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/sink"), tr::graph::role_t::STORED_VALUE);
+    counting_backend_t link_src("link_src");
+    counting_backend_t rx("rx");
+    counting_backend_t flat("flat");
+    counting_backend_t egress("egress");
+    tr::net::fwd_router_t router(
+        g, {.link_src = &link_src, .rx = &rx, .flat = &flat, .egress = &egress});
+    null_link_t link;
+    tr::testing::check(router.attach_link("link-a", link), "the link registers");
+
+    const int held = link_src.live;
+    link.inject(subscribe_fwd());
+    tr::testing::check(g.has_subscribers(x), "the remote subscribe binds");
+    tr::testing::check(link_src.live == held + 1,
+                       "the subscription holds ONE block of the router's link plane");
+    tr::testing::check(flat.allocs == 0, "`flat` served nothing for the subscription");
+    tr::testing::check(rx.live == 0 && egress.live == 0,
+                       "the per-frame planes hold nothing once the subscribe is answered");
+
+    (void)router.remove_child("link-a");
+    tr::testing::check(link_src.live < held + 1,
+                       "the block goes back to the link plane with the subscription");
+}
+
 }  // namespace
 
 int main() {
@@ -199,5 +251,6 @@ int main() {
     uninjected_retention_still_comes_from_flat();
     the_seam_is_for_retention_only();
     a_refusing_retained_seam_answers_by_value();
+    a_router_draws_the_block_from_its_link_plane();
     return tr::testing::summary("retained_subscription_seam");
 }
