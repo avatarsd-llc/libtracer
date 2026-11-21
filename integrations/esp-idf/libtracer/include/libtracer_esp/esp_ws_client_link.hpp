@@ -882,8 +882,8 @@ class esp_ws_client_link_t final : public transport_t {
     held_budget_t held_;
     /** @brief The shared egress module (ADR-0087 §2, #1619): the writer role, and the rings
      *         frames wait in while a write is in flight or cut short, drawn from @ref tx_src_.
-     *         No write tears the connection down and the strike verdict closes nothing:
-     *         liveness is the read side's and the application's frozen-peer check (#2787). */
+     *         No stalled write tears the connection down: liveness is the read side's and the
+     *         application's frozen-peer check (#2787). */
     tr::net::egress_t egress_;
     /** @brief The one peer's egress state, opened by the constructor and closed by the
      *         destructor once every sender has left. */

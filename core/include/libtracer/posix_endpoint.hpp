@@ -384,8 +384,6 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *               counted. A listener passes false and its peer stays closed until there
      *               is a connection: a one-peer listener's opens at each accept
      *               (@ref accept_one), and a multi-peer server keeps one peer per session.
-     *               No write waits (#2252), so every peer takes the strike cap
-     *               `kEgressStallStrikes`.
      * @param node   The node's wait module, or null for a thread of the link's own
      *               (@ref posix_endpoint_t).
      */
@@ -647,7 +645,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *         @ref teardown_peer. */
     std::atomic<bool> rx_owed_{false};
     /** @brief Write turns that found the peer's socket full and moved nothing (#838, #2144)
-     *         — the "how often did a stalled peer refuse us" counter, each one a strike.
+     *         — the "how often did a stalled peer refuse us" counter, never a verdict (#2899).
      *         Relaxed: a diagnostic tally, not a synchronizer. Word-wide, not 64-bit
      *         (core/STYLE.md §Introspection clause 5, #1697): a 64-bit atomic is a
      *         libatomic call on every rv32; a 32-bit target wraps after 2^32. */
@@ -665,7 +663,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
     /** @brief This link's egress store: shared frames, rings, a frame's gather overflow
      *         (@ref write_frame), and a derived class's own link buffers (#1780). */
     mem::block_source_t* io_src_;
-    /** @brief The egress module (ADR-0087 §2): the source and the strike cap. */
+    /** @brief The egress module (ADR-0087 §2): the rings and frames, from @ref io_src_. */
     egress_t egress_;
     /** @brief The ONE peer's egress — a dialer's or a one-peer listener's. A multi-peer
      *         server keeps one per session instead and leaves this one closed. */
@@ -751,8 +749,8 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
 
     /** @brief Write turns that found a peer's socket full and moved nothing, summed over
-     *         every peer this server has carried (#838, #2144). `kEgressStallStrikes` of them
-     *         in a row on one session close that session. */
+     *         every peer this server has carried (#838, #2144). Counted only: a session
+     *         that stopped reading is closed by @ref sweep (#2899). */
     [[nodiscard]] std::uint64_t stalled_tx() const noexcept {
         return stalled_tx_.load(std::memory_order_relaxed);
     }
@@ -942,9 +940,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
          *         the session's frame; reset at accept. No byte when the budget is off. */
         [[no_unique_address]] session_read_tally_t read_tally{};
         /** @brief This session's egress (ADR-0087 §2, #2144): its frames waiting per vertex,
-         *         its writer role and its strikes. Closed while the slot is free; reset as the
-         *         slot is recycled, so a stalled peer's frames and strikes are never inherited
-         *         by its successor in the slot. */
+         *         and its writer role. Closed while the slot is free; reset as the slot is
+         *         recycled, so a stalled peer's frames are never inherited by its successor in
+         *         the slot. */
         egress_peer_t egress;
         /** @brief The application's `now` at the last liveness check that found this peer
          *         moving, or owing nothing (#2198). Written only by @ref sweep,
@@ -1086,7 +1084,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * shared frame built at most once for the whole fan-out (the framing copied, @p value kept
      * by reference). Every write is nonblocking, so a stalled peer costs the round one refused
      * syscall and never delays the peers behind it; its frames wait in its own ring for
-     * @p lane, and only ITS strikes condemn it. Shed frames and stalls are counted.
+     * @p lane. Shed frames and stalls are counted.
      *
      * The walk takes no lock (#2263): it follows @ref session_base_t::next, so accept,
      * teardown, the receive loop and every other sender run beside it. A session that departs

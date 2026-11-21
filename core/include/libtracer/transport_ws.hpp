@@ -531,9 +531,9 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
         return connected_.load(std::memory_order_relaxed);
     }
 
-    /** @brief Strikes a STALLED server cost (#838, #2144): offers past a full STREAM lane
-     *         whose turn moved nothing, each one a frame shed. `kEgressStallStrikes` rings of
-     * them in a row close the connection. */
+    /** @brief Stalls a server cost (#838, #2144): offers past a full STREAM lane whose turn
+     *         moved nothing, each one a frame shed. Counted, never a verdict (#2899): a server
+     *         that stopped reading is closed by @ref sweep. */
     [[nodiscard]] std::uint64_t stalled_tx() const noexcept {
         return stalled_tx_.load(std::memory_order_relaxed);
     }

@@ -6,8 +6,8 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Since #2174 a SAMPLE lane never strikes, so a peer that keeps its socket open and reads
- * nothing is no longer dropped by the link on its own. The application closes it instead:
+ * The link never drops a peer that keeps its socket open and reads nothing on its own: a
+ * stalled write is counted, never a verdict (#2174, #2899). The application closes it instead:
  * it calls `transport_t::sweep(now, deadline)` with `now` from its own clock (#2481), and
  * the vertex closes each peer that owed the wire progress (a frame held on it, or a frame or
  * handshake the peer began) and made none since its record fell below `deadline`, and
@@ -17,7 +17,9 @@
  * Per transport, three arms: a frozen peer is closed past the deadline and counted, never
  * before it; a draining peer is not; an idle peer, owing nothing, is not. Each direction is
  * its own row, on the dialers as on the servers (#2812): a server that begins a frame and
- * stops is closed by the dialer, and a self-healing link over it redials.
+ * stops is closed by the dialer, and a self-healing link over it redials. A send burst
+ * against a reader that is slow, or has stopped, sheds counted frames and closes nothing; only
+ * the check, or a real socket error, takes the link down (#2899).
  */
 
 #include <arpa/inet.h>

@@ -1,8 +1,8 @@
 /**
  * @file
  * @brief The one egress module every stream link adapts (ADR-0087 §2, #2144): one shared
- *        refcounted frame per send, one ring of frame references per (peer, vertex), a writer
- *        elected by try-lock, and a stall strike.
+ *        refcounted frame per send, one ring of frame references per (peer, vertex), and a
+ *        writer elected by try-lock.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -48,23 +48,14 @@
  * that the socket cuts short keeps its frame on the wire with its offset: the rest goes on the
  * peer's next turn, so a part write never desyncs the stream.
  *
- * **The stall strike.** A strike is an offer the peer could not take: its STREAM lane was
- * full, so the offer cost a frame (the ring's arm shed one), and the turn it took moved no
- * byte of the held frame. Any byte moved clears the count. A SAMPLE lane (depth 1) never
- * strikes: its overwrite is its contract and costs one slot by construction, so a fast
- * publisher cannot condemn a peer whose socket stalls briefly. A peer that is truly stuck
- * behind SAMPLE lanes alone is left to the link's own down detection (`POLLHUP`, `POLLERR`,
- * the liveness window). A refused lane draw is the source's verdict and never strikes. The verdict
- * is in whole rings: a peer is condemned when its strikes in a row reach the link's cap times the
- * depth of the lane being offered, so a peer that let that many rings of a vertex go by without
- * taking a byte. A peer whose lane still has room is inside the depth its vertex declared, so a
- * burst that only fills rings strikes nothing, and a deeper ring tolerates a longer burst. Turns
- * run only on events — a new frame offered to the peer (its sender resumes the held frame first) or
- * the socket reporting writability (@ref tr::net::egress_t::flush) — so the count is of offers the
- * peer refused, never of time.
- * At the link's cap the peer is condemned: the call that reached the verdict says so, and the
- * link closes the session. Anything else — a peer that is gone — is the socket's own event
- * (`POLLHUP`, `POLLERR`) or teardown. No timer and no clock read here.
+ * **A stall is counted, never judged** (#2899). An offer that found its STREAM lane full, so
+ * that the ring's arm shed a frame, on a turn that moved no byte is counted as a stall. Nothing
+ * here closes a peer for it: the writer never waits (#2252) and a full lane sheds counted frames,
+ * so nothing wedges. A peer that stopped reading is closed by the application's liveness check
+ * (@ref tr::net::egress_t::condemn_held, #2198), on the application's own `now`; a link whose
+ * application never checks sees counted drops. Only a failed write that cut a frame mid-way
+ * condemns the peer at once, since its stream can never be resynced. No timer and no clock read
+ * here.
  *
  * **Which thread frees** (ADR-0072, ADR-0080). A frame reference may be dropped by whichever
  * thread finishes or sheds it, so its block comes from a source that is safe to free on any
@@ -114,16 +105,6 @@ namespace tr::net {
  *        one queue was before #2144: a full control lane sheds its oldest frame, counted.
  */
 inline constexpr std::uint16_t kEgressControlDepth = 8;
-
-/**
- * @brief Whole rings that condemn a peer whose writes move nothing: each strike is one offer
- *        that found the peer's STREAM lane full and whose turn moved no byte of the held
- *        frame (a SAMPLE lane never strikes), and
- *        the verdict is this many times the lane's depth in a row. Turns run only on events —
- *        a new frame offered to the peer, or the socket reporting writability — never on a
- *        clock. The #2130 figure.
- */
-inline constexpr std::uint8_t kEgressStallStrikes = 64;
 
 /**
  * @brief One outbound frame, built once and shared by every peer it reaches.
@@ -272,10 +253,10 @@ struct egress_result_t {
                                              out (the SAMPLE overwrite, the best-effort
                                              drop-oldest). */
     std::uint32_t stalled = 0;   /**< @brief Offers that found the peer's STREAM lane full
-                                             and whose turn moved nothing — each one a
-                                             strike. A SAMPLE lane never strikes. */
-    bool condemn = false;        /**< @brief The peer reached the strike cap, or a failed
-                                             write cut a frame mid-way: the link closes it. */
+                                             and whose turn moved nothing: counted only, never
+                                             a verdict (#2899). A SAMPLE lane never stalls. */
+    bool condemn = false;        /**< @brief A failed write cut a frame mid-way: the link
+                                             closes the peer. */
 };
 
 /**
@@ -373,8 +354,6 @@ class egress_peer_t {
     std::atomic<lane_t*> tail_{nullptr};
     egress_frame_t* wire_ = nullptr; /**< @brief The frame being written (writer only). */
     std::uint32_t off_ = 0;          /**< @brief Bytes of `wire_` on the wire (writer only). */
-    std::uint16_t strikes_ = 0;      /**< @brief Consecutive strikes: full-lane offers that
-                                                 moved nothing (writer only, saturating). */
     std::atomic<std::uint8_t> role_{kClosed}; /**< @brief `kWriter` | `kClosed` | `kLanes` |
                                                            `kLaneWait`. */
     std::atomic<bool> held_{false};           /**< @brief @ref wants_write. */
@@ -384,7 +363,7 @@ static_assert(sizeof(void*) != 8 || sizeof(egress_peer_t) <= 24,
               "the egress slot is at most 24 B per peer (#2144)");
 
 /**
- * @brief The link-level half of the egress module: the source and the strike cap.
+ * @brief The link-level half of the egress module: the source its lanes are drawn from.
  *
  * One per link, and it holds no lock: each peer's lanes are guarded by that peer's own lane
  * lock (#2310), a bit of its role byte. The lock is held only for a lane step — an index step,
@@ -399,17 +378,8 @@ static_assert(sizeof(void*) != 8 || sizeof(egress_peer_t) <= 24,
  */
 class egress_t {
    public:
-    /**
-     * @brief An egress whose lanes are drawn from @p src.
-     *
-     * @param strike_cap Whole rings of strikes (full-lane offers that move nothing) before
-     *                   the peer is condemned. A link whose
-     *                   write turns wait a bound passes its own small cap; a non-blocking one
-     *                   takes @ref kEgressStallStrikes.
-     */
-    explicit egress_t(mem::block_source_t& src,
-                      std::uint8_t strike_cap = kEgressStallStrikes) noexcept
-        : src_(&src), strike_cap_(strike_cap != 0 ? strike_cap : 1) {}
+    /** @brief An egress whose lanes are drawn from @p src. */
+    explicit egress_t(mem::block_source_t& src) noexcept : src_(&src) {}
 
     egress_t(const egress_t&) = delete;
     egress_t& operator=(const egress_t&) = delete;
@@ -441,9 +411,9 @@ class egress_t {
      *               egress_frame_t&, std::size_t off)`.
      * @param condemn Shuts the peer's socket down. Called while this call still holds the
      *               writer role, so the socket it names cannot have been closed and reused —
-     *               only when the peer earned it (@ref egress_result_t::condemn), and
-     *               perhaps more than once in one call, so it is idempotent (`shutdown(2)`
-     *               is).
+     *               only when a failed write cut a frame mid-way
+     *               (@ref egress_result_t::condemn), and perhaps more than once in one call, so
+     *               it is idempotent (`shutdown(2)` is).
      * @param arm    Arms write interest for a frame the socket cut short. Called while this
      *               call still holds the writer role, and only once
      *               @ref egress_peer_t::wants_write reports the frame (#2775): a waiter that
@@ -481,7 +451,6 @@ class egress_t {
                     r.condemn = s.moved != 0;  // half a record went out and the rest cannot
                 }
             }
-            if (s.moved != 0) p.strikes_ = 0;
             drain_owned(p, std::forward<Write>(write), condemn, std::forward<Arm>(arm), r, held, 0,
                         true);
             return r;
@@ -503,7 +472,7 @@ class egress_t {
         // The store-buffering pair: the push above, then the claim. A holder that let the
         // role go after our push re-reads the round and finds it; a holder that has not let
         // go yet drains it. Either way it leaves. The claimed turn
-        // resumes a held frame first: this offer is the event a peer's strike counts.
+        // resumes a held frame first: this offer is the event a stall counts.
         if (own || claim(p))
             drain_owned(p, std::forward<Write>(write), condemn, std::forward<Arm>(arm), r, false,
                         lost);
@@ -570,7 +539,6 @@ class egress_t {
         // push that raced the close (#2145).
         { const lanes_guard_t lock(p); }
         while (egress_frame_t* const f = pop(p)) egress_frame_t::release(f);
-        p.strikes_ = 0;
         p.held_.store(false, std::memory_order_release);
         if constexpr (::tr::graph::kFaultInjection) {
             if (auto* const hook = ::tr::detail::egress_open_close_hook) hook(false);
@@ -591,7 +559,6 @@ class egress_t {
         if constexpr (::tr::graph::kFaultInjection) {
             if (auto* const hook = ::tr::detail::egress_open_close_hook) hook(true);
         }
-        p.strikes_ = 0;
         p.wire_ = first;
         p.off_ = 0;
         p.held_.store(first != nullptr, std::memory_order_relaxed);
@@ -750,10 +717,9 @@ class egress_t {
      *
      * Ends with the role released. A frame the socket would not finish stays on the wire
      * (@ref egress_peer_t::wants_write) for the next turn. A step is held or failed, never
-     * both. Any byte moved clears the strikes;
-     * a turn that moved nothing, taken by an offer that found its STREAM lane full, is one,
-     * and the cap times that lane's depth (@p lost) condemns the peer. A SAMPLE lane
-     * (@p lost 1) and an offer that cost nothing (0) never strike.
+     * both. A turn that moved nothing, taken by an offer that found its STREAM lane full
+     * (@p lost, its depth), is counted as a stall and condemns nothing (#2899). A SAMPLE lane
+     * (@p lost 1) and an offer that cost nothing (0) are not stalls.
      *
      * @p drained skips the first drain pass: the caller took the role over empty lanes and
      * wrote its own record. A frame pushed since is found by the re-check after the role is
@@ -785,16 +751,9 @@ class egress_t {
                 egress_frame_t::release(std::exchange(p.wire_, nullptr));
                 p.off_ = 0;
             }
-            // A strike: an offer that cost a frame of a full STREAM lane, on a turn that
-            // moved nothing. A SAMPLE's overwrite is its contract, bounded at one slot, so
-            // depth 1 never strikes. Any byte moved clears the run; the verdict is whole rings.
-            const std::uint32_t depth = std::exchange(lost, 0);
-            const bool strike = (moved == 0) & (depth > 1);
-            r.stalled += strike;
-            p.strikes_ = static_cast<std::uint16_t>(
-                std::min<std::uint32_t>((p.strikes_ + strike) * (moved == 0), UINT16_MAX));
-            r.condemn |=
-                strike & (p.strikes_ >= std::min<std::uint32_t>(strike_cap_ * depth, UINT16_MAX));
+            // A stall: an offer that cost a frame of a full STREAM lane, on a turn that moved
+            // nothing. Counted, never a verdict (#2899): liveness is the application's check.
+            r.stalled += (moved == 0) & (std::exchange(lost, 0) > 1);
             if (r.condemn) condemn();  // still inside the role: the socket is the peer's own
             p.held_.store(held, std::memory_order_release);
             if (held) arm();  // after the flag: see send's @p arm
@@ -813,7 +772,6 @@ class egress_t {
     }
 
     mem::block_source_t* src_; /**< @brief Where the lanes come from. */
-    std::uint8_t strike_cap_;  /**< @brief Strikes before condemnation. */
 };
 
 }  // namespace tr::net

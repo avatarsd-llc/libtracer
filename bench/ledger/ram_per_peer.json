@@ -38,7 +38,7 @@
       "value": 24,
       "goal": 24,
       "moved_by": "#2144 (one shared-frame egress, one ring per (peer, vertex))",
-      "basis": "sizeof(tr::net::egress_peer_t) on x86-64, pinned by its static_assert (16 B on a 32-bit target): the lane round, the frame on the wire and its offset, the strike count, the role and the writability flag. A ring is drawn per (peer, vertex) only while frames wait, so an idle peer holds this slot and nothing else."
+      "basis": "sizeof(tr::net::egress_peer_t) on x86-64, pinned by its static_assert (16 B on a 32-bit target): the lane round, the frame on the wire and its offset, the role and the writability flag. A ring is drawn per (peer, vertex) only while frames wait, so an idle peer holds this slot and nothing else."
     },
     {
       "id": "tcp-server link base",

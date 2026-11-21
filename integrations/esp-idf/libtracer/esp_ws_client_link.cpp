@@ -1020,8 +1020,7 @@ void esp_ws_client_link_t::send_on(std::span<const std::span<const std::byte>> i
     });
     // A write never waits (#2787): what the socket will not take now stays on the wire for the
     // next turn (the next send, or the recv loop's), and the connection is the read side's to
-    // drop. The egress's strike verdict has nothing to close: liveness is the application's
-    // frozen-peer check, on its own clock.
+    // drop: liveness is the application's frozen-peer check, on its own clock.
     resume_t resume{*this};
     const tr::net::egress_result_t r = egress_.send(
         peer_, lane, once,
