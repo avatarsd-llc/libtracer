@@ -66,10 +66,10 @@ using await_fire_fn_t = void (*)(void* ctx, await_waiter_t& waiter) noexcept;
  *        `vertex_t::wait_for_change`.
  *
  * Intrusive and caller-owned: the graph links it into the stripe of the vertex it watches and
- * allocates nothing. A remote AWAIT's waiter is drawn by the router from the receiving link's
- * own rx source, so the receiver pays for the wait it serves and no library-internal buffer
- * holds it. While armed it is counted in the stripe's @ref vertex_stripe_t::waiters, so a
- * publish on a stripe with no waiter of either kind keeps the lock-free path (#555).
+ * allocates nothing. A remote AWAIT's waiter is drawn by the router from its long-lived link
+ * plane (#2902), so no library-internal buffer holds it. While armed it is counted in the
+ * stripe's @ref vertex_stripe_t::waiters, so a publish on a stripe with no waiter of either kind
+ * keeps the lock-free path (#555).
  *
  * Every field but @ref fire / @ref ctx is the graph's, written under the stripe mutex.
  */

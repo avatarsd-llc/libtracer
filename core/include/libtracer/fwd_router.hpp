@@ -184,9 +184,10 @@ struct router_planes_t {
     /**
      * @brief The nothrow source the router's LONG-LIVED link state draws from (#603 defect 1 /
      * #873 family 3, ADR-0065 / ADR-0079 §Decision 4): the NAME->link demux table, each child's
-     * receive context, the bus token caches and the bound-path scratch — the library holds no
-     * buffer of its own. A bounded node injects a @ref mem::pool_source_t over its static slab
-     * (one slab, whole stack — ADR-0039 §2); the default is the process net sub-pool
+     * receive context, the bus token caches, the bound-path scratch and each deferred AWAIT's
+     * waiter (#2902) — the library holds no buffer of its own. A bounded node injects a @ref
+     * mem::pool_source_t over its static slab (one slab, whole stack — ADR-0039 §2); the default is
+     * the process net sub-pool
      * (`mem::net_source()`; the static arena on an MCU build). Must outlive the router, and must be
      * thread-safe: several transport receive threads reach it.
      *
@@ -200,8 +201,7 @@ struct router_planes_t {
      * `nullptr`, so it reinstates the very abort this parameter change removed. @ref
      * mem::block_source_t's warning carries the full reasoning, including why a budget-tracking
      * variant is declined too. Split from @p rx deliberately (ADR-0079's per-plane default): @p rx
-     * is per-frame decode scratch and may legitimately be a `bump_source_t`, while link state is
-     * LONG-LIVED and would monotonically fill one.
+     * is per-frame decode scratch, while link state is LONG-LIVED.
      */
     mem::block_source_t* link_src = &mem::net_source();
 
@@ -1920,14 +1920,14 @@ class fwd_router_t {
         return own != nullptr ? *own : *rx_;
     }
 
-    /** @brief One deferred remote AWAIT, drawn from its link's rx source (ADR-0084).
+    /** @brief One deferred remote AWAIT, drawn from the link plane (ADR-0084, #2902).
      *         Defined in `fwd_router.cpp`. */
     struct pending_await_t;
 
     /**
      * @brief The router's deferred-AWAIT state (ADR-0084): the list of pending waiters.
      *
-     * Holds no buffer: every waiter is a block of the receiving link's own rx source. It
+     * Holds no buffer: every waiter is a block of the router's link plane (#2902). It
      * holds no thread and reads no clock either: libtracer has no timers. A pending waiter
      * resolves on change, on `link_down` / `remove_child`, or when the router is destroyed. The
      * request's `await_timeout` is ignored: the requester owns the deadline (RFC-0004

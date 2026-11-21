@@ -140,7 +140,7 @@ on the next write.
 
 A **remote** `await` (an `FWD{AWAIT}` arriving over a link) is answered the same way, but the
 waiting happens at the vertex and not on the link: the terminus parks a one-shot waiter, drawn
-from the receiving link's own rx source, and returns that link's receive context at once. The
+from the router's long-lived link plane, and returns that link's receive context at once. The
 reply goes out on the next write, from the writer's thread. The terminus enforces no deadline:
 the requester owns it (RFC-0004 Amendment 3), and `await_timeout` is only its hint. A waiter
 whose vertex never changes is released when the link goes down or the node tears down. Because

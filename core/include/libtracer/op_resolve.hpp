@@ -229,7 +229,7 @@ struct deferred_await_t {
  * @brief The terminus's AWAIT deferral sink (ADR-0084): take over @p req and answer it when
  *        the vertex changes, so the resolve returns the receive context at once.
  * @return Success when the sink now owns the answer; an error (`BACKPRESSURE` when the
- *         receiving link's source refused the waiter) is answered at once by the resolver.
+ *         router's link plane refused the waiter) is answered at once by the resolver.
  */
 using await_defer_fn_t = result_t<void> (*)(void* ctx, const deferred_await_t& req);
 

@@ -2591,18 +2591,17 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
 
 /**
  * @brief One deferred remote AWAIT: the armed waiter plus everything its reply needs, in ONE
- *        block of the receiving link's rx source.
+ *        block of the router's link plane.
  *
- * The receiver pays (ADR-0084 §Decision 2): the block is `sizeof` this header plus the link
- * name and the reply's route bytes, drawn from the same source that link's decode arena draws
- * from, so a peer that parks AWAITs spends its own link's budget and no one else's. The route
+ * The block is `sizeof` this header plus the link name and the reply's route bytes. It outlives
+ * the frame that parked it, so it is long-lived link state and comes from the link plane
+ * (`link_src_`, fixed at construction), never from the per-frame rx source (#2902). The route
  * bytes are copied once here because the request frame they came from is released when the
  * receive context returns.
  */
 struct fwd_router_t::pending_await_t {
     graph::await_waiter_t waiter;             /**< @brief Armed on the vertex; its ctx is this. */
     fwd_router_t* router = nullptr;           /**< @brief The owner the fire thunk calls back. */
-    mem::block_source_t* source = nullptr;    /**< @brief The rx source this block came from. */
     std::size_t block_bytes = 0;              /**< @brief The block's size, for its release. */
     graph::vertex_handle_t vertex;            /**< @brief The awaited vertex. */
     pending_await_t* prev = nullptr;          /**< @brief Plane list link. */
@@ -2709,29 +2708,24 @@ void fwd_router_t::await_fired_thunk(void* ctx, graph::await_waiter_t& /*w*/) no
 }
 
 graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& req) {
-    const child_rx_ctx_t* const ctx =
-        req.inbound != nullptr ? static_cast<const child_rx_ctx_t*>(req.inbound->origin) : nullptr;
     const std::string_view name = req.inbound != nullptr ? req.inbound->link : std::string_view{};
     // No link to answer over ⇒ nothing to defer: the caller answers BACKPRESSURE at once.
     if (name.empty()) return std::unexpected(graph::status_t::BACKPRESSURE);
 
-    mem::block_source_t& source = rx_for(ctx);
     const std::size_t bytes =
         sizeof(pending_await_t) + name.size() + req.dst.size() + req.src.size();
-    void* const mem = source.try_alloc(bytes, alignof(pending_await_t));
-    // The receiving link's own budget is spent: refuse THIS await, by value. Never a fallback
-    // to the blocking wait.
+    void* const mem = link_src_->try_alloc(bytes, alignof(pending_await_t));
+    // The link plane is spent: refuse THIS await, by value. Never a fallback to the blocking
+    // wait.
     if (mem == nullptr) return std::unexpected(graph::status_t::BACKPRESSURE);
     auto* const p = new (mem) pending_await_t(req.vertex);
     p->waiter.fire = &fwd_router_t::await_fired_thunk;
     p->waiter.ctx = p;
     p->router = this;
-    p->source = &source;
     p->block_bytes = bytes;
     // No deadline is stored: the requester owns the timeout (RFC-0004 Amendment 3, ADR-0084),
     // and the resolver skips the `await_timeout` hint. A waiter whose vertex never changes ends on
-    // link_down / remove_child or at teardown, and it costs only this block of its own link's
-    // source.
+    // link_down / remove_child or at teardown, and it costs only this block of the link plane.
     p->echo_ts = req.echo_ts;
     p->name_len = name.size();
     p->dst_len = req.dst.size();
@@ -2747,7 +2741,7 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     std::unique_lock lock(awaits_.m);
     const auto refuse = [&](graph::status_t st) -> graph::result_t<void> {
         p->~pending_await_t();
-        source.release(mem, bytes, alignof(pending_await_t));
+        link_src_->release(mem, bytes, alignof(pending_await_t));
         return std::unexpected(st);
     };
     if (awaits_.stop) return refuse(graph::status_t::BACKPRESSURE);
@@ -2767,10 +2761,9 @@ void fwd_router_t::retire_await_locked(pending_await_t* p) noexcept {
     if (p->next != nullptr) p->next->prev = p->prev;
     if (awaits_.head == p) awaits_.head = p->next;
     --awaits_.count;
-    mem::block_source_t* const source = p->source;
     const std::size_t bytes = p->block_bytes;
     p->~pending_await_t();
-    source->release(p, bytes, alignof(pending_await_t));
+    link_src_->release(p, bytes, alignof(pending_await_t));
     awaits_.cv.notify_all();  // teardown waits for the list to drain
 }
 
@@ -2817,10 +2810,11 @@ void fwd_router_t::answer_await(pending_await_t& p) {
         count_drop(assemble_dropped_);
         return;
     }
-    // The waiter's own source, not its link's: the fire may land after the link it arrived
-    // over was removed, when nothing may be read through that link any more (#1941).
+    // The waiter's own plane, the link plane, not its link's rx source: the fire may land after
+    // the link it arrived over was removed, when nothing may be read through that link any more
+    // (#1941, #2902).
     std::array<std::span<const std::byte>, kReplyInlineIov> inline_iov;
-    reply_iov_t iov(inline_iov, *p.source);
+    reply_iov_t iov(inline_iov, *link_src_);
     const auto table = gather_reply_iov(reply, iov);
     if (table.empty()) {
         count_drop(reply_iov_dropped_);
