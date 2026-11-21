@@ -18,6 +18,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -27,6 +28,7 @@
 #include <vector>
 
 #include "bench_common.hpp"
+#include "libtracer/mem_borrowed.hpp"
 #include "libtracer/tracer.hpp"
 
 namespace {
@@ -47,10 +49,19 @@ int main() {
     tr::graph::graph_t g;
     const auto p = g.try_register_vertex(path_t("/p"), role_t::STORED_VALUE);
     if (!p) return 1;
+    std::array<std::byte, 8> seed{};
+    seed.fill(std::byte{0xAB});
     for (int i = 0; i < kFanout; ++i) {
+        // A branch read composes only when the vertex has a REGISTERED child: register the
+        // middle level too, not just the leaves under it.
+        if (!g.try_register_vertex(path_t("/p/a" + std::to_string(i)), role_t::STORED_VALUE))
+            return 1;
         for (int j = 0; j < kFanout; ++j) {
             const std::string k = "/p/a" + std::to_string(i) + "/b" + std::to_string(j);
-            if (!g.try_register_vertex(path_t(k), role_t::STORED_VALUE)) return 1;
+            const auto v = g.try_register_vertex(path_t(k), role_t::STORED_VALUE);
+            // A walk folds stored values: with none anywhere, the read of /p is NOT_FOUND
+            // and nothing is walked.
+            if (!v || !g.write(*v, tr::view::view_t::over(tr::view::borrow_const(seed)))) return 1;
         }
     }
     std::printf("%-16s %10s %10s %10s %10s\n", "row", "p50_us", "max_us", "walks", "yields");
@@ -59,6 +70,9 @@ int main() {
         std::atomic<bool> stop{false};
         std::atomic<std::uint64_t> walks{0};
         std::atomic<std::uint64_t> yields{0};
+        // Any other refusal is terminal: the row cannot measure what it claims, so the readers
+        // stop and the bench fails instead of waiting forever for a walk that never ends.
+        std::atomic<int> refused{0};
         std::vector<std::thread> readers;
         for (int r = 0; r < n; ++r) {
             readers.emplace_back([&] {
@@ -68,12 +82,17 @@ int main() {
                         walks.fetch_add(1, std::memory_order_relaxed);
                     } else if (v.error() == status_t::BACKPRESSURE) {
                         yields.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        refused.store(static_cast<int>(v.error()) + 1);
+                        stop = true;
+                        return;
                     }
                 }
             });
         }
         // Let the readers get going (n walks ended) before the first timed write.
-        while (n > 0 && walks.load() + yields.load() < static_cast<std::uint64_t>(n))
+        while (n > 0 && refused.load() == 0 &&
+               walks.load() + yields.load() < static_cast<std::uint64_t>(n))
             std::this_thread::yield();
         std::vector<double> us;
         us.reserve(kWrites);
@@ -86,6 +105,11 @@ int main() {
         }
         stop = true;
         for (std::thread& t : readers) t.join();
+        if (refused.load() != 0) {
+            std::fprintf(stderr, "walk_writer N=%d: read of /p refused with status %d\n", n,
+                         refused.load() - 1);
+            return 2;
+        }
         std::sort(us.begin(), us.end());
         char row[32];
         std::snprintf(row, sizeof row, "walk_writer N=%d", n);
