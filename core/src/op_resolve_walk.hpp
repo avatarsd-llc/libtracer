@@ -1002,9 +1002,14 @@ template <class N>
  * (span tier, byte-identical) and — 3c — the `tlv_view_t` reader (owning rope
  * tier). Every frame read goes through the node-reader concept; nothing here
  * names a specific decode representation.
+ *
+ * Always inlined: each tier calls it from exactly one place (`op_resolver_t::resolve`), so the
+ * attribute costs no flash. Left to the inliner, a larger walk stops being inlined into that
+ * caller and the receive path pays two frames where it paid one (#2875: +176 B on the esp32c6
+ * WebSocket client rx stack row).
  */
 template <class N>
-[[nodiscard]] result_t<view::rope_t> resolve_node(
+[[nodiscard, gnu::always_inline]] inline result_t<view::rope_t> resolve_node(
     graph_t& graph, const N& root, std::string_view inbound_link, std::string_view subject,
     const view::view_t* frame_view, mem::mem_backend_t& flat, mem::mem_backend_t& egress,
     mem::mem_backend_t& ack, mem::block_source_t& retained,
