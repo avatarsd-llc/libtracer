@@ -15,11 +15,13 @@
  * - **no receiver deadline.** The requester owns the timeout (RFC-0004 Amendment 3): with no
  *   write, the waiter stays pending past its `await_timeout` and answers nothing, until its link
  *   goes down or the router is destroyed;
- * - **the receiver pays.** The waiter is a block of the receiving link's own rx source, held
- *   while the AWAIT is pending and given back once it is answered, cancelled or torn down.
+ * - **the waiter lives on the link plane.** It outlives the frame that parked it, so it is a
+ *   block of the router's long-lived link plane, never of the child's per-frame rx source: it is
+ *   held while the AWAIT is pending and given back to the link plane once it is answered (from
+ *   the writer's thread), cancelled or torn down, and the rx source keeps no draw (#2902).
  */
 
-#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -27,6 +29,7 @@
 #include <cstdio>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string_view>
 #include <thread>
@@ -37,6 +40,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
@@ -109,36 +113,49 @@ class rec_link_t final : public transport_t {
     std::vector<std::vector<std::byte>> sent_;
 };
 
-/** @brief A heap-backed rx source that counts the blocks it has lent out. */
-class counting_source_t final : public tr::mem::block_source_t {
+/** @brief A source that serves from @p inner and tracks every block it has lent out. */
+class tracking_source_t final : public tr::mem::block_source_t {
    public:
-    counting_source_t() noexcept : block_source_t("test_counting_rx") {}
-    /** @brief Serve from the heap and count the loan. */
+    /** @brief Track the blocks drawn from @p inner. */
+    tracking_source_t(tr::mem::block_source_t& inner, const char* name) noexcept
+        : block_source_t(name), inner_(inner) {}
+    /** @brief Serve from the inner source and record the loan. */
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
-        void* const p = tr::mem::heap_source().try_alloc(bytes, align);
+        void* const p = inner_.try_alloc(bytes, align);
         if (p != nullptr) {
             const std::lock_guard lock(m_);
-            ++live_;
-            largest_ = std::max(largest_, bytes);
+            live_.insert(p);
         }
         return p;
     }
-    /** @brief Give the block back and count the return. */
+    /** @brief Record the return, then give the block back to the inner source. */
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
-        tr::mem::heap_source().release(p, bytes, align);
-        const std::lock_guard lock(m_);
-        --live_;
+        {
+            const std::lock_guard lock(m_);
+            live_.erase(p);
+        }
+        inner_.release(p, bytes, align);
     }
     /** @brief Blocks currently lent out. */
-    [[nodiscard]] long live() const {
+    [[nodiscard]] std::size_t live() const {
+        const std::lock_guard lock(m_);
+        return live_.size();
+    }
+    /** @brief Whether @p p is currently lent out. */
+    [[nodiscard]] bool holds(const void* p) const {
+        const std::lock_guard lock(m_);
+        return live_.contains(const_cast<void*>(p));
+    }
+    /** @brief The blocks currently lent out. */
+    [[nodiscard]] std::set<void*> snapshot() const {
         const std::lock_guard lock(m_);
         return live_;
     }
 
    private:
+    tr::mem::block_source_t& inner_;
     mutable std::mutex m_;
-    long live_ = 0;
-    std::size_t largest_ = 0;
+    std::set<void*> live_;
 };
 
 /** @brief An opaque `VALUE` TLV holding a little-endian `u32`. */
@@ -199,9 +216,17 @@ constexpr std::uint32_t kSeed = 0x11111111u;
 constexpr std::uint32_t kOther = 0x22222222u;
 constexpr std::uint32_t kChanged = 0x33333333u;
 
-/** @brief One node: `/sink` and `/other`, one fake link `cli` on its own counting source. */
+/**
+ * @brief One node: `/sink` and `/other`, one fake link `cli`. The router's link plane is a
+ *        tracked heap source; the child's rx source is its own tracked
+ *        `pool_source_t<no_guard_t>`, the per-child shape a receiver injects.
+ */
 struct node_t {
-    counting_source_t rx;
+    tracking_source_t plane{tr::mem::heap_source(), "test_link_plane"};
+    std::array<std::byte, 64 * 1024> slab{};
+    std::array<tr::mem::size_class_t, 16> classes{};
+    tr::mem::pool_source_t<tr::no_guard_t> pool{slab, classes};
+    tracking_source_t rx{pool, "test_child_rx"};
     graph_t graph;
     std::optional<fwd_router_t> router;
     rec_link_t link;
@@ -211,12 +236,28 @@ struct node_t {
     node_t()
         : sink(graph.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE)),
           other(graph.register_vertex(*path_t::parse("/other"), role_t::STORED_VALUE)) {
-        router.emplace(graph);
+        router.emplace(graph, tr::net::router_planes_t{.link_src = &plane});
         (void)router->attach_link("cli", link, &rx);
         (void)graph.write(sink, make_value(b_value_u32(kSeed)));
         (void)graph.write(other, make_value(b_value_u32(kOther)));
     }
 };
+
+/**
+ * @brief Send an AWAIT on `/<target>` and return the one link-plane block it parked, or nullptr
+ *        when it parked none there (or more than one).
+ */
+void* park(node_t& n, std::string_view target) {
+    const std::set<void*> before = n.plane.snapshot();
+    n.link.inject(b_await(target, 10s));
+    void* found = nullptr;
+    for (void* p : n.plane.snapshot()) {
+        if (before.contains(p)) continue;
+        if (found != nullptr) return nullptr;
+        found = p;
+    }
+    return found;
+}
 
 /**
  * @brief The acceptance case: an AWAIT leaves the receive context at once, and a READ sent
@@ -232,15 +273,15 @@ std::vector<std::byte> pair_of(const graph_t& g, vertex_handle_t v) {
 void read_after_pending_await_is_answered_first() {
     std::printf("a READ behind a pending AWAIT on the same link is answered first:\n");
     node_t n;
-    const long base = n.rx.live();
 
     const auto t0 = std::chrono::steady_clock::now();
-    n.link.inject(b_await("sink", 10s));
+    void* const waiter = park(n, "sink");
     const auto held = std::chrono::steady_clock::now() - t0;
     check(held < 500ms, "  the AWAIT's receive context returned without waiting");
     check(n.link.count() == 0, "  and sent nothing yet");
     check(n.router->pending_awaits() == 1, "  one AWAIT is pending");
-    check(n.rx.live() == base + 1, "  its waiter is ONE block of the receiving link's rx source");
+    check(waiter != nullptr, "  its waiter is ONE block of the router's link plane");
+    check(n.rx.live() == 0, "  and the child's rx source holds no draw for it");
 
     n.link.inject(b_fwd(fwd_op_t::READ, b_path({"other"}), b_path({"cli"})));
     check(n.link.count() == 1, "  the READ behind it was answered on the same link");
@@ -257,32 +298,32 @@ void read_after_pending_await_is_answered_first() {
               second->src == pair_of(n.graph, n.sink),
           "  the AWAIT's RESULT carries the new value, and /sink's PAIR as its src");
     check(n.router->pending_awaits() == 0, "  nothing is pending afterwards");
-    check(n.rx.live() == base, "  and the waiter's block went back to the link's source");
+    check(waiter != nullptr && !n.plane.holds(waiter),
+          "  and the waiter's block went back to the link plane");
 }
 
 /**
  * @brief The receiver enforces no deadline (RFC-0004 Amendment 3): a 20 ms AWAIT with no write
  *        stays pending past its `await_timeout` and answers nothing; its link going down
- *        releases it, and its block goes back to the link's source.
+ *        releases it.
  */
 void receiver_ignores_await_timeout() {
     std::printf("the receiver ignores await_timeout — the requester owns the deadline:\n");
     node_t n;
-    const long base = n.rx.live();
     n.link.inject(b_await("sink", 20ms));
     std::this_thread::sleep_for(100ms);
     check(n.link.count() == 0, "  past its 20 ms await_timeout, nothing was sent");
     check(n.router->pending_awaits() == 1, "  and the waiter is still pending");
     (void)n.router->remove_child("cli");
     check(n.router->pending_awaits() == 0, "  remove_child releases it");
-    check(n.rx.live() == base, "  and its block went back to the link's source");
+    check(n.rx.live() == 0, "  and the child's rx source holds no draw");
 }
 
 /** @brief Many AWAITs on one link each answer exactly once, from the write to their vertex. */
 void many_awaits_each_answer_once() {
     std::printf("many pending AWAITs each answer exactly once:\n");
     node_t n;
-    const long base = n.rx.live();
+    const std::size_t base = n.plane.live();
     constexpr int kSinkWaiters = 8;
     constexpr int kOtherWaiters = 8;
     for (int i = 0; i < kSinkWaiters; ++i) n.link.inject(b_await("sink", 10s));
@@ -302,20 +343,22 @@ void many_awaits_each_answer_once() {
     check(sink_results == kSinkWaiters, "  one RESULT per /sink waiter, carrying its value");
     check(other_results == kOtherWaiters, "  one RESULT per /other waiter, carrying its value");
     check(n.router->pending_awaits() == 0, "  nothing is pending afterwards");
-    check(n.rx.live() == base, "  every waiter's block went back to the link's source");
+    check(n.plane.live() == base, "  every waiter's block went back to the link plane");
+    check(n.rx.live() == 0, "  and the child's rx source holds no draw");
 }
 
 /** @brief Taking the link down releases its pending waiters without answering them. */
 void link_down_releases_waiters() {
     std::printf("removing the link releases its pending AWAITs:\n");
     node_t n;
-    const long base = n.rx.live();
-    n.link.inject(b_await("sink", 10s));
-    n.link.inject(b_await("sink", 10s));
+    void* const first = park(n, "sink");
+    void* const second = park(n, "sink");
     check(n.router->pending_awaits() == 2, "  two are pending");
     (void)n.router->remove_child("cli");
     check(n.router->pending_awaits() == 0, "  none after remove_child");
-    check(n.rx.live() == base, "  and their blocks went back to the link's source");
+    check(first != nullptr && second != nullptr && !n.plane.holds(first) && !n.plane.holds(second),
+          "  and their blocks went back to the link plane");
+    check(n.rx.live() == 0, "  and the child's rx source holds no draw");
     (void)n.graph.write(n.sink, make_value(b_value_u32(kChanged)));
     check(n.link.count() == 0, "  a later write answers nothing");
 }
@@ -325,8 +368,7 @@ void link_down_releases_waiters() {
 void link_up_releases_nothing() {
     std::printf("a link-state up evicts nothing and releases no pending AWAIT:\n");
     node_t n;
-    const long base = n.rx.live();
-    n.link.inject(b_await("sink", 10s));
+    void* const waiter = park(n, "sink");
     check(n.router->pending_awaits() == 1, "  one AWAIT is pending");
 
     n.link.come_up();
@@ -344,22 +386,67 @@ void link_up_releases_nothing() {
     check(r && r->kind == reply_kind_t::RESULT && r->value == kChanged,
           "  with the AWAIT's RESULT, carrying the new value");
     check(n.router->pending_awaits() == 0, "  nothing is pending afterwards");
-    check(n.rx.live() == base, "  and the waiter's block went back to the link's source");
+    check(waiter != nullptr && !n.plane.holds(waiter),
+          "  and the waiter's block went back to the link plane");
 }
 
 /** @brief Destroying the router with AWAITs pending neither hangs nor leaks. */
 void teardown_with_pending_awaits() {
     std::printf("router teardown with pending AWAITs:\n");
     node_t n;
-    const long base = n.rx.live();
-    n.link.inject(b_await("sink", 10s));
-    n.link.inject(b_await("other", 10s));
+    void* const first = park(n, "sink");
+    void* const second = park(n, "other");
     const auto t0 = std::chrono::steady_clock::now();
     n.router.reset();
     check(std::chrono::steady_clock::now() - t0 < 2s, "  the destructor returns promptly");
-    check(n.rx.live() == base, "  and every waiter block was given back");
+    check(first != nullptr && second != nullptr && !n.plane.holds(first) && !n.plane.holds(second),
+          "  and every waiter block went back to the link plane");
+    check(n.rx.live() == 0, "  and the child's rx source holds no draw");
     (void)n.graph.write(n.sink, make_value(b_value_u32(kChanged)));
     check(n.link.count() == 0, "  a write after teardown answers nothing");
+}
+
+/**
+ * @brief Waiter release from the writer thread with a per-child rx source (#2902): a waiter
+ *        outlives the frame that parked it, so it is drawn from and returned to the router's
+ *        link plane, and the child's per-frame rx source keeps no draw across its lifetime.
+ *        It is also given back on `link_down`, on `remove_child`, and at router destruction.
+ */
+void waiter_release_from_writer_thread_with_per_child_rx_source() {
+    std::printf("waiter release from writer thread with per-child rx source:\n");
+    {
+        node_t n;
+        void* const waiter = park(n, "sink");
+        check(waiter != nullptr, "  the parked waiter is one block of the link plane");
+        check(n.rx.live() == 0, "  the child's rx source holds no draw while it is parked");
+        std::thread writer([&] { (void)n.graph.write(n.sink, make_value(b_value_u32(kChanged))); });
+        writer.join();
+        check(n.link.wait_for(1, 2s), "  a write on another thread completes the AWAIT");
+        check(n.router->pending_awaits() == 0, "  nothing is pending afterwards");
+        check(waiter != nullptr && !n.plane.holds(waiter),
+              "  the writer thread returned the waiter to the link plane");
+        check(n.rx.live() == 0, "  and the child's rx source holds no draw");
+    }
+    {
+        node_t n;
+        void* const waiter = park(n, "sink");
+        n.router->link_down("cli");
+        check(n.router->pending_awaits() == 0, "  link_down releases a parked waiter");
+        check(waiter != nullptr && !n.plane.holds(waiter), "  back to the link plane");
+        void* const again = park(n, "sink");
+        (void)n.router->remove_child("cli");
+        check(n.router->pending_awaits() == 0, "  remove_child releases a parked waiter");
+        check(again != nullptr && !n.plane.holds(again), "  back to the link plane");
+        check(n.rx.live() == 0, "  and the child's rx source holds no draw");
+    }
+    {
+        node_t n;
+        void* const waiter = park(n, "sink");
+        n.router.reset();
+        check(waiter != nullptr && !n.plane.holds(waiter),
+              "  router destruction returns a parked waiter to the link plane");
+        check(n.rx.live() == 0, "  and the child's rx source holds no draw");
+    }
 }
 
 /** @brief A writer thread races the receive thread arming waiters; each AWAIT still answers
@@ -391,6 +478,7 @@ int main() {
     link_down_releases_waiters();
     link_up_releases_nothing();
     teardown_with_pending_awaits();
+    waiter_release_from_writer_thread_with_per_child_rx_source();
     concurrent_writes_race_arming();
     return tr::testing::summary("fwd_await_defer");
 }
