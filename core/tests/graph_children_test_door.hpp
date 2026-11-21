@@ -1,7 +1,8 @@
 /**
  * @file
  * @brief Test-only access to `graph_t`'s flat `:children` serialize, the oracle the folded
- *        listing is diffed against (#2437), and to its waiting-writer count (#2846).
+ *        listing is diffed against (#2437), and to its waiting-writer count and map lock (#2846,
+ *        #2900).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -36,6 +37,10 @@ struct graph_children_test_door_t {
     static std::uint32_t map_writers_waiting(const graph_t& g) noexcept {
         return g.map_writers_waiting_.load(std::memory_order_relaxed);
     }
+
+    /** @brief @p g's map lock itself (#2900): a test holds it exclusively to prove that a walk
+     *         arriving while a writer waits never takes its shared hold. */
+    static tr::shared_mutex_t& map_mutex(const graph_t& g) noexcept { return g.map_mutex_; }
 };
 
 }  // namespace tr::graph

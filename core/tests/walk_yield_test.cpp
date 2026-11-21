@@ -16,6 +16,13 @@
  * thread while a parked walk holds the lock and the writer waits: both yield at once. That arm
  * relies on the host's reader/writer lock admitting a new reader while a writer waits, which
  * glibc's default lock does.
+ *
+ * A walk that ARRIVES while a writer waits must not take its shared hold at all (#2900): on a
+ * reader-preferring lock, walks that retry back to back would otherwise relay the read phase
+ * between them and the writer would never get in. The test holds the map lock exclusively
+ * itself, lets a real writer queue behind it, and then runs every walk from another thread: a
+ * walk that answers at all while the lock is held exclusively never took its hold. A walk that
+ * took it would block until ctest's timeout, which is the failure.
  */
 
 #include <atomic>
@@ -163,9 +170,46 @@ void test_walks_yield(int walks) {
     check(visited >= 11, "and visits every vertex, the writer's included");
 }
 
+/**
+ * @brief While a writer waits, an arriving walk answers BACKPRESSURE (for_each_vertex: false)
+ *        without taking the map lock (#2900): it returns while the lock is held exclusively.
+ */
+void test_arriving_walk_takes_no_hold() {
+    std::printf("a walk arriving while a writer waits takes no hold:\n");
+    fixture_t f;
+    tr::shared_mutex_t& m = graph_children_test_door_t::map_mutex(f.g);
+    m.lock();  // the test is the exclusive holder; no walk can take a shared hold now
+    std::thread writer([&f] {
+        check(f.g.try_register_vertex(path_t("/q"), role_t::STORED_VALUE).has_value(),
+              "the queued writer's registration lands");
+    });
+    wait_for([&] { return f.waiting() == 1; });
+    std::thread walker([&f] {
+        const auto composed = f.g.read_subtree_folded(f.p, "peer");
+        check(!composed && composed.error() == status_t::BACKPRESSURE,
+              "the composed read answers BACKPRESSURE without its hold");
+        const auto folded = f.g.read_children_folded(f.p);
+        check(!folded && folded.error() == status_t::BACKPRESSURE,
+              "`:children` (folded) answers BACKPRESSURE without its hold");
+        const auto flat = tr::testing::read_children_materialized(f.g, f.p);
+        check(!flat && flat.error() == status_t::BACKPRESSURE,
+              "`:children` (materialized) answers BACKPRESSURE without its hold");
+        int visited = 0;
+        check(!f.g.for_each_vertex([&visited](auto, vertex_handle_t) { ++visited; }),
+              "for_each_vertex answers false without its hold");
+        check(visited == 0, "and visits nothing");
+    });
+    walker.join();  // returns only if no walk took its shared hold
+    m.unlock();
+    writer.join();
+    check(f.waiting() == 0, "no writer is counted once it has the lock");
+    check(f.g.read_subtree_folded(f.p, "peer").has_value(), "a retried composed read completes");
+}
+
 }  // namespace
 
 int main() {
+    test_arriving_walk_takes_no_hold();
     test_walks_yield(1);
     test_walks_yield(2);
     test_walks_yield(4);
