@@ -619,6 +619,7 @@ esp_err_t server_t::deliver_frame(int fd, std::span<const std::byte> body, bool 
         req.user_ctx = it->second.ws_user_ctx;
         // httpd_req_new: the session's context pair is copied INTO the request.
         t_req = request_scope_t{true, fd, it->second.ctx, it->second.free_ctx};
+        req.sess_ctx = it->second.ctx;
     }
     t_pending = pending_frame_t{body.data(), body.size(), final, type};
     req.handle = static_cast<httpd_handle_t>(this);

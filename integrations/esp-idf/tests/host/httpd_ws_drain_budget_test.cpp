@@ -427,6 +427,132 @@ void test_a_quiet_session_never_waits_for_a_flood() {
 }
 
 // ---------------------------------------------------------------------------
+// 10 — sessions that join one after another are stopped by the link-wide ceiling: twice
+//      the budget, whatever their shares add up to (#2891).
+// ---------------------------------------------------------------------------
+void test_sessions_joining_in_turn_stop_at_twice_the_budget() {
+    constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
+    std::printf("sessions bursting one after another park at twice the budget:\n");
+    constexpr int kFds[] = {820, 821, 822, 823, 824, 825, 826};
+    auto link = fresh_link(kFds[0]);
+    for (std::size_t i = 1; i < std::size(kFds); ++i) claimed_session(kFds[i]);
+    (void)fake_httpd::run_idle_hooks();
+    g_payload_reads.store(0);
+    const std::byte body[8] = {};
+    // Session k (1-based) reads ceil(budget / k) frames, the most its share lets it read
+    // before its next frame would wait: shares alone would let 85 frames through at 32.
+    std::size_t by_shares = 0;
+    for (std::size_t k = 1; k <= std::size(kFds); ++k) by_shares += (kBudget + k - 1) / k;
+    std::thread httpd([&] {
+        for (std::size_t k = 1; k <= std::size(kFds); ++k)
+            for (std::size_t i = 0; i < (kBudget + k - 1) / k; ++i)
+                (void)fake_httpd::instance().deliver_frame(kFds[k - 1],
+                                                           std::span<const std::byte>(body));
+    });
+    check(by_shares > 2 * kBudget, "the shares alone add up to more than twice the budget");
+    check(wait_until([&] { return parked_after(2 * kBudget); }),
+          "the drain parks after exactly twice the budget, inside a session's share");
+    check(link->stats().rx_drain_waits == 1, "one wait");
+    // Every later frame belongs to a session that has read in this drain, so each further
+    // idle releases the drain again.
+    for (int i = 0; i < 4 && g_payload_reads.load() < by_shares; ++i) {
+        (void)fake_httpd::run_idle_hooks();
+        (void)wait_until([&] {
+            return g_payload_reads.load() == by_shares || fake_httpd::semaphore_waiters() == 1;
+        });
+    }
+    (void)fake_httpd::run_idle_hooks();
+    httpd.join();
+    check(g_payload_reads.load() == by_shares, "every frame was read in the end");
+    finish(std::move(link));
+}
+
+// ---------------------------------------------------------------------------
+// 11 — an in-call reply joins its destination to the current drain, so a tally left from an
+//      earlier drain does not drop it (#2891).
+// ---------------------------------------------------------------------------
+/** @brief The directed endpoint of the peer on @p fd: the last peer enumerated after it was
+ *         claimed, so call it right after @ref claimed_session. */
+tr::net::transport_t* newest_peer(httpd_ws_link_t& link) {
+    std::string name;
+    link.enumerate_peers([&name](std::string_view p) { name = std::string(p); });
+    return name.empty() ? nullptr : link.peer_link(name);
+}
+
+/** @brief An application that answers every frame in-call to one fixed peer. */
+class forwarder_t {
+   public:
+    void arm(tr::net::transport_t* to) { to_ = to; }
+    void operator()(peer_handle_t, std::span<const std::byte>) {
+        const std::byte reply[4] = {};
+        if (to_ != nullptr) to_->send(std::span<const std::byte>(reply));
+    }
+
+   private:
+    tr::net::transport_t* to_ = nullptr;
+};
+
+void test_an_in_call_reply_counts_for_a_stale_destination() {
+    std::printf("replies to a session whose tally is from an earlier drain still count:\n");
+    auto link = fresh_link(830);  // A, the sender
+    (void)fake_httpd::instance().run_pending();
+    forwarder_t app;
+    link->set_peer_receiver(app);
+    claimed_session(831);  // B, the destination: claimed, then a frame in THIS drain
+    tr::net::transport_t* const b = newest_peer(*link);
+    check(b != nullptr, "the destination resolved to a directed endpoint");
+    const std::byte body[8] = {};
+    (void)fake_httpd::instance().deliver_frame(831, std::span<const std::byte>(body));
+    // A new drain: B's tally is now an earlier drain's.
+    (void)fake_httpd::run_idle_hooks();
+    app.arm(b);
+    g_payload_reads.store(0);
+    std::atomic<int> step{0};
+    std::thread httpd([&] {
+        // A's frames, each answered in-call to B, up to B's reply bound.
+        for (std::size_t i = 0; i < 8; ++i)
+            (void)fake_httpd::instance().deliver_frame(830, std::span<const std::byte>(body));
+        step.store(1);
+        // B's own next frame meets its reply bound: the replies were kept.
+        (void)fake_httpd::instance().deliver_frame(831, std::span<const std::byte>(body));
+        step.store(2);
+    });
+    check(wait_until([&] { return step.load() == 1 && parked_after(8); }),
+          "B's next frame waits: the replies written to it in this drain were counted");
+    (void)fake_httpd::run_idle_hooks();
+    check(wait_until([&] { return step.load() == 2; }), "and it is read once the core idles");
+    httpd.join();
+    app.arm(nullptr);
+    finish(std::move(link));
+}
+
+// ---------------------------------------------------------------------------
+// 12 — a session closing mid-drain: the slot's next tenant starts with nothing (#2891).
+// ---------------------------------------------------------------------------
+void test_a_session_closing_mid_drain() {
+    constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
+    std::printf("a session that closes mid-drain leaves nothing to its successor:\n");
+    auto link = fresh_link(840);
+    g_payload_reads.store(0);
+    const std::byte body[8] = {};
+    for (std::size_t i = 0; i + 4 < kBudget; ++i)
+        (void)fake_httpd::instance().deliver_frame(840, std::span<const std::byte>(body));
+    // Gone mid-drain, and a new client on the same descriptor (and slot), same drain.
+    fake_httpd::instance().close_session(840);
+    (void)fake_httpd::instance().run_pending();
+    claimed_session(840);
+    const std::size_t before = g_payload_reads.load();
+    // The departed session still counts in the divisor (it only overcounts), so the new one's
+    // share is half the budget; it inherits none of its predecessor's units.
+    ingress_t in(840, kBudget / 2 + 1, 8);
+    check(wait_until([&] { return parked_after(before + kBudget / 2); }),
+          "the new tenant reads its own share, from zero, before it waits");
+    (void)fake_httpd::run_idle_hooks();
+    check(wait_until([&] { return in.delivered() == kBudget / 2 + 1; }), "and finishes after idle");
+    finish(std::move(link));
+}
+
+// ---------------------------------------------------------------------------
 // 9 — a drain also ends on its own egress: in-call replies worth a quarter of lwIP's send
 //     buffer end it before the frame budget would (ADR-0085 §7).
 // ---------------------------------------------------------------------------
@@ -549,6 +675,9 @@ int main(int argc, char** argv) {
         test_park_sends_each_frame_once();
         test_a_quiet_session_never_waits_for_a_flood();
         test_in_call_reply_bytes_end_a_drain();
+        test_sessions_joining_in_turn_stop_at_twice_the_budget();
+        test_an_in_call_reply_counts_for_a_stale_destination();
+        test_a_session_closing_mid_drain();
     }
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);

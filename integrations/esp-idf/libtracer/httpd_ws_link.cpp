@@ -383,25 +383,59 @@ constexpr std::size_t kRxDrainTxBytes = kTcpSndBuf / 4;
  * per drain never fills the queue. This replaces the Nagle switch the two-write send path
  * needed (a reply was two segments, so 32 of them were 64 against a queue of 16).
  */
-constexpr std::size_t kRxDrainTxReplies = kTcpSndQueueLen / 2;
+constexpr std::size_t kRxDrainTxReplies = std::min<std::size_t>(kTcpSndQueueLen / 2, 254);
+static_assert(kRxDrainTxReplies >= 1, "a reply bound of zero would park every frame");
 
 /** @brief Reply bytes counted as one more reply, so that one tally bounds both the segments
  *         and the bytes: @ref kRxDrainTxReplies of these are @ref kRxDrainTxBytes. */
 constexpr std::size_t kRxDrainTxReplyBytes = kRxDrainTxBytes / kRxDrainTxReplies;
 
 /**
- * @brief A drain's budget in UNITS: one per frame, plus one per @ref kRxDrainUnitBytes of
- *        payload, so that one count ends a drain no later than either budget would.
+ * @brief A drain's budget in UNITS (@ref drain_units): one per frame, plus payload units, so
+ *        that one count ends a drain no later than either budget would.
  *
  * A session's own tally is one byte (@ref drain_tally_t), which is what bounds the frame
  * budget to 254 (`Kconfig` ranges it). With the frame budget off the bytes are counted in
- * 32nds of the byte budget, and a frame alone costs nothing.
+ * 32nds of the byte budget, rounded UP, so a frame of any non-empty size costs at least one.
  */
 constexpr std::size_t kRxDrainUnits = kRxDrainFrames != 0 ? kRxDrainFrames : 32;
 static_assert(kRxDrainUnits <= 254, "a session's drain tally is one byte (ADR-0085)");
-/** @brief Payload bytes charged as one unit; 0 when the byte budget is off. */
-constexpr std::size_t kRxDrainUnitBytes =
-    kRxDrainBytes == 0 ? 0 : std::max<std::size_t>(kRxDrainBytes / kRxDrainUnits, 1);
+
+/**
+ * @brief The units one frame of @p len payload bytes costs under a frame budget of
+ *        @p frames and a byte budget of @p bytes (either 0 = off; see @ref kRxDrainUnits).
+ *
+ * With both budgets set a frame is one unit plus its whole payload units, so a drain ends no
+ * later than either budget alone would. Byte budget only: the payload units rounded up, so
+ * small frames are paced too. Frame budget only: one unit.
+ */
+[[nodiscard]] constexpr std::size_t drain_units(std::size_t len, std::size_t frames,
+                                                std::size_t bytes) noexcept {
+    const std::size_t units = frames != 0 ? frames : 32;
+    const std::size_t unit_bytes = bytes == 0 ? 0 : std::max<std::size_t>(bytes / units, 1);
+    if (unit_bytes == 0) return 1;
+    return frames != 0 ? 1 + len / unit_bytes : (len + unit_bytes - 1) / unit_bytes;
+}
+// The three configurations, at the defaults' numbers: the host suites bind both budgets, so
+// the byte-only and frame-only arms are checked here, at compile time, on every build.
+static_assert(drain_units(8, 32, 32768) == 1 && drain_units(4096, 32, 32768) == 5);
+static_assert(drain_units(1, 0, 32768) == 1 && drain_units(1024, 0, 32768) == 1 &&
+              drain_units(1025, 0, 32768) == 2 && drain_units(0, 0, 32768) == 0);
+static_assert(drain_units(65536, 32, 0) == 1);
+static_assert(32 * drain_units(8, 0, 32768) >= 32, "byte-only: 32 small frames spend 32 units");
+
+/**
+ * @brief The link-wide ceiling on one drain's units: twice the budget (#2891).
+ *
+ * Shares alone bound a drain's frames by about one budget only when the sessions interleave.
+ * Sessions that join ONE AFTER ANOTHER each read their share at the time they joined, so N of
+ * them read U(1 + 1/2 + ... + 1/N), about 2.6 U at seven. The ceiling stops that at 2 U; under
+ * fair interleaving the shares stop the drain long before it. So a drain reads at most
+ * min(U * H_N, 2 U) units plus one frame per session (the frame that crosses its line), which
+ * at the defaults' 32 frames, 16 sockets and ~7.3 ms a small request is 80 frames, ~0.58 s,
+ * still inside the 1 s minimum task watchdog.
+ */
+constexpr std::size_t kRxDrainLinkUnits = 2 * kRxDrainUnits;
 
 /**
  * @brief One session's share of the current drain (ADR-0085, per session since #2891): the
@@ -2436,23 +2470,40 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     return slot;
 }
 
-void httpd_ws_link_t::pace_rx(int fd, std::size_t frame_bytes) {
+void httpd_ws_link_t::join_drain(session_t& s, std::uint16_t tag) {
+    if constexpr (!kRxDrainPaced) return;
+    if (rx_drain_epoch_ != tag) {
+        rx_drain_epoch_ = tag;
+        rx_drain_sessions_ = 0;
+        rx_drain_units_ = 0;
+    }
+    // A tally of another drain counts nothing in this one: it starts here, and its session
+    // joins the divisor. A session that left mid-drain stays counted, so the divisor can only
+    // OVERCOUNT the sessions reading, which only makes the others' waits come earlier.
+    if (s.drain.epoch != tag || rx_drain_sessions_ == 0) {
+        s.drain = drain_tally_t{.epoch = tag};
+        ++rx_drain_sessions_;
+    }
+}
+
+void httpd_ws_link_t::pace_rx(void* sess_ctx, std::size_t frame_bytes) {
     if constexpr (!kRxDrainPaced) return;
     idle_gate_t& gate = g_idle_gates[static_cast<std::size_t>(xPortGetCoreID())];
     if (!gate.hooked.load(std::memory_order_acquire)) return;
-    // The drain is counted per SESSION (#2891). A socket whose session is not claimed yet (its
-    // first frame claims it) or that was refused after its upgrade has no tally: that one
-    // frame is not paced, and every frame after it is.
-    void* const ctx = httpd_sess_get_ctx(handle_.load(std::memory_order_relaxed), fd);
-    if (ctx == nullptr || ctx == gate_.load(std::memory_order_relaxed)) return;
-    drain_tally_t& t = static_cast<session_t*>(ctx)->drain;
+    // The drain is counted per SESSION (#2891), on the session httpd hands the request
+    // (`req->sess_ctx`). A socket whose session is not claimed yet (its first frame claims it)
+    // or that was refused after its upgrade has no tally: that one frame is not paced, and
+    // every frame after it is.
+    if (sess_ctx == nullptr || sess_ctx == gate_.load(std::memory_order_relaxed)) return;
+    session_t& s = *static_cast<session_t*>(sess_ctx);
     std::uint32_t epoch = gate.epoch.load(std::memory_order_seq_cst);
     // The drain is the run of frames since this core last idled; an epoch that moved since
     // starts a new one. A session waits only once it has read ITS SHARE of the budget, the
     // budget divided among the sessions that have read in this drain, or once its own in-call
-    // replies reach what lwIP can hold unacknowledged for it (kRxDrainTxReplies): a quiet
-    // session is never held for another one's flood, and the frames read between two idle
-    // moments still stay within about one budget plus one frame per session. A task that
+    // replies reach what lwIP can hold unacknowledged for it (kRxDrainTxReplies), or once the
+    // whole drain reaches twice the budget (kRxDrainLinkUnits, which only sessions joining one
+    // after another reach). So no session is charged for another session's frames, and a
+    // drain reads at most min(U * H_N, 2 U) units plus one frame per session. A task that
     // migrated reads another core's epoch, which almost never matches the tag, and starts a
     // new drain; one that matches by chance waits once early, never for good.
     //
@@ -2468,9 +2519,11 @@ void httpd_ws_link_t::pace_rx(int fd, std::size_t frame_bytes) {
     // consumed the frame's first header byte before this handler is called
     // (httpd_parse.c httpd_req_new -> httpd_ws_get_frame_type), so a handler that returns
     // without the payload desynchronises the stream.
-    const bool spent = t.epoch == static_cast<std::uint16_t>(epoch) &&
-                       (std::size_t{t.units} * rx_drain_sessions_ >= kRxDrainUnits ||
-                        t.replies >= kRxDrainTxReplies);
+    const auto now = static_cast<std::uint16_t>(epoch);
+    const bool spent =
+        s.drain.epoch == now && rx_drain_epoch_ == now &&
+        (std::size_t{s.drain.units} * rx_drain_sessions_ >= kRxDrainUnits ||
+         s.drain.replies >= kRxDrainTxReplies || rx_drain_units_ >= kRxDrainLinkUnits);
     if (spent) {
         rx_drain_waits_.fetch_add(1, std::memory_order_relaxed);
         gate.waiters.fetch_add(1, std::memory_order_seq_cst);
@@ -2481,18 +2534,11 @@ void httpd_ws_link_t::pace_rx(int fd, std::size_t frame_bytes) {
         gate.waiters.fetch_sub(1, std::memory_order_seq_cst);
         epoch = gate.epoch.load(std::memory_order_seq_cst);
     }
-    const auto tag = static_cast<std::uint16_t>(epoch);
-    if (rx_drain_epoch_ != tag) {
-        rx_drain_epoch_ = tag;
-        rx_drain_sessions_ = 0;
-    }
-    if (t.epoch != tag || rx_drain_sessions_ == 0) {
-        t = drain_tally_t{.epoch = tag};
-        ++rx_drain_sessions_;
-    }
-    t.units =
-        saturating_add(t.units, (kRxDrainFrames != 0 ? 1 : 0) +
-                                    (kRxDrainUnitBytes != 0 ? frame_bytes / kRxDrainUnitBytes : 0));
+    join_drain(s, static_cast<std::uint16_t>(epoch));
+    const std::size_t units = drain_units(frame_bytes, kRxDrainFrames, kRxDrainBytes);
+    s.drain.units = saturating_add(s.drain.units, units);
+    rx_drain_units_ = static_cast<std::uint16_t>(
+        std::min<std::size_t>(rx_drain_units_ + units, kRxDrainLinkUnits));
 }
 
 void httpd_ws_link_t::egress_posted() noexcept {
@@ -2524,7 +2570,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // The drain budget (ADR-0085). After the header, so the frame's size is known and is
     // charged whole; before the payload, so a spent budget leaves every byte of it — and
     // of whatever follows — in the socket while this task waits for its core to idle.
-    pace_rx(httpd_req_to_sockfd(req), frame.len);
+    pace_rx(req->sess_ctx, frame.len);
 
     // Pass 2: ALWAYS drain the payload — even a frame type we ignore must be consumed,
     // or its bytes stay in the stream and the next recv reads them as a frame header
@@ -3639,10 +3685,14 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     // Charged to the destination session's drain (ADR-0085 §7): an in-call reply is written
     // by the receive context, on the httpd task, so this is the one writer the drain accounts,
     // and lwIP's send limits are that connection's own.
+    // The destination joins the current drain first, exactly as its own next frame would
+    // join it, or a tally left from an earlier drain would drop these replies there.
     if constexpr (kRxDrainPaced)
-        if (err == ESP_OK)
+        if (err == ESP_OK) {
+            join_drain(*to.slot, rx_drain_epoch_);
             to.slot->drain.replies =
                 saturating_add(to.slot->drain.replies, 1 + total / kRxDrainTxReplyBytes);
+        }
     note_tx_result(to, err == ESP_OK, total);
 }
 
@@ -4345,11 +4395,11 @@ httpd_ws_link_t::tx_outcome_t httpd_ws_link_t::write_frame(httpd_handle_t h, int
 esp_err_t httpd_ws_link_t::write_rest(httpd_handle_t h, int fd, const tx_frame_t& f) {
     // The frame as one byte sequence — its WebSocket header, its gathered bytes, then a
     // retained value's links straight from the published block — written from `f.sent` on,
-    // as ONE gathered write (#2891) whenever it has at most kWriteParts parts, which a
-    // gathered frame (header, payload) always does. A gathered frame's header is encoded here
-    // (ws::encode_frame_header); a retained frame carries its own in `payload`. The write goes
-    // through the session's verdicts inside write_frame's bracket, so a frame the socket takes
-    // only some of ends this call with the rest still owed.
+    // as ONE gathered write (#2891) whenever it has at most kWriteParts non-empty parts,
+    // which a gathered frame (header, payload) and a retained frame of up to two links do. A
+    // gathered frame's header is encoded here (ws::encode_frame_header); a retained frame carries
+    // its own in `payload`. The write goes through the session's verdicts inside write_frame's
+    // bracket, so a frame the socket takes only some of ends this call with the rest still owed.
     const tx_block_t& b = *f.blk;
     std::array<std::byte, ws::kMaxServerFrameHeader> hdr{};
     const std::size_t hdr_len =

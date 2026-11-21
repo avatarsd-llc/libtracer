@@ -118,9 +118,10 @@ menu "libtracer"
             waits, because the count restarts each time the core idles.
 
             The budget is shared among the sessions that read in the drain: a
-            session waits only once it has read its share, so a quiet session
-            never waits for another session's flood (#2891). At most 254, the
-            ceiling of a session's one-byte tally.
+            session waits only once it has read its share, so no session is
+            charged for another session's frames (#2891); a whole drain stops at
+            twice the budget. At most 254, the ceiling of a session's one-byte
+            tally.
 
             Binds tr::graph::config_t::kRxDrainFrames. The default keeps the
             longest idle-free stretch near 0.23 s at the ~7 ms per small request

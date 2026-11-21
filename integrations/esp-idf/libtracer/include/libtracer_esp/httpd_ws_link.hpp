@@ -1562,13 +1562,14 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * (ping, close) included: each costs the same handler pass. A drain belongs to the core
      * it started on; a task that migrated starts a new one (see ADR-0085, dual core).
      *
-     * The drain is counted per SESSION (#2891): the session on @p fd waits only once it has
-     * read its share of the budget (the budget divided among the sessions that read in the
-     * drain), or once the in-call replies written to it reach half lwIP's segment queue or a
-     * quarter of its send buffer (ADR-0085 §7): while this task holds unread ingress, lwIP
-     * drops the peer's data-bearing segments and the ACKs they carry, so more replies would
-     * wait for an ACK only this task can release. A quiet session never waits for another
-     * one's flood.
+     * The drain is counted per SESSION (#2891): the session @p sess_ctx (httpd's
+     * `req->sess_ctx`) waits only once it has read its share of the budget (the budget divided
+     * among the sessions that read in the drain), once the in-call replies written to it reach
+     * half lwIP's segment queue or a quarter of its send buffer (ADR-0085 §7: while this task
+     * holds unread ingress, lwIP drops the peer's data-bearing segments and the ACKs they
+     * carry, so more replies would wait for an ACK only this task can release), or once the
+     * whole drain reaches twice the budget. No session is charged for another session's
+     * frames; a frame that arrives while the task is parked still waits for that park.
      *
      * The wait is also where this link's held frames go out while it lasts. The parked
      * task is the httpd task, the one that writes them, so a frame stored by another task
@@ -1576,7 +1577,11 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * park, ingress waits for idle, and no peer can buy ingress by provoking egress. The frame is
      * not read before the core idles.
      */
-    void pace_rx(int fd, std::size_t frame_bytes);
+    void pace_rx(void* sess_ctx, std::size_t frame_bytes);
+    /** @brief Make @p s a member of the drain tagged @p tag: a link whose drain has another tag
+     *         starts this one, and a tally of another drain starts at zero and joins the
+     *         divisor (httpd task only; see @ref pace_rx). */
+    void join_drain(session_t& s, std::uint16_t tag);
     /** @brief Wake a drain parked for idle so it flushes the frame just stored (any task; the
      *         producer's side of the idle-gate handshake, after the store). */
     void egress_posted() noexcept;
@@ -1913,9 +1918,9 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      */
     static int send_gathered(httpd_handle_t handle, int fd, ::iovec* iov, std::size_t iovcnt,
                              int flags);
-    /** @brief Parts one write of @ref write_rest gathers: a gathered frame's header and
-     *         payload, or a retained frame's head and two links. More parts take more writes. */
-    static constexpr std::size_t kWriteParts = 4;
+    /** @brief Non-empty parts one write of @ref write_rest gathers: a gathered frame's header
+     *         and payload, or a retained frame's head and two links. More take more writes. */
+    static constexpr std::size_t kWriteParts = 3;
 
     /**
      * @brief Handle a detected stream desynchronisation on @p slot's socket: log it and
@@ -2352,6 +2357,9 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief Sessions that have read a frame in the current drain: the divisor of each
      *         one's share of the budget (see @ref pace_rx). httpd task only. */
     std::uint16_t rx_drain_sessions_ = 0;
+    /** @brief Units read in the current drain by every session, held at twice the budget:
+     *         the link-wide ceiling of @ref pace_rx. httpd task only. */
+    std::uint16_t rx_drain_units_ = 0;
     /** @brief The in-call reply scratch, `tx_inline_bytes_` from `memory.io`: used only on
      *         the httpd task inside @ref send_in_call to gather a rope reply into one
      *         WebSocket frame. */
