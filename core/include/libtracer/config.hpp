@@ -689,6 +689,21 @@ struct default_config_t {
     static constexpr std::uint8_t kReadBudget = 0;
 
     /**
+     * @brief A per-link bound on parked waiters: how many deferred remote AWAITs one link may
+     *        hold at once (ADR-0084 §Decision 2, #2902).
+     *
+     * A waiter is one block of the router's shared link plane, so the most that plane holds for
+     * AWAITs is links × this cap × one waiter block, which the embedder sizes. An AWAIT beyond
+     * the cap on its link is answered `tr::flow::backpressure` at once and counted in
+     * `%fwd_router_t::await_refusals`; other links still park. The bound costs no byte per link:
+     * the router counts a link's waiters by walking its list, and only once the router as a
+     * whole holds this many. Must be at least 1.
+     *
+     * Override fragment: `static constexpr std::size_t kMaxAwaitsPerLink = 4;`.
+     */
+    static constexpr std::size_t kMaxAwaitsPerLink = 8;
+
+    /**
      * @brief Locks in the host guard's process-wide stripe table (#1716); a power of two.
      *
      * Applies when the build keeps the default @ref guard_t, and then the library then binds

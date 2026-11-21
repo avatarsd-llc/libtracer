@@ -15,6 +15,10 @@
  * - **no receiver deadline.** The requester owns the timeout (RFC-0004 Amendment 3): with no
  *   write, the waiter stays pending past its `await_timeout` and answers nothing, until its link
  *   goes down or the router is destroyed;
+ * - **a per-link bound on parked waiters.** One link holds at most
+ *   `config_t::kMaxAwaitsPerLink` waiters; one more is answered BACKPRESSURE and counted, while
+ *   another link still parks. The bound keys on the link name, so a same-name successor of a
+ *   removed link starts from its own waiters, not from state left on the old ctx;
  * - **the waiter lives on the link plane.** It outlives the frame that parked it, so it is a
  *   block of the router's long-lived link plane, never of the child's per-frame rx source: it is
  *   held while the AWAIT is pending and given back to the link plane once it is answered (from
@@ -324,8 +328,10 @@ void many_awaits_each_answer_once() {
     std::printf("many pending AWAITs each answer exactly once:\n");
     node_t n;
     const std::size_t base = n.plane.live();
-    constexpr int kSinkWaiters = 8;
-    constexpr int kOtherWaiters = 8;
+    // Both vertices on one link, inside its per-link bound on parked waiters.
+    constexpr auto kCap = static_cast<int>(tr::graph::config_t::kMaxAwaitsPerLink);
+    constexpr int kSinkWaiters = (kCap + 1) / 2;
+    constexpr int kOtherWaiters = kCap - kSinkWaiters;
     for (int i = 0; i < kSinkWaiters; ++i) n.link.inject(b_await("sink", 10s));
     for (int i = 0; i < kOtherWaiters; ++i) n.link.inject(b_await("other", 10s));
     check(n.router->pending_awaits() == kSinkWaiters + kOtherWaiters, "  all are pending");
@@ -449,6 +455,50 @@ void waiter_release_from_writer_thread_with_per_child_rx_source() {
     }
 }
 
+/**
+ * @brief A per-link bound on parked waiters (#2902): the (cap+1)-th AWAIT parked on one link is
+ *        refused BACKPRESSURE and counted, while another link still parks; a same-name successor
+ *        of a removed link (its ctx tombstoned and revived) parks up to the cap again.
+ */
+void per_link_bound_on_parked_waiters() {
+    std::printf("a per-link bound on parked waiters:\n");
+    constexpr std::size_t kCap = tr::graph::config_t::kMaxAwaitsPerLink;
+    node_t n;
+    rec_link_t other;
+    check(n.router->attach_link("cli2", other, &n.rx), "  a second link is attached");
+    const std::size_t refused = n.router->await_refusals();
+
+    bool parked = true;
+    for (std::size_t i = 0; i < kCap; ++i) parked = park(n, "sink") != nullptr && parked;
+    check(parked && n.router->pending_awaits() == kCap, "  one link parks up to the cap");
+    n.link.inject(b_await("sink", 10s));
+    const auto sent = n.link.frames();
+    const auto r = sent.size() == 1 ? parse_reply(sent[0]) : std::nullopt;
+    check(r && r->kind == reply_kind_t::ERROR, "  the next AWAIT on it is answered at once");
+    check(n.router->pending_awaits() == kCap, "  and does not park");
+    check(n.router->await_refusals() == refused + 1, "  and the refusal is counted");
+
+    other.inject(b_await("sink", 10s));
+    check(other.count() == 0 && n.router->pending_awaits() == kCap + 1,
+          "  another link still parks");
+
+    (void)n.router->remove_child("cli");
+    check(n.router->pending_awaits() == 1, "  removing the full link releases its waiters");
+    rec_link_t successor;
+    check(n.router->attach_link("cli", successor, &n.rx), "  a same-name successor is attached");
+    for (std::size_t i = 0; i < kCap; ++i) successor.inject(b_await("sink", 10s));
+    check(successor.count() == 0 && n.router->pending_awaits() == kCap + 1,
+          "  the successor parks up to the cap, carrying nothing from the removed link");
+    successor.inject(b_await("sink", 10s));
+    check(successor.count() == 1 && n.router->await_refusals() == refused + 2,
+          "  and its next AWAIT is refused and counted");
+
+    (void)n.graph.write(n.sink, make_value(b_value_u32(kChanged)));
+    check(n.router->pending_awaits() == 0, "  a write answers every parked waiter");
+    check(other.count() == 1 && successor.count() == kCap + 1, "  each on its own link");
+    check(n.rx.live() == 0, "  and the rx source holds no draw");
+}
+
 /** @brief A writer thread races the receive thread arming waiters; each AWAIT still answers
  *         exactly once. */
 void concurrent_writes_race_arming() {
@@ -479,6 +529,7 @@ int main() {
     link_up_releases_nothing();
     teardown_with_pending_awaits();
     waiter_release_from_writer_thread_with_per_child_rx_source();
+    per_link_bound_on_parked_waiters();
     concurrent_writes_race_arming();
     return tr::testing::summary("fwd_await_defer");
 }

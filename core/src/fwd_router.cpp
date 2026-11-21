@@ -2589,6 +2589,9 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
 
 // --- deferred remote AWAIT (ADR-0084) ------------------------------------------------
 
+static_assert(graph::config_t::kMaxAwaitsPerLink >= 1,
+              "config_t::kMaxAwaitsPerLink must be at least 1");
+
 /**
  * @brief One deferred remote AWAIT: the armed waiter plus everything its reply needs, in ONE
  *        block of the router's link plane.
@@ -2715,9 +2718,12 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     const std::size_t bytes =
         sizeof(pending_await_t) + name.size() + req.dst.size() + req.src.size();
     void* const mem = link_src_->try_alloc(bytes, alignof(pending_await_t));
-    // The link plane is spent: refuse THIS await, by value. Never a fallback to the blocking
-    // wait.
-    if (mem == nullptr) return std::unexpected(graph::status_t::BACKPRESSURE);
+    // The link plane is spent: refuse THIS await, by value, and count it. Never a fallback to
+    // the blocking wait.
+    if (mem == nullptr) {
+        count_drop(await_refused_);
+        return std::unexpected(graph::status_t::BACKPRESSURE);
+    }
     auto* const p = new (mem) pending_await_t(req.vertex);
     p->waiter.fire = &fwd_router_t::await_fired_thunk;
     p->waiter.ctx = p;
@@ -2745,6 +2751,17 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
         return std::unexpected(st);
     };
     if (awaits_.stop) return refuse(graph::status_t::BACKPRESSURE);
+    // A per-link bound on parked waiters (kMaxAwaitsPerLink, #2902): a link is the name its
+    // waiters answer over, so they are counted by walking the list, and only once the router
+    // as a whole holds the cap. No byte per link, and no state that outlives the link's ctx.
+    std::size_t same_link = 0;
+    if (awaits_.count >= graph::config_t::kMaxAwaitsPerLink)
+        for (pending_await_t* q = awaits_.head; q != nullptr; q = q->next)
+            same_link += static_cast<std::size_t>(q->name() == name);
+    if (same_link >= graph::config_t::kMaxAwaitsPerLink) {
+        count_drop(await_refused_);
+        return refuse(graph::status_t::BACKPRESSURE);
+    }
     // Armed UNDER the plane lock (plane → stripe is the lock order). A writer that fires it
     // the instant it is armed blocks on this lock in its fire thunk until it is listed.
     const graph::result_t<void> armed = graph_.arm_await(req.vertex, p->waiter, req.subject);
