@@ -78,7 +78,9 @@ TRANSPORT_ROWS = (
     # 9,418 -> 9,178 B (#2813): shut_down never waits, and the endpoint's attach is out of line.
     # 9,178 -> 9,194 B (+16): rulings 83/85/93, #2774 per-session READ budget, built off:
     # the off build's cost is accepted. Main's pin plus the measured delta.
-    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9194, None),
+    # 9,194 -> 9,124 B (-70, #2899): the egress stall verdict is deleted (no strike count,
+    # no strike cap, no condemn on a stall).
+    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9124, None),
     # 8,896 -> 9,080 B (#2147): the poll loops give way to turn functions, the write-interest
     # arm and disarm, and the thread-per-link fallback's block (maintainer ruling 60).
     # 9,080 -> 9,262 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys back
@@ -93,7 +95,8 @@ TRANSPORT_ROWS = (
     # attach (now out of line) keeps a shut link off the wait.
     # 9,282 -> 9,290 B (+8): rulings 83/85/93, #2774 per-session READ budget, built off:
     # the off build's cost is accepted. Main's pin plus the measured delta.
-    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9290, None),
+    # 9,290 -> 9,184 B (-106, #2899): the egress stall verdict is deleted.
+    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9184, None),
     ("CAN (transport_can + TWAI link)", ("transport_can", "twai_link", "socketcan_link_stub"),
      None, "compiled, not linked: full_node creates no CAN connection, so --gc-sections drops it"),
     ("WebSocket (httpd server + client link)", ("httpd_ws_link", "esp_ws_client_link"),
@@ -135,7 +138,9 @@ FOOTPRINT_PINS = {
     # 33,567 -> 33,509 B (-58, #2871): the framing's unfragmented message goes through the
     # assembler, one message path instead of two, and the framing's frames merge into the
     # ingress's. Every other row and the RAM stay at main.
-    "WebSocket (httpd server + client link)": 33509,
+    # 33,509 -> 33,423 B (-86, #2899): the egress stall verdict is deleted. Every other row
+    # and the RAM stay at main.
+    "WebSocket (httpd server + client link)": 33423,
 }
 
 
