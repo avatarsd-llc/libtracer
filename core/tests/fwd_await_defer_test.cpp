@@ -89,6 +89,15 @@ class rec_link_t final : public transport_t {
     /** @brief Deliver @p frame inbound, as this link's receive thread would: through the
      *         receiver `add_child` installed, so the router sees its per-link context. */
     void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
+    /** @brief The session a flat server link reports as delivering the frame in flight, as a
+     *         TCP or WS listener does (`%transport_t::inbound_peer`); none by default. */
+    [[nodiscard]] tr::net::peer_handle_t inbound_peer() const noexcept override { return peer; }
+    /** @brief Deliver @p frame inbound as session @p from of this one link. */
+    void inject_from(tr::net::peer_handle_t from, std::span<const std::byte> frame) {
+        peer = from;
+        rx_.deliver_borrowed(frame);
+        peer = {};
+    }
     /** @brief Fire the link-state notifier with `up = true`, as a transport whose connection
      *         came up would (#2147). */
     void come_up() { notify_up(); }
@@ -113,6 +122,7 @@ class rec_link_t final : public transport_t {
     }
 
    private:
+    tr::net::peer_handle_t peer{};
     std::mutex m_;
     std::vector<std::vector<std::byte>> sent_;
 };
@@ -499,6 +509,83 @@ void per_link_bound_on_parked_waiters() {
     check(n.rx.live() == 0, "  and the rx source holds no draw");
 }
 
+/**
+ * @brief On a link that carries several sessions (a flat TCP or WS listener), the per-link bound
+ *        on parked waiters is kept per session handle (#2902): each session parks up to the cap,
+ *        a session at its cap does not refuse another, and a later session in the same slot
+ *        (a new generation) releases the earlier session's waiters instead of counting them.
+ */
+void per_session_bound_on_one_link() {
+    std::printf("a per-link bound on parked waiters, kept per session on one link:\n");
+    constexpr std::size_t kCap = tr::graph::config_t::kMaxAwaitsPerLink;
+    node_t n;
+    tr::net::peer_handle_t a{};
+    a.index = 1;
+    a.generation = 1;
+    tr::net::peer_handle_t b{};
+    b.index = 2;
+    b.generation = 1;
+    const std::size_t refused = n.router->await_refusals();
+
+    for (std::size_t i = 0; i < kCap; ++i) n.link.inject_from(a, b_await("sink", 10s));
+    check(n.link.count() == 0 && n.router->pending_awaits() == kCap,
+          "  session A parks up to the cap");
+    n.link.inject_from(a, b_await("sink", 10s));
+    check(n.link.count() == 1 && n.router->await_refusals() == refused + 1,
+          "  A's next AWAIT is refused and counted");
+    for (std::size_t i = 0; i < kCap; ++i) n.link.inject_from(b, b_await("sink", 10s));
+    check(n.link.count() == 1 && n.router->pending_awaits() == 2 * kCap,
+          "  session B on the same link still parks up to the cap");
+
+    tr::net::peer_handle_t a_next = a;
+    a_next.generation = 2;
+    const std::size_t reclaimed = n.router->await_reclaims();
+    n.link.inject_from(a_next, b_await("sink", 10s));
+    check(n.link.count() == 1 && n.router->pending_awaits() == kCap + 1,
+          "  a later session in A's slot parks, and A's waiters are released");
+    check(n.router->await_reclaims() == reclaimed + kCap, "  and counted as reclaimed");
+
+    (void)n.graph.write(n.sink, make_value(b_value_u32(kChanged)));
+    check(n.router->pending_awaits() == 0, "  a write answers every parked waiter");
+}
+
+/**
+ * @brief Session churn on one slot of a link that carries several sessions (#2902): each session
+ *        parks up to the cap and leaves without its departure reaching the router, and the next
+ *        session in the slot reclaims the earlier one's waiters, so the link plane stays at or
+ *        below slots × cap, and another session still parks afterwards.
+ */
+void slot_reuse_reclaims_departed_waiters() {
+    std::printf("a reused session slot reclaims the departed session's waiters:\n");
+    constexpr std::size_t kCap = tr::graph::config_t::kMaxAwaitsPerLink;
+    constexpr std::uint32_t kRounds = 20;
+    node_t n;
+    const std::size_t base = n.plane.live();
+    const std::size_t reclaimed = n.router->await_reclaims();
+    bool bounded = true;
+    for (std::uint32_t gen = 1; gen <= kRounds; ++gen) {
+        tr::net::peer_handle_t s{};
+        s.index = 1;
+        s.generation = gen;
+        for (std::size_t i = 0; i < kCap; ++i) n.link.inject_from(s, b_await("sink", 10s));
+        bounded = bounded && n.router->pending_awaits() <= kCap && n.plane.live() <= base + kCap;
+    }
+    check(bounded, "  the link plane stays at or below slots x cap through the churn");
+    check(n.link.count() == 0, "  no session was refused, and a departed one is sent nothing");
+    check(n.router->await_reclaims() == reclaimed + (kRounds - 1) * kCap,
+          "  every departed session's waiters were reclaimed and counted");
+    tr::net::peer_handle_t other{};
+    other.index = 2;
+    other.generation = 1;
+    n.link.inject_from(other, b_await("sink", 10s));
+    check(n.link.count() == 0 && n.router->pending_awaits() == kCap + 1,
+          "  another session still parks afterwards");
+    (void)n.graph.write(n.sink, make_value(b_value_u32(kChanged)));
+    check(n.router->pending_awaits() == 0 && n.link.count() == kCap + 1,
+          "  a write answers only the live sessions' waiters");
+    check(n.rx.live() == 0, "  and the rx source holds no draw");
+}
+
 /** @brief A writer thread races the receive thread arming waiters; each AWAIT still answers
  *         exactly once. */
 void concurrent_writes_race_arming() {
@@ -530,6 +617,8 @@ int main() {
     teardown_with_pending_awaits();
     waiter_release_from_writer_thread_with_per_child_rx_source();
     per_link_bound_on_parked_waiters();
+    per_session_bound_on_one_link();
+    slot_reuse_reclaims_departed_waiters();
     concurrent_writes_race_arming();
     return tr::testing::summary("fwd_await_defer");
 }
