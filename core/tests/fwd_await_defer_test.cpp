@@ -31,6 +31,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -79,8 +80,9 @@ class rec_link_t final : public transport_t {
         const std::lock_guard lock(m_);
         sent_.emplace_back(frame.begin(), frame.end());
     }
-    /** @brief Record a scatter-gather frame, flattened. */
+    /** @brief Record a scatter-gather frame, flattened, after running @ref on_send once. */
     void send(std::span<const std::span<const std::byte>> iov) override {
+        if (on_send) std::exchange(on_send, nullptr)();
         const std::lock_guard lock(m_);
         std::vector<std::byte> flat;
         for (const auto& s : iov) flat.insert(flat.end(), s.begin(), s.end());
@@ -120,6 +122,10 @@ class rec_link_t final : public transport_t {
         }
         return true;
     }
+
+    /** @brief Run once inside the next scatter-gather send, before it is recorded: a test
+     *         acts while a reply is being sent. */
+    std::function<void()> on_send;
 
    private:
     tr::net::peer_handle_t peer{};
@@ -586,6 +592,35 @@ void slot_reuse_reclaims_departed_waiters() {
     check(n.rx.live() == 0, "  and the rx source holds no draw");
 }
 
+/**
+ * @brief A departed session's waiter that is already firing when its slot is reused is released
+ *        by its own thread, and counted as reclaimed exactly once however many parks walk past
+ *        it before it retires (#2902).
+ */
+void reclaim_counts_a_firing_waiter_once() {
+    std::printf("a firing waiter of a departed session is counted as reclaimed once:\n");
+    constexpr std::size_t kCap = tr::graph::config_t::kMaxAwaitsPerLink;
+    node_t n;
+    tr::net::peer_handle_t gone{};
+    gone.index = 1;
+    gone.generation = 1;
+    tr::net::peer_handle_t next = gone;
+    next.generation = 2;
+    for (std::size_t i = 0; i < kCap; ++i) n.link.inject_from(gone, b_await("sink", 10s));
+    const std::size_t reclaimed = n.router->await_reclaims();
+    // While the write sends the first reply, every waiter of the departed session has fired
+    // and none has retired; two parks by the slot's next session each walk past all of them.
+    n.link.on_send = [&] {
+        n.link.inject_from(next, b_await("other", 10s));
+        n.link.inject_from(next, b_await("other", 10s));
+    };
+    (void)n.graph.write(n.sink, make_value(b_value_u32(kChanged)));
+    check(n.router->await_reclaims() == reclaimed + kCap,
+          "  each fired waiter of the departed session is counted once");
+    check(n.router->pending_awaits() == 2, "  only the next session's two waiters stay parked");
+    check(n.link.count() == 1, "  and only the reply already being sent went out");
+}
+
 /** @brief A writer thread races the receive thread arming waiters; each AWAIT still answers
  *         exactly once. */
 void concurrent_writes_race_arming() {
@@ -619,6 +654,7 @@ int main() {
     per_link_bound_on_parked_waiters();
     per_session_bound_on_one_link();
     slot_reuse_reclaims_departed_waiters();
+    reclaim_counts_a_firing_waiter_once();
     concurrent_writes_race_arming();
     return tr::testing::summary("fwd_await_defer");
 }

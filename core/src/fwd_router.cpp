@@ -2803,8 +2803,9 @@ std::size_t fwd_router_t::cancel_awaits_locked(std::string_view link_name, peer_
         const bool gone = peer.valid() ? p->peer.index == peer.index : !count_peer;
         kept += static_cast<std::size_t>(on_link && mine);
         if (on_link && gone && !mine) {
-            // A waiter released while parking is reclaimed from a departed session: counted.
-            await_reclaimed_.fetch_add(static_cast<std::size_t>(count_peer),
+            // A waiter released while parking is reclaimed from a departed session: counted
+            // once, the first time it is cancelled (an orphan stays listed until it retires).
+            await_reclaimed_.fetch_add(static_cast<std::size_t>(count_peer && !p->orphan),
                                        std::memory_order_relaxed);
             // Not yet fired ⇒ ours to release now. Fired or sending ⇒ its thread retires it;
             // it only learns to send nothing.
