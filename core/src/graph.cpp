@@ -3936,16 +3936,16 @@ result_t<view::view_t> graph_t::read_children(vertex_t* v) const {
         // PATH — the RFC removes `NAME` from `PATH` bodies only and leaves the type and its
         // decoder standing everywhere else — so the member is RE-FRAMED here rather than
         // borrowed: same wire shape as before this RFC, one header write per child.
-        // After each member, a waiting writer goes first (#2846): the listing yields as
-        // BACKPRESSURE, the answer a refused draw gives.
+        // At every child, member or not, a waiting writer goes first (#2846): the listing
+        // yields as BACKPRESSURE, the answer a refused draw gives.
         v->for_each_child([this, &members, &staged](const vertex_t& c) {
+            staged &= !map_writer_waiting();
             if (!staged || !c.enumerable_member()) return;
             const std::span<const std::byte> seg = child_segment(c);
             const std::size_t body = kNameHeaderBytes + seg.size();
             staged = wire::emit_header(members, type_t::POINT,
                                        opt_t{.pl = true, .ll = body > 0xFFFFu}, body) &&
                      wire::emit_name(members, seg);
-            staged &= !map_writer_waiting();
         });
     }
     mem::bytes_t out(*tables_);
@@ -4108,15 +4108,15 @@ result_t<value_ref_t> graph_t::read_children_folded(vertex_handle_t vh) const {
         const auto lock = lock_map_walk();  // none while a writer waits (#2900)
         if (!lock) return std::unexpected(status_t::BACKPRESSURE);
         v->for_each_child([this, &members, &members_len, &oom, &hdr_backend](const vertex_t& c) {
+            // At every child, member or not, a waiting writer goes first (#2846): the listing
+            // yields as BACKPRESSURE, the answer a refused draw gives, so it rides the same latch.
+            oom |= map_writer_waiting();
             // THE membership predicate, shared verbatim with `read_children` — placeholders
             // and enumeration-hidden children (the RFC-0014 §3 creator endpoint) are not
             // members on either door.
             if (oom || !c.enumerable_member()) return;
             const std::size_t body = folded_own(&c, nullptr).len;
-            // After each member, a waiting writer goes first (#2846): the listing yields as
-            // BACKPRESSURE, which is the answer a refused draw gives, so it rides the same latch.
             oom = !append_folded_node(members, hdr_backend, body, &c, nullptr);
-            oom |= map_writer_waiting();
             members_len += folded_hdr_len(body) + body;
         });
     }
@@ -4201,8 +4201,9 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
         // `nodes` draws from the same store. A lambda cannot return the error, so a refused
         // push (a node or a child) latches `refused` and the loop propagates it after each
         // visit. A waiting writer (#2846) latches it too, and answers the same BACKPRESSURE.
+        if (!lock) return std::unexpected(status_t::BACKPRESSURE);
         bool refused = false;
-        if (!lock || !stack.push_back(work_t{.v = root, .parent = 0}))
+        if (!stack.push_back(work_t{.v = root, .parent = 0}))
             return std::unexpected(status_t::BACKPRESSURE);
         while (!stack.empty()) {
             const work_t w = stack.back();

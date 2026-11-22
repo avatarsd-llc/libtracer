@@ -1971,13 +1971,13 @@ class graph_t {
             const auto lock = lock_map_walk();  // none while a writer waits (#2900)
             if (!lock) return false;
             vertex_t* const r = root();
-            // Each taken vertex is followed by a yield check (#2846): a waiting writer ends the
-            // snapshot as a refused draw does.
+            // Every node, skipped or taken, first checks for a waiting writer (#2846), which
+            // ends the snapshot as a refused draw does: a run of unregistered nodes yields too.
             const auto take = [this, &snap, &ok](vertex_t& c) {
+                ok &= !map_writer_waiting();
                 if (!ok || !c.registered()) return;
                 mem::bytes_t k(*tables_);
-                ok = try_build_key(&c, k) && snap.push_back(entry_t{std::move(k), &c}) &&
-                     !map_writer_waiting();
+                ok = try_build_key(&c, k) && snap.push_back(entry_t{std::move(k), &c});
             };
             take(*r);
             r->for_each_descendant(take);
