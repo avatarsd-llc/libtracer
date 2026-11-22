@@ -2744,6 +2744,25 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
     add_test(NAME bus_module COMMAND bus_module_test)
 endif()
 
+# #2911 — a terminus reply on a link that carries several sessions (a flat TCP or WS
+# listener, a UDP listener) goes to the session that sent the request.
+if(LIBTRACER_TRANSPORT_TCP OR LIBTRACER_TRANSPORT_WS OR LIBTRACER_TRANSPORT_UDP)
+    add_executable(flat_server_reply_test flat_server_reply_test.cpp)
+    target_link_libraries(flat_server_reply_test PRIVATE libtracer)
+    libtracer_test_warnings(flat_server_reply_test)
+    if(LIBTRACER_TRANSPORT_TCP)
+        target_compile_definitions(flat_server_reply_test PRIVATE LIBTRACER_TEST_HAS_TCP=1)
+    endif()
+    if(LIBTRACER_TRANSPORT_WS)
+        target_compile_definitions(flat_server_reply_test PRIVATE LIBTRACER_TEST_HAS_WS=1)
+    endif()
+    if(LIBTRACER_TRANSPORT_UDP)
+        target_compile_definitions(flat_server_reply_test PRIVATE LIBTRACER_TEST_HAS_UDP=1)
+    endif()
+    add_test(NAME flat_server_reply COMMAND flat_server_reply_test)
+    set_tests_properties(flat_server_reply PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+endif()
+
 # The `bus` CTest LABEL — the tests that need the ADR-0044 bus module PRESENT (#375
 # deliverable 3), so a `kBusLinks = false` build can deselect them with `ctest -LE bus`.
 #
