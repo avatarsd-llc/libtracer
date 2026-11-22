@@ -461,6 +461,14 @@ class fwd_router_t {
     }
 
     /**
+     * @brief Parked remote AWAITs released without a reply because their session left the
+     *        link and a later session took its slot (#2902). Monotonic and relaxed.
+     */
+    [[nodiscard]] std::size_t await_reclaims() const noexcept {
+        return await_reclaimed_.load(std::memory_order_relaxed);
+    }
+
+    /**
      * @brief Terminus replies whose egress link was found by NAME rather than taken from the
      *        receive context the request arrived on (#1709).
      *
@@ -1963,8 +1971,18 @@ class fwd_router_t {
     void answer_await(pending_await_t& p);
     /** @brief Unlink and release @p p; `await_plane_t::m` held. */
     void retire_await_locked(pending_await_t* p) noexcept;
-    /** @brief Cancel the waiters of @p link_name (all when empty); `await_plane_t::m` held. */
-    void cancel_awaits_locked(std::string_view link_name, bool all) noexcept;
+    /**
+     * @brief Cancel the waiters of @p link_name (every link when empty); `await_plane_t::m`
+     *        held.
+     *
+     * With no @p peer, every waiter of the link goes. With one, the waiters in @p peer's slot
+     * go: on a departure (@p count_peer false) that session's own and any earlier session's;
+     * while parking (@p count_peer true) only an earlier session's, counted in
+     * @ref await_reclaims, while @p peer's own are kept.
+     * @return The kept waiters of @p peer on the link (0 unless @p count_peer).
+     */
+    std::size_t cancel_awaits_locked(std::string_view link_name, peer_handle_t peer,
+                                     bool count_peer) noexcept;
 
     graph::graph_t& graph_;
     graph::op_resolver_t resolver_;
@@ -2071,6 +2089,8 @@ class fwd_router_t {
     std::atomic<std::size_t> reply_name_lookups_{0};
     /** @brief @ref await_refusals's counter: cold state, beside the drops (#2902). */
     std::atomic<std::size_t> await_refused_{0};
+    /** @brief @ref await_reclaims's counter: cold state, beside the drops (#2902). */
+    std::atomic<std::size_t> await_reclaimed_{0};
     /** @brief The READ run's census (#2774), advanced by @ref close_read_run; no byte when the
      *         budget is off. */
     [[no_unique_address]] read_census_t<kReadBudgetOn> read_run_;

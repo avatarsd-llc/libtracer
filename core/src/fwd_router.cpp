@@ -1120,7 +1120,7 @@ std::size_t fwd_router_t::link_gone(std::string_view link_name, graph::link_pair
     // A deferred AWAIT's reply has nowhere to go once its link is down: release its waiter
     // (ADR-0084). The receiver holds no deadline, so this is how an unanswered one ends.
     const std::lock_guard lock(awaits_.m);
-    cancel_awaits_locked(link_name, false);
+    cancel_awaits_locked(link_name, link.peer, false);
     return evicted;
 }
 
@@ -2603,9 +2603,10 @@ static_assert(graph::config_t::kMaxAwaitsPerLink >= 1,
  * receive context returns.
  */
 struct fwd_router_t::pending_await_t {
-    graph::await_waiter_t waiter;             /**< @brief Armed on the vertex; its ctx is this. */
-    fwd_router_t* router = nullptr;           /**< @brief The owner the fire thunk calls back. */
-    std::size_t block_bytes = 0;              /**< @brief The block's size, for its release. */
+    graph::await_waiter_t waiter;   /**< @brief Armed on the vertex; its ctx is this. */
+    fwd_router_t* router = nullptr; /**< @brief The owner the fire thunk calls back. */
+    std::size_t block_bytes = 0;    /**< @brief The block's size, for its release. */
+    peer_handle_t peer{}; /**< @brief The session it arrived with; not valid ⇒ the link's own. */
     graph::vertex_handle_t vertex;            /**< @brief The awaited vertex. */
     pending_await_t* prev = nullptr;          /**< @brief Plane list link. */
     pending_await_t* next = nullptr;          /**< @brief Plane list link. */
@@ -2643,7 +2644,7 @@ fwd_router_t::~fwd_router_t() {
     graph_.clear_hook(&graph::graph_hooks_t::link_name, this);
     std::unique_lock lock(awaits_.m);
     awaits_.stop = true;
-    cancel_awaits_locked({}, true);
+    cancel_awaits_locked({}, {}, false);
     // A waiter a writer already took, or one whose reply is being sent, still calls back
     // into this router: wait for each of them to retire itself.
     awaits_.cv.wait(lock, [&] { return awaits_.head == nullptr; });
@@ -2729,6 +2730,7 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     p->waiter.ctx = p;
     p->router = this;
     p->block_bytes = bytes;
+    p->peer = req.inbound->peer;
     // No deadline is stored: the requester owns the timeout (RFC-0004 Amendment 3, ADR-0084),
     // and the resolver skips the `await_timeout` hint. A waiter whose vertex never changes ends on
     // link_down / remove_child or at teardown, and it costs only this block of the link plane.
@@ -2751,13 +2753,14 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
         return std::unexpected(st);
     };
     if (awaits_.stop) return refuse(graph::status_t::BACKPRESSURE);
-    // A per-link bound on parked waiters (kMaxAwaitsPerLink, #2902): a link is the name its
-    // waiters answer over, so they are counted by walking the list, and only once the router
-    // as a whole holds the cap. No byte per link, and no state that outlives the link's ctx.
-    std::size_t same_link = 0;
-    if (awaits_.count >= graph::config_t::kMaxAwaitsPerLink)
-        for (pending_await_t* q = awaits_.head; q != nullptr; q = q->next)
-            same_link += static_cast<std::size_t>(q->name() == name);
+    // A per-link bound on parked waiters (kMaxAwaitsPerLink, #2902), kept per session on a
+    // link that carries several: a waiter is keyed by the name it answers over and the
+    // session handle it arrived with. Counted by walking the list, and only once the router
+    // as a whole holds the cap; the same walk reclaims the waiters of an earlier session in
+    // the arriving session's slot. No byte per link, and no state that outlives the link's ctx.
+    const std::size_t same_link = awaits_.count >= graph::config_t::kMaxAwaitsPerLink
+                                      ? cancel_awaits_locked(name, p->peer, true)
+                                      : 0;
     if (same_link >= graph::config_t::kMaxAwaitsPerLink) {
         count_drop(await_refused_);
         return refuse(graph::status_t::BACKPRESSURE);
@@ -2784,10 +2787,25 @@ void fwd_router_t::retire_await_locked(pending_await_t* p) noexcept {
     awaits_.cv.notify_all();  // teardown waits for the list to drain
 }
 
-void fwd_router_t::cancel_awaits_locked(std::string_view link_name, bool all) noexcept {
+std::size_t fwd_router_t::cancel_awaits_locked(std::string_view link_name, peer_handle_t peer,
+                                               bool count_peer) noexcept {
+    std::size_t kept = 0;
     for (pending_await_t* p = awaits_.head; p != nullptr;) {
         pending_await_t* const next = p->next;
-        if (all || p->name() == link_name) {
+        // An empty name is every link (teardown).
+        const bool on_link = link_name.empty() || p->name() == link_name;
+        // The arriving session's own waiters, when parking: counted and kept.
+        const bool mine = count_peer && p->peer == peer;
+        // With no handle, every waiter of the link goes. With one, every waiter in its slot
+        // goes: the departing session's own, and any of an earlier session the link no longer
+        // holds in that slot (a different generation; one slot holds one live session, so this
+        // stays right when the generation wraps).
+        const bool gone = peer.valid() ? p->peer.index == peer.index : !count_peer;
+        kept += static_cast<std::size_t>(on_link && mine);
+        if (on_link && gone && !mine) {
+            // A waiter released while parking is reclaimed from a departed session: counted.
+            await_reclaimed_.fetch_add(static_cast<std::size_t>(count_peer),
+                                       std::memory_order_relaxed);
             // Not yet fired ⇒ ours to release now. Fired or sending ⇒ its thread retires it;
             // it only learns to send nothing.
             if (!p->sending && graph::graph_t::disarm_await(p->waiter)) {
@@ -2798,6 +2816,7 @@ void fwd_router_t::cancel_awaits_locked(std::string_view link_name, bool all) no
         }
         p = next;
     }
+    return kept;
 }
 
 void fwd_router_t::answer_await(pending_await_t& p) {
