@@ -3919,7 +3919,8 @@ result_t<view::view_t> graph_t::read_children(vertex_t* v) const {
     mem::bytes_t members(*tables_);
     bool staged = true;
     {
-        const std::shared_lock lock(map_mutex_);
+        const auto lock = lock_map_walk();  // none while a writer waits (#2900)
+        if (!lock) return std::unexpected(status_t::BACKPRESSURE);
         // A direct child contributes ONE `POINT{NAME <segment>}` member (ADR-0057 — one
         // child-list walk, no whole-map prefix scan). Placeholders (unregistered
         // intermediate levels) are not members, matching the flat map where they did
@@ -3935,9 +3936,10 @@ result_t<view::view_t> graph_t::read_children(vertex_t* v) const {
         // PATH — the RFC removes `NAME` from `PATH` bodies only and leaves the type and its
         // decoder standing everywhere else — so the member is RE-FRAMED here rather than
         // borrowed: same wire shape as before this RFC, one header write per child.
+        // At every child, member or not, a waiting writer goes first (#2846): the listing
+        // yields as BACKPRESSURE, the answer a refused draw gives.
         v->for_each_child([this, &members, &staged](const vertex_t& c) {
-            // A waiting writer goes first (#2846): the listing yields as BACKPRESSURE.
-            staged = staged && !map_writer_waiting();
+            staged &= !map_writer_waiting();
             if (!staged || !c.enumerable_member()) return;
             const std::span<const std::byte> seg = child_segment(c);
             const std::size_t body = kNameHeaderBytes + seg.size();
@@ -4103,11 +4105,12 @@ result_t<value_ref_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     std::size_t members_len = 0;
     bool oom = false;
     {
-        const std::shared_lock lock(map_mutex_);
+        const auto lock = lock_map_walk();  // none while a writer waits (#2900)
+        if (!lock) return std::unexpected(status_t::BACKPRESSURE);
         v->for_each_child([this, &members, &members_len, &oom, &hdr_backend](const vertex_t& c) {
-            // A waiting writer goes first (#2846): the listing yields as BACKPRESSURE, which
-            // is the answer a refused draw gives, so it rides the same latch.
-            oom = oom || map_writer_waiting();
+            // At every child, member or not, a waiting writer goes first (#2846): the listing
+            // yields as BACKPRESSURE, the answer a refused draw gives, so it rides the same latch.
+            oom |= map_writer_waiting();
             // THE membership predicate, shared verbatim with `read_children` — placeholders
             // and enumeration-hidden children (the RFC-0014 §3 creator endpoint) are not
             // members on either door.
@@ -4181,7 +4184,9 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
             vertex_t* v = nullptr;  /**< @brief The subtree root to collect. */
             std::size_t parent = 0; /**< @brief Its parent's index in `nodes`. */
         };
-        const std::shared_lock lock(map_mutex_);
+        // No hold while a writer waits (#2900): a walk that joined the read phase the writer is
+        // waiting out would keep it open for the next one.
+        const auto lock = lock_map_walk();
         // MIGRATED to the ADR-0065 failable seam (#981): `work_t` is a pointer plus an index
         // — trivially copyable and trivially destructible — so the collect stack takes
         // `block_array_t` over the injected `ctl_` rather than a `std::vector` +
@@ -4194,8 +4199,9 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
         // a peer can drive to exhaustion.
         mem::block_array_t<work_t> stack(*tables_);
         // `nodes` draws from the same store. A lambda cannot return the error, so a refused
-        // child push latches `refused` and the loop propagates it after each visit. A waiting
-        // writer (#2846) latches it too, and answers the same BACKPRESSURE.
+        // push (a node or a child) latches `refused` and the loop propagates it after each
+        // visit. A waiting writer (#2846) latches it too, and answers the same BACKPRESSURE.
+        if (!lock) return std::unexpected(status_t::BACKPRESSURE);
         bool refused = false;
         if (!stack.push_back(work_t{.v = root, .parent = 0}))
             return std::unexpected(status_t::BACKPRESSURE);
@@ -4212,8 +4218,9 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
             const folded_own_t own = folded_own(n.named, n.lkv.get());
             n.body_len = own.len;
             total_links += own.links;
-            // One refusable growth, no probe window (#850, #981 closed here by #1778).
-            if (!nodes.push_back(std::move(n))) return std::unexpected(status_t::BACKPRESSURE);
+            // One refusable growth, no probe window (#850, #981 closed here by #1778). A refusal
+            // rides the latch: no child is pushed after it, and the node's check below answers.
+            refused |= !nodes.push_back(std::move(n));
             // Push the children, then reverse the just-pushed run: the LIFO pop then
             // visits siblings in for_each_child's sorted order, keeping the array's
             // pre-order equal to the emitted wire order.
