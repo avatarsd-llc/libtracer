@@ -111,8 +111,11 @@ void run_sub(std::string_view proto, std::uint16_t port) {
 int run_pub(std::string_view proto, std::uint16_t port) {
     auto ep = make_endpoint(proto, false, port);
     if (!ep) return 1;
-    ep->start_receiving();               // a DIAL link receives once armed (#2247)
-    std::this_thread::sleep_for(400ms);  // let the connection/link establish
+    ep->start_receiving();  // a DIAL link receives once armed (#2247)
+    // Let the connection establish: up to 5 s, so a slow host is not a spurious failure, then
+    // the settle the first size's latency probes always had.
+    for (int i = 0; i < 500 && !ep->link_up(); ++i) std::this_thread::sleep_for(10ms);
+    std::this_thread::sleep_for(400ms);
     if (!ep->link_up()) {
         std::fprintf(stderr, "LINK net-%.*s never came up\n", static_cast<int>(proto.size()),
                      proto.data());
