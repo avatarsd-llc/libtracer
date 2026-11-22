@@ -6,8 +6,8 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Since #2174 a SAMPLE lane never strikes, so a peer that keeps its socket open and reads
- * nothing is no longer dropped by the link on its own. The application closes it instead:
+ * The link never drops a peer that keeps its socket open and reads nothing on its own: a
+ * stalled write is counted, never a verdict (#2174, #2899). The application closes it instead:
  * it calls `transport_t::sweep(now, deadline)` with `now` from its own clock (#2481), and
  * the vertex closes each peer that owed the wire progress (a frame held on it, or a frame or
  * handshake the peer began) and made none since its record fell below `deadline`, and
@@ -17,7 +17,9 @@
  * Per transport, three arms: a frozen peer is closed past the deadline and counted, never
  * before it; a draining peer is not; an idle peer, owing nothing, is not. Each direction is
  * its own row, on the dialers as on the servers (#2812): a server that begins a frame and
- * stops is closed by the dialer, and a self-healing link over it redials.
+ * stops is closed by the dialer, and a self-healing link over it redials. A send burst
+ * against a reader that is slow, or has stopped, sheds counted frames and closes nothing; only
+ * the check, or a real socket error, takes the link down (#2899).
  */
 
 #include <arpa/inet.h>
@@ -413,6 +415,156 @@ void test_self_heal_redials() {
     }
 }
 
+/**
+ * @brief Sends in one burst (#2899): far past the 512 offers (64 rings of the control lane's
+ *        depth 8) in a row after which the egress used to condemn a link whose reader was
+ *        still reading.
+ */
+constexpr int kBurst = 8192;
+/** @brief One burst frame: a few of them fill the reader's small receive window. */
+const std::vector<std::byte> kBurstFrame(16 * 1024, std::byte{0x5c});
+
+/** @brief A dialed TCP or WebSocket link and the raw far end it talks to. */
+template <class Link>
+struct dialed_t {
+    listener_t l;               /**< @brief Where the far end listens. */
+    int peer = -1;              /**< @brief The far end, raw. */
+    std::unique_ptr<Link> link; /**< @brief The link under test. */
+    std::atomic<int> downs{0};  /**< @brief Link-down reports. */
+    explicit dialed_t(bool ws) {
+        std::thread srv([&] { peer = ws ? ws_accept(l, {}) : ::accept(l.fd, nullptr, nullptr); });
+        link.reset(new Link("127.0.0.1", l.port, {}));
+        if (link->set_link_state_notifier(
+                [](void* c, bool up) {
+                    if (!up) static_cast<std::atomic<int>*>(c)->fetch_add(1);
+                },
+                &downs))
+            downs.fetch_add(1);
+        link->start_receiving();
+        srv.join();
+    }
+    ~dialed_t() {
+        link.reset();
+        if (peer >= 0) ::close(peer);
+    }
+    dialed_t(const dialed_t&) = delete;
+    dialed_t& operator=(const dialed_t&) = delete;
+
+    /** @brief Send the whole burst as fast as the loop goes, sweeping nothing. */
+    void burst() {
+        for (int i = 0; i < kBurst; ++i) link->send(std::span(kBurstFrame));
+    }
+    /** @brief The link is still up a moment after the burst: a verdict reached in the burst
+     *         would have shut the socket and the driving thread reported it down by now. */
+    [[nodiscard]] bool stays_up() const {
+        std::this_thread::sleep_for(300ms);
+        return link->link_up() && downs.load() == 0;
+    }
+};
+
+/**
+ * @brief #2899 — a burst against a slow reader that is still reading keeps the link up: what
+ *        does not fit is shed and counted, and the liveness check closes nothing.
+ */
+template <class Link>
+void burst_against_a_slow_reader(bool ws) {
+    dialed_t<Link> d(ws);
+    check(d.link->ok() && d.peer >= 0, "  dialed, and the reader reads slowly");
+    std::atomic<bool> stop{false};
+    std::atomic<std::size_t> read{0};
+    std::thread reader([&] {
+        std::vector<std::byte> buf(16 * 1024);
+        const timeval tv{.tv_sec = 0, .tv_usec = 20000};
+        ::setsockopt(d.peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        while (!stop.load()) {
+            const ssize_t n = ::recv(d.peer, buf.data(), buf.size(), 0);
+            if (n > 0) read.fetch_add(static_cast<std::size_t>(n));
+            if (n == 0) break;
+            std::this_thread::sleep_for(5ms);  // slow, but it never stops
+        }
+    });
+    d.burst();
+    const bool up = d.stays_up();
+    stop = true;
+    reader.join();
+    check(read.load() > 0, "  the reader drained bytes throughout");
+    check(up, "  the link is still up after the burst");
+    check(d.link->drop_stats().dropped_tx > 0, "  the excess is shed and counted");
+    check(d.link->frozen_closed() == 0, "  and the liveness check closed nothing");
+    std::printf("  dropped=%llu stalled=%llu read=%zu\n",
+                static_cast<unsigned long long>(d.link->drop_stats().dropped_tx),
+                static_cast<unsigned long long>(d.link->stalled_tx()), read.load());
+}
+
+/**
+ * @brief #2899 — a reader that stopped reading survives the burst and is closed only by the
+ *        application's check, one full interval on: counted once, torn down once, every
+ *        egress open paired with one close.
+ */
+template <class Link>
+void stopped_reader_closed_by_the_sweep_alone(bool ws) {
+    static std::atomic<int> opens{0}, closes{0};
+    opens.store(0);
+    closes.store(0);
+    struct hook_guard_t {
+        ~hook_guard_t() { tr::detail::egress_open_close_hook = nullptr; }
+    } const guard;
+    if constexpr (tr::graph::kFaultInjection)
+        tr::detail::egress_open_close_hook = [](bool opened) noexcept {
+            (opened ? opens : closes).fetch_add(1);
+        };
+    {
+        dialed_t<Link> d(ws);
+        check(d.link->ok() && d.peer >= 0, "  dialed, and the reader never reads");
+        d.burst();
+        check(d.stays_up(), "  the burst alone closes nothing");
+        check(d.link->frozen_closed() == 0 && d.link->drop_stats().dropped_tx > 0,
+              "  its excess is shed and counted, and nothing is frozen yet");
+        check(judge(*d.link) == 1, "  the check closes it one full interval on");
+        check(goes_down(*d.link) && d.downs.load() == 1, "  the link goes down, once");
+        check(sees_close(d.peer), "  the reader sees the connection go");
+    }
+    if constexpr (tr::graph::kFaultInjection)
+        check(opens.load() == 1 && closes.load() == 1,
+              "  torn down once: the one open paired with one close");
+}
+
+/**
+ * @brief #2899 — a real socket error still condemns at once: the reader resets the connection
+ *        with a frame held part-written on its wire, and the link goes down with no check run.
+ */
+template <class Link>
+void socket_error_condemns_at_once(bool ws) {
+    dialed_t<Link> d(ws);
+    check(d.link->ok() && d.peer >= 0, "  dialed");
+    d.link->send(std::span(kBig));  // cut short: the rest is held on the wire
+    const ::linger rst{.l_onoff = 1, .l_linger = 0};
+    ::setsockopt(d.peer, SOL_SOCKET, SO_LINGER, &rst, sizeof(rst));
+    ::close(d.peer);  // RST
+    d.peer = -1;
+    d.link->send(std::span(kSmall));  // resumes the held frame into the reset socket
+    check(goes_down(*d.link), "  the link goes down with no check run");
+    check(d.link->frozen_closed() == 0, "  and it was not the liveness check that closed it");
+}
+
+void test_burst_keeps_a_live_link() {
+    std::printf("a send burst against a slow reader keeps the link up (#2899):\n");
+    std::printf(" tcp dialer:\n");
+    burst_against_a_slow_reader<tr::net::tcp_transport_t>(false);
+    std::printf(" ws dialer:\n");
+    burst_against_a_slow_reader<tr::net::ws_client_transport_t>(true);
+    std::printf("a reader that stopped is closed by the check alone (#2899):\n");
+    std::printf(" tcp dialer:\n");
+    stopped_reader_closed_by_the_sweep_alone<tr::net::tcp_transport_t>(false);
+    std::printf(" ws dialer:\n");
+    stopped_reader_closed_by_the_sweep_alone<tr::net::ws_client_transport_t>(true);
+    std::printf("a real socket error still condemns at once (#2899):\n");
+    std::printf(" tcp dialer:\n");
+    socket_error_condemns_at_once<tr::net::tcp_transport_t>(false);
+    std::printf(" ws dialer:\n");
+    socket_error_condemns_at_once<tr::net::ws_client_transport_t>(true);
+}
+
 }  // namespace
 
 int main() {
@@ -422,5 +574,6 @@ int main() {
     test_ws_server();
     test_ws_client();
     test_self_heal_redials();
+    test_burst_keeps_a_live_link();
     return tr::testing::summary("frozen_peer_test");
 }

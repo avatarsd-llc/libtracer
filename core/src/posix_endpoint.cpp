@@ -899,7 +899,7 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     // The stream teardown-under-role invariant, per slot: shut the fd down so a write in
     // flight returns, close the egress (which waits its writer out and releases every
     // waiting frame), and only THEN reset and close the fd — so no sender ever writes to a
-    // closed or reused descriptor. A stalled peer's frames and strikes die with its session
+    // closed or reused descriptor. A stalled peer's frames die with its session
     // and are never inherited by whoever next claims this slot (#838).
     if constexpr (graph::kFaultInjection) {
         if (detail::slot_teardown_hook != nullptr) detail::slot_teardown_hook();

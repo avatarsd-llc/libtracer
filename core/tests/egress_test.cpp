@@ -2,7 +2,7 @@
  * @file
  * @brief #2144 — the shared-frame egress module (ADR-0087 §2): one refcounted frame per send,
  *        one ring of frame references per (peer, vertex) at the vertex's depth, a writer
- *        elected by try-lock, a stall strike counted on events.
+ *        elected by try-lock, a stall counted on events and never judged (#2899).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -19,12 +19,11 @@
  *     the control lane (depth `kEgressControlDepth`, best-effort).
  *  4. A frame the socket took only part of resumes from its offset; a failed write that cut
  *     a frame mid-way condemns the peer.
- *  5. Offers past a full STREAM lane that move nothing are strikes; the cap times the lane's
- *     depth condemns the peer, inside the writer role; an offer the lane still had room for is
- *     none, a turn that moves a byte clears them, and no offer means no strike. A SAMPLE lane
- *     never strikes: a fast publisher to a briefly stalled peer condemns nothing, and the peer
- *     gets the latest value when it drains, and SAMPLE offers interleaved with STREAM ones on
- *     the same stalled peer strike nothing. The control lane strikes like a STREAM lane.
+ *  5. Offers past a full STREAM lane that move nothing are stalls, counted and never a
+ *     verdict (#2899): however many come, the peer stays open. An offer the lane still had
+ *     room for is none, a turn that moves a byte is none, and no offer means no stall. A
+ *     SAMPLE lane never stalls: a fast publisher to a briefly stalled peer costs one slot, and
+ *     the peer gets the latest value when it drains.
  *  6. Close waits the writer out and releases every frame and lane; a refused lane sheds the
  *     frame, counted, and leaves the peer open. A close that races senders strands nothing.
  *  7. A peer whose writer is stuck inside a write does not delay a send to another peer of the
@@ -62,7 +61,6 @@ using tr::net::egress_result_t;
 using tr::net::egress_step_t;
 using tr::net::egress_t;
 using tr::testing::check;
-using tr::testing::check_quiet;
 using bytes_t = std::vector<std::byte>;
 
 /** @brief A heap-backed source that counts live blocks and can be told to refuse. */
@@ -175,7 +173,7 @@ void test_sample_is_latest_wins() {
         sock.room = 0;  // the peer is not reading
         egress_result_t r = send(eg, p, sock, src, 1, a);
         check(r.shed == 0 && r.stalled == 0 && p.wants_write(),
-              "the first frame stays on the wire, no strike, and the peer wants writability");
+              "the first frame stays on the wire, no stall, and the peer wants writability");
         r = send(eg, p, sock, src, 2, a);
         check(r.shed == 0, "the second waits in the vertex's one slot");
         r = send(eg, p, sock, src, 3, a);
@@ -286,7 +284,7 @@ void test_part_write_resumes() {
     fake_sock_t sock;
     sock.room = 5;  // three bytes short of the first frame
     egress_result_t r = send(eg, p, sock, src, 7, a);
-    check(r.stalled == 0 && r.shed == 0, "a turn that moved bytes is no strike, and sheds nothing");
+    check(r.stalled == 0 && r.shed == 0, "a turn that moved bytes is no stall, and sheds nothing");
     check(p.wants_write(), "the rest waits for writability");
     sock.room = SIZE_MAX;
     r = flush(eg, p, sock);
@@ -305,12 +303,10 @@ void test_part_write_resumes() {
     check(src.live.load() == 0, "nothing leaked");
 }
 
-void test_strikes_count_offers() {
-    std::printf(
-        "offers past a full STREAM lane that move nothing are strikes; whole rings "
-        "condemn:\n");
+void test_stalls_are_counted_never_judged() {
+    std::printf("offers past a full STREAM lane that move nothing are counted, never judged:\n");
     counting_source_t src;
-    egress_t eg(src, /*strike_cap=*/3);
+    egress_t eg(src);
     egress_peer_t p;
     eg.open(p);
     const delivery_lane_t a = lane_of(&vertex_a, 2);
@@ -318,37 +314,37 @@ void test_strikes_count_offers() {
     sock.room = 0;
     std::uint32_t stalled = 0;
     for (std::uint8_t m = 1; m <= 3; ++m) stalled += send(eg, p, sock, src, m, a).stalled;
-    check(stalled == 0, "one held and the lane's depth waiting: the lane absorbs it, no strike");
+    check(stalled == 0, "one held and the lane's depth waiting: the lane absorbs it, no stall");
     egress_result_t r = send(eg, p, sock, src, 4, a);
     check(r.stalled == 1 && r.displaced == 1,
-          "an offer past the full lane that moved nothing: one");
+          "an offer past the full lane that moved nothing: one stall, its oldest frame shed");
+    sock.room = 1;  // one byte moves
     r = send(eg, p, sock, src, 5, a);
-    check(r.stalled == 1 && !r.condemn, "the next: two");
-    sock.room = 1;  // one byte moves: the strikes clear
-    r = send(eg, p, sock, src, 6, a);
-    check(r.stalled == 0, "a turn that moved a byte is no strike");
+    check(r.stalled == 0, "a turn that moved a byte is no stall");
     sock.room = 0;
-    stalled = 0;
-    for (std::uint8_t m = 7; m <= 11; ++m) stalled += send(eg, p, sock, src, m, a).stalled;
-    check(stalled == 5 && sock.condemned == 0, "five strikes after a moved byte: still open");
-    r = send(eg, p, sock, src, 12, a);
-    check(r.condemn && sock.condemned == 1,
-          "the sixth, the cap's three whole rings of a depth-2 lane, condemns");
+    egress_result_t sum;
+    for (int i = 0; i < 4096; ++i) {
+        r = send(eg, p, sock, src, static_cast<std::uint8_t>(6 + i % 200), a);
+        sum.stalled += r.stalled;
+        sum.condemn |= r.condemn;
+    }
+    check(sum.stalled == 4096 && !sum.condemn && sock.condemned == 0 && !p.closed(),
+          "four thousand stalls in a row: every one counted, and the peer is still open");
     eg.close(p);
     r = flush(eg, p, sock);
-    check(r.stalled == 0, "a closed peer is no strike");
+    check(r.stalled == 0, "a closed peer is no stall");
     check(src.live.load() == 0, "closing released every waiting frame and lane");
 }
 
 /**
- * @brief A SAMPLE lane never strikes (maintainer ruling on #2144): its overwrite is its
+ * @brief A SAMPLE lane never stalls (maintainer ruling on #2144): its overwrite is its
  *        contract, bounded at one slot, so a fast publisher to a peer whose socket stalls
- *        for a while condemns nothing, and the peer reads the latest value once it drains.
+ *        for a while costs one slot, and the peer reads the latest value once it drains.
  */
-void test_sample_never_strikes() {
+void test_sample_never_stalls() {
     std::printf("a fast SAMPLE publisher never condemns a briefly stalled peer:\n");
     counting_source_t src;
-    egress_t eg(src, /*strike_cap=*/3);
+    egress_t eg(src);
     egress_peer_t p;
     eg.open(p);
     const delivery_lane_t telemetry = lane_of(&vertex_a, 1);
@@ -363,7 +359,7 @@ void test_sample_never_strikes() {
         sum.condemn |= r.condemn;
     }
     check(sum.stalled == 0 && !sum.condemn && sock.condemned == 0 && !p.closed(),
-          "a thousand overwrites, far past cap x depth: no strike, still open");
+          "a thousand overwrites: no stall, still open");
     check(sum.displaced == 998, "each newer value overwrote the one waiting, counted");
     check(src.live.load() == 3, "the cost stayed bounded: the held frame, one slot, its lane");
     sock.room = SIZE_MAX;  // the socket drains
@@ -371,70 +367,6 @@ void test_sample_never_strikes() {
     check(
         marks(sock.got) == std::vector<std::uint8_t>{2, static_cast<std::uint8_t>(1 + 1000 % 250)},
         "it drains the held frame, then the latest value");
-    eg.close(p);
-    check(src.live.load() == 0, "nothing leaked");
-}
-
-/**
- * @brief SAMPLE and STREAM offers interleaved against one stalled peer (#2174 review): the
- *        SAMPLE lane's overwrites strike nothing and clear nothing, while the STREAM lane's
- *        offers past its full ring strike and condemn at the cap times its depth.
- */
-void test_sample_and_stream_interleaved() {
-    std::printf("SAMPLE and STREAM interleaved on one stalled peer: only STREAM strikes:\n");
-    counting_source_t src;
-    egress_t eg(src, /*strike_cap=*/3);
-    egress_peer_t p;
-    eg.open(p);
-    const delivery_lane_t telemetry = lane_of(&vertex_a, 1);
-    const delivery_lane_t log = lane_of(&vertex_b, 2);
-    fake_sock_t sock;
-    sock.room = 0;
-    (void)send(eg, p, sock, src, 1, telemetry);  // held on the wire
-    std::uint32_t sample_stalled = 0;
-    std::uint32_t stream_stalled = 0;
-    int condemned_at = 0;
-    for (int i = 1; i <= 20 && condemned_at == 0; ++i) {
-        const egress_result_t s =
-            send(eg, p, sock, src, static_cast<std::uint8_t>(10 + i), telemetry);
-        sample_stalled += s.stalled;
-        check_quiet(!s.condemn, "a SAMPLE offer never condemns");
-        const egress_result_t r = send(eg, p, sock, src, static_cast<std::uint8_t>(100 + i), log);
-        stream_stalled += r.stalled;
-        if (r.condemn) condemned_at = i;
-    }
-    check(sample_stalled == 0, "no SAMPLE offer struck");
-    check(stream_stalled == 6 && condemned_at == 8 && sock.condemned == 1,
-          "STREAM: two absorbed, then six strikes (cap 3 x depth 2) condemn on the eighth");
-    eg.close(p);
-    check(src.live.load() == 0, "nothing leaked");
-}
-
-/**
- * @brief The control lane (no vertex, depth `kEgressControlDepth`, best-effort) is a STREAM
- *        lane for the strike count (#2174 review): offers past its full ring strike, and the
- *        cap times its depth condemns.
- */
-void test_control_lane_strikes() {
-    std::printf("the control lane strikes and condemns at cap x its depth:\n");
-    counting_source_t src;
-    egress_t eg(src, /*strike_cap=*/3);
-    egress_peer_t p;
-    eg.open(p);
-    const delivery_lane_t control{};
-    fake_sock_t sock;
-    sock.room = 0;
-    std::uint32_t stalled = 0;
-    int condemned_at = 0;
-    for (int i = 1; i <= 64 && condemned_at == 0; ++i) {
-        const egress_result_t r = send(eg, p, sock, src, static_cast<std::uint8_t>(i), control);
-        stalled += r.stalled;
-        if (r.condemn) condemned_at = i;
-    }
-    constexpr int kDepth = tr::net::kEgressControlDepth;
-    check(stalled == 3U * kDepth && condemned_at == 1 + kDepth + 3 * kDepth,
-          "one held and a full ring absorbed, then cap x depth strikes condemn");
-    check(sock.condemned == 1, "condemned once, inside the role");
     eg.close(p);
     check(src.live.load() == 0, "nothing leaked");
 }
@@ -465,7 +397,7 @@ void test_close_and_refusal() {
     src.refuse.store(true);
     const egress_result_t refused = send(eg, p, sock, src, 6, lane_of(&vertex_b, 4));
     check(refused.shed == 1 && refused.stalled == 0,
-          "a refused lane: shed, and the source's verdict is no strike");
+          "a refused lane: shed, and the source's verdict is no stall");
     src.refuse.store(false);
     check(!p.closed(), "and the peer is still open");
     sock.room = SIZE_MAX;
@@ -580,7 +512,7 @@ void test_close_races_senders() {
     counting_source_t src;
     bool leaked = false;
     for (int round = 0; round < 200 && !leaked; ++round) {
-        egress_t eg(src, /*strike_cap=*/255);
+        egress_t eg(src);
         egress_peer_t p;
         eg.open(p);
         const auto none = [](const egress_frame_t&, std::size_t) {
@@ -620,7 +552,7 @@ void test_concurrent_handoff() {
     bytes_t got;             // writer-role only
     std::size_t budget = 0;  // writer-role only: bytes the "socket" takes this turn
     {
-        egress_t eg(src, /*strike_cap=*/255);
+        egress_t eg(src);
         egress_peer_t p;
         eg.open(p);
         const auto take = [&](std::span<const std::byte> s) {
@@ -794,10 +726,8 @@ int main() {
     test_stream_order_and_arms();
     test_one_ring_per_vertex();
     test_part_write_resumes();
-    test_strikes_count_offers();
-    test_sample_never_strikes();
-    test_sample_and_stream_interleaved();
-    test_control_lane_strikes();
+    test_stalls_are_counted_never_judged();
+    test_sample_never_stalls();
     test_close_and_refusal();
     test_stalled_peer_does_not_delay_others();
     test_lane_lock_is_per_peer();

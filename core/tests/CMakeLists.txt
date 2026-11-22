@@ -2448,7 +2448,7 @@ set_tests_properties(park PROPERTIES TIMEOUT 120)
 
 if(LIBTRACER_NET_PLANE)
     # #2144 — the shared-frame egress module (ADR-0087 §2): SAMPLE latest-wins, STREAM order
-    # and its two pressure arms, part writes, strikes, close, a stalled peer delaying no other
+    # and its two pressure arms, part writes, counted stalls, close, a stalled peer delaying no other
     # (over the #2139 fake link), and the writer-role handoff under contention (the TSan leg).
     add_executable(egress_test egress_test.cpp)
     target_link_libraries(egress_test PRIVATE libtracer)

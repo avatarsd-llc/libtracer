@@ -281,10 +281,9 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
     /** @brief LISTEN mode: the actual bound TCP port (resolves an ephemeral 0). */
     [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
 
-    /** @brief Strikes a STALLED peer cost (#838, #2144): offers past a full STREAM lane whose
-     *         turn moved nothing, each one a frame shed. `kEgressStallStrikes` rings of them in a
-     *         row close the connection, so a non-zero count with @ref link_up still true is a peer
-     * that is falling behind but recovering. */
+    /** @brief Stalls a peer cost (#838, #2144): offers past a full STREAM lane whose turn
+     *         moved nothing, each one a frame shed. Counted, never a verdict (#2899): a peer
+     *         that stopped reading is closed by @ref sweep. */
     [[nodiscard]] std::uint64_t stalled_tx() const noexcept {
         return stalled_tx_.load(std::memory_order_relaxed);
     }

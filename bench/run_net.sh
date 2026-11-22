@@ -10,7 +10,9 @@
 #
 # Emits RESULT lines on stdout, each followed by its RESULT_TAIL companion (p999, worst
 # sample, sample count, adequacy flag) — append to the compare sweep or pipe to
-# render_compare.py. Diagnostics go to stderr. Never aborts on one failing transport.
+# render_compare.py. Diagnostics go to stderr, the publisher's per-size LINK lines among
+# them (#2899). Never aborts on one failing transport: every pair runs, and the script exits
+# nonzero at the end when any publisher failed (its link went down, or never came up).
 set -uo pipefail
 cd "$(dirname "$0")"
 
@@ -35,15 +37,24 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1 || true
 cmake --build build --target bench_transports -j >/dev/null 2>&1 || true
 cmake --build build --target bench_zenoh_net -j >/dev/null 2>&1 || true
 
-# run_pair <binary> <proto> <port>: sub (backgrounded, RESULT -> our stdout) then pub.
+# run_pair <binary> <proto> <port>: sub (backgrounded, RESULT -> our stdout) then pub, whose
+# stderr (its LINK lines) goes to ours. Fails when the publisher failed (#2899): a run whose
+# link went down measured nothing after it, and must not read as a short success.
+failed=0
 run_pair() {
-    local bin="$1" proto="$2" port="$3"
+    local bin="$1" proto="$2" port="$3" rc
     [ -x "$bin" ] || return 0
     timeout 150 "$bin" sub "$proto" "$port" &
     local sub=$!
     sleep 0.7
-    timeout 130 "$bin" pub "$proto" "$port" >/dev/null 2>&1 || true
+    timeout 130 "$bin" pub "$proto" "$port" >/dev/null
+    rc=$?
     wait "$sub" 2>/dev/null || true
+    if [ "$rc" -ne 0 ]; then
+        echo "run_net.sh: $bin pub $proto exited $rc (link down, never up, or timed out)" >&2
+        failed=1
+    fi
+    return "$rc"
 }
 
 lport=48400
@@ -65,3 +76,4 @@ for proto in udp tcp; do
     lport=$((lport + 10))
     zport=$((zport + 10))
 done
+exit "$failed"

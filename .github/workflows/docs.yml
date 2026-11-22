@@ -389,8 +389,9 @@ jobs:
           # arithmetic and only one engine did any I/O.
           # Network transports (UDP/TCP) — two-process pub/sub over real loopback sockets,
           # the SAME topology for both engines. Best-effort; never fails the build (a chart
-          # is simply omitted if a transport doesn't come up).
-          bash bench/run_net.sh >>"$out" 2>/dev/null || true
+          # is simply omitted if a transport doesn't come up), but a publisher whose link went
+          # down is named in the log, with its per-size LINK lines, and warned (#2899).
+          bash bench/run_net.sh >>"$out" || echo "::warning::bench/run_net.sh: a publisher failed (link down or never up); see its LINK lines above"
       # The trend charts' source rules (#1769): the page opens on bench-local, the hosted
       # store is the portability envelope, and the zenoh ratio is same-pass only. Tested
       # here because this job is the one that renders the charts; it needs no build.

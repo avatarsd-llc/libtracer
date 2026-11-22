@@ -1,7 +1,7 @@
 /**
  * @file
- * @brief #838, #2252 — a host stream send into a stalled peer never waits, is counted, and
- *        the peer that keeps stalling is closed.
+ * @brief #838, #2252, #2899 — a host stream send into a stalled peer never waits, and what
+ *        it cannot write is counted, never a verdict on the peer.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -15,14 +15,14 @@
  * Two levels, because the two halves fail differently:
  *
  *  1. **The helper, over a socketpair whose buffers are FULL.** A write returns at once as
- *     STALLED (arm 1), the egress strikes the stalling peer once its lane is full and closes
- *     it after `kEgressStallStrikes` whole rings of offers past that depth that moved nothing
- *     (arm 2), a record the socket took only part of keeps its place and finishes, so the
- *     framing never desyncs (arm 3, #2144), and a turn that moves bytes clears the strikes
- *     (arm 4). Deterministic — a socketpair with no reader stays full forever.
- *  2. **A real `tcp_transport_t` against a peer that never reads** (arms 5–7): `send()`
- *     returns at once, every record behind a held one reaches the peer in order once it reads,
- *     a full ring takes its vertex's arm, counted, and a peer that never reads is torn down.
+ *     STALLED (arm 1), offers past the full lane are counted stalls and shed frames however
+ *     many come, and close nothing (arm 2, #2899: a peer that stopped reading is the
+ *     application's liveness check to close, `frozen_peer_test`), and a record the socket took
+ *     only part of keeps its place and finishes, so the framing never desyncs (arm 3, #2144).
+ *     Deterministic — a socketpair with no reader stays full forever.
+ *  2. **A real `tcp_transport_t` against a peer that never reads**: `send()` returns at once,
+ *     every record behind a held one reaches the peer in order once it reads, and a full ring
+ *     takes its vertex's arm, counted.
  *
  * #1295's residual arm is the concurrent directed batch on a real peer-named server, which
  * since #2144 costs the senders no wait at all, and the admission arm (#2247) admits 4,096
@@ -169,46 +169,34 @@ void test_full_socket_write_returns() {
 
 /**
  * @brief Jam @p probe's lane: one record held on the wire and the control lane's whole depth
- *        waiting behind it. Every turn moves nothing, and none is a strike: the lane had room.
+ *        waiting behind it. Every turn moves nothing, and none is a stall: the lane had room.
  */
 void fill_lane(stall_probe_t& probe, std::span<const std::byte> rec) {
     for (std::size_t i = 0; i <= tr::net::kEgressControlDepth; ++i) probe.send(rec);
 }
 
-/** @brief Strikes in one whole ring of the control lane: the unit the verdict counts in. */
-constexpr std::uint64_t kRing = tr::net::kEgressControlDepth;
-
-/** @brief Offer @p rings whole rings of records past @p probe's full lane. */
-void strike_rings(stall_probe_t& probe, std::span<const std::byte> rec, std::uint64_t rings) {
-    for (std::uint64_t i = 0; i < rings * kRing; ++i) probe.send(rec);
-}
-
-/** @brief Whole rings of strikes that condemn a peer (`kEgressStallStrikes`). */
-constexpr std::uint64_t kCap = tr::net::kEgressStallStrikes;
+/** @brief Offers past a full lane in arm 2: far past the 512 in a row (64 rings of the
+ *         control lane) that closed a live peer before #2899. */
+constexpr std::uint64_t kOffers = 8192;
 
 /**
- * @brief Arm 2: past a full lane, `kEgressStallStrikes` whole rings of offers in a row that
- *        move nothing close the peer; one fewer does not — and the frames inside the lane's
- *        depth wait instead of being shed.
+ * @brief Arm 2 (#2899): past a full lane, every offer that moves nothing is a counted stall
+ *        and a counted shed frame, however many come in a row, and none closes the peer; the
+ *        frames inside the lane's depth wait instead of being shed.
  */
-void test_streak_closes_the_peer() {
-    std::printf("the brokenness detector strikes the stalling peer, then closes it:\n");
+void test_stalls_are_counted_never_judged() {
+    std::printf("offers into a stalled peer are counted, and close nothing:\n");
     const stalled_pair_t p;
     stall_probe_t probe(p.a);
     const std::array<std::byte, 64> rec{};
 
     fill_lane(probe, rec);
     check(probe.stalled_tx_.load() == 0 && probe.drops_.snapshot().dropped_tx == 0,
-          "inside the lane's depth a turn that moves nothing waits: no strike, nothing shed");
-    strike_rings(probe, rec, kCap - 1);
-    check(probe.stalled_tx_.load() == (kCap - 1) * kRing && !is_shut_down(p.a),
-          "one ring short of the cap is backpressure, not a verdict");
-    strike_rings(probe, rec, 1);
-    check(is_shut_down(p.a), "the ring that reaches the cap closes the peer");
-    check(probe.stalled_tx_.load(std::memory_order_relaxed) == kCap * kRing,
-          "every stalled turn is COUNTED — a stalled peer is never a silent drop");
-    check(probe.drops_.snapshot().dropped_tx == kCap * kRing,
-          "each strike cost the lane its oldest frame, counted (#2144)");
+          "inside the lane's depth a turn that moves nothing waits: no stall, nothing shed");
+    for (std::uint64_t i = 0; i < kOffers; ++i) probe.send(rec);
+    check(probe.stalled_tx_.load() == kOffers && probe.drops_.snapshot().dropped_tx == kOffers,
+          "every stalled offer is COUNTED and cost the lane its oldest frame, counted (#2144)");
+    check(!is_shut_down(p.a), "and none of them closed the peer");
 }
 
 /**
@@ -263,38 +251,6 @@ void test_partial_record_finishes() {
 }
 
 /**
- * @brief Arm 4: a turn that moves bytes clears the strikes — the trichotomy's middle arm.
- */
-void test_completion_resets_the_streak() {
-    std::printf("a peer that takes the next frame is riding out a burst, not broken:\n");
-    const stalled_pair_t p;
-    stall_probe_t probe(p.a);
-    const std::array<std::byte, 64> rec{};
-
-    fill_lane(probe, rec);
-    strike_rings(probe, rec, kCap - 1);
-    check(probe.stalled_tx_.load() == (kCap - 1) * kRing, "one ring short of the cap accrued");
-    // The peer reads everything it was sent: the socket has room again.
-    const int flags = ::fcntl(p.b, F_GETFL, 0);
-    ::fcntl(p.b, F_SETFL, flags | O_NONBLOCK);
-    std::array<std::byte, 65536> sink;
-    for (int i = 0; i < 20; ++i) {
-        while (::recv(p.b, sink.data(), sink.size(), 0) > 0) {
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    probe.send(rec);
-    check(probe.stalled_tx_.load() == (kCap - 1) * kRing && !is_shut_down(p.a),
-          "the turn that moved the waiting frames clears the strikes");
-    // Jam it again: as many rings again would pass the cap, had the streak not restarted.
-    stalled_pair_t::jam(p.a);
-    fill_lane(probe, rec);
-    strike_rings(probe, rec, kCap - 1);
-    check(probe.stalled_tx_.load() == 2 * (kCap - 1) * kRing && !is_shut_down(p.a),
-          "so the next stall starts a fresh streak instead of closing");
-}
-
-/**
  * @brief #2247 — the admission cap is the injected `max_peers` alone: 4,096 real peers are
  *        admitted, the next is refused, and none of the admitted is evicted for it.
  *
@@ -344,83 +300,6 @@ void test_admits_4096_peers() {
     check(admitted == kPeers, "every one of the 4,096 holds a slot; none was evicted");
     ::close(extra);
     for (const int c : clients) ::close(c);
-}
-
-/**
- * @brief Arm 7: the end-to-end property, over a real `tcp_transport_t`.
- *
- * A peer that accepts the connection and then never reads a byte. Pre-#838 the first send
- * that fills the window never returns and this function hangs. Now every send returns at once
- * (#2252), the frames it could not write wait in the link's egress, only those its ring had
- * no room for are shed, and the strikes take the dead peer down.
- */
-void test_tcp_link_sheds_and_drops_a_stalled_peer() {
-    std::printf("a real tcp link sheds frames for a stalled peer and then drops it:\n");
-    const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
-    check(listener >= 0, "listener socket");
-    const int one = 1;
-    ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    // A small receive buffer on the accepting side, so the peer's window fills after a few
-    // frames instead of megabytes of them.
-    const int small = 4096;
-    ::setsockopt(listener, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
-    sockaddr_in local{};
-    local.sin_family = AF_INET;
-    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    local.sin_port = 0;
-    check(::bind(listener, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0, "bound");
-    check(::listen(listener, 1) == 0, "listening");
-    socklen_t llen = sizeof(local);
-    check(::getsockname(listener, reinterpret_cast<sockaddr*>(&local), &llen) == 0,
-          "port resolved");
-
-    tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port), {});
-    check(link.ok(), "the dial succeeded");
-    // The link-down event, not a clock, says when the verdict reached the connection.
-    std::atomic<bool> down{false};
-    const auto on_down = [](void* ctx, bool /*up*/) {
-        auto* d = static_cast<std::atomic<bool>*>(ctx);
-        d->store(true);
-        d->notify_all();
-    };
-    if (link.set_link_state_notifier(on_down, &down)) on_down(&down, false);
-    link.start_receiving();
-
-    const int peer = ::accept(listener, nullptr, nullptr);
-    check(peer >= 0, "the peer accepted the connection — and now never reads a byte");
-
-    // Push frames until the link goes down. Each send is one turn, and the verdict needs the
-    // cap in strikes IN A ROW: a strike counted while the kernel still took bytes now and then
-    // is cleared by the next byte that moves, so the total count says nothing about the
-    // verdict. No send waits, so the loop is bounded by its count alone; a slow machine only
-    // spends more of the count before the socket stops taking bytes.
-    const std::vector<std::byte> frame(64 * 1024);
-    std::int64_t slowest = 0;
-    for (int sent = 0; sent < 16 * 4096 && !down.load(); ++sent) {
-        const auto t0 = clock_t_::now();
-        link.send(std::span(frame));
-        slowest = std::max(slowest, ms_since(t0));
-    }
-
-    check(link.stalled_tx() >= kCap * kRing,
-          "the stalled peer cost the link write turns, and they are COUNTED");
-    check(slowest < kNoWaitMs, "and no send waited on the stalled peer");
-    for (int i = 0; i < 4; ++i) link.send(std::span(frame));
-    check(link.drop_stats().dropped_tx > 0,
-          "a send to the condemned peer is shed and counted — never a silent drop");
-
-    // The verdict reaches the connection: shutdown makes the recv loop see EOF, which runs
-    // the ordinary remote-departure teardown and reports the link down. A link that never
-    // condemned the peer never reports it, and the test's own deadline names the hang.
-    down.wait(false);
-    check(!link.link_up(), "the peer that would not take bytes is dropped, not blocked on");
-    std::printf("  stalled=%llu dropped=%llu, slowest send %lld ms\n",
-                static_cast<unsigned long long>(link.stalled_tx()),
-                static_cast<unsigned long long>(link.drop_stats().dropped_tx),
-                static_cast<long long>(slowest));
-
-    ::close(peer);
-    ::close(listener);
 }
 
 /**
@@ -679,11 +558,9 @@ int main() {
                                     "test have no peer tier to resolve through");
     std::printf("== #838, #2252: host stream sends never wait, are counted and attributed ==\n");
     test_full_socket_write_returns();
-    test_streak_closes_the_peer();
+    test_stalls_are_counted_never_judged();
     test_partial_record_finishes();
-    test_completion_resets_the_streak();
     test_admits_4096_peers();
-    test_tcp_link_sheds_and_drops_a_stalled_peer();
     test_held_and_queued_records_are_all_delivered_in_order();
     test_full_ring_takes_its_arm();
     test_concurrent_directed_sends_cost_no_wait();

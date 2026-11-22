@@ -17,6 +17,11 @@
  *   bench_transports sub <udp|tcp|ws> <port>
  *   bench_transports pub <udp|tcp|ws> <port>
  *
+ * The publisher reports, per size on stderr, whether its link is still up and how many sends
+ * it shed (`LINK net-<proto> size=<S> link_up=<0|1> dropped_tx=<n>`), and exits nonzero when
+ * the link went down: a run whose later sizes reached nobody is a failed run, not a short one
+ * (#2899).
+ *
  * (Successor to the retired two-process bench_libtracer_net — ADR-0040 moved the net
  * plane to explicit-source-routed FWD; this measures the transport seam itself.)
  */
@@ -89,15 +94,33 @@ void run_sub(std::string_view proto, std::uint16_t port) {
     while (last_recv.load(std::memory_order_relaxed) == 0) std::this_thread::sleep_for(10ms);
     for (;;) {
         std::this_thread::sleep_for(200ms);
-        if (now_ns() - last_recv.load(std::memory_order_relaxed) > 3'000'000'000ULL) break;
+        // The receive thread may stamp a frame after this thread read the clock, so a stamp
+        // newer than `now` is a live stream, not an unsigned wrap to "quiet for ages": that
+        // wrap ended the subscriber mid-burst and reset the publisher's link (#2899).
+        const std::uint64_t last = last_recv.load(std::memory_order_relaxed);
+        if (now_ns() > last + 3'000'000'000ULL) break;
     }
+    const tr::net::transport_drop_stats_t d = ep->drop_stats();
+    std::fprintf(stderr, "LINK net-%.*s sub dropped_rx=%llu malformed_rx=%llu\n",
+                 static_cast<int>(proto.size()), proto.data(),
+                 static_cast<unsigned long long>(d.dropped_rx),
+                 static_cast<unsigned long long>(d.malformed_rx));
 }
 
-void run_pub(std::string_view proto, std::uint16_t port) {
+/** @return 0 when every size ran with the link up; 1 when the link went down or never came. */
+int run_pub(std::string_view proto, std::uint16_t port) {
     auto ep = make_endpoint(proto, false, port);
-    if (!ep) return;
-    ep->start_receiving();               // a DIAL link receives once armed (#2247)
-    std::this_thread::sleep_for(400ms);  // let the connection/link establish
+    if (!ep) return 1;
+    ep->start_receiving();  // a DIAL link receives once armed (#2247)
+    // Let the connection establish: up to 5 s, so a slow host is not a spurious failure, then
+    // the settle the first size's latency probes always had.
+    for (int i = 0; i < 500 && !ep->link_up(); ++i) std::this_thread::sleep_for(10ms);
+    std::this_thread::sleep_for(400ms);
+    if (!ep->link_up()) {
+        std::fprintf(stderr, "LINK net-%.*s never came up\n", static_cast<int>(proto.size()),
+                     proto.data());
+        return 1;
+    }
 
     std::vector<std::uint8_t> payload;
     const auto send = [&](std::size_t S, net::Phase ph) {
@@ -105,6 +128,7 @@ void run_pub(std::string_view proto, std::uint16_t port) {
         ep->send(std::as_bytes(std::span<const std::uint8_t>(payload)));
     };
     const std::size_t lat_msgs = net::latency_msgs();
+    std::uint64_t dropped = 0;
     for (std::size_t S : net::sizes_for(proto)) {
         for (std::size_t i = 0; i < lat_msgs; ++i) {
             send(S, net::kLatency);
@@ -115,7 +139,15 @@ void run_pub(std::string_view proto, std::uint16_t port) {
         for (std::size_t i = 0; i < net::throughput_msgs(S); ++i) send(S, net::kThroughput);
         for (int i = 0; i < 8; ++i) send(16, net::kEof);
         std::this_thread::sleep_for(std::chrono::milliseconds(net::kDrainMs));
+        const std::uint64_t total = ep->drop_stats().dropped_tx;
+        const bool up = ep->link_up();
+        std::fprintf(stderr, "LINK net-%.*s size=%zu link_up=%d dropped_tx=%llu\n",
+                     static_cast<int>(proto.size()), proto.data(), S, up ? 1 : 0,
+                     static_cast<unsigned long long>(total - dropped));
+        dropped = total;
+        if (!up) return 1;  // every later size would reach nobody
     }
+    return 0;
 }
 
 }  // namespace
@@ -128,9 +160,8 @@ int main(int argc, char** argv) {
     const std::string_view role = argv[1];
     const std::string_view proto = argv[2];
     const auto port = static_cast<std::uint16_t>(std::strtoul(argv[3], nullptr, 10));
-    if (role == "pub")
-        run_pub(proto, port);
-    else if (role == "sub")
+    if (role == "pub") return run_pub(proto, port);
+    if (role == "sub")
         run_sub(proto, port);
     else
         return 2;
