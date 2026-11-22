@@ -184,11 +184,14 @@ struct router_planes_t {
     /**
      * @brief The nothrow source the router's LONG-LIVED link state draws from (#603 defect 1 /
      * #873 family 3, ADR-0065 / ADR-0079 §Decision 4): the NAME->link demux table, each child's
-     * receive context, the bus token caches and the bound-path scratch — the library holds no
-     * buffer of its own. A bounded node injects a @ref mem::pool_source_t over its static slab
-     * (one slab, whole stack — ADR-0039 §2); the default is the process net sub-pool
+     * receive context, the bus token caches, the bound-path scratch and each deferred AWAIT's
+     * waiter (#2902) — the library holds no buffer of its own. A bounded node injects a @ref
+     * mem::pool_source_t over its static slab (one slab, whole stack — ADR-0039 §2); the default is
+     * the process net sub-pool
      * (`mem::net_source()`; the static arena on an MCU build). Must outlive the router, and must be
-     * thread-safe: several transport receive threads reach it.
+     * thread-safe: several transport receive threads draw from it, and a writer's thread releases
+     * a deferred AWAIT's waiter to it (and draws that reply's scatter table from it) when the
+     * write answers the AWAIT.
      *
      * This plane used to be a `%std::pmr::memory_resource*`. It could not stay one: a pmr resource
      * cannot report exhaustion by value, so on the shipping `-fno-exceptions` profile a peer-driven
@@ -200,8 +203,7 @@ struct router_planes_t {
      * `nullptr`, so it reinstates the very abort this parameter change removed. @ref
      * mem::block_source_t's warning carries the full reasoning, including why a budget-tracking
      * variant is declined too. Split from @p rx deliberately (ADR-0079's per-plane default): @p rx
-     * is per-frame decode scratch and may legitimately be a `bump_source_t`, while link state is
-     * LONG-LIVED and would monotonically fill one.
+     * is per-frame decode scratch, while link state is LONG-LIVED.
      */
     mem::block_source_t* link_src = &mem::net_source();
 
@@ -355,8 +357,7 @@ class fwd_router_t {
           egress_(planes.egress),
           // The NAME->link demux table's chunks are long-lived control state whose high-water
           // mark is the count of DISTINCT link names ever registered, so they take the LINK
-          // store rather than the per-frame `rx` one — which a `bump_source_t` may legitimately
-          // be, and which would fill monotonically under them (#873 phase 1).
+          // store rather than the per-frame `rx` one (#873 phase 1).
           registry_(planes.link_src != nullptr ? *planes.link_src : mem::net_source()) {
         // The captureless {fn, ctx} pair the ADR-0047 doctrine prescribes (#1049) — the same
         // shape as `on_reverse_ref` below. The graph publishes it through a `sink_slot_t`,
@@ -445,10 +446,27 @@ class fwd_router_t {
      * @brief How many remote AWAITs this router holds right now (ADR-0084): armed waiters
      *        plus any whose reply is being sent.
      *
-     * Each one is charged to the rx source of the link it arrived on, so this is also the
-     * count of waiter blocks those sources have lent out.
+     * Each one is a block of the link plane (@ref link_source), at most
+     * `config_t::kMaxAwaitsPerLink` per link (#2902).
      */
     [[nodiscard]] std::size_t pending_awaits() const;
+
+    /**
+     * @brief Remote AWAITs refused `BACKPRESSURE` at park time (#2902): their link already held
+     *        `config_t::kMaxAwaitsPerLink` waiters, or the link plane refused the waiter block.
+     *        Monotonic and relaxed (`core/STYLE.md` §Introspection).
+     */
+    [[nodiscard]] std::size_t await_refusals() const noexcept {
+        return await_refused_.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Parked remote AWAITs released without a reply because their session left the
+     *        link and a later session took its slot (#2902). Monotonic and relaxed.
+     */
+    [[nodiscard]] std::size_t await_reclaims() const noexcept {
+        return await_reclaimed_.load(std::memory_order_relaxed);
+    }
 
     /**
      * @brief Terminus replies whose egress link was found by NAME rather than taken from the
@@ -1920,14 +1938,14 @@ class fwd_router_t {
         return own != nullptr ? *own : *rx_;
     }
 
-    /** @brief One deferred remote AWAIT, drawn from its link's rx source (ADR-0084).
+    /** @brief One deferred remote AWAIT, drawn from the link plane (ADR-0084, #2902).
      *         Defined in `fwd_router.cpp`. */
     struct pending_await_t;
 
     /**
      * @brief The router's deferred-AWAIT state (ADR-0084): the list of pending waiters.
      *
-     * Holds no buffer: every waiter is a block of the receiving link's own rx source. It
+     * Holds no buffer: every waiter is a block of the router's link plane (#2902). It
      * holds no thread and reads no clock either: libtracer has no timers. A pending waiter
      * resolves on change, on `link_down` / `remove_child`, or when the router is destroyed. The
      * request's `await_timeout` is ignored: the requester owns the deadline (RFC-0004
@@ -1953,14 +1971,24 @@ class fwd_router_t {
     void answer_await(pending_await_t& p);
     /** @brief Unlink and release @p p; `await_plane_t::m` held. */
     void retire_await_locked(pending_await_t* p) noexcept;
-    /** @brief Cancel the waiters of @p link_name (all when empty); `await_plane_t::m` held. */
-    void cancel_awaits_locked(std::string_view link_name, bool all) noexcept;
+    /**
+     * @brief Cancel the waiters of @p link_name (every link when empty); `await_plane_t::m`
+     *        held.
+     *
+     * With no @p peer, every waiter of the link goes. With one, the waiters in @p peer's slot
+     * go: on a departure (@p count_peer false) that session's own and any earlier session's;
+     * while parking (@p count_peer true) only an earlier session's, counted in
+     * @ref await_reclaims, while @p peer's own are kept.
+     * @return The kept waiters of @p peer on the link (0 unless @p count_peer).
+     */
+    std::size_t cancel_awaits_locked(std::string_view link_name, peer_handle_t peer,
+                                     bool count_peer) noexcept;
 
     graph::graph_t& graph_;
     graph::op_resolver_t resolver_;
     // The long-lived link-state substrate (#603 defect 1 / #873 family 3): receive contexts,
     // bus token caches, interned kinds and bound-path scratch draw from it.
-    mem::block_source_t* link_src_;
+    mem::block_source_t* const link_src_;
     mem::block_source_t* rx_;     // DEFAULT terminus-arena source, NOTHROW (#588);
                                   // a child may carry its own (ADR-0067 §3)
     mem::mem_backend_t* flat_;    // every rope flatten the router performs (#730);
@@ -2059,6 +2087,10 @@ class fwd_router_t {
     /** @brief @ref reply_name_lookups's counter: cold state, so it sits with the drops. Bumped
      *         only on the by-name arm of `reply_link`, never on a point-to-point reply. */
     std::atomic<std::size_t> reply_name_lookups_{0};
+    /** @brief @ref await_refusals's counter: cold state, beside the drops (#2902). */
+    std::atomic<std::size_t> await_refused_{0};
+    /** @brief @ref await_reclaims's counter: cold state, beside the drops (#2902). */
+    std::atomic<std::size_t> await_reclaimed_{0};
     /** @brief The READ run's census (#2774), advanced by @ref close_read_run; no byte when the
      *         budget is off. */
     [[no_unique_address]] read_census_t<kReadBudgetOn> read_run_;

@@ -1120,7 +1120,7 @@ std::size_t fwd_router_t::link_gone(std::string_view link_name, graph::link_pair
     // A deferred AWAIT's reply has nowhere to go once its link is down: release its waiter
     // (ADR-0084). The receiver holds no deadline, so this is how an unanswered one ends.
     const std::lock_guard lock(awaits_.m);
-    cancel_awaits_locked(link_name, false);
+    cancel_awaits_locked(link_name, link.peer, false);
     return evicted;
 }
 
@@ -2589,21 +2589,24 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
 
 // --- deferred remote AWAIT (ADR-0084) ------------------------------------------------
 
+static_assert(graph::config_t::kMaxAwaitsPerLink >= 1,
+              "config_t::kMaxAwaitsPerLink must be at least 1");
+
 /**
  * @brief One deferred remote AWAIT: the armed waiter plus everything its reply needs, in ONE
- *        block of the receiving link's rx source.
+ *        block of the router's link plane.
  *
- * The receiver pays (ADR-0084 §Decision 2): the block is `sizeof` this header plus the link
- * name and the reply's route bytes, drawn from the same source that link's decode arena draws
- * from, so a peer that parks AWAITs spends its own link's budget and no one else's. The route
+ * The block is `sizeof` this header plus the link name and the reply's route bytes. It outlives
+ * the frame that parked it, so it is long-lived link state and comes from the link plane
+ * (`link_src_`, fixed at construction), never from the per-frame rx source (#2902). The route
  * bytes are copied once here because the request frame they came from is released when the
  * receive context returns.
  */
 struct fwd_router_t::pending_await_t {
-    graph::await_waiter_t waiter;             /**< @brief Armed on the vertex; its ctx is this. */
-    fwd_router_t* router = nullptr;           /**< @brief The owner the fire thunk calls back. */
-    mem::block_source_t* source = nullptr;    /**< @brief The rx source this block came from. */
-    std::size_t block_bytes = 0;              /**< @brief The block's size, for its release. */
+    graph::await_waiter_t waiter;   /**< @brief Armed on the vertex; its ctx is this. */
+    fwd_router_t* router = nullptr; /**< @brief The owner the fire thunk calls back. */
+    std::size_t block_bytes = 0;    /**< @brief The block's size, for its release. */
+    peer_handle_t peer{}; /**< @brief The session it arrived with; not valid ⇒ the link's own. */
     graph::vertex_handle_t vertex;            /**< @brief The awaited vertex. */
     pending_await_t* prev = nullptr;          /**< @brief Plane list link. */
     pending_await_t* next = nullptr;          /**< @brief Plane list link. */
@@ -2641,7 +2644,7 @@ fwd_router_t::~fwd_router_t() {
     graph_.clear_hook(&graph::graph_hooks_t::link_name, this);
     std::unique_lock lock(awaits_.m);
     awaits_.stop = true;
-    cancel_awaits_locked({}, true);
+    cancel_awaits_locked({}, {}, false);
     // A waiter a writer already took, or one whose reply is being sent, still calls back
     // into this router: wait for each of them to retire itself.
     awaits_.cv.wait(lock, [&] { return awaits_.head == nullptr; });
@@ -2709,29 +2712,28 @@ void fwd_router_t::await_fired_thunk(void* ctx, graph::await_waiter_t& /*w*/) no
 }
 
 graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& req) {
-    const child_rx_ctx_t* const ctx =
-        req.inbound != nullptr ? static_cast<const child_rx_ctx_t*>(req.inbound->origin) : nullptr;
     const std::string_view name = req.inbound != nullptr ? req.inbound->link : std::string_view{};
     // No link to answer over ⇒ nothing to defer: the caller answers BACKPRESSURE at once.
     if (name.empty()) return std::unexpected(graph::status_t::BACKPRESSURE);
 
-    mem::block_source_t& source = rx_for(ctx);
     const std::size_t bytes =
         sizeof(pending_await_t) + name.size() + req.dst.size() + req.src.size();
-    void* const mem = source.try_alloc(bytes, alignof(pending_await_t));
-    // The receiving link's own budget is spent: refuse THIS await, by value. Never a fallback
-    // to the blocking wait.
-    if (mem == nullptr) return std::unexpected(graph::status_t::BACKPRESSURE);
+    void* const mem = link_src_->try_alloc(bytes, alignof(pending_await_t));
+    // The link plane is spent: refuse THIS await, by value, and count it. Never a fallback to
+    // the blocking wait.
+    if (mem == nullptr) {
+        count_drop(await_refused_);
+        return std::unexpected(graph::status_t::BACKPRESSURE);
+    }
     auto* const p = new (mem) pending_await_t(req.vertex);
     p->waiter.fire = &fwd_router_t::await_fired_thunk;
     p->waiter.ctx = p;
     p->router = this;
-    p->source = &source;
     p->block_bytes = bytes;
+    p->peer = req.inbound->peer;
     // No deadline is stored: the requester owns the timeout (RFC-0004 Amendment 3, ADR-0084),
     // and the resolver skips the `await_timeout` hint. A waiter whose vertex never changes ends on
-    // link_down / remove_child or at teardown, and it costs only this block of its own link's
-    // source.
+    // link_down / remove_child or at teardown, and it costs only this block of the link plane.
     p->echo_ts = req.echo_ts;
     p->name_len = name.size();
     p->dst_len = req.dst.size();
@@ -2747,10 +2749,22 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     std::unique_lock lock(awaits_.m);
     const auto refuse = [&](graph::status_t st) -> graph::result_t<void> {
         p->~pending_await_t();
-        source.release(mem, bytes, alignof(pending_await_t));
+        link_src_->release(mem, bytes, alignof(pending_await_t));
         return std::unexpected(st);
     };
     if (awaits_.stop) return refuse(graph::status_t::BACKPRESSURE);
+    // A per-link bound on parked waiters (kMaxAwaitsPerLink, #2902), kept per session on a
+    // link that carries several: a waiter is keyed by the name it answers over and the
+    // session handle it arrived with. Counted by walking the list, and only once the router
+    // as a whole holds the cap; the same walk reclaims the waiters of an earlier session in
+    // the arriving session's slot. No byte per link, and no state that outlives the link's ctx.
+    const std::size_t same_link = awaits_.count >= graph::config_t::kMaxAwaitsPerLink
+                                      ? cancel_awaits_locked(name, p->peer, true)
+                                      : 0;
+    if (same_link >= graph::config_t::kMaxAwaitsPerLink) {
+        count_drop(await_refused_);
+        return refuse(graph::status_t::BACKPRESSURE);
+    }
     // Armed UNDER the plane lock (plane → stripe is the lock order). A writer that fires it
     // the instant it is armed blocks on this lock in its fire thunk until it is listed.
     const graph::result_t<void> armed = graph_.arm_await(req.vertex, p->waiter, req.subject);
@@ -2767,17 +2781,32 @@ void fwd_router_t::retire_await_locked(pending_await_t* p) noexcept {
     if (p->next != nullptr) p->next->prev = p->prev;
     if (awaits_.head == p) awaits_.head = p->next;
     --awaits_.count;
-    mem::block_source_t* const source = p->source;
     const std::size_t bytes = p->block_bytes;
     p->~pending_await_t();
-    source->release(p, bytes, alignof(pending_await_t));
+    link_src_->release(p, bytes, alignof(pending_await_t));
     awaits_.cv.notify_all();  // teardown waits for the list to drain
 }
 
-void fwd_router_t::cancel_awaits_locked(std::string_view link_name, bool all) noexcept {
+std::size_t fwd_router_t::cancel_awaits_locked(std::string_view link_name, peer_handle_t peer,
+                                               bool count_peer) noexcept {
+    std::size_t kept = 0;
     for (pending_await_t* p = awaits_.head; p != nullptr;) {
         pending_await_t* const next = p->next;
-        if (all || p->name() == link_name) {
+        // An empty name is every link (teardown).
+        const bool on_link = link_name.empty() || p->name() == link_name;
+        // The arriving session's own waiters, when parking: counted and kept.
+        const bool mine = count_peer && p->peer == peer;
+        // With no handle, every waiter of the link goes. With one, every waiter in its slot
+        // goes: the departing session's own, and any of an earlier session the link no longer
+        // holds in that slot (a different generation; one slot holds one live session, so this
+        // stays right when the generation wraps).
+        const bool gone = peer.valid() ? p->peer.index == peer.index : !count_peer;
+        kept += static_cast<std::size_t>(on_link && mine);
+        if (on_link && gone && !mine) {
+            // A waiter released while parking is reclaimed from a departed session: counted
+            // once, the first time it is cancelled (an orphan stays listed until it retires).
+            await_reclaimed_.fetch_add(static_cast<std::size_t>(count_peer && !p->orphan),
+                                       std::memory_order_relaxed);
             // Not yet fired ⇒ ours to release now. Fired or sending ⇒ its thread retires it;
             // it only learns to send nothing.
             if (!p->sending && graph::graph_t::disarm_await(p->waiter)) {
@@ -2788,6 +2817,7 @@ void fwd_router_t::cancel_awaits_locked(std::string_view link_name, bool all) no
         }
         p = next;
     }
+    return kept;
 }
 
 void fwd_router_t::answer_await(pending_await_t& p) {
@@ -2817,10 +2847,11 @@ void fwd_router_t::answer_await(pending_await_t& p) {
         count_drop(assemble_dropped_);
         return;
     }
-    // The waiter's own source, not its link's: the fire may land after the link it arrived
-    // over was removed, when nothing may be read through that link any more (#1941).
+    // The waiter's own plane, the link plane, not its link's rx source: the fire may land after
+    // the link it arrived over was removed, when nothing may be read through that link any more
+    // (#1941, #2902).
     std::array<std::span<const std::byte>, kReplyInlineIov> inline_iov;
-    reply_iov_t iov(inline_iov, *p.source);
+    reply_iov_t iov(inline_iov, *link_src_);
     const auto table = gather_reply_iov(reply, iov);
     if (table.empty()) {
         count_drop(reply_iov_dropped_);
