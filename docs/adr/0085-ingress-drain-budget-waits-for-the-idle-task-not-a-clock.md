@@ -102,7 +102,7 @@ No session is charged for another session's frames: a quiet session reads a fram
 
 **Units.** The frame and byte budgets are folded into one count:
 - with both budgets set, a frame costs one unit plus one per `kRxDrainBytes / kRxDrainFrames` bytes of payload, so a drain ends no later than either budget alone would;
-- with the byte budget alone, a frame costs its payload in 32nds of the budget, rounded up;
+- with the byte budget alone, a frame costs its payload in 32nds of the budget, rounded up, and at least one unit, an empty frame too;
 - `CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_FRAMES` is limited to 254, the ceiling of a one-byte count.
 
 **The reply bound is checked when the session reads.** In-call replies are charged to their destination session, which joins the current drain first. The bound stops that session only at its own next frame. A session that only receives is never parked by it, and its replies still count against lwIP's queue as §7 describes.

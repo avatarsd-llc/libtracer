@@ -396,7 +396,7 @@ constexpr std::size_t kRxDrainTxReplyBytes = kRxDrainTxBytes / kRxDrainTxReplies
  *
  * A session's own tally is one byte (@ref drain_tally_t), which is what bounds the frame
  * budget to 254 (`Kconfig` ranges it). With the frame budget off the bytes are counted in
- * 32nds of the byte budget, rounded UP, so a frame of any non-empty size costs at least one.
+ * 32nds of the byte budget, rounded UP, and every frame costs at least one, an empty one too.
  */
 constexpr std::size_t kRxDrainUnits = kRxDrainFrames != 0 ? kRxDrainFrames : 32;
 static_assert(kRxDrainUnits <= 254, "a session's drain tally is one byte (ADR-0085)");
@@ -406,21 +406,22 @@ static_assert(kRxDrainUnits <= 254, "a session's drain tally is one byte (ADR-00
  *        @p frames and a byte budget of @p bytes (either 0 = off; see @ref kRxDrainUnits).
  *
  * With both budgets set a frame is one unit plus its whole payload units, so a drain ends no
- * later than either budget alone would. Byte budget only: the payload units rounded up, so
- * small frames are paced too. Frame budget only: one unit.
+ * later than either budget alone would. Byte budget only: the payload units rounded up, at
+ * least one, so small and empty frames are paced too. Frame budget only: one unit.
  */
 [[nodiscard]] constexpr std::size_t drain_units(std::size_t len, std::size_t frames,
                                                 std::size_t bytes) noexcept {
     const std::size_t units = frames != 0 ? frames : 32;
     const std::size_t unit_bytes = bytes == 0 ? 0 : std::max<std::size_t>(bytes / units, 1);
     if (unit_bytes == 0) return 1;
-    return frames != 0 ? 1 + len / unit_bytes : (len + unit_bytes - 1) / unit_bytes;
+    return frames != 0 ? 1 + len / unit_bytes
+                       : std::max<std::size_t>(1, (len + unit_bytes - 1) / unit_bytes);
 }
 // The three configurations, at the defaults' numbers: the host suites bind both budgets, so
 // the byte-only and frame-only arms are checked here, at compile time, on every build.
 static_assert(drain_units(8, 32, 32768) == 1 && drain_units(4096, 32, 32768) == 5);
 static_assert(drain_units(1, 0, 32768) == 1 && drain_units(1024, 0, 32768) == 1 &&
-              drain_units(1025, 0, 32768) == 2 && drain_units(0, 0, 32768) == 0);
+              drain_units(1025, 0, 32768) == 2 && drain_units(0, 0, 32768) == 1);
 static_assert(drain_units(65536, 32, 0) == 1);
 static_assert(32 * drain_units(8, 0, 32768) >= 32, "byte-only: 32 small frames spend 32 units");
 
