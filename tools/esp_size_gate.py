@@ -140,7 +140,10 @@ FOOTPRINT_PINS = {
     # ingress's. Every other row and the RAM stay at main.
     # 33,509 -> 33,423 B (-86, #2899): the egress stall verdict is deleted. Every other row
     # and the RAM stay at main.
-    "WebSocket (httpd server + client link)": 33423,
+    # 33,423 -> 33,465 B (+42, #2891, ruled): each WS frame goes out as one sendmsg and the
+    # httpd ingress drain is charged per session with a link-wide ceiling. The image also
+    # links lwip_sendmsg (+502 B, outside this row), accepted. Every other row stays at main.
+    "WebSocket (httpd server + client link)": 33465,
 }
 
 
