@@ -717,7 +717,7 @@ template <class N, class ReplyError>
 [[nodiscard]] result_t<view::rope_t> apply_op(
     graph_t& graph, const parsed_fwd_t<N>& req, vertex_handle_t v, std::string_view inbound_link,
     std::string_view subject, const view::view_t* frame_view, mem::mem_backend_t& flat,
-    mem::mem_backend_t& egress, mem::mem_backend_t& ack, mem::block_source_t& retained,
+    mem::mem_backend_t& egress, mem::mem_backend_t& ack, mem::mem_backend_t& retained,
     const reply_route_t& route, const ReplyError& reply_error, const field_path_t& field,
     op_resolver_t::reverse_ref_fn_t reverse_ref_fn, void* reverse_ref_ctx,
     link_token_seam_t link_token, await_defer_seam_t await_defer) {
@@ -804,8 +804,8 @@ template <class N, class ReplyError>
 
         // The remote-subscribe binding: what it stores for the life of the subscription (the
         // source SUBSCRIBER, the accumulated return route and the completed reverse chain) is
-        // ONE block of @p retained, the injected subscription-retained source (#2875), and the
-        // edge keeps three windows into it. Each TLV is copied once, trailer-sliced (ADR-0041
+        // ONE segment of @p retained, the injected subscription-retained backend (#2875), and
+        // the edge keeps three windows into it. Each TLV is copied once, trailer-sliced (ADR-0041
         // §2; ADR-0042 §3 pinning applies to the value store only). A refused block refuses the
         // subscribe with BACKPRESSURE: there is no second source to fall back to.
         if (remote_sub) {
@@ -838,19 +838,17 @@ template <class N, class ReplyError>
             const std::size_t sub_n = payload_node.wire_size();
             const std::size_t route_n = req.src.wire_size();
             const std::size_t rev_n = own ? kHead + body_len : 0;
-            // The ONE route copy of the subscription's life (ADR-0041 §2) sits in this block:
+            // The ONE route copy of the subscription's life (ADR-0041 §2) sits in this segment:
             // every later delivery clones a refcount on it, never the bytes.
-            const value_ref_t kept =
-                value_ref_t::adopt(value_t::make_inline(sub_n + route_n + rev_n, retained));
-            if (!kept) return error_reply(route, status_t::BACKPRESSURE, egress);
-            const std::span<std::byte> out = const_cast<value_t*>(kept.get())->inline_bytes();
+            const view::view_t block =
+                view::view_t::over(view::segment_alloc(retained, sub_n + route_n + rev_n));
+            if (block.empty()) return error_reply(route, status_t::BACKPRESSURE, egress);
+            const std::span<std::byte> out = block.owner->bytes;
             if (!payload_node.copy_wire_into(out.first(sub_n)) ||
                 !req.src.copy_wire_into(out.subspan(sub_n, route_n)))
                 return error_reply(route, status_t::BACKPRESSURE, egress);
             out[1] = struct_opt(out[1]);
             out[sub_n + 1] = struct_opt(out[sub_n + 1]);
-            // The windows hold the block; the value reference `kept` is dropped on return.
-            const view::view_t& block = kept->only();
             view::view_t reverse_route{};
             if (own) {
                 const std::span<std::byte> rev = out.subspan(sub_n + route_n);
@@ -1012,7 +1010,7 @@ template <class N>
 [[nodiscard, gnu::always_inline]] inline result_t<view::rope_t> resolve_node(
     graph_t& graph, const N& root, std::string_view inbound_link, std::string_view subject,
     const view::view_t* frame_view, mem::mem_backend_t& flat, mem::mem_backend_t& egress,
-    mem::mem_backend_t& ack, mem::block_source_t& retained,
+    mem::mem_backend_t& ack, mem::mem_backend_t& retained,
     op_resolver_t::reverse_ref_fn_t reverse_ref_fn = &op_resolver_t::no_reverse_ref,
     void* reverse_ref_ctx = nullptr, const wire::path_ref_element_t* dst_target = nullptr,
     link_token_seam_t link_token = {}, await_defer_seam_t await_defer = {}) {

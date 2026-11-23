@@ -191,7 +191,10 @@ struct router_planes_t {
      * (`mem::net_source()`; the static arena on an MCU build). Must outlive the router, and must be
      * thread-safe: several transport receive threads draw from it, and a writer's thread releases
      * a deferred AWAIT's waiter to it (and draws that reply's scatter table from it) when the
-     * write answers the AWAIT.
+     * write answers the AWAIT. A remote subscription's retained segment is drawn from it too when
+     * no
+     * @p retained is injected (#2875); that segment lives in the graph, so this source must also
+     * outlive the graph's subscriptions.
      *
      * This plane used to be a `%std::pmr::memory_resource*`. It could not stay one: a pmr resource
      * cannot report exhaustion by value, so on the shipping `-fno-exceptions` profile a peer-driven
@@ -283,27 +286,30 @@ struct router_planes_t {
     mem::mem_backend_t* egress = &mem::net_backend();
 
     /**
-     * @brief The source for what a REMOTE SUBSCRIBE keeps for the LIFE OF THE SUBSCRIPTION — the
+     * @brief The backend for what a REMOTE SUBSCRIBE keeps for the LIFE OF THE SUBSCRIPTION — the
      * source `SUBSCRIBER` TLV, "the ONE route copy of the subscription's life" (ADR-0041 §2) and
-     * the completed reverse chain, together ONE block the edge keeps three windows into (#2875).
+     * the completed reverse chain, together ONE segment the edge keeps three windows into (#2875).
      * A DEDICATED injection for the reason @p egress is one: @p flat is documented and sized
      * against per-operation FLATTEN bytes, and this block is neither per-operation nor a flatten.
      * Its live set is the SUBSCRIPTION POPULATION, so a host that size-classes @p flat would find
      * the classes filled by a set that never returns and nothing left for the churn they were cut
      * for — the classes stop working exactly when a client is attached (#1610).
      *
-     * DEFAULTS TO NULL, meaning @p link_src: the router's long-lived link plane, which a peer's
-     * subscription is long-lived link state of. A node that bounds @p link_src therefore bounds
+     * DEFAULTS TO NULL, meaning @p link_src, through a `mem::detached_source_backend_t` the
+     * router keeps over it: the router's long-lived link plane, which a peer's subscription is
+     * long-lived link state of. Each segment names the source in its own block, so it may outlive
+     * the router. A node that bounds @p link_src therefore bounds
      * its subscriptions too, and its census counts them (#2875). A host that injects this plane
      * can send the block to a plain heap arm instead: one alloc and one free per subscription is
      * not churn and wants no class.
      *
      * Sized against the subscription population, NOT a concurrency factor. Exhaustion is answered
      * by value — a `BACKPRESSURE` on the subscribe, which simply does not bind. MUST be thread-
-     * safe on the same terms as @p flat: the block goes back on whichever thread drops the
-     * subscription's last window. Must outlive the router.
+     * safe on the same terms as @p flat: the segment goes back on whichever thread drops the
+     * subscription's last window. An injected one must outlive every segment it serves, which
+     * may be longer than the router: a subscription lives in the graph.
      */
-    mem::block_source_t* retained = nullptr;
+    mem::mem_backend_t* retained = nullptr;
 };
 
 /**
@@ -352,7 +358,7 @@ class fwd_router_t {
           // `egress` (#795), and subscription-scoped retention from `retained` (#1610), else
           // from the long-lived link plane (#2875).
           resolver_(graph, planes.flat, planes.egress,
-                    planes.retained != nullptr ? planes.retained : planes.link_src),
+                    planes.retained != nullptr ? planes.retained : &link_backend_),
           link_src_(planes.link_src),
           rx_(planes.rx),
           flat_(planes.flat),
@@ -360,7 +366,8 @@ class fwd_router_t {
           // The NAME->link demux table's chunks are long-lived control state whose high-water
           // mark is the count of DISTINCT link names ever registered, so they take the LINK
           // store rather than the per-frame `rx` one (#873 phase 1).
-          registry_(planes.link_src != nullptr ? *planes.link_src : mem::net_source()) {
+          registry_(planes.link_src != nullptr ? *planes.link_src : mem::net_source()),
+          link_backend_(planes.link_src != nullptr ? *planes.link_src : mem::net_source()) {
         // The captureless {fn, ctx} pair the ADR-0047 doctrine prescribes (#1049) — the same
         // shape as `on_reverse_ref` below. The graph publishes it through a `sink_slot_t`,
         // so `this` must outlive every write that can still reach the producer fan-out;
@@ -1999,6 +2006,11 @@ class fwd_router_t {
                                   // a refusal degrades to addressed BACKPRESSURE
     child_registry_t registry_;   // the one NAME→link demux table (Brick 3a, ADR-0037);
                                   // its chunks draw from `link_src` (#873 phase 1)
+    /**
+     * @brief The default subscription-retained backend (#2875): segments over the link plane,
+     *        each naming its source in its own block so it may outlive the router.
+     */
+    mem::detached_source_backend_t link_backend_;
     /**
      * @brief One interned link-kind record: the view a `child_rx_ctx_t::kind` points at,
      *        with the owned `kind` bytes right after it in the same block (#1779).

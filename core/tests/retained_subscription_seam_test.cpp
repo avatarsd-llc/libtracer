@@ -42,6 +42,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -230,6 +231,13 @@ void a_router_draws_the_block_from_its_link_plane() {
     null_link_t link;
     tr::testing::check(router.attach_link("link-a", link), "the link registers");
 
+    // The process-default value sub-pool is what `heap_backend()` draws from. Every plane here
+    // is injected, so a subscribe that reached `heap_backend()` would show up in its census.
+    // Checked only where it is a separate pool: on a heap-rooted build the counters below draw
+    // from the same heap.
+    const bool heap_apart = &tr::mem::value_source() != &tr::mem::heap_source();
+    const std::size_t heap_before = tr::mem::value_source().stats().in_use;
+
     const int held = link_src.live;
     link.inject(subscribe_fwd());
     tr::testing::check(g.has_subscribers(x), "the remote subscribe binds");
@@ -238,10 +246,26 @@ void a_router_draws_the_block_from_its_link_plane() {
     tr::testing::check(flat.allocs == 0, "`flat` served nothing for the subscription");
     tr::testing::check(rx.live == 0 && egress.live == 0,
                        "the per-frame planes hold nothing once the subscribe is answered");
+    tr::testing::check(!heap_apart || tr::mem::value_source().stats().in_use == heap_before,
+                       "nothing of the subscription was drawn from `heap_backend()`");
 
+    // The unsubscribe path: a `:subscribers[0]` clear returns the block.
+    std::vector<std::byte> clear;
+    tr::wire::emit_tlv(clear, type_t::STATUS, opt_t{}, std::span<const std::byte>{});
+    const auto field = tr::graph::path_t::parse("/x:subscribers[0]");
+    tr::testing::check(
+        g.write(x, field->field(), tr::testing::make_value(clear), "link-a").has_value(),
+        "the subscription clears");
+    tr::testing::check(!g.has_subscribers(x), "…and is gone");
+    tr::testing::check(link_src.live == held,
+                       "the unsubscribe returns the block to the link plane");
+
+    // The link's departure returns it too.
+    link.inject(subscribe_fwd());
+    tr::testing::check(link_src.live == held + 1, "a second subscription holds one block again");
     (void)router.remove_child("link-a");
-    tr::testing::check(link_src.live < held + 1,
-                       "the block goes back to the link plane with the subscription");
+    tr::testing::check(link_src.live == held,
+                       "the block goes back to the link plane when the link leaves");
 }
 
 }  // namespace

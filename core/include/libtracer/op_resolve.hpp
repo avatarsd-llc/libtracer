@@ -316,20 +316,21 @@ class op_resolver_t {
      *              empty rope that `or_backpressure` turns into an addressed `kind=ERROR`
      *              `STATUS{BACKPRESSURE}` — exhaustion answered by value, never an abort. MUST
      *              be thread-safe on the same terms as @p flat. Must outlive the resolver.
-     * @param retained The source a remote subscribe's life-long state is drawn from (#1610,
+     * @param retained The backend a remote subscribe's life-long state is drawn from (#1610,
      *              #2875): the source `SUBSCRIBER` TLV, the ONE route copy of the
-     *              subscription's life and the completed reverse chain, together ONE block
+     *              subscription's life and the completed reverse chain, together ONE segment
      *              that the edge keeps three windows into. Its live set is the SUBSCRIPTION
      *              POPULATION, so it is a seam of its own rather than a share of @p flat.
-     *              `fwd_router_t` passes its `retained` plane, else its `link_src`. Null
+     *              `fwd_router_t` passes its `retained` plane, else a backend over its
+     *              `link_src`. Null
      *              means @p flat. A refusal answers the subscribe `BACKPRESSURE` and binds
-     *              nothing. MUST be thread-safe on the same terms as @p flat: the block goes
-     *              back on whichever thread drops the subscription's last window. Must
-     *              outlive the resolver.
+     *              nothing. MUST be thread-safe on the same terms as @p flat: the segment
+     *              goes back on whichever thread drops the subscription's last window. Must
+     *              outlive every segment it serves.
      */
     explicit op_resolver_t(graph_t& graph, mem::mem_backend_t* flat = &mem::heap_backend(),
                            mem::mem_backend_t* egress = &mem::heap_backend(),
-                           mem::block_source_t* retained = nullptr) noexcept
+                           mem::mem_backend_t* retained = nullptr) noexcept
         : graph_(graph), flat_(flat), egress_(egress), retained_(retained) {}
 
     /**
@@ -575,14 +576,14 @@ class op_resolver_t {
     mem::mem_backend_t* egress_ = &mem::heap_backend();  // reply head + mint egress bytes (#795)
     // The SUBSCRIPTION-RETAINED seam (#1610, #2875). Null means "the same place flattens
     // come from".
-    mem::block_source_t* retained_ = nullptr;
+    mem::mem_backend_t* retained_ = nullptr;
     /** @brief The retained seam, or @p fallback when none was injected.
      *
      *  The fallback is the CALLER's flatten backend rather than a member, because the two
      *  tiers do not share one: the span tier flattens from `flat_`, the view tier from the
      *  root segment's own backend. Passing it in keeps an un-injected resolve on the
      *  backend its own tier flattens from. */
-    [[nodiscard]] mem::block_source_t& retained_backend(
+    [[nodiscard]] mem::mem_backend_t& retained_backend(
         mem::mem_backend_t& fallback) const noexcept {
         return retained_ != nullptr ? *retained_ : fallback;
     }
