@@ -85,6 +85,7 @@ typedef struct httpd_req {
     int method;            /**< @brief HTTP method; GET is the handshake. */
     void* user_ctx;        /**< @brief The `httpd_uri_t::user_ctx` (the link). */
     int fd;                /**< @brief Fake-only: the session socket (httpd hides this). */
+    void* sess_ctx;        /**< @brief The session's context, copied in at httpd_req_new. */
 } httpd_req_t;
 
 /** @brief A URI registration. */

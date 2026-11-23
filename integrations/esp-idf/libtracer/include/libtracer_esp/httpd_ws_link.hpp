@@ -181,6 +181,8 @@
 #include "libtracer_esp/fixed_array.hpp"
 #include "libtracer_esp/link_stats.hpp"
 
+struct iovec;  // the socket layer's gather element (lwIP's, or POSIX `<sys/uio.h>`)
+
 namespace tr::net {
 
 /**
@@ -1560,12 +1562,14 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * (ping, close) included: each costs the same handler pass. A drain belongs to the core
      * it started on; a task that migrated starts a new one (see ADR-0085, dual core).
      *
-     * The drain also ends when the in-call replies it wrote reach a quarter of lwIP's send
-     * buffer, and once it has read `kRxDrainNagleFrames` frames back to back the session's
-     * socket @p fd is switched to Nagle until its next light drain (ADR-0085 §7): while
-     * this task holds unread ingress, lwIP drops the peer's data-bearing segments and the
-     * ACKs they carry, so a burst of two-segment replies under TCP_NODELAY would fill the
-     * segment queue and the reply write would wait for an ACK only this task can release.
+     * The drain is counted per SESSION (#2891): the session @p sess_ctx (httpd's
+     * `req->sess_ctx`) waits only once it has read its share of the budget (the budget divided
+     * among the sessions that read in the drain), once the in-call replies written to it reach
+     * half lwIP's segment queue or a quarter of its send buffer (ADR-0085 §7: while this task
+     * holds unread ingress, lwIP drops the peer's data-bearing segments and the ACKs they
+     * carry, so more replies would wait for an ACK only this task can release), or once the
+     * whole drain reaches twice the budget. No session is charged for another session's
+     * frames; a frame that arrives while the task is parked still waits for that park.
      *
      * The wait is also where this link's held frames go out while it lasts. The parked
      * task is the httpd task, the one that writes them, so a frame stored by another task
@@ -1573,9 +1577,11 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * park, ingress waits for idle, and no peer can buy ingress by provoking egress. The frame is
      * not read before the core idles.
      */
-    void pace_rx(int fd, std::size_t frame_bytes);
-    /** @brief Set or clear TCP_NODELAY on @p fd (best-effort; see `kRxDrainNagleFrames`). */
-    static void set_nodelay(int fd, bool on);
+    void pace_rx(void* sess_ctx, std::size_t frame_bytes);
+    /** @brief Make @p s a member of the drain tagged @p tag: a link whose drain has another tag
+     *         starts this one, and a tally of another drain starts at zero and joins the
+     *         divisor (httpd task only; see @ref pace_rx). */
+    void join_drain(session_t& s, std::uint16_t tag);
     /** @brief Wake a drain parked for idle so it flushes the frame just stored (any task; the
      *         producer's side of the idle-gate handshake, after the store). */
     void egress_posted() noexcept;
@@ -1894,15 +1900,27 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * where "drop the frame, keep the socket" is unsound, and one a short bound makes
      * more likely rather than less.
      *
-     * It judges the FRAME, not just the buffer (#951). `esp_http_server` writes one frame
-     * as two calls to this function — the header, then the payload — so a write that puts
-     * nothing on the wire loses a whole frame only when it is the frame's first. A failure
-     * on the second leaves the peer holding a header promising bytes that never arrive,
-     * which is the same unparseable stream a short write produces and is judged the same
-     * way. The frame boundary comes from @ref tx_work, which brackets the send.
+     * It judges the FRAME, not just the buffer (#951). `esp_http_server` writes its own
+     * frames (a PONG, a CLOSE echo) as two calls to this function — the header, then the
+     * payload — and a frame the link left part-way is finished by a later write, so a write
+     * that puts nothing on the wire loses a whole frame only when it is the frame's first. A
+     * failure on a later one leaves the peer holding a header promising bytes that never
+     * arrive, which is the same unparseable stream a short write produces and is judged the
+     * same way. The frame boundary comes from the caller's bracket (@ref write_frame,
+     * @ref send_now).
      */
     static int send_guarded(httpd_handle_t handle, int fd, const char* buf, std::size_t len,
                             int flags);
+    /**
+     * @brief @ref send_guarded over @p iovcnt parts as ONE `sendmsg` (#2891): the write every
+     *        frame of the link's own takes, so a small frame is one TCP segment, header and
+     *        payload together. Same verdicts, same return convention.
+     */
+    static int send_gathered(httpd_handle_t handle, int fd, ::iovec* iov, std::size_t iovcnt,
+                             int flags);
+    /** @brief Non-empty parts one write of @ref write_rest gathers: a gathered frame's header
+     *         and payload, or a retained frame's head and two links. More take more writes. */
+    static constexpr std::size_t kWriteParts = 3;
 
     /**
      * @brief Handle a detected stream desynchronisation on @p slot's socket: log it and
@@ -2333,21 +2351,15 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *         against @ref kDefaultRxScratchBytes, and zeroed if the allocation failed so
      *         the size and the pointer can never disagree. */
     std::size_t rx_scratch_bytes_ = 0;
-    /** @brief The idle-gate epoch the current drain began in (see @ref pace_rx). httpd
-     *         task only, like @ref rx_scratch_. */
-    std::uint32_t rx_drain_epoch_ = 0;
-    /** @brief The core the current drain began on; its idle gate is the one compared. */
-    std::size_t rx_drain_core_ = 0;
-    /** @brief Frames consumed in the current drain (see @ref pace_rx). */
-    std::size_t rx_drain_frames_ = 0;
-    /** @brief Payload bytes consumed in the current drain (see @ref pace_rx). */
-    std::size_t rx_drain_bytes_ = 0;
-    /** @brief In-call reply bytes written in the current drain; the drain ends when they
-     *         reach a quarter of lwIP's send buffer (ADR-0085 §7). httpd task only. */
-    std::size_t rx_drain_tx_bytes_ = 0;
-    /** @brief The session socket currently switched from TCP_NODELAY to Nagle because a
-     *         drain showed the flood shape, or -1 (ADR-0085 §7). httpd task only. */
-    int rx_nagle_fd_ = -1;
+    /** @brief The low half of the idle-gate epoch the current drain began in (see
+     *         @ref pace_rx). httpd task only, like @ref rx_scratch_. */
+    std::uint16_t rx_drain_epoch_ = 0;
+    /** @brief Sessions that have read a frame in the current drain: the divisor of each
+     *         one's share of the budget (see @ref pace_rx). httpd task only. */
+    std::uint16_t rx_drain_sessions_ = 0;
+    /** @brief Units read in the current drain by every session, held at twice the budget:
+     *         the link-wide ceiling of @ref pace_rx. httpd task only. */
+    std::uint16_t rx_drain_units_ = 0;
     /** @brief The in-call reply scratch, `tx_inline_bytes_` from `memory.io`: used only on
      *         the httpd task inside @ref send_in_call to gather a rope reply into one
      *         WebSocket frame. */

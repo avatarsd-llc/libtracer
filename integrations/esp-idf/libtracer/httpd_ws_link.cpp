@@ -30,6 +30,7 @@
 #include <expected>
 #include <mutex>
 #include <new>
+#include <type_traits>
 #include <utility>
 
 #include "esp_freertos_hooks.h"
@@ -338,55 +339,32 @@ constexpr std::uint8_t kMaxConsecutiveTxDrops = 3;
  * per-frame one, and a single stalled peer parks the httpd task for twice what the
  * derivation used to claim (#956).
  *
+ * The link's own frames are ONE write since #2891 (@ref httpd_ws_link_t::send_gathered), but
+ * IDF still writes its own control replies through the same override in two (the PONG it
+ * answers a PING with, and the CLOSE it echoes), so the divisor stays for those.
+ *
  * The sibling constant on the client link is `kIdfWriteLegs` in `esp_ws_client_link.cpp`,
  * which is 3 because `_ws_write` spends it on a poll plus both writes (#952). Same class
  * of fact, different function, so each states its own — never a shared constant.
- *
- * This term disappears if the send path ever becomes a single write (the direction #949
- * and the frame-atomicity work point at); it is a fact about the API in use, not a policy.
  */
 constexpr std::uint32_t kIdfWsWriteLegs = 2;
 
 /**
- * @brief Frames a drain reads back to back before the session's socket is switched from
- *        TCP_NODELAY to Nagle, so the drain's remaining replies coalesce (ADR-0085 §7).
- *
- * Why the socket must change under a flood, and only then. The receive context is the
- * task that writes the in-call replies, and while it holds unread ingress lwIP holds the
- * peer's data segments as REFUSED (the socket's recv mbox is full) and drops every further
- * data-bearing segment from that peer before processing it, ACK numbers included
- * (`tcp_in.c`, the `refused_data` test at the top of `tcp_input`'s per-pcb path). The
- * peer keeps piggybacking its ACKs on data for as long as it has data to send, so the
- * board's own reply segments stay unacknowledged until the board READS. Under
- * TCP_NODELAY every reply is two segments (header and payload, @ref kIdfWsWriteLegs), so
- * a drain of @ref kRxDrainFrames small replies queues 2x that many against
- * @ref kTcpSndQueueLen; the write that finds the queue full waits for an ACK only the
- * waiting task can release, spends the send bound, and fails: one reply refused, or a
- * header on the wire with its payload lost, and three in a row condemn a healthy session.
- *
- * Nagle is TCP's own answer: with unacknowledged data outstanding, small writes gather in
- * one unsent segment until it fills or an ACK arrives, so a drain's replies cost one or two
- * segments, never the queue. It is wrong for the interactive case (a lone reply's payload
- * leg would wait a delayed-ACK behind its header leg), so it is applied only once a drain
- * has shown the flood shape, this many frames without the core idling, and held until the
- * peer's next LIGHT drain, one that ends by idle before reaching it. A peer that flooded
- * once and then only receives never produces that drain and keeps paying one delayed ACK
- * per push burst until it sends lightly again or reconnects. The threshold is half the
- * queue in frames: what the drain wrote under TCP_NODELAY before switching can never fill
- * it.
- */
-constexpr std::size_t kRxDrainNagleFrames = kTcpSndQueueLen / (2 * kIdfWsWriteLegs);
-
-/**
- * @brief In-call reply bytes a drain may write before it ends, whatever its frame count:
+ * @brief In-call reply bytes a session may be sent in one drain before its next frame waits:
  *        a quarter of lwIP's send buffer (ADR-0085 §7).
  *
- * The byte half of @ref kRxDrainNagleFrames. Coalesced or not, the replies of a drain stay
- * unacknowledged until the next drain's reads let the peer's ACKs through, so the replies
- * of about two drains are outstanding at once. Bounding a drain's reply bytes to a quarter
- * of @ref kTcpSndBuf keeps that total under half of it, and a reply write never waits for
- * send-buffer space the writer itself is withholding. Frames with small replies never
- * reach it; a drain of large replies ends sooner and parks more often: the receiver pays.
+ * Why a drain's replies are bounded at all. The receive context is the task that writes the
+ * in-call replies, and while it holds unread ingress lwIP holds the peer's data segments as
+ * REFUSED (the socket's recv mbox is full) and drops every further data-bearing segment from
+ * that peer before processing it, ACK numbers included (`tcp_in.c`, the `refused_data` test at
+ * the top of `tcp_input`'s per-pcb path). The peer piggybacks its ACKs on data for as long as
+ * it has data to send, so the board's reply segments can stay unacknowledged until the board
+ * READS, and the replies of about two drains are outstanding at once. Bounding one drain's
+ * reply bytes to a quarter of @ref kTcpSndBuf keeps that total under half of it, and a reply
+ * write never waits for send-buffer space the writer itself is withholding.
+ *
+ * Both limits are a connection's own (lwIP keeps them per pcb), so the charge is per
+ * SESSION: a session is never held back by replies written to another.
  *
  * In-call replies only. Pushes posted by other tasks and sent from inside the park
  * (@ref httpd_ws_link_t::flush_egress) are outside this bound, and need none since #2095:
@@ -395,6 +373,94 @@ constexpr std::size_t kRxDrainNagleFrames = kTcpSndQueueLen / (2 * kIdfWsWriteLe
  * send buffer still waits out the send bound (pre-existing).
  */
 constexpr std::size_t kRxDrainTxBytes = kTcpSndBuf / 4;
+
+/**
+ * @brief In-call replies a session may be sent in one drain: half lwIP's segment queue
+ *        (ADR-0085 §7, as amended by #2891).
+ *
+ * The segment half of @ref kRxDrainTxBytes. Each reply is ONE write and so, below the MSS,
+ * one segment; with two drains' replies outstanding at once, half of @ref kTcpSndQueueLen
+ * per drain never fills the queue. This replaces the Nagle switch the two-write send path
+ * needed (a reply was two segments, so 32 of them were 64 against a queue of 16).
+ */
+constexpr std::size_t kRxDrainTxReplies = std::min<std::size_t>(kTcpSndQueueLen / 2, 254);
+static_assert(kRxDrainTxReplies >= 1, "a reply bound of zero would park every frame");
+
+/** @brief Reply bytes counted as one more reply, so that one tally bounds both the segments
+ *         and the bytes: @ref kRxDrainTxReplies of these are @ref kRxDrainTxBytes. */
+constexpr std::size_t kRxDrainTxReplyBytes = kRxDrainTxBytes / kRxDrainTxReplies;
+
+/**
+ * @brief A drain's budget in UNITS (@ref drain_units): one per frame, plus payload units, so
+ *        that one count ends a drain no later than either budget would.
+ *
+ * A session's own tally is one byte (@ref drain_tally_t), which is what bounds the frame
+ * budget to 254 (`Kconfig` ranges it). With the frame budget off the bytes are counted in
+ * 32nds of the byte budget, rounded UP, and every frame costs at least one, an empty one too.
+ */
+constexpr std::size_t kRxDrainUnits = kRxDrainFrames != 0 ? kRxDrainFrames : 32;
+static_assert(kRxDrainUnits <= 254, "a session's drain tally is one byte (ADR-0085)");
+
+/**
+ * @brief The units one frame of @p len payload bytes costs under a frame budget of
+ *        @p frames and a byte budget of @p bytes (either 0 = off; see @ref kRxDrainUnits).
+ *
+ * With both budgets set a frame is one unit plus its whole payload units, so a drain ends no
+ * later than either budget alone would. Byte budget only: the payload units rounded up, at
+ * least one, so small and empty frames are paced too. Frame budget only: one unit.
+ */
+[[nodiscard]] constexpr std::size_t drain_units(std::size_t len, std::size_t frames,
+                                                std::size_t bytes) noexcept {
+    const std::size_t units = frames != 0 ? frames : 32;
+    const std::size_t unit_bytes = bytes == 0 ? 0 : std::max<std::size_t>(bytes / units, 1);
+    if (unit_bytes == 0) return 1;
+    return frames != 0 ? 1 + len / unit_bytes
+                       : std::max<std::size_t>(1, (len + unit_bytes - 1) / unit_bytes);
+}
+// The three configurations, at the defaults' numbers: the host suites bind both budgets, so
+// the byte-only and frame-only arms are checked here, at compile time, on every build.
+static_assert(drain_units(8, 32, 32768) == 1 && drain_units(4096, 32, 32768) == 5);
+static_assert(drain_units(1, 0, 32768) == 1 && drain_units(1024, 0, 32768) == 1 &&
+              drain_units(1025, 0, 32768) == 2 && drain_units(0, 0, 32768) == 1);
+static_assert(drain_units(65536, 32, 0) == 1);
+static_assert(32 * drain_units(8, 0, 32768) >= 32, "byte-only: 32 small frames spend 32 units");
+
+/**
+ * @brief The link-wide ceiling on one drain's units: twice the budget (#2891).
+ *
+ * Shares alone bound a drain's frames by about one budget only when the sessions interleave.
+ * Sessions that join ONE AFTER ANOTHER each read their share at the time they joined, so N of
+ * them read U(1 + 1/2 + ... + 1/N), about 2.6 U at seven. The ceiling stops that at 2 U; under
+ * fair interleaving the shares stop the drain long before it. So a drain reads at most
+ * min(U * H_N, 2 U) units plus one frame per session (the frame that crosses its line), which
+ * at the defaults' 32 frames, 16 sockets and ~7.3 ms a small request is 80 frames, ~0.58 s,
+ * still inside the 1 s minimum task watchdog.
+ */
+constexpr std::size_t kRxDrainLinkUnits = 2 * kRxDrainUnits;
+
+/**
+ * @brief One session's share of the current drain (ADR-0085, per session since #2891): the
+ *        drain it belongs to, and what it read and was answered in it (httpd task only).
+ *
+ * Four bytes, and none when the build does not pace (@ref session_drain_tally_t). A tag that
+ * is not the current drain's means zero; the tag is the low half of the core's idle epoch, so
+ * it repeats every 65536 idle passes, and a tally last written exactly that many passes ago is
+ * read as a member of the current drain for that one drain: at most one early wait.
+ */
+struct drain_tally_t {
+    std::uint16_t epoch = 0;  /**< @brief Low half of the idle epoch of the drain counted. */
+    std::uint8_t units = 0;   /**< @brief Frame and payload units read (saturating). */
+    std::uint8_t replies = 0; /**< @brief In-call replies written to it (saturating). */
+};
+/** @brief What a @ref drain_tally_t becomes when the build does not pace: no byte. */
+struct no_drain_tally_t {};
+/** @brief A session slot's drain member. */
+using session_drain_tally_t = std::conditional_t<kRxDrainPaced, drain_tally_t, no_drain_tally_t>;
+
+/** @brief @p tally plus @p add, held at 255 (the tally is one byte). */
+[[nodiscard]] constexpr std::uint8_t saturating_add(std::uint8_t tally, std::size_t add) noexcept {
+    return static_cast<std::uint8_t>(std::min<std::size_t>(tally + add, 255));
+}
 
 /**
  * @brief The task-watchdog period, seconds — the numerator of the send bound.
@@ -1005,17 +1071,17 @@ struct httpd_ws_link_t::session_t {
      * @brief A frame write is OPEN on this session: bytes landed since @ref open_tx_frame
      *        belong to a frame the peer has been promised in full (httpd task only).
      *
-     * `esp_http_server` writes ONE WebSocket frame as TWO calls to the session's send
-     * function — the header, then the payload (httpd_ws.c) — so the override cannot tell,
-     * from one buffer, whether a failure loses a whole frame or truncates one already
-     * announced on the wire. That distinction is the difference between the two policies
-     * this link runs (#951), and nothing IDF hands the override carries it. So the frame
-     * boundary is marked here, by the one caller that knows it: @ref
-     * httpd_ws_link_t::tx_work brackets the async send.
+     * A frame can take more than one write — the rest of one a non-blocking flush left
+     * part-way, or a retained frame of more parts than one write gathers — so the override
+     * cannot tell, from one write, whether a failure loses a whole frame or truncates one
+     * already announced on the wire. That distinction is the difference between the two
+     * policies this link runs (#951). So the frame boundary is marked here, by the one
+     * caller that knows it: @ref httpd_ws_link_t::write_frame and
+     * @ref httpd_ws_link_t::send_now bracket the write.
      *
      * Not under `peers_m_`, unlike every other cross-thread member of this slot, and not
      * atomic: all four touch points — the two brackets and the override's accumulate and
-     * verdict — run on the httpd task, and `httpd_ws_send_frame_async` is synchronous, so
+     * verdict — run on the httpd task, and every write is synchronous, so
      * the window cannot interleave with another frame's. Same confinement `assembler` has
      * on the receive side.
      */
@@ -1135,6 +1201,10 @@ struct httpd_ws_link_t::session_t {
      * mean "admitted at the transport level, serving nothing".
      */
     bool auth_pending = false;
+    /** @brief This session's share of the current drain (ADR-0085, #2891): reset at the claim,
+     *         written only on the httpd task. No byte when the build does not pace; it sits in the
+     *         padding after `auth_pending`, so the slot does not grow on 32- or 64-bit targets. */
+    [[no_unique_address]] session_drain_tally_t drain{};
     /**
      * @brief The application's `now` at the first liveness check that saw this session
      *        (#2257, peers_m_); @ref kAuthUnseen until one has.
@@ -2299,10 +2369,6 @@ void httpd_ws_link_t::refuse_upgraded(int fd) {
     (void)send_now(nullptr, fd, HTTPD_WS_TYPE_CLOSE,
                    std::span<const std::byte>(payload.data(), 2 + refusal_reason_len_));
     condemn(fd);
-    // Its frame went through the drain budget like any other, so it may be the socket a drain
-    // put on Nagle (ADR-0085 §7). It has no session for on_session_closed to clear that from,
-    // so it is cleared here: a recycled descriptor starts on TCP_NODELAY like every other.
-    if (rx_nagle_fd_ == fd) rx_nagle_fd_ = -1;
 }
 
 httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenticated) {
@@ -2373,6 +2439,7 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     // never 0 after the increment on a claim, so the handle is always valid.
     slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen};
     slot->read_tally = session_read_tally_t{};  // a new tenancy has read nothing (#2774)
+    slot->drain = session_drain_tally_t{};      // nor drained anything (#2891)
     // ADR-0073 §2: the routable NAME is the handle spelled out, `p<slot>~<gen>`, legal
     // by construction, and the `<ip>:<port>` goes to the diagnostics field instead of
     // into the graph. The generation makes a reused slot's name a fresh one.
@@ -2404,30 +2471,44 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     return slot;
 }
 
-void httpd_ws_link_t::set_nodelay(int fd, bool on) {
-    const int value = on ? 1 : 0;
-    // Best-effort like bound_socket: a socket that cannot take the option keeps what it
-    // had, which is the pre-ADR-0085 behaviour for that one peer.
-    if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &value, sizeof(value)) != 0)
-        ESP_LOGD(kTag, "TCP_NODELAY=%d not applied fd=%d", value, fd);
+void httpd_ws_link_t::join_drain(session_t& s, std::uint16_t tag) {
+    if constexpr (!kRxDrainPaced) return;
+    if (rx_drain_epoch_ != tag) {
+        rx_drain_epoch_ = tag;
+        rx_drain_sessions_ = 0;
+        rx_drain_units_ = 0;
+    }
+    // A tally of another drain counts nothing in this one: it starts here, and its session
+    // joins the divisor. A session that left mid-drain stays counted, so the divisor can only
+    // OVERCOUNT the sessions reading, which only makes the others' waits come earlier.
+    if (s.drain.epoch != tag || rx_drain_sessions_ == 0) {
+        s.drain = drain_tally_t{.epoch = tag};
+        ++rx_drain_sessions_;
+    }
 }
 
-void httpd_ws_link_t::pace_rx(int fd, std::size_t frame_bytes) {
+void httpd_ws_link_t::pace_rx(void* sess_ctx, std::size_t frame_bytes) {
     if constexpr (!kRxDrainPaced) return;
-    const auto core = static_cast<std::size_t>(xPortGetCoreID());
-    idle_gate_t& gate = g_idle_gates[core];
+    idle_gate_t& gate = g_idle_gates[static_cast<std::size_t>(xPortGetCoreID())];
     if (!gate.hooked.load(std::memory_order_acquire)) return;
+    // The drain is counted per SESSION (#2891), on the session httpd hands the request
+    // (`req->sess_ctx`). A socket whose session is not claimed yet (its first frame claims it)
+    // or that was refused after its upgrade has no tally: that one frame is not paced, and
+    // every frame after it is.
+    if (sess_ctx == nullptr || sess_ctx == gate_.load(std::memory_order_relaxed)) return;
+    session_t& s = *static_cast<session_t*>(sess_ctx);
     std::uint32_t epoch = gate.epoch.load(std::memory_order_seq_cst);
-    // An unpinned httpd task that migrated compares against a different core's epoch, which
-    // means nothing; it starts a new drain on the core it is now on. The budget is therefore
-    // approximate for such a task (ADR-0085), never a hang: it waits on the gate it is on.
-    if (core != rx_drain_core_) {
-        rx_drain_core_ = core;
-        rx_drain_epoch_ = epoch - 1;  // any value but `epoch`: forces the reset below
-    }
     // The drain is the run of frames since this core last idled; an epoch that moved since
-    // the previous frame starts a new one. Otherwise a spent budget waits for the idle
-    // task. While it waits it is still the httpd task, the one drain of this link's queued
+    // starts a new one. A session waits only once it has read ITS SHARE of the budget, the
+    // budget divided among the sessions that have read in this drain, or once its own in-call
+    // replies reach what lwIP can hold unacknowledged for it (kRxDrainTxReplies), or once the
+    // whole drain reaches twice the budget (kRxDrainLinkUnits, which only sessions joining one
+    // after another reach). So no session is charged for another session's frames, and a
+    // drain reads at most min(U * H_N, 2 U) units plus one frame per session. A task that
+    // migrated reads another core's epoch, which almost never matches the tag, and starts a
+    // new drain; one that matches by chance waits once early, never for good.
+    //
+    // While it waits it is still the httpd task, the one drain of this link's queued
     // sends, so a send posted to it by another task (a held frame) is RUN FROM HERE,
     // on this task, the socket write and all, and the park goes on. The frame stays unread:
     // egress wakes the park, ingress waits for idle, and a peer who can make this link
@@ -2439,13 +2520,12 @@ void httpd_ws_link_t::pace_rx(int fd, std::size_t frame_bytes) {
     // consumed the frame's first header byte before this handler is called
     // (httpd_parse.c httpd_req_new -> httpd_ws_get_frame_type), so a handler that returns
     // without the payload desynchronises the stream.
-    // The third way a drain ends is on its own EGRESS: the in-call reply bytes it wrote
-    // (kRxDrainTxBytes), so that what is unacknowledged never outgrows the send buffer
-    // while this task is the one holding the ACKs back (see kRxDrainNagleFrames).
-    const bool spent = (kRxDrainFrames != 0 && rx_drain_frames_ >= kRxDrainFrames) ||
-                       (kRxDrainBytes != 0 && rx_drain_bytes_ >= kRxDrainBytes) ||
-                       rx_drain_tx_bytes_ >= kRxDrainTxBytes;
-    if (epoch == rx_drain_epoch_ && spent) {
+    const auto now = static_cast<std::uint16_t>(epoch);
+    const bool spent =
+        s.drain.epoch == now && rx_drain_epoch_ == now &&
+        (std::size_t{s.drain.units} * rx_drain_sessions_ >= kRxDrainUnits ||
+         s.drain.replies >= kRxDrainTxReplies || rx_drain_units_ >= kRxDrainLinkUnits);
+    if (spent) {
         rx_drain_waits_.fetch_add(1, std::memory_order_relaxed);
         gate.waiters.fetch_add(1, std::memory_order_seq_cst);
         while (gate.epoch.load(std::memory_order_seq_cst) == epoch) {
@@ -2455,30 +2535,11 @@ void httpd_ws_link_t::pace_rx(int fd, std::size_t frame_bytes) {
         gate.waiters.fetch_sub(1, std::memory_order_seq_cst);
         epoch = gate.epoch.load(std::memory_order_seq_cst);
     }
-    if (epoch != rx_drain_epoch_) {
-        // A drain that ended by idle BEFORE the flood shape showed is a light load: the
-        // session that was put on Nagle gets TCP_NODELAY back. One that reached the shape
-        // keeps Nagle through the next drain, since its coalesced segments may still be
-        // unacknowledged and the next drain's first replies would otherwise queue behind
-        // them under TCP_NODELAY. Interactive peers never reach the shape and never flip.
-        if (rx_nagle_fd_ >= 0 && rx_drain_frames_ < kRxDrainNagleFrames) {
-            set_nodelay(rx_nagle_fd_, true);
-            rx_nagle_fd_ = -1;
-        }
-        rx_drain_epoch_ = epoch;
-        rx_drain_frames_ = 0;
-        rx_drain_bytes_ = 0;
-        rx_drain_tx_bytes_ = 0;
-    }
-    ++rx_drain_frames_;
-    rx_drain_bytes_ += frame_bytes;
-    // The flood shape: this many frames without the core idling. From here the drain's
-    // replies coalesce. Switched on the session being drained, before its reply is written.
-    if (rx_drain_frames_ >= kRxDrainNagleFrames && rx_nagle_fd_ != fd) {
-        if (rx_nagle_fd_ >= 0) set_nodelay(rx_nagle_fd_, true);
-        set_nodelay(fd, false);
-        rx_nagle_fd_ = fd;
-    }
+    join_drain(s, static_cast<std::uint16_t>(epoch));
+    const std::size_t units = drain_units(frame_bytes, kRxDrainFrames, kRxDrainBytes);
+    s.drain.units = saturating_add(s.drain.units, units);
+    rx_drain_units_ = static_cast<std::uint16_t>(
+        std::min<std::size_t>(rx_drain_units_ + units, kRxDrainLinkUnits));
 }
 
 void httpd_ws_link_t::egress_posted() noexcept {
@@ -2510,7 +2571,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // The drain budget (ADR-0085). After the header, so the frame's size is known and is
     // charged whole; before the payload, so a spent budget leaves every byte of it — and
     // of whatever follows — in the socket while this task waits for its core to idle.
-    pace_rx(httpd_req_to_sockfd(req), frame.len);
+    pace_rx(req->sess_ctx, frame.len);
 
     // Pass 2: ALWAYS drain the payload — even a frame type we ignore must be consumed,
     // or its bytes stay in the stream and the next recv reads them as a frame header
@@ -2892,14 +2953,15 @@ esp_err_t httpd_ws_link_t::send_now(session_t* slot, int fd, int ws_type,
     // socket to arrive at the same call. It also means the auth exchange cannot be starved
     // by a fan-out that has the pool busy — which matters, because the frame it is trying to
     // write is the one that decides whether this session is served at all.
-    httpd_ws_frame_t f = {};
-    f.final = true;
-    f.fragmented = false;
-    f.type = static_cast<httpd_ws_type_t>(ws_type);
-    // `httpd_ws_frame_t::payload` is non-const in IDF and the send does not write through
-    // it; the cast is confined to this one call rather than pushed onto the callers.
-    f.payload = reinterpret_cast<std::uint8_t*>(const_cast<std::byte*>(payload.data()));
-    f.len = payload.size();
+    // The frame is ONE write, its header encoded here (#2891): IDF's
+    // `httpd_ws_send_frame_async` would write header and payload as two, two segments under
+    // TCP_NODELAY. `httpd_ws_type_t` carries RFC 6455's opcode values.
+    std::array<std::byte, ws::kMaxServerFrameHeader> hdr{};
+    iovec iov[2] = {
+        {hdr.data(),
+         ws::encode_frame_header(hdr, static_cast<ws::opcode_t>(ws_type), payload.size())},
+        // `sendmsg` does not write through the iovec; the cast is the C API's missing const.
+        {const_cast<std::byte*>(payload.data()), payload.size()}};
     // A held frame part-way on this socket goes out first, or this frame's bytes would land
     // inside it (#2095). If it cannot be finished the session is condemned with it.
     if (slot != nullptr && !finish_wire(slot, fd)) return ESP_FAIL;
@@ -2907,7 +2969,8 @@ esp_err_t httpd_ws_link_t::send_now(session_t* slot, int fd, int ws_type,
     // an auth frame by the same rule it judges every other frame by (#951) — a truncated
     // CLOSE desynchronises the stream just as thoroughly as a truncated reply.
     if (slot != nullptr) slot->open_tx_frame();
-    const esp_err_t err = httpd_ws_send_frame_async(h, fd, &f);
+    const esp_err_t err =
+        send_gathered(h, fd, iov, payload.empty() ? 1 : 2, 0) >= 0 ? ESP_OK : ESP_FAIL;
     const std::size_t wrote = slot != nullptr ? slot->close_tx_frame() : 0;
     // The bracket's verdict, reported only to a caller that asked for it. A non-zero count
     // on a failed send is the OTHER failure (#951): the frame was announced and then cut
@@ -3063,9 +3126,6 @@ void httpd_ws_link_t::on_session_closed(void* ctx) {
         const std::lock_guard lock(gate->m);
         owner = gate->link;
         if (owner == nullptr) return;
-        // The socket on Nagle is gone with its session; a recycled descriptor starts on
-        // TCP_NODELAY from bound_socket like every other.
-        if (owner->rx_nagle_fd_ == slot->fd) owner->rx_nagle_fd_ = -1;
         departed = owner->reclaim_slot(slot, departed_handle);
         if (departed.empty()) return;  // nothing owed to the routing plane
         // A departure IS owed, and it is fired below with `m` RELEASED (#960). The mutex
@@ -3623,9 +3683,17 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     if (err != ESP_OK && on_wire == 0)
         ESP_LOGW(kTag, "ws reply failed (%s) fd=%d len=%u - frame dropped", esp_err_to_name(err),
                  fd, (unsigned)total);
-    // Charged to the current drain (ADR-0085 §7): an in-call reply is written by the
-    // receive context, on the httpd task, so this is the one writer the drain accounts.
-    if (err == ESP_OK) rx_drain_tx_bytes_ += total;
+    // Charged to the destination session's drain (ADR-0085 §7): an in-call reply is written
+    // by the receive context, on the httpd task, so this is the one writer the drain accounts,
+    // and lwIP's send limits are that connection's own.
+    // The destination joins the current drain first, exactly as its own next frame would
+    // join it, or a tally left from an earlier drain would drop these replies there.
+    if constexpr (kRxDrainPaced)
+        if (err == ESP_OK) {
+            join_drain(*to.slot, rx_drain_epoch_);
+            to.slot->drain.replies =
+                saturating_add(to.slot->drain.replies, 1 + total / kRxDrainTxReplyBytes);
+        }
     note_tx_result(to, err == ESP_OK, total);
 }
 
@@ -3946,13 +4014,27 @@ void httpd_ws_link_t::check_httpd_stack() {
 
 int httpd_ws_link_t::send_guarded(httpd_handle_t handle, int fd, const char* buf, std::size_t len,
                                   int flags) {
-    (void)handle;
-    // The write esp_http_server would have done, with its own error mapping — a plain
-    // BSD send, which this TU already owns the socket layer for. It is NOT delegated to
-    // the server's default send function: httpd_socket_send routes back through THIS
-    // override (that is what an override is), and the default is private to the
-    // component. So the write happens here and the return value is inspected here.
+    // The write esp_http_server would have done, with its own error mapping. It is NOT
+    // delegated to the server's default send function: httpd_socket_send routes back through
+    // THIS override (that is what an override is), and the default is private to the
+    // component. So the write happens here and the return value is inspected here, by the
+    // same verdicts the link's own frames get.
     if (buf == nullptr) return HTTPD_SOCK_ERR_INVALID;
+    iovec one{const_cast<char*>(buf), len};
+    return send_gathered(handle, fd, &one, 1, flags);
+}
+
+int httpd_ws_link_t::send_gathered(httpd_handle_t handle, int fd, iovec* iov, std::size_t iovcnt,
+                                   int flags) {
+    // ONE write for all of @p iov: lwIP queues every part before it sends (do_writemore calls
+    // tcp_output once), so a small frame written this way is one segment, header and payload
+    // together (#2891). `sendmsg` takes MSG_DONTWAIT and nothing else on lwIP, which is all
+    // this passes.
+    std::size_t len = 0;
+    for (std::size_t i = 0; i < iovcnt; ++i) len += iov[i].iov_len;
+    msghdr msg{};
+    msg.msg_iov = iov;
+    msg.msg_iovlen = static_cast<decltype(msg.msg_iovlen)>(iovcnt);
     // The session this socket belongs to, read BEFORE the write: it carries the frame
     // bracket tx_work opened, which is the only way this override can tell which write of
     // a frame it is on. Resolved the same way every other latched callback resolves its
@@ -3961,12 +4043,12 @@ int httpd_ws_link_t::send_guarded(httpd_handle_t handle, int fd, const char* buf
     // session-table lookup per write instead of per detected fault, which is not a new
     // order of cost on this path: `httpd_socket_send` performs the IDENTICAL lookup (a
     // scan of at most `max_open_sockets` descriptors) immediately before every call it
-    // makes to this function, and the bounded `::send` below dominates both.
+    // makes to this function, and the bounded `sendmsg` below dominates both.
     auto* const slot = static_cast<session_t*>(httpd_sess_get_ctx(handle, fd));
     // A held frame's flush writes WITHOUT WAITING (#2095): the httpd task serves every peer,
     // so a write that waited on this one's window would set every other peer's rate.
     const bool nonblock = slot != nullptr && slot->tx_frame_open && slot->tx_nonblock;
-    const int ret = static_cast<int>(::send(fd, buf, len, nonblock ? flags | MSG_DONTWAIT : flags));
+    const int ret = static_cast<int>(::sendmsg(fd, &msg, nonblock ? flags | MSG_DONTWAIT : flags));
     if (nonblock && (ret >= 0 || errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
         // A full socket, or room for only part of this buffer, is not a fault here: the
         // bracket keeps the count of what went out, the failure return stops IDF before it
@@ -4304,19 +4386,7 @@ httpd_ws_link_t::tx_outcome_t httpd_ws_link_t::write_frame(httpd_handle_t h, int
     // announced and could not finish (#951), and — non-blocking — a full socket from a
     // broken one (#2095). Only the caller knows that boundary.
     s.open_tx_frame(nonblock, f.sent);
-    esp_err_t err = ESP_OK;
-    const tx_block_t& b = *f.blk;
-    if (f.sent == 0 && !b.value) {
-        httpd_ws_frame_t wf = {};
-        wf.final = true;
-        wf.fragmented = false;
-        wf.type = HTTPD_WS_TYPE_BINARY;
-        wf.payload = reinterpret_cast<std::uint8_t*>(b.payload);
-        wf.len = b.len;
-        err = httpd_ws_send_frame_async(h, fd, &wf);
-    } else {
-        err = write_rest(h, fd, f);
-    }
+    const esp_err_t err = write_rest(h, fd, f);
     const bool blocked = s.tx_frame_blocked;
     f.sent = static_cast<std::uint32_t>(s.close_tx_frame());
     if (err == ESP_OK) return tx_outcome_t::SENT;
@@ -4325,32 +4395,37 @@ httpd_ws_link_t::tx_outcome_t httpd_ws_link_t::write_frame(httpd_handle_t h, int
 
 esp_err_t httpd_ws_link_t::write_rest(httpd_handle_t h, int fd, const tx_frame_t& f) {
     // The frame as one byte sequence — its WebSocket header, its gathered bytes, then a
-    // retained value's links straight from the published block — written from `f.sent` on.
-    // A gathered frame's header is the one httpd_ws_send_frame_async would have written
-    // (ws::encode_frame_header); a retained frame carries its own in `payload`. Every write goes
-    // through the session's send override inside write_frame's bracket, so a part the socket
-    // takes only some of ends this call with the rest still owed.
+    // retained value's links straight from the published block — written from `f.sent` on,
+    // as ONE gathered write (#2891) whenever it has at most kWriteParts non-empty parts,
+    // which a gathered frame (header, payload) and a retained frame of up to two links do. A
+    // gathered frame's header is encoded here (ws::encode_frame_header); a retained frame carries
+    // its own in `payload`. The write goes through the session's verdicts inside write_frame's
+    // bracket, so a frame the socket takes only some of ends this call with the rest still owed.
     const tx_block_t& b = *f.blk;
     std::array<std::byte, ws::kMaxServerFrameHeader> hdr{};
     const std::size_t hdr_len =
         b.value ? 0 : ws::encode_frame_header(hdr, ws::opcode_t::BINARY, b.len);
+    const std::span<const view::view_t> links =
+        b.value ? b.value->links() : std::span<const view::view_t>();
+    std::array<iovec, kWriteParts> iov{};
+    std::size_t n = 0;
     std::size_t skip = f.sent;
-    const auto write_part = [&](const std::byte* p, std::size_t n) {
-        if (skip >= n) {
-            skip -= n;
-            return true;
+    for (std::size_t part = 0; part < 2 + links.size(); ++part) {
+        const std::span<const std::byte> bytes =
+            part == 0   ? std::span<const std::byte>(hdr.data(), hdr_len)
+            : part == 1 ? std::span<const std::byte>(b.payload, b.len)
+                        : links[part - 2].bytes();
+        if (skip >= bytes.size()) {  // on the wire already, or empty
+            skip -= bytes.size();
+            continue;
         }
-        p += skip;
-        n -= skip;
+        // `sendmsg` does not write through the iovec; the cast is the C API's missing const.
+        iov[n++] = {const_cast<std::byte*>(bytes.data() + skip), bytes.size() - skip};
         skip = 0;
-        const int ret = httpd_socket_send(h, fd, reinterpret_cast<const char*>(p), n, 0);
-        return ret >= 0 && static_cast<std::size_t>(ret) == n;
-    };
-    if (!write_part(hdr.data(), hdr_len) || !write_part(b.payload, b.len)) return ESP_FAIL;
-    if (b.value)
-        for (const view::view_t& l : b.value->links())
-            if (!write_part(l.bytes().data(), l.bytes().size())) return ESP_FAIL;
-    return ESP_OK;
+        if (n == iov.size() && send_gathered(h, fd, iov.data(), std::exchange(n, 0), 0) < 0)
+            return ESP_FAIL;
+    }
+    return n == 0 || send_gathered(h, fd, iov.data(), n, 0) >= 0 ? ESP_OK : ESP_FAIL;
 }
 
 bool httpd_ws_link_t::finish_wire(session_t* slot, int fd) {

@@ -12,6 +12,7 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cassert>
@@ -122,6 +123,10 @@ bool server_t::open_session(int fd, void* ctx, httpd_free_ctx_fn_t free_fn) {
         // brand-new session starts level with the oldest existing one rather than ahead of it.
         sess.lru_counter = lru_clock_;
         sessions_[fd] = sess;
+        // A new connection is a new byte stream: what the last one on this number left part-way
+        // is not the start of this one's (the wire parse counts frames per connection).
+        wire_.erase(fd);
+        parsed_.erase(fd);
     }
     // The pre-handshake predicate, OUTSIDE m_ — it re-enters the link (the gate's mutex), and
     // the fake never holds its own lock across a call into the link. The request it gets is the
@@ -172,11 +177,6 @@ std::size_t server_t::frames_sent() const {
     return frames_sent_;
 }
 
-void server_t::note_sent() {
-    const std::lock_guard lock(m_);
-    ++frames_sent_;
-}
-
 std::vector<server_t::sent_frame_t> server_t::sent_frames() const {
     const std::lock_guard lock(m_);
     return sent_frames_;
@@ -185,18 +185,6 @@ std::vector<server_t::sent_frame_t> server_t::sent_frames() const {
 void server_t::clear_sent_frames() {
     const std::lock_guard lock(m_);
     sent_frames_.clear();
-}
-
-void server_t::note_sent_frame(int fd, httpd_ws_type_t type, const void* payload, std::size_t len) {
-    sent_frame_t rec;
-    rec.fd = fd;
-    rec.type = type;
-    if (payload != nullptr && len != 0) {
-        const auto* const bytes = static_cast<const std::byte*>(payload);
-        rec.payload.assign(bytes, bytes + len);
-    }
-    const std::lock_guard lock(m_);
-    sent_frames_.push_back(std::move(rec));
 }
 
 void server_t::set_queue_refusing(bool refusing) {
@@ -242,6 +230,7 @@ std::vector<std::byte> server_t::wire(int fd) const {
 void server_t::clear_wire(int fd) {
     const std::lock_guard lock(m_);
     wire_.erase(fd);
+    parsed_.erase(fd);
 }
 
 void server_t::note_wire(int fd, const void* buf, std::size_t n) {
@@ -250,6 +239,33 @@ void server_t::note_wire(int fd, const void* buf, std::size_t n) {
     const auto* const b = static_cast<const std::byte*>(buf);
     std::vector<std::byte>& w = wire_[fd];
     w.insert(w.end(), b, b + n);
+    // Parse what the PEER would: every frame the stream now holds whole is a sent frame
+    // (frames_sent, sent_frames). A frame announced and then abandoned is never whole, so it
+    // is counted by neither, which is the success edge the link's own writes have (#951).
+    // A server frame is never masked: 2 header bytes, plus 2 or 8 of extended length.
+    std::size_t& at = parsed_[fd];
+    while (w.size() - at >= 2) {
+        const auto op = static_cast<std::uint8_t>(w[at]) & 0x0FU;
+        std::size_t len = static_cast<std::uint8_t>(w[at + 1]) & 0x7FU;
+        std::size_t hdr = 2;
+        if (len >= 126) {
+            const std::size_t ext = len == 126 ? 2 : 8;
+            if (w.size() - at < 2 + ext) return;
+            len = 0;
+            for (std::size_t i = 0; i < ext; ++i)
+                len = (len << 8) | static_cast<std::uint8_t>(w[at + 2 + i]);
+            hdr += ext;
+        }
+        if (w.size() - at < hdr + len) return;
+        ++frames_sent_;
+        sent_frame_t rec;
+        rec.fd = fd;
+        rec.type = static_cast<httpd_ws_type_t>(op);
+        rec.payload.assign(w.begin() + static_cast<std::ptrdiff_t>(at + hdr),
+                           w.begin() + static_cast<std::ptrdiff_t>(at + hdr + len));
+        sent_frames_.push_back(std::move(rec));
+        at += hdr + len;
+    }
 }
 
 esp_err_t server_t::set_send_override(int fd, httpd_send_func_t send_fn) {
@@ -603,6 +619,7 @@ esp_err_t server_t::deliver_frame(int fd, std::span<const std::byte> body, bool 
         req.user_ctx = it->second.ws_user_ctx;
         // httpd_req_new: the session's context pair is copied INTO the request.
         t_req = request_scope_t{true, fd, it->second.ctx, it->second.free_ctx};
+        req.sess_ctx = it->second.ctx;
     }
     t_pending = pending_frame_t{body.data(), body.size(), final, type};
     req.handle = static_cast<httpd_handle_t>(this);
@@ -738,11 +755,19 @@ esp_err_t httpd_ws_send_frame_async(httpd_handle_t handle, int fd, httpd_ws_fram
     // socket layer only ever sees a length); its length is, because that is what a peer
     // has been promised once the write lands.
     std::size_t header_len = 2;
-    if (frame->len > 0xFFFFU)
+    std::uint8_t header[10] = {static_cast<std::uint8_t>(0x80U | frame->type),
+                               static_cast<std::uint8_t>(frame->len)};
+    if (frame->len > 0xFFFFU) {
         header_len = 10;
-    else if (frame->len >= 126U)
+        header[1] = 127;
+        for (int i = 0; i < 8; ++i)
+            header[2 + i] = static_cast<std::uint8_t>(std::uint64_t{frame->len} >> (56 - 8 * i));
+    } else if (frame->len >= 126U) {
         header_len = 4;
-    const std::uint8_t header[10] = {};
+        header[1] = 126;
+        header[2] = static_cast<std::uint8_t>(frame->len >> 8);
+        header[3] = static_cast<std::uint8_t>(frame->len);
+    }
     if (fake_httpd::instance().socket_send(fd, reinterpret_cast<const char*>(header), header_len,
                                            0) < 0)
         return ESP_FAIL;
@@ -752,11 +777,7 @@ esp_err_t httpd_ws_send_frame_async(httpd_handle_t handle, int fd, httpd_ws_fram
             fd, reinterpret_cast<const char*>(frame->payload), frame->len, 0);
         if (ret < 0) return ESP_FAIL;
     }
-    fake_httpd::instance().note_sent();
-    // Record what the PEER would have seen. Only here, past both writes, so a frame that was
-    // announced and then abandoned is counted by neither — the same success edge note_sent
-    // marks (#1184 needs the close CODE, which the counter cannot carry).
-    fake_httpd::instance().note_sent_frame(fd, frame->type, frame->payload, frame->len);
+    // Counted by the wire parse (note_wire), as every frame the peer receives is.
     return ESP_OK;
 }
 
@@ -783,6 +804,25 @@ esp_err_t httpd_sess_set_send_override(httpd_handle_t handle, int sockfd,
  * write. Descriptors the fake did not hand out are none of its business and go to the
  * real syscall, so nothing else linked into the test binary changes behaviour.
  */
+extern "C" ssize_t __real_sendmsg(int fd, const msghdr* msg, int flags);
+/**
+ * @brief The link's gathered frame write (#2891), interposed (`-Wl,--wrap=sendmsg`): ONE
+ *        scripted write for all its parts, recorded part by part up to what was accepted.
+ */
+extern "C" ssize_t __wrap_sendmsg(int fd, const msghdr* msg, int flags) {
+    if (!fake_httpd::instance().owns_socket(fd)) return __real_sendmsg(fd, msg, flags);
+    std::size_t total = 0;
+    for (std::size_t i = 0; i < msg->msg_iovlen; ++i) total += msg->msg_iov[i].iov_len;
+    const int ret = fake_httpd::instance().raw_send(fd, total, flags);
+    std::size_t left = ret > 0 ? static_cast<std::size_t>(ret) : 0;
+    for (std::size_t i = 0; i < msg->msg_iovlen && left != 0; ++i) {
+        const std::size_t n = std::min(left, msg->msg_iov[i].iov_len);
+        fake_httpd::instance().note_wire(fd, msg->msg_iov[i].iov_base, n);
+        left -= n;
+    }
+    return ret;
+}
+
 extern "C" ssize_t __real_send(int fd, const void* buf, std::size_t len, int flags);
 extern "C" ssize_t __wrap_send(int fd, const void* buf, std::size_t len, int flags) {
     if (!fake_httpd::instance().owns_socket(fd)) return __real_send(fd, buf, len, flags);
