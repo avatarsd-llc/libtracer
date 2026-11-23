@@ -203,7 +203,7 @@ counted twice. Not one refusal reached a neighbouring seam. Above the vertex's c
 arm was refused by value (`BACKPRESSURE`) when the write asked for a reply and dropped silently
 when it did not. Both were counted at the flat seam as oversize.
 
-Three sizing rules follow. §3.1 is where an embedder should apply them:
+Four sizing rules follow. §3.1 is where an embedder should apply them:
 
 1. **A slow subscriber costs its own slot, not the other sessions' delivery.** The 3-session
    run above predates #2095: the link then held one TX pool shared by every session, and a
@@ -232,6 +232,25 @@ Three sizing rules follow. §3.1 is where an embedder should apply them:
    80 KiB free. A deployment sized from idle free heap passes every static audit and still fails
    under its own designed load. Under §5, the run that sets `capacity` must be the saturating
    one, and the heap's low-water mark goes in the same snapshot pair as the seam counters.
+4. **Keep received data from pinning the shared Wi-Fi receive buffers.** By default lwIP on
+   ESP-IDF receives without a copy, so each queued segment holds a Wi-Fi driver receive buffer
+   until the application reads it. All connections share those buffers. While the httpd link's
+   drain budget parks a flooding session
+   ([ADR-0085](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0085-ingress-drain-budget-waits-for-the-idle-task-not-a-clock.md)),
+   that session's unread segments stay in lwIP and keep their buffers. The driver then drops
+   other sessions' frames below lwIP, so `lwip_stats` `tcp.drop` and `link.drop` stay at 0. The
+   client recovers each loss with a TCP retransmission, and a control session's READ latency
+   jumps to retransmission-timeout multiples (about 200 ms and up on a Linux client).
+   - **Measured:** on an ESP32-C6 with three sessions flooding READs and a control session
+     reading at 10 Hz, control READ p95 rose to 7–10× its idle value with the default setting,
+     and two thirds of the slow READs had a client retransmission on their own socket.
+   - **Fix:** set `CONFIG_LWIP_L2_TO_L3_COPY=y`, so lwIP copies each frame and frees the driver
+     buffer at once. In the same test this brought control READ p95 down to about 1.6× idle and
+     served about 8–10 % more flood READs, with no change in RAM at rest. The other fix is to raise
+     `CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM` until the flood no longer exhausts the buffers.
+   - **Cost:** one copy per received frame. Under a sustained flood the IDLE task's share of CPU
+     falls to near 0 (it measured about 0.5 %), so check the task watchdog margin for your
+     configuration.
 
 For the same budget, an earlier pass on this target measured about 700 B per WebSocket session
 on the server task, plus about 465 B of TCP/IP socket state, and about 430 B per subscription
