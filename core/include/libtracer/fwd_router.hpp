@@ -172,6 +172,8 @@ struct router_stats_t {
  * it points at its own slab:
  *
  * @code
+ * tr::mem::pool_source_t links{...};  // before the graph: a subscription's segment lives in it
+ * tr::graph::graph_t graph{...};
  * tr::net::fwd_router_t router{graph, {.link_src = &links, .rx = &rx_pool,
  *                                      .flat = &flat_pool, .egress = &flat_pool}};
  * @endcode
@@ -186,15 +188,13 @@ struct router_planes_t {
      * #873 family 3, ADR-0065 / ADR-0079 §Decision 4): the NAME->link demux table, each child's
      * receive context, the bus token caches, the bound-path scratch and each deferred AWAIT's
      * waiter (#2902) — the library holds no buffer of its own. A bounded node injects a @ref
-     * mem::pool_source_t over its static slab (one slab, whole stack — ADR-0039 §2); the default is
-     * the process net sub-pool
-     * (`mem::net_source()`; the static arena on an MCU build). Must outlive the router, and must be
-     * thread-safe: several transport receive threads draw from it, and a writer's thread releases
-     * a deferred AWAIT's waiter to it (and draws that reply's scatter table from it) when the
-     * write answers the AWAIT. A remote subscription's retained segment is drawn from it too when
-     * no
-     * @p retained is injected (#2875); that segment lives in the graph, so this source must also
-     * outlive the graph's subscriptions.
+     * mem::pool_source_t over its static slab (one slab, whole stack — ADR-0039 §2); the default
+     * is the process net sub-pool (`mem::net_source()`; the static arena on an MCU build). Must
+     * outlive the router, and must be thread-safe: several transport receive threads draw from
+     * it, and a writer's thread releases a deferred AWAIT's waiter to it (and draws that reply's
+     * scatter table from it) when the write answers the AWAIT. A remote subscription's retained
+     * segment is drawn from it too when no @p retained is injected (#2875); that segment lives in
+     * the graph, so this source must also outlive the graph's subscriptions.
      *
      * This plane used to be a `%std::pmr::memory_resource*`. It could not stay one: a pmr resource
      * cannot report exhaustion by value, so on the shipping `-fno-exceptions` profile a peer-driven

@@ -322,11 +322,10 @@ class op_resolver_t {
      *              that the edge keeps three windows into. Its live set is the SUBSCRIPTION
      *              POPULATION, so it is a seam of its own rather than a share of @p flat.
      *              `fwd_router_t` passes its `retained` plane, else a backend over its
-     *              `link_src`. Null
-     *              means @p flat. A refusal answers the subscribe `BACKPRESSURE` and binds
-     *              nothing. MUST be thread-safe on the same terms as @p flat: the segment
-     *              goes back on whichever thread drops the subscription's last window. Must
-     *              outlive every segment it serves.
+     *              `link_src`. Null means @p flat. A refusal answers the subscribe
+     *              `BACKPRESSURE` and binds nothing. MUST be thread-safe on the same terms as
+     *              @p flat: the segment goes back on whichever thread drops the
+     *              subscription's last window. Must outlive every segment it serves.
      */
     explicit op_resolver_t(graph_t& graph, mem::mem_backend_t* flat = &mem::heap_backend(),
                            mem::mem_backend_t* egress = &mem::heap_backend(),

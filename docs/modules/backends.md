@@ -160,6 +160,16 @@ raw `nullptr` translated at this adapter's own boundary and nowhere else.
 :members:
 ```
 
+The detached variant, `detached_source_backend_t`, keeps the source's address in each block
+instead of naming itself as the reclaimer, so a segment it hands out may outlive the adapter.
+The router's retained plane uses it
+([#2875](https://github.com/avatarsd-llc/libtracer/issues/2875)): a subscription's retained
+segment can outlive the router that drew it.
+
+```{doxygenclass} tr::mem::detached_source_backend_t
+:members:
+```
+
 The standard-`Allocator` face that used to sit here, `source_allocator_t`, was retired in
 [#1783](https://github.com/avatarsd-llc/libtracer/issues/1783): it threw on exhaustion, and
 nothing in core used it once the core containers (`block_array_t` and its siblings) took over

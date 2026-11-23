@@ -189,6 +189,8 @@ class detached_source_backend_t final : public mem_backend_t {
     /**
      * @brief Allocate a @p size-byte segment (refcount 1) in ONE block of the source, reclaimed
      *        by @ref detached_reclaimer.
+     * @param size The payload bytes; the block adds the source pointer and the segment header.
+     * @param hint Ignored: every block comes from the one source.
      * @retval nullptr The source refused: BACKPRESSURE, with nothing to unwind.
      */
     [[nodiscard]] view::segment_t* alloc(std::size_t size,

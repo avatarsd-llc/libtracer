@@ -840,10 +840,10 @@ template <class N, class ReplyError>
             const std::size_t rev_n = own ? kHead + body_len : 0;
             // The ONE route copy of the subscription's life (ADR-0041 §2) sits in this segment:
             // every later delivery clones a refcount on it, never the bytes.
-            const view::view_t block =
-                view::view_t::over(view::segment_alloc(retained, sub_n + route_n + rev_n));
-            if (block.empty()) return error_reply(route, status_t::BACKPRESSURE, egress);
-            const std::span<std::byte> out = block.owner->bytes;
+            const view::segment_ptr_t block =
+                view::segment_alloc(retained, sub_n + route_n + rev_n);
+            if (!block) return error_reply(route, status_t::BACKPRESSURE, egress);
+            const std::span<std::byte> out = block->bytes;
             if (!payload_node.copy_wire_into(out.first(sub_n)) ||
                 !req.src.copy_wire_into(out.subspan(sub_n, route_n)))
                 return error_reply(route, status_t::BACKPRESSURE, egress);
@@ -856,7 +856,7 @@ template <class N, class ReplyError>
                 wire::path_pair_store(rev.subspan<kHead, wire::kPathPairRecordBytes>(), *own);
                 std::memcpy(rev.data() + kHead + wire::kPathPairRecordBytes, rbody.data(),
                             rbody.size());
-                reverse_route = block.subview(sub_n + route_n, rev_n);
+                reverse_route = view::view_t{block, sub_n + route_n, rev_n};
             }
             // ADR-0049: the wire append enters the graph's single admission door
             // (subscribe_wire → admit_subscriber) — the SUBSCRIBER TLV is parsed
@@ -876,7 +876,7 @@ template <class N, class ReplyError>
             // mistake #1290's prototype was killed for.
             const graph::carried_link_t carried = link_token.ask();
             result_t<void> w = graph.subscribe_wire(
-                v, block.subview(0, sub_n), block.subview(sub_n, route_n), inbound_link,
+                v, view::view_t{block, 0, sub_n}, view::view_t{block, sub_n, route_n}, inbound_link,
                 std::move(reverse_route), subject, carried.token, carried.link);
             if (!w) return error_reply(route, w.error(), egress);
             return or_backpressure(assemble_reply(ok, reply_kind_t::RESULT, {}, {}, 0, ack), route,
