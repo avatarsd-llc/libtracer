@@ -161,4 +161,62 @@ class source_backend_t final : public mem_backend_t {
     block_source_t* src_; /**< @brief Borrowed; never owned, and must outlive this. */
 };
 
+/**
+ * @brief Serve one-block segments from an injected @ref block_source_t, segments that may
+ *        OUTLIVE this adapter (#2875).
+ *
+ * A @ref source_backend_t names itself as each segment's reclaimer, so it must outlive every
+ * segment it served. That is wrong for an adapter a short-lived owner holds over a long-lived
+ * source: `fwd_router_t` draws a remote subscription's retained segment through one, the
+ * subscription lives in the graph, and the graph (or the deferred reclamation of a retired
+ * edge) may drop it after the router is gone.
+ *
+ * This adapter writes the source's address at the head of the block instead and names the
+ * process-wide @ref detached_reclaimer, which reads it back. Each block is one pointer, padded
+ * to the segment's alignment, then the segment header, then the bytes: the same size a
+ * @ref source_backend_t block takes on a 64-bit host, and the source is the only thing that
+ * must outlive the segment. The adapter itself holds one pointer and may go first.
+ */
+class detached_source_backend_t final : public mem_backend_t {
+   public:
+    /** @brief Serve every segment from @p src, which must outlive every segment served. */
+    explicit detached_source_backend_t(block_source_t& src) noexcept
+        : mem_backend_t("mem_detached"), src_(&src) {}
+
+    /** @brief The source the bytes come from. */
+    [[nodiscard]] block_source_t& source() const noexcept { return *src_; }
+
+    /**
+     * @brief Allocate a @p size-byte segment (refcount 1) in ONE block of the source, reclaimed
+     *        by @ref detached_reclaimer.
+     * @param size The payload bytes; the block adds the source pointer and the segment header.
+     * @param hint Ignored: every block comes from the one source.
+     * @retval nullptr The source refused: BACKPRESSURE, with nothing to unwind.
+     */
+    [[nodiscard]] view::segment_t* alloc(std::size_t size,
+                                         alloc_hint_t hint = alloc_hint_t::NONE) override;
+
+    /** @brief The bytes follow the segment header, so they are aligned to it. */
+    [[nodiscard]] std::size_t alignment() const noexcept override { return kInlinePayloadAlign; }
+
+    /** @brief The block's head: the source's address, read back by the reclaimer. */
+    static constexpr std::size_t kPrefixBytes = sizeof(block_source_t*);
+    /** @brief The alignment every block is drawn at: the segment's, and the pointer's. */
+    static constexpr std::size_t kBlockAlign = alignof(view::segment_t) > alignof(void*)
+                                                   ? alignof(view::segment_t)
+                                                   : alignof(void*);
+
+   private:
+    block_source_t* src_; /**< @brief Borrowed; must outlive every segment served. */
+};
+
+/**
+ * @brief The reclaimer every @ref detached_source_backend_t segment names: it returns the whole
+ *        block to the source whose address the block's head holds. It allocates nothing.
+ *
+ * One process-wide instance, constructed on first use into static storage and NEVER destroyed,
+ * so a segment released during static destruction still reaches it.
+ */
+[[nodiscard]] mem_backend_t& detached_reclaimer() noexcept;
+
 }  // namespace tr::mem

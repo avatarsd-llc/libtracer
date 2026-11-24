@@ -114,7 +114,8 @@ class fwd_router_t {
     //   rx         the NOTHROW block source the terminus decode arena draws from (ADR-0065);
     //   flat       the byte backend EVERY rope flatten draws from, forward AND terminus (#730/#766);
     //   egress     the reply-egress backend (#795);
-    //   retained   a remote subscription's life-long copies (#1610); null means `flat`.
+    //   retained   a remote subscription's one life-long block (#1610, #2875); null means
+    //              `link_src`.
     explicit fwd_router_t(graph::graph_t& graph, const router_planes_t& planes = {});
 
     // `name` is this node's mount RUN for `link`: the leading dst segments that route onward

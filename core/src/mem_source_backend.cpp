@@ -16,6 +16,7 @@
 #include "libtracer/mem_source_backend.hpp"
 
 #include <cstddef>
+#include <new>
 
 #include "libtracer/placement.hpp"
 
@@ -45,6 +46,39 @@ void source_backend_t::destroy(view::segment_t* seg) noexcept {
     const std::size_t size = seg->bytes.size();
     seg->~segment_t();
     src_->release(seg, block_bytes(size), kBlockAlign);
+}
+
+namespace {
+
+/** @brief The @ref detached_reclaimer type: reads the source back from the block's head. */
+class detached_reclaimer_t final : public mem_backend_t {
+   public:
+    detached_reclaimer_t() noexcept : mem_backend_t("mem_detached") {}
+    void destroy(view::segment_t* seg) noexcept override {
+        constexpr std::size_t kPrefix = detached_source_backend_t::kPrefixBytes;
+        std::byte* const block = inline_block_of(seg, kPrefix);
+        block_source_t* const src = *reinterpret_cast<block_source_t* const*>(block);
+        const std::size_t bytes = inline_block_bytes(kPrefix, seg->bytes.size());
+        seg->~segment_t();
+        src->release(block, bytes, detached_source_backend_t::kBlockAlign);
+    }
+    [[nodiscard]] std::size_t alignment() const noexcept override { return kInlinePayloadAlign; }
+};
+
+}  // namespace
+
+mem_backend_t& detached_reclaimer() noexcept {
+    // Never destroyed: a segment can be released after every static destructor has run.
+    alignas(detached_reclaimer_t) static std::byte storage[sizeof(detached_reclaimer_t)];
+    static detached_reclaimer_t* const r = new (storage) detached_reclaimer_t();
+    return *r;
+}
+
+view::segment_t* detached_source_backend_t::alloc(std::size_t size, alloc_hint_t /*hint*/) {
+    void* const block = src_->try_alloc(inline_block_bytes(kPrefixBytes, size), kBlockAlign);
+    if (block == nullptr) return nullptr;
+    *static_cast<block_source_t**>(block) = src_;
+    return place_inline(&detached_reclaimer(), block, kPrefixBytes, size);
 }
 
 }  // namespace tr::mem

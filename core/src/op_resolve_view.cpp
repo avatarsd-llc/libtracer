@@ -320,8 +320,7 @@ result_t<view::rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd,
     // `egress` is the reply head + mint seam (#795, ADR-0074), separate from the flatten seam
     // the walk's nodes carry: it is passed straight to `resolve_node` because only the reply
     // builders draw from it, never a node's `wire()`/`body()`. Default `heap_backend()` when
-    // un-injected. …and `retained` (#1610) falls back to the SAME backend this tier flattens from —
-    // the root segment's own — so an un-injected view-tier resolve is byte-unchanged too.
+    // un-injected. …and `retained` (#1610) falls back to the SAME backend this tier flattens from.
     // The acknowledgement's egress (#1658): the caller's storage first, `egress` past it. An
     // empty store places nothing, so a caller that passes none is byte-unchanged.
     mem::mem_backend_t& egress = egress_ != nullptr ? *egress_ : mem::heap_backend();

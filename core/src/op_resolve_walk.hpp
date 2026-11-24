@@ -802,13 +802,12 @@ template <class N, class ReplyError>
         const bool remote_sub = !inbound_link.empty() && is_subscribe_append(field) &&
                                 payload_node.type() == type_t::SUBSCRIBER;
 
-        // The remote-subscribe binding: its stored views (source SUBSCRIBER + the
-        // accumulated return route) are subscription-scoped and keep the ADR-0041 §2
-        // one-copy behavior unconditionally (ADR-0042 §3 pinning applies to the value
-        // store only). The slot retains `src` (copied once, trailer-sliced) + the
-        // inbound link so the producer fan-out delivers its FWD{WRITE}s home. A
-        // wire TLV is never empty, so an empty copy is exactly an allocation failure
-        // ⇒ BACKPRESSURE.
+        // The remote-subscribe binding: what it stores for the life of the subscription (the
+        // source SUBSCRIBER, the accumulated return route and the completed reverse chain) is
+        // ONE segment of @p retained, the injected subscription-retained backend (#2875), and
+        // the edge keeps three windows into it. Each TLV is copied once, trailer-sliced (ADR-0041
+        // §2; ADR-0042 §3 pinning applies to the value store only). A refused block refuses the
+        // subscribe with BACKPRESSURE: there is no second source to fall back to.
         if (remote_sub) {
             // A SUBSCRIBE is a standing request for future frames, so "no reply
             // requested" and "subscribe" are contradictory asks on one frame: the edge
@@ -818,43 +817,46 @@ template <class N, class ReplyError>
             // MALFORMED for the same reason an empty-src READ is (RFC-0004 Amendment 2),
             // and takes the same terminus drop.
             if (req.no_reply) return std::unexpected(status_t::INVALID_PATH);
-            const view::view_t sub_value = own_tlv(payload_node, retained);
-            if (sub_value.empty()) return error_reply(route, status_t::BACKPRESSURE, egress);
-            // The ONE route copy of the subscription's life (ADR-0041 §2), into a
-            // refcounted segment — every later delivery clones the refcount.
-            const view::view_t return_route = own_tlv(req.src, retained);
-            if (return_route.empty()) return error_reply(route, status_t::BACKPRESSURE, egress);
             // The responder's COMPLETION of the reverse-direction list (RFC-0029 §7.1): the
             // list arrives one element short — the hop into this node is the one no peer can
             // issue for it — so element 0 becomes this node's own reference to the identity
-            // the subscribe arrived on, supplied by the injected transport-plane seam. Every
-            // failure degrades to the canonical-only subscription (an EMPTY reverse view),
-            // never to an error: the chain is an optimisation plus a liveness check, and a
-            // subscribe that cannot store it still subscribes exactly as before.
+            // the subscribe arrived on, supplied by the injected transport-plane seam. A `PATH`
+            // body of path elements, stored VERBATIM behind this node's own record: every
+            // delivery consumes element 0 locally and puts the rest on the wire as its `dst`,
+            // so no delivery re-spells anything. No supplier answer, an empty (or refused)
+            // body, or one a 16-bit length cannot carry with one more record degrades to the
+            // canonical-only subscription (no reverse window), never to an error.
+            const std::span<const std::byte> rbody =
+                req.reverse ? req.reverse->body() : std::span<const std::byte>{};
+            // One range test: an empty body wraps to the top of `size_t` and fails it too.
+            const std::optional<wire::path_ref_element_t> own =
+                rbody.size() - 1u < 0xFFFFu - wire::kPathPairRecordBytes
+                    ? reverse_ref_fn(reverse_ref_ctx, inbound_link)
+                    : std::nullopt;
+            constexpr std::size_t kHead = 4;  // type, opt, u16 LE length
+            const std::size_t body_len = wire::kPathPairRecordBytes + rbody.size();
+            const std::size_t sub_n = payload_node.wire_size();
+            const std::size_t route_n = req.src.wire_size();
+            const std::size_t rev_n = own ? kHead + body_len : 0;
+            // The ONE route copy of the subscription's life (ADR-0041 §2) sits in this segment:
+            // every later delivery clones a refcount on it, never the bytes.
+            const view::segment_ptr_t block =
+                view::segment_alloc(retained, sub_n + route_n + rev_n);
+            if (!block) return error_reply(route, status_t::BACKPRESSURE, egress);
+            const std::span<std::byte> out = block->bytes;
+            if (!payload_node.copy_wire_into(out.first(sub_n)) ||
+                !req.src.copy_wire_into(out.subspan(sub_n, route_n)))
+                return error_reply(route, status_t::BACKPRESSURE, egress);
+            out[1] = struct_opt(out[1]);
+            out[sub_n + 1] = struct_opt(out[sub_n + 1]);
             view::view_t reverse_route{};
-            if (req.reverse) {
-                // A `PATH` body of path elements, stored VERBATIM behind this node's own
-                // record: every delivery consumes element 0 locally and puts the rest on the
-                // wire as its `dst`, so no delivery re-spells anything. A refused flatten
-                // reads as an empty body, which stores nothing; a body a 16-bit length
-                // cannot carry with one more record stores nothing either.
-                const std::span<const std::byte> rbody = req.reverse->body();
-                const std::optional<wire::path_ref_element_t> own =
-                    !rbody.empty() && rbody.size() <= 0xFFFFu - wire::kPathPairRecordBytes
-                        ? reverse_ref_fn(reverse_ref_ctx, inbound_link)
-                        : std::nullopt;
-                constexpr std::size_t kHead = 4;  // type, opt, u16 LE length
-                const std::size_t body_len = wire::kPathPairRecordBytes + rbody.size();
-                view::segment_ptr_t seg =
-                    own ? view::segment_alloc(flat, kHead + body_len) : view::segment_ptr_t{};
-                if (seg) {
-                    const std::span<std::byte> out = seg->bytes;
-                    wire::store_header(out, type_t::PATH, wire::opt_t{}, body_len);
-                    wire::path_pair_store(out.subspan<kHead, wire::kPathPairRecordBytes>(), *own);
-                    std::memcpy(out.data() + kHead + wire::kPathPairRecordBytes, rbody.data(),
-                                rbody.size());
-                    reverse_route = view::view_t::over(std::move(seg));
-                }
+            if (own) {
+                const std::span<std::byte> rev = out.subspan(sub_n + route_n);
+                wire::store_header(rev, type_t::PATH, wire::opt_t{}, body_len);
+                wire::path_pair_store(rev.subspan<kHead, wire::kPathPairRecordBytes>(), *own);
+                std::memcpy(rev.data() + kHead + wire::kPathPairRecordBytes, rbody.data(),
+                            rbody.size());
+                reverse_route = view::view_t{block, sub_n + route_n, rev_n};
             }
             // ADR-0049: the wire append enters the graph's single admission door
             // (subscribe_wire → admit_subscriber) — the SUBSCRIBER TLV is parsed
@@ -873,9 +875,9 @@ template <class N, class ReplyError>
             // alone, and a control-plane saving charged to every terminus frame is the
             // mistake #1290's prototype was killed for.
             const graph::carried_link_t carried = link_token.ask();
-            result_t<void> w = graph.subscribe_wire(v, sub_value, return_route, inbound_link,
-                                                    std::move(reverse_route), subject,
-                                                    carried.token, carried.link);
+            result_t<void> w = graph.subscribe_wire(
+                v, view::view_t{block, 0, sub_n}, view::view_t{block, sub_n, route_n}, inbound_link,
+                std::move(reverse_route), subject, carried.token, carried.link);
             if (!w) return error_reply(route, w.error(), egress);
             return or_backpressure(assemble_reply(ok, reply_kind_t::RESULT, {}, {}, 0, ack), route,
                                    egress);  // OK, empty payload: the ack (#1658)
@@ -998,9 +1000,14 @@ template <class N>
  * (span tier, byte-identical) and — 3c — the `tlv_view_t` reader (owning rope
  * tier). Every frame read goes through the node-reader concept; nothing here
  * names a specific decode representation.
+ *
+ * Always inlined: each tier calls it from exactly one place (`op_resolver_t::resolve`), so the
+ * attribute costs no flash. Left to the inliner, a larger walk stops being inlined into that
+ * caller and the receive path pays two frames where it paid one (#2875: +176 B on the esp32c6
+ * WebSocket client rx stack row).
  */
 template <class N>
-[[nodiscard]] result_t<view::rope_t> resolve_node(
+[[nodiscard, gnu::always_inline]] inline result_t<view::rope_t> resolve_node(
     graph_t& graph, const N& root, std::string_view inbound_link, std::string_view subject,
     const view::view_t* frame_view, mem::mem_backend_t& flat, mem::mem_backend_t& egress,
     mem::mem_backend_t& ack, mem::mem_backend_t& retained,
