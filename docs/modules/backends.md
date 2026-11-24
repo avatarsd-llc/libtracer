@@ -170,6 +170,9 @@ segment can outlive the router that drew it.
 :members:
 ```
 
+```{doxygenfunction} tr::mem::detached_reclaimer
+```
+
 The standard-`Allocator` face that used to sit here, `source_allocator_t`, was retired in
 [#1783](https://github.com/avatarsd-llc/libtracer/issues/1783): it threw on exhaustion, and
 nothing in core used it once the core containers (`block_array_t` and its siblings) took over
