@@ -191,8 +191,11 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
      *                0 is no address.
      */
     void send_to(std::uint64_t address, std::span<const std::span<const std::byte>> iov) override;
-    /** @brief The retained send to one session keeps the base's (#2923). */
+    /// @cond
+    // The retained send to one session keeps the base's (#2923); hidden from the
+    // API docs, which would list the iovec override twice.
     using transport_t::send_to;
+    /// @endcond
 
     /** @brief A reply goes to the datagram's source (#2911): @ref inbound_source. */
     [[nodiscard]] std::uint64_t inbound_reply_to() const noexcept override { return source_; }
