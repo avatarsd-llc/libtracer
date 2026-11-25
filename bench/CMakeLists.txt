@@ -145,6 +145,12 @@ add_executable(bench_terminus_tier bench_terminus_tier.cpp)
 target_link_libraries(bench_terminus_tier PRIVATE libtracer)
 target_compile_options(bench_terminus_tier PRIVATE -Wall -Wextra)
 
+# #2911: the terminus reply's dispatch onto its link, point-to-point and session-naming (A/B:
+# build the same file on a pre-#2911 tree, where both rows reply through `send`).
+add_executable(bench_reply_dispatch bench_reply_dispatch.cpp)
+target_link_libraries(bench_reply_dispatch PRIVATE libtracer)
+target_compile_options(bench_reply_dispatch PRIVATE -Wall -Wextra)
+
 # #1533: what cleared and suspended subscriber slots cost a fan-out write (A/B: build the
 # `cleared` arm on a pre-#1533 tree for the old per-entry skip).
 add_executable(bench_subscriber_suspend bench_subscriber_suspend.cpp)

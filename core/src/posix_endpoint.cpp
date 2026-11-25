@@ -625,6 +625,14 @@ transport_t* slot_server_t::peer_link_of(peer_handle_t peer) {
     return s.open.load(std::memory_order_relaxed) && s.handle == peer ? &endpoint_of(s) : nullptr;
 }
 
+void slot_server_t::send_to(std::uint64_t reply_to,
+                            std::span<const std::span<const std::byte>> iov) {
+    // The handle names the session that asked; the slot's endpoint sends to it alone.
+    if (transport_t* const to = peer_link_of(peer_handle_t::from_bits(reply_to)))
+        return to->send(iov);
+    drops_.count_dropped_tx();
+}
+
 read_tally_t* slot_server_t::inbound_tally() noexcept {
     // Asked inside a delivery, on the driving thread: the slot table's only mutator, so the
     // lookup takes no lock. `delivering_` names the session whose frame is in flight and is

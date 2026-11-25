@@ -594,6 +594,17 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
 
     /**
+     * @brief A reply to the session whose handle @p reply_to carries, and to no other (#2911).
+     *
+     * The token is @ref inbound_peer's handle, read while the request was delivered. The
+     * session is checked by handle under `peers_m_`, so a session that has gone, or one a
+     * later connection took the slot of, drops the frame and counts it as @ref peer_link's
+     * endpoint does. On the httpd task the reply is written in the call; elsewhere it is
+     * queued.
+     */
+    void send_to(std::uint64_t reply_to, std::span<const std::span<const std::byte>> iov) override;
+
+    /**
      * @brief Resolve an inbound handle back to its `p<slot>~<gen>` peer name (#1294).
      *
      * A pure function of the handle — the same formatting the claim edge stamps

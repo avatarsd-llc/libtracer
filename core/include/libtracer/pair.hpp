@@ -123,6 +123,12 @@ struct peer_handle_t : wire::pair_t {
         return (static_cast<std::uint64_t>(generation) << 32) | index;
     }
 
+    /** @brief The handle @ref bits encoded, back from its one integer. */
+    [[nodiscard]] static constexpr peer_handle_t from_bits(std::uint64_t bits) noexcept {
+        return peer_handle_t{wire::pair_t{.index = static_cast<std::uint32_t>(bits),
+                                          .generation = static_cast<std::uint32_t>(bits >> 32)}};
+    }
+
     /** @brief Handles compare by identity — same index AND same generation. */
     [[nodiscard]] friend constexpr bool operator==(peer_handle_t, peer_handle_t) noexcept = default;
 };

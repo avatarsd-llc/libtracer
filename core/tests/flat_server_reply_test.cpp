@@ -15,7 +15,8 @@
  * - **deferred AWAIT.** An AWAIT from A, answered by a later write, goes to A; one whose
  *   session has left before the write is not answered to anyone else;
  * - **UDP listener.** A deferred AWAIT is answered to the datagram source that sent it, even
- *   when another source sent a datagram in between.
+ *   when another source sent a datagram in between; distinct sources park within the link's
+ *   one `kMaxAwaitsPerLink` cap, since a source is not a session.
  *
  * Subscription pushes are not replies and keep their fan-out; they are covered elsewhere.
  */
@@ -239,6 +240,25 @@ void udp_answers_the_awaits_sender() {
     std::this_thread::sleep_for(200ms);
     check(rx_c.count() == 1, "  and the other source receives only its own reply");
 }
+
+/** @brief Distinct UDP sources share the listener's one cap: a source is not a session. */
+void udp_sources_share_one_link_cap() {
+    std::printf("udp listener: distinct sources park within one link cap:\n");
+    node_t n;
+    tr::net::udp_transport_t server(0, "", 0);
+    (void)n.router.attach_link("cli", server);
+    const std::uint16_t port = server.local_port();
+    constexpr std::size_t kCap = tr::graph::config_t::kMaxAwaitsPerLink;
+    std::vector<std::unique_ptr<tr::net::udp_transport_t>> sources;
+    for (std::size_t i = 0; i <= kCap; ++i) {
+        sources.push_back(std::make_unique<tr::net::udp_transport_t>(0, "127.0.0.1", port));
+        sources.back()->send(b_await("sink"));
+        (void)eventually(
+            [&] { return n.router.pending_awaits() + n.router.await_refusals() == i + 1; }, 2s);
+    }
+    check(n.router.pending_awaits() == kCap, "  the cap's worth of AWAITs park");
+    check(n.router.await_refusals() == 1, "  and one more source's AWAIT is refused");
+}
 #endif
 
 }  // namespace
@@ -254,6 +274,7 @@ int main() {
 #endif
 #if defined(LIBTRACER_TEST_HAS_UDP)
     udp_answers_the_awaits_sender();
+    udp_sources_share_one_link_cap();
 #endif
     return tr::testing::summary("flat_server_reply");
 }

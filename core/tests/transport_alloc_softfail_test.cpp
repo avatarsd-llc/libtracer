@@ -1671,6 +1671,7 @@ class silent_link_t final : public tr::net::transport_t {
         ++spans_;
     }
     void send(std::span<const std::span<const std::byte>> iov) override {
+        if (refuse_) return;  // as the contiguous form
         n_ = 0;
         for (const std::span<const std::byte> s : iov) append(s);
         ++gathers_;
@@ -1681,13 +1682,15 @@ class silent_link_t final : public tr::net::transport_t {
     [[nodiscard]] std::size_t spans() const noexcept { return spans_; }
     /** @brief Sends taken through the scatter-gather overload. */
     [[nodiscard]] std::size_t gathers() const noexcept { return gathers_; }
+    /** @brief Sends taken through either overload. */
+    [[nodiscard]] std::size_t sends() const noexcept { return spans_ + gathers_; }
     /** @brief Forget everything recorded so far. */
     void reset() noexcept {
         n_ = 0;
         spans_ = 0;
         gathers_ = 0;
     }
-    /** @brief Refuse every contiguous send from now on, as an exhausted link source would. */
+    /** @brief Refuse every send from now on, as an exhausted link source would. */
     void refuse(bool on) noexcept { refuse_ = on; }
 
    private:
@@ -1729,12 +1732,12 @@ void test_retired_type_answer_allocates_nothing() {
     tr::wire::emit_tlv(retired, static_cast<tr::wire::type_t>(0x12), tr::wire::opt_t{.pl = true},
                        body);
     router.on_frame("up", retired);  // warm-up: any lazy table creation happens here, unarmed
-    check(up.spans() == 1 && !up.last().empty(), "the retired COMPACT drew an answer at all");
+    check(up.sends() == 1 && !up.last().empty(), "the retired COMPACT drew an answer at all");
 
     up.reset();
     const std::size_t allocs = count_allocs([&] { router.on_frame("up", retired); });
     check(allocs == 0, "a retired type is answered without a single allocation");
-    check(up.spans() == 1, "and it was answered — a silent drop would make the count vacuous");
+    check(up.sends() == 1, "and it was answered — a silent drop would make the count vacuous");
     check(up.last().size() == 10, "the answer is the fixed 10-byte bare type_mismatch ERROR");
     check(router.drop_stats().retired_rx == 2, "and both frames were counted in retired_rx");
 
@@ -1742,7 +1745,7 @@ void test_retired_type_answer_allocates_nothing() {
     up.reset();
     up.refuse(true);
     router.on_frame("up", retired);
-    check(up.spans() == 0, "a refused answer goes nowhere");
+    check(up.sends() == 0, "a refused answer goes nowhere");
     check(router.drop_stats().retired_rx == 3, "and the retired frame is still counted");
 }
 

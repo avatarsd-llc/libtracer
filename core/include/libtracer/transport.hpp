@@ -1214,6 +1214,35 @@ class transport_t {
     [[nodiscard]] virtual peer_handle_t inbound_peer() const noexcept { return {}; }
 
     /**
+     * @brief Where a reply to the frame this link is delivering RIGHT NOW goes back to: an
+     *        opaque 64-bit token for @ref send_to (#2911).
+     *
+     * A link that carries several sessions answers a request to the session that sent it, not
+     * to all of them. The DEFAULT is @ref inbound_peer's handle as one integer, which is the
+     * session on a stream listener and 0 (the link itself) on a link with no per-peer
+     * identity. A UDP listener answers the datagram's source instead. Valid on the same terms
+     * as @ref inbound_peer: only inside a receive callback, on the thread running it.
+     */
+    [[nodiscard]] virtual std::uint64_t inbound_reply_to() const noexcept {
+        return inbound_peer().bits();
+    }
+
+    /**
+     * @brief Send @p iov as one frame to the session @p reply_to names (#2911): the reply to
+     *        a request, which goes to the session that asked.
+     *
+     * @p reply_to is a token @ref inbound_reply_to answered while the request was delivered.
+     * The DEFAULT ignores it and calls @ref send, which is right for a link that is one
+     * session. A link that carries several sends to that session alone, and drops and counts
+     * the frame (`dropped_tx`) when that session has gone, so a reply never reaches another
+     * session.
+     */
+    virtual void send_to(std::uint64_t reply_to, std::span<const std::span<const std::byte>> iov) {
+        (void)reply_to;
+        send(iov);
+    }
+
+    /**
      * @brief The READ tally of the session whose frame this link is delivering RIGHT NOW
      *        (#2774), or null when the link itself is the session.
      *

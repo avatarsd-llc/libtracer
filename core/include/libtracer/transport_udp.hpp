@@ -190,7 +190,10 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
      * @param address A packed endpoint, as @ref inbound_source and @ref peer_address give it;
      *                0 is no address.
      */
-    void send_to(std::uint64_t address, std::span<const std::span<const std::byte>> iov);
+    void send_to(std::uint64_t address, std::span<const std::span<const std::byte>> iov) override;
+
+    /** @brief A reply goes to the datagram's source (#2911): @ref inbound_source. */
+    [[nodiscard]] std::uint64_t inbound_reply_to() const noexcept override { return source_; }
 
     /**
      * @brief The source of the datagram being delivered, packed as `(ip << 16) | port`.

@@ -840,6 +840,14 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     [[nodiscard]] transport_t* peer_link_of(peer_handle_t peer);
 
     /**
+     * @brief A reply to the session whose handle @p reply_to carries, and to no other (#2911).
+     *
+     * The token is @ref inbound_reply_to's: the delivering session's handle. A session that
+     * has gone, or a token that names none, drops the frame and counts it in `dropped_tx`.
+     */
+    void send_to(std::uint64_t reply_to, std::span<const std::span<const std::byte>> iov) override;
+
+    /**
      * @brief Close the open peer named @p peer, freeing its slot for reuse.
      *
      * Shuts the socket down (`SHUT_RDWR`) under @ref peers_m_ (teardown un-names a slot
