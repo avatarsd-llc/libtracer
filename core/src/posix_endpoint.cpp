@@ -625,6 +625,15 @@ transport_t* slot_server_t::peer_link_of(peer_handle_t peer) {
     return s.open.load(std::memory_order_relaxed) && s.handle == peer ? &endpoint_of(s) : nullptr;
 }
 
+void slot_server_t::send_to(std::uint64_t reply_to,
+                            std::span<const std::span<const std::byte>> iov) {
+    // The handle names the session that asked; the slot's endpoint sends to it alone, and its
+    // egress sheds the frame if another session took the slot meanwhile.
+    if (transport_t* const to = peer_link_of(peer_handle_t::from_bits(reply_to)))
+        return to->send_to(reply_to, iov);
+    drops_.count_dropped_tx();
+}
+
 read_tally_t* slot_server_t::inbound_tally() noexcept {
     // Asked inside a delivery, on the driving thread: the slot table's only mutator, so the
     // lookup takes no lock. `delivering_` names the session whose frame is in flight and is
@@ -675,7 +684,8 @@ std::uint64_t slot_server_t::sweep(std::uint64_t now, std::uint64_t deadline) {
 }
 
 void slot_server_t::send_one(session_base_t& s, function_ref_t<egress_frame_t*()> frame,
-                             std::span<const ::iovec> rec, const graph::delivery_lane_t& lane) {
+                             std::span<const ::iovec> rec, const graph::delivery_lane_t& lane,
+                             std::uint32_t tenancy) {
     // The fd is read INSIDE the writer role: accept opens the egress only after publishing
     // it, and teardown closes the egress (waiting the role out) before resetting it.
     const auto fd = [&s] { return s.fd.load(std::memory_order_relaxed); };
@@ -685,7 +695,9 @@ void slot_server_t::send_one(session_base_t& s, function_ref_t<egress_frame_t*()
         [&](const egress_frame_t& f, std::size_t off) {
             return note_moved(s.tx_moved, write_frame(fd(), f, off));
         },
-        [&] { condemn_fd(fd()); }, [&] { arm_write(s); });
+        [&] { condemn_fd(fd()); }, [&] { arm_write(s); },
+        // Asked inside the egress, where the slot cannot pass to another session (#2911).
+        [&] { return tenancy == 0 || s.gen_seq.load(std::memory_order_acquire) == tenancy; });
     note_egress(r);
 }
 
@@ -702,9 +714,13 @@ void slot_server_t::broadcast(std::span<const ::iovec> rec, const graph::value_t
 }
 
 void slot_server_t::send_to(session_base_t& s, std::span<const ::iovec> rec,
-                            const graph::value_t* value, const graph::delivery_lane_t& lane) {
+                            const graph::value_t* value, const graph::delivery_lane_t& lane,
+                            std::uint32_t tenancy) {
+    if constexpr (graph::kFaultInjection) {
+        if (detail::directed_send_hook != nullptr) detail::directed_send_hook();
+    }
     egress_once_t once([&] { return frame_of(rec, value); });
-    send_one(s, once, rec, lane);  // a departed session's egress is closed: a counted shed
+    send_one(s, once, rec, lane, tenancy);  // a departed session, or its slot reused: shed
 }
 
 void slot_server_t::flush_peer(session_base_t& s) {
@@ -767,8 +783,11 @@ void slot_server_t::accept_peer() {
         // generation never repeats and never lands on 0 (which is reserved for "no peer"), so
         // a handle minted against the session that used to hold this slot can never be
         // mistaken for its successor's.
-        if (++slot->gen_seq == 0) slot->gen_seq = 1;
-        slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen_seq};
+        std::uint32_t gen = slot->gen_seq.load(std::memory_order_relaxed) + 1;
+        if (gen == 0) gen = 1;
+        // Relaxed: the egress opens after, and its release publishes the generation to a sender.
+        slot->gen_seq.store(gen, std::memory_order_relaxed);
+        slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), gen};
         slot->read_tally = session_read_tally_t{};  // a new tenancy has read nothing (#2774)
         // The routable NAME is the handle spelled out — `p<slot>~<gen>`, legal by
         // construction (ADR-0073 §2). It carries the generation, so a reused slot gets a

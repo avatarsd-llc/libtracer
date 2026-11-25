@@ -4684,6 +4684,29 @@ void httpd_ws_link_t::enumerate_peer_stats(const peer_stats_visitor_t& visit) co
     }
 }
 
+void httpd_ws_link_t::send_to(std::uint64_t reply_to,
+                              std::span<const std::span<const std::byte>> iov) {
+    // The handle names the session that asked: its slot, and the tenancy the handle compare
+    // pins, so a slot a later connection took is not this session.
+    const peer_handle_t peer = peer_handle_t::from_bits(reply_to);
+    session_ref_t to;
+    {
+        const std::lock_guard lock(peers_m_);
+        session_t* const slot =
+            peer.valid() && peer.index < slots_.size() ? slots_[peer.index] : nullptr;
+        if (slot == nullptr || !slot->open || slot->dead || slot->auth_pending ||
+            slot->handle != peer) {
+            tx_to_dead_peer_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        to = session_ref_t{slot, slot->gen};
+    }
+    if (t_serving_link == this)
+        send_in_call(to, iov);
+    else
+        queue_send(to, iov);
+}
+
 transport_t* httpd_ws_link_t::peer_link(std::string_view peer) {
     const std::lock_guard lock(peers_m_);
     // The exact compare IS the tenancy check: a name carrying a departed

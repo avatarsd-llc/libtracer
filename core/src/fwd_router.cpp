@@ -476,6 +476,20 @@ template <class Cursor>
 }
 
 /**
+ * @brief Send @p iov back over @p in to the session whose request @p in is delivering now
+ *        (#2911): on a link that carries several sessions, a reply goes to the one that asked.
+ */
+void reply_to_asker(transport_t& in, std::span<const std::span<const std::byte>> iov) {
+    in.send_to(in.inbound_reply_to(), iov);
+}
+
+/** @brief The one-span form of @ref reply_to_asker. */
+void reply_to_asker(transport_t& in, std::span<const std::byte> frame) {
+    const std::span<const std::byte> one[1] = {frame};
+    reply_to_asker(in, std::span<const std::span<const std::byte>>(one));
+}
+
+/**
  * @brief Answer a bus-NAME-hop rejection (ADR-0073 §3 / RFC-0020) with an ADDRESSED
  *        `FWD{REPLY, kind=ERROR, STATUS{ERROR{tr::path::invalid}}}` over the inbound link.
  *
@@ -566,7 +580,8 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     // the same lookup `reply_link` falls back to for a bus peer's terminus reply. This cold
     // refusal keeps the by-name form for every inbound link; the terminus's point-to-point
     // replies leave through the ctx's link instead (#1709).
-    if (transport_t* const up = registry.by_name(inbound_name)) up->send(reply.links()[0].bytes());
+    if (transport_t* const up = registry.by_name(inbound_name))
+        reply_to_asker(*up, reply.links()[0].bytes());
 }
 
 /**
@@ -672,7 +687,7 @@ template <class Cursor>
     alignas(view::segment_t) std::array<std::byte, kRefusalStoreBytes> buf;
     graph::reply_store_t store(buf, graph::caller_store_backend());
     const view::rope_t reply = graph::assemble_error_reply(route, status, store);
-    if (reply.link_count() != 0) link.send(reply.links()[0].bytes());
+    if (reply.link_count() != 0) reply_to_asker(link, reply.links()[0].bytes());
 }
 
 /**
@@ -693,7 +708,7 @@ template <class Cursor>
     // `STATUS{ERROR{...}}` minus its 4-byte STATUS header is the bare `ERROR`.
     const std::array<std::byte, graph::kErrorStatusTailBytes> tail =
         graph::error_status_tail(graph::status_t::TYPE_MISMATCH);
-    link.send(std::span<const std::byte>(tail).subspan(4));
+    reply_to_asker(link, std::span<const std::byte>(tail).subspan(4));
 }
 
 /**
@@ -1124,21 +1139,6 @@ std::size_t fwd_router_t::link_gone(std::string_view link_name, graph::link_pair
     return evicted;
 }
 
-namespace {
-/**
- * @brief Rebuild a @ref peer_handle_t from the `bits()` a receiver ctx stores it as.
- *
- * The handle is kept as ONE `u64` on the ctx so a frame path loads it with a single relaxed
- * atomic rather than two that could straddle a control-plane rebind and pair one tenancy's
- * index with another's generation — the field-tearing shape #882 fixed one seam out.
- */
-[[nodiscard]] constexpr peer_handle_t peer_handle_from_bits(std::uint64_t bits) noexcept {
-    return peer_handle_t{wire::pair_t{.index = static_cast<std::uint32_t>(bits),
-                                      .generation = static_cast<std::uint32_t>(bits >> 32)}};
-}
-
-}  // namespace
-
 peer_handle_t fwd_router_t::session_tenant(const bus_token_cache_t* cache,
                                            std::uint32_t slot) noexcept {
     // The words live on the bus token cache (#2413). Which pointer the caller hands in is the
@@ -1147,7 +1147,7 @@ peer_handle_t fwd_router_t::session_tenant(const bus_token_cache_t* cache,
     session_tenancy_t* const t =
         cache != nullptr ? cache->tenancy.load(std::memory_order_acquire) : nullptr;
     return t != nullptr && slot < t->size
-               ? peer_handle_from_bits(t->word(slot).load(std::memory_order_acquire))
+               ? peer_handle_t::from_bits(t->word(slot).load(std::memory_order_acquire))
                : peer_handle_t{};
 }
 
@@ -2329,7 +2329,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
                                graph::status_t::BACKPRESSURE);
             return;
         }
-        in->send(table);
+        reply_to_asker(*in, table);
     } else if (inbound_name.empty()) {
         // This node originated the request (`originate`) and terminates it: there is no link
         // to send the reply over, so it goes where a reply arriving home would — the record —
@@ -2408,7 +2408,7 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
                                graph::status_t::BACKPRESSURE);
             return;
         }
-        in->send(table);
+        reply_to_asker(*in, table);
     }
 }
 
@@ -2606,7 +2606,10 @@ struct fwd_router_t::pending_await_t {
     graph::await_waiter_t waiter;   /**< @brief Armed on the vertex; its ctx is this. */
     fwd_router_t* router = nullptr; /**< @brief The owner the fire thunk calls back. */
     std::size_t block_bytes = 0;    /**< @brief The block's size, for its release. */
-    peer_handle_t peer{}; /**< @brief The session it arrived with; not valid ⇒ the link's own. */
+    /** @brief Where the reply goes on its link (#2911): the session's handle when
+     *         `reply_is_peer`, else the link's own token (a UDP source, or 0). Held as the
+     *         pair `bits()` round-trips, which keeps the block 4-byte aligned on rv32. */
+    peer_handle_t reply_to{};
     graph::vertex_handle_t vertex;            /**< @brief The awaited vertex. */
     pending_await_t* prev = nullptr;          /**< @brief Plane list link. */
     pending_await_t* next = nullptr;          /**< @brief Plane list link. */
@@ -2614,11 +2617,17 @@ struct fwd_router_t::pending_await_t {
     std::size_t name_len = 0;                 /**< @brief Link name bytes. */
     std::size_t dst_len = 0;                  /**< @brief Reply `dst` bytes. */
     std::size_t src_len = 0;                  /**< @brief Reply `src` bytes. */
-    bool sending = false; /**< @brief A reply is being built outside the lock. */
-    bool orphan = false;  /**< @brief Cancelled while firing: send nothing. */
+    bool sending = false;       /**< @brief A reply is being built outside the lock. */
+    bool orphan = false;        /**< @brief Cancelled while firing: send nothing. */
+    bool reply_is_peer = false; /**< @brief `reply_to` is a session handle. */
 
     /** @brief A fresh, unarmed waiter block for @p v. */
     explicit pending_await_t(graph::vertex_handle_t v) noexcept : vertex(v) {}
+
+    /** @brief The session it arrived with; not valid ⇒ the link's own (the cap's key). */
+    [[nodiscard]] peer_handle_t peer() const noexcept {
+        return reply_is_peer ? reply_to : peer_handle_t{};
+    }
 
     /** @brief The trailing byte region: name, dst, src, in that order. */
     [[nodiscard]] std::byte* tail() noexcept { return reinterpret_cast<std::byte*>(this + 1); }
@@ -2730,7 +2739,14 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     p->waiter.ctx = p;
     p->router = this;
     p->block_bytes = bytes;
-    p->peer = req.inbound->peer;
+    // The reply goes to the session that asked (#2911): its handle when it has one, else
+    // the link's own answer, read now while the request is still being delivered.
+    p->reply_is_peer = req.inbound->peer.valid();
+    if (p->reply_is_peer) {
+        p->reply_to = req.inbound->peer;
+    } else if (transport_t* const in = registry_.by_name(name)) {
+        p->reply_to = peer_handle_t::from_bits(in->inbound_reply_to());
+    }
     // No deadline is stored: the requester owns the timeout (RFC-0004 Amendment 3, ADR-0084),
     // and the resolver skips the `await_timeout` hint. A waiter whose vertex never changes ends on
     // link_down / remove_child or at teardown, and it costs only this block of the link plane.
@@ -2759,7 +2775,7 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     // as a whole holds the cap; the same walk reclaims the waiters of an earlier session in
     // the arriving session's slot. No byte per link, and no state that outlives the link's ctx.
     const std::size_t same_link = awaits_.count >= graph::config_t::kMaxAwaitsPerLink
-                                      ? cancel_awaits_locked(name, p->peer, true)
+                                      ? cancel_awaits_locked(name, p->peer(), true)
                                       : 0;
     if (same_link >= graph::config_t::kMaxAwaitsPerLink) {
         count_drop(await_refused_);
@@ -2795,12 +2811,12 @@ std::size_t fwd_router_t::cancel_awaits_locked(std::string_view link_name, peer_
         // An empty name is every link (teardown).
         const bool on_link = link_name.empty() || p->name() == link_name;
         // The arriving session's own waiters, when parking: counted and kept.
-        const bool mine = count_peer && p->peer == peer;
+        const bool mine = count_peer && p->peer() == peer;
         // With no handle, every waiter of the link goes. With one, every waiter in its slot
         // goes: the departing session's own, and any of an earlier session the link no longer
         // holds in that slot (a different generation; one slot holds one live session, so this
         // stays right when the generation wraps).
-        const bool gone = peer.valid() ? p->peer.index == peer.index : !count_peer;
+        const bool gone = peer.valid() ? p->peer().index == peer.index : !count_peer;
         kept += static_cast<std::size_t>(on_link && mine);
         if (on_link && gone && !mine) {
             // A waiter released while parking is reclaimed from a departed session: counted
@@ -2857,7 +2873,9 @@ void fwd_router_t::answer_await(pending_await_t& p) {
         count_drop(reply_iov_dropped_);
         return;
     }
-    link->send(table);
+    // To the session that asked (#2911): one that has gone gets nothing, and the link counts
+    // the drop.
+    link->send_to(p.reply_to.bits(), table);
 }
 
 }  // namespace tr::net

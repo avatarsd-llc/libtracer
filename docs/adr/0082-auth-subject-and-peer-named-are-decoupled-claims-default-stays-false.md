@@ -59,9 +59,10 @@ On a constrained node — the single-upstream MCU that is the common NARROW depl
 
 The reference docs described both mechanisms but never said how to reason about holding both. The rule:
 
-- **Do you need to address, ACL, or tear down an individual peer by name?** (Reply to *this* browser tab; enumerate peers per [ADR-0044](0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md); write an ACE naming one peer; `bus_link_t::close_peer` a specific session.) → **`peer_named=true`**, and budget the per-peer anchor vertex and the `collect()` point.
+- **Do you need to address, ACL, or tear down an individual peer by name?** (Push to *this* browser tab unasked; enumerate peers per [ADR-0044](0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md); write an ACE naming one peer; `bus_link_t::close_peer` a specific session.) → **`peer_named=true`**, and budget the per-peer anchor vertex and the `collect()` point.
 - **Do you need to know who wrote something, in order to decide whether to allow it or to record it?** → **the subject**. Read `write_ctx_t::subject` in the handler. This is the authorization answer, and once Part 2 lands it works at either setting of `peer_named` — do not turn the flag on to obtain it.
 - **Both?** Set both. They are independent; there is no interaction to reason about beyond the cost of the first.
+- **Only replies to requests?** Neither flag is needed. A reply goes to the session that sent the request at either setting of `peer_named`, so a FLAT listener with several sessions answers each one alone (#2911).
 - **Neither, i.e. a point-to-point link?** The default is already right: FLAT, no per-peer state, and the link's own registered child name is the hop name.
 
 The failure mode this guidance exists to prevent is treating a peer *name* as an identity claim. A name is assigned by the local transport at accept; it attests to nothing about the far end. Only a subject bound by an authentication check ([ADR-0045](0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md), and the WebSocket session-auth frame) carries a claim worth authorizing against.

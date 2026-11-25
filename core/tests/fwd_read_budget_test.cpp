@@ -359,26 +359,24 @@ void tcp_slots(std::size_t n, bool peer_named) {
     check(server->ok() && router.attach_link("srv", *server), "  the listener mounts");
     auto p = std::make_unique<tcp_client_t>(server->local_port());
     auto q = std::make_unique<tcp_client_t>(server->local_port());
-    // A flat listener has one routing identity, so its replies reach every client: each client
-    // then sees both sessions' answers. A peer-named one answers the asking session only.
+    // At either setting a reply goes to the session that asked (#2911), so each client sees its
+    // own answers only.
     std::size_t want_p = 0;
     std::size_t want_q = 0;
     const auto step = [&](tcp_client_t& from, std::size_t k) {
         from.reads(k);
-        want_p += (&from == p.get() || !peer_named) ? k : 0;
-        want_q += (&from == q.get() || !peer_named) ? k : 0;
+        want_p += &from == p.get() ? k : 0;
+        want_q += &from == q.get() ? k : 0;
         return wait_until([&] { return p->total() == want_p && q->total() == want_q; });
     };
     check(step(*p, 1) && step(*q, 1), "  each client's first READ is answered");
     check(step(*p, n) && step(*q, n), "  N more READs each are answered");
-    const std::size_t seen = peer_named ? 1 : 2;  // the sessions whose replies a client sees
     const answers_t pa = p->got();
     const answers_t qa = q->got();
-    check(pa.result == seen * n && pa.backpressure == seen && qa.result == seen * n &&
-              qa.backpressure == seen,
+    check(pa.result == n && pa.backpressure == 1 && qa.result == n && qa.backpressure == 1,
           "  one BACKPRESSURE per session: each is counted in its own slot");
     router.close_read_run();
-    check(step(*p, n) && p->got().backpressure == seen,
+    check(step(*p, n) && p->got().backpressure == 1,
           "  after a close, N more from p: none refused");
     q.reset();
     p.reset();

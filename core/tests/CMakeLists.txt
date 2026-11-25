@@ -683,6 +683,29 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
     set_tests_properties(httpd_ws_in_call_reply
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # The router behind the link is the net plane's.
+    if(LIBTRACER_NET_PLANE)
+        # #2911 — on a FLAT link, a reply goes to the WebSocket session that asked: a READ in the
+        # handler frame, a deferred AWAIT from the application's thread, and none to a session
+        # that took a departed one's slot. A real graph_t + fwd_router_t behind the link.
+        add_executable(httpd_ws_flat_reply_test
+            "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_flat_reply_test.cpp"
+            "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+            "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+        target_include_directories(httpd_ws_flat_reply_test PRIVATE
+            "${LIBTRACER_ESP_DIR}/tests/host"
+            "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+            "${LIBTRACER_ESP_DIR}/libtracer/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_link_libraries(httpd_ws_flat_reply_test PRIVATE libtracer)
+        target_link_options(httpd_ws_flat_reply_test PRIVATE
+            "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
+        libtracer_test_warnings(httpd_ws_flat_reply_test)
+        add_test(NAME httpd_ws_flat_reply COMMAND httpd_ws_flat_reply_test)
+        set_tests_properties(httpd_ws_flat_reply
+            PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+    endif()
+
     # #961 — the FAN-OUT path's allocation, on the same fake. The instrument is what is
     # new: the suite replaces the WHOLE global operator new/delete family (whole because a
     # subset makes ASan abort on a mismatched pair), so "a broadcast allocates" is a number
@@ -2744,6 +2767,26 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
     add_test(NAME bus_module COMMAND bus_module_test)
 endif()
 
+# #2911 — a terminus reply on a link that carries several sessions (a flat TCP or WS
+# listener, a UDP listener) goes to the session that sent the request.
+if(LIBTRACER_NET_PLANE AND (LIBTRACER_TRANSPORT_TCP OR LIBTRACER_TRANSPORT_WS OR
+                             LIBTRACER_TRANSPORT_UDP))
+    add_executable(flat_server_reply_test flat_server_reply_test.cpp)
+    target_link_libraries(flat_server_reply_test PRIVATE libtracer)
+    libtracer_test_warnings(flat_server_reply_test)
+    if(LIBTRACER_TRANSPORT_TCP)
+        target_compile_definitions(flat_server_reply_test PRIVATE LIBTRACER_TEST_HAS_TCP=1)
+    endif()
+    if(LIBTRACER_TRANSPORT_WS)
+        target_compile_definitions(flat_server_reply_test PRIVATE LIBTRACER_TEST_HAS_WS=1)
+    endif()
+    if(LIBTRACER_TRANSPORT_UDP)
+        target_compile_definitions(flat_server_reply_test PRIVATE LIBTRACER_TEST_HAS_UDP=1)
+    endif()
+    add_test(NAME flat_server_reply COMMAND flat_server_reply_test)
+    set_tests_properties(flat_server_reply PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+endif()
+
 # The `bus` CTest LABEL — the tests that need the ADR-0044 bus module PRESENT (#375
 # deliverable 3), so a `kBusLinks = false` build can deselect them with `ctest -LE bus`.
 #
@@ -2796,6 +2839,7 @@ set(LIBTRACER_BUS_TESTS
     httpd_ws_eviction_lock
     httpd_ws_fanout_alloc
     httpd_ws_in_call_reply
+    httpd_ws_flat_reply
     httpd_ws_keepalive
     httpd_ws_rx_owned
     httpd_ws_send_stall

@@ -97,6 +97,15 @@ inline void (*slot_taken_hook)() = nullptr;
  * Same rules as @ref slot_taken_hook .
  */
 inline void (*slot_teardown_hook)() = nullptr;
+
+/**
+ * @brief Test seam: called by a stream server's send to ONE session once the session is
+ *        resolved and before its frame is offered to the session's egress, with no lock held. A
+ *        test parks the send here to let the session leave and another take its slot.
+ *
+ * Same rules as @ref slot_taken_hook .
+ */
+inline void (*directed_send_hook)() = nullptr;
 }  // namespace detail
 
 /**
@@ -840,6 +849,14 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     [[nodiscard]] transport_t* peer_link_of(peer_handle_t peer);
 
     /**
+     * @brief A reply to the session whose handle @p reply_to carries, and to no other (#2911).
+     *
+     * The token is @ref inbound_reply_to's: the delivering session's handle. A session that
+     * has gone, or a token that names none, drops the frame and counts it in `dropped_tx`.
+     */
+    void send_to(std::uint64_t reply_to, std::span<const std::span<const std::byte>> iov) override;
+
+    /**
      * @brief Close the open peer named @p peer, freeing its slot for reuse.
      *
      * Shuts the socket down (`SHUT_RDWR`) under @ref peers_m_ (teardown un-names a slot
@@ -933,8 +950,10 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
         peer_handle_t handle;
         /** @brief This slot's monotonic tenancy counter — the source of the generation
          *         @ref handle is minted at. Bumped once per accept (never reused, never
-         *         zero), so the counter survives the retire that clears @ref handle. */
-        std::uint32_t gen_seq = 0;
+         *         zero), so the counter survives the retire that clears @ref handle. Bumped
+         *         before the egress opens, so a sender inside the egress reads the generation
+         *         of the session it writes to (#2911): atomic for that reader. */
+        std::atomic<std::uint32_t> gen_seq{0};
         /** @brief This session's READs in the current run (#2774): written by the driving
          *         thread, and handed to the router through @ref inbound_tally while it delivers
          *         the session's frame; reset at accept. No byte when the budget is off. */
@@ -1103,9 +1122,13 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     /**
      * @brief Send one record to ONE session through its egress — the directed facades'
      *        door. Parameters as @ref broadcast; a departed session sheds, counted.
+     * @param tenancy The generation of the session the record is for (#2911), or 0 for
+     *                whichever session holds @p s. A slot another session took since sheds the
+     *                record, counted.
      */
     void send_to(session_base_t& s, std::span<const ::iovec> rec,
-                 const graph::value_t* value = nullptr, const graph::delivery_lane_t& lane = {});
+                 const graph::value_t* value = nullptr, const graph::delivery_lane_t& lane = {},
+                 std::uint32_t tenancy = 0);
 
     /**
      * @name Variance points (runtime virtuals — ADR-0047 §4 wiring-frequency).
@@ -1299,9 +1322,11 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     void flush_peer(session_base_t& s);
 
     /** @brief One record to @p s through its egress, every write nonblocking: @p rec direct
-     *         when @p s is idle, else the shared frame @p frame builds, in @p lane. */
+     *         when @p s is idle, else the shared frame @p frame builds, in @p lane. A nonzero
+     *         @p tenancy sheds it unless @p s still holds that generation. */
     void send_one(session_base_t& s, function_ref_t<egress_frame_t*()> frame,
-                  std::span<const ::iovec> rec, const graph::delivery_lane_t& lane);
+                  std::span<const ::iovec> rec, const graph::delivery_lane_t& lane,
+                  std::uint32_t tenancy = 0);
 };
 
 /**

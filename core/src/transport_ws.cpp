@@ -308,7 +308,7 @@ void ws_server_transport_t::send_retained(session_base_t* to,
 void ws_server_transport_t::send_record(session_base_t* to,
                                         std::span<const std::span<const std::byte>> parts,
                                         const graph::value_t* value,
-                                        const graph::delivery_lane_t& lane) {
+                                        const graph::delivery_lane_t& lane, std::uint32_t tenancy) {
     // Encode the ONE server frame header for the whole gathered payload, then hand
     // [header, span0, span1, ...] to every open peer (@p to null) or to the one session as a
     // single gathered write — no flatten, no re-copy (server frames are UNMASKED, RFC 6455
@@ -332,7 +332,7 @@ void ws_server_transport_t::send_record(session_base_t* to,
     if (to == nullptr)
         broadcast(rec, value, lane);
     else
-        send_to(*to, rec, value, lane);  // a departed session's egress is closed: shed
+        send_to(*to, rec, value, lane, tenancy);  // a departed or reused slot: shed
 }
 
 void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
@@ -345,6 +345,13 @@ void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::byte> fra
 void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
     if (slot_ != nullptr)
         static_cast<ws_server_transport_t&>(server_of(*slot_)).send_record(slot_, iov, nullptr, {});
+}
+
+void ws_server_transport_t::peer_endpoint_t::send_to(
+    std::uint64_t reply_to, std::span<const std::span<const std::byte>> iov) {
+    if (slot_ != nullptr)
+        static_cast<ws_server_transport_t&>(server_of(*slot_))
+            .send_record(slot_, iov, nullptr, {}, peer_handle_t::from_bits(reply_to).generation);
 }
 
 void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::span<const std::byte>> head,

@@ -433,7 +433,8 @@ void tcp_server_transport_t::send_retained(session_base_t* to,
 void tcp_server_transport_t::send_record(session_base_t* to,
                                          std::span<const std::span<const std::byte>> parts,
                                          const graph::value_t* value,
-                                         const graph::delivery_lane_t& lane) {
+                                         const graph::delivery_lane_t& lane,
+                                         std::uint32_t tenancy) {
     // Build the record ONCE, then hand the gather to the fan-out or to the one session: every
     // idle peer writes from it (read-only, #932), and a peer that has to wait gets one shared
     // frame in that vertex's ring.
@@ -445,7 +446,7 @@ void tcp_server_transport_t::send_record(session_base_t* to,
     if (to == nullptr)
         broadcast(rec.span(), value, lane);
     else
-        send_to(*to, rec.span(), value, lane);  // a departed session's egress is closed: shed
+        send_to(*to, rec.span(), value, lane, tenancy);  // a departed or reused slot: shed
 }
 
 void tcp_server_transport_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
@@ -458,6 +459,13 @@ void tcp_server_transport_t::peer_endpoint_t::send(
     if (slot_ != nullptr)
         static_cast<tcp_server_transport_t&>(server_of(*slot_))
             .send_record(slot_, iov, nullptr, {});
+}
+
+void tcp_server_transport_t::peer_endpoint_t::send_to(
+    std::uint64_t reply_to, std::span<const std::span<const std::byte>> iov) {
+    if (slot_ != nullptr)
+        static_cast<tcp_server_transport_t&>(server_of(*slot_))
+            .send_record(slot_, iov, nullptr, {}, peer_handle_t::from_bits(reply_to).generation);
 }
 
 void tcp_server_transport_t::peer_endpoint_t::send(std::span<const std::span<const std::byte>> head,
