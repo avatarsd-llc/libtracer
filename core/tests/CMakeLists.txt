@@ -699,7 +699,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
             "${CMAKE_CURRENT_SOURCE_DIR}")
         target_link_libraries(httpd_ws_flat_reply_test PRIVATE libtracer)
         target_link_options(httpd_ws_flat_reply_test PRIVATE
-            "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+            "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
         libtracer_test_warnings(httpd_ws_flat_reply_test)
         add_test(NAME httpd_ws_flat_reply COMMAND httpd_ws_flat_reply_test)
         set_tests_properties(httpd_ws_flat_reply
