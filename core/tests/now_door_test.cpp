@@ -171,6 +171,7 @@ struct count_carrier_t final : tr::net::transport_t {
     void send(std::span<const std::byte>) override {}
     void send(std::span<const std::span<const std::byte>>) override {}
     /** @brief Keep one datagram. */
+    using tr::net::transport_t::send_to;
     void send_to(std::uint64_t, std::span<const std::span<const std::byte>> iov) {
         std::vector<std::byte> d;
         for (const auto s : iov) d.insert(d.end(), s.begin(), s.end());

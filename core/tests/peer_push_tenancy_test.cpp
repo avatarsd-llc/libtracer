@@ -35,8 +35,12 @@
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#if defined(LIBTRACER_TEST_HAS_TCP)
 #include "libtracer/transport_tcp.hpp"
+#endif
+#if defined(LIBTRACER_TEST_HAS_WS)
 #include "libtracer/transport_ws.hpp"
+#endif
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -229,9 +233,13 @@ void push_to_a_reused_slot(const char* kind) {
 }  // namespace
 
 int main() {
+#if defined(LIBTRACER_TEST_HAS_TCP)
     push_to_a_reused_slot<tr::net::tcp_server_transport_t, tr::net::tcp_transport_t,
                           tr::net::tcp_server_config_t>("tcp");
+#endif
+#if defined(LIBTRACER_TEST_HAS_WS)
     push_to_a_reused_slot<tr::net::ws_server_transport_t, tr::net::ws_client_transport_t,
                           tr::net::ws_server_config_t>("ws");
+#endif
     return tr::testing::summary("peer_push_tenancy");
 }

@@ -2789,10 +2789,16 @@ endif()
 
 # #2923 — a subscription push to a peer-named session is checked against that session's
 # generation: a slot another connection took meanwhile receives nothing, and the drop counts.
-if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
+if(LIBTRACER_NET_PLANE AND (LIBTRACER_TRANSPORT_TCP OR LIBTRACER_TRANSPORT_WS))
     add_executable(peer_push_tenancy_test peer_push_tenancy_test.cpp)
     target_link_libraries(peer_push_tenancy_test PRIVATE libtracer)
     libtracer_test_warnings(peer_push_tenancy_test)
+    if(LIBTRACER_TRANSPORT_TCP)
+        target_compile_definitions(peer_push_tenancy_test PRIVATE LIBTRACER_TEST_HAS_TCP=1)
+    endif()
+    if(LIBTRACER_TRANSPORT_WS)
+        target_compile_definitions(peer_push_tenancy_test PRIVATE LIBTRACER_TEST_HAS_WS=1)
+    endif()
     add_test(NAME peer_push_tenancy COMMAND peer_push_tenancy_test)
     set_tests_properties(peer_push_tenancy PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 endif()

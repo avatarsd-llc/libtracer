@@ -603,6 +603,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * queued.
      */
     void send_to(std::uint64_t reply_to, std::span<const std::span<const std::byte>> iov) override;
+    /** @brief The retained send to one session keeps the base's (#2923). */
+    using transport_t::send_to;
 
     /**
      * @brief Resolve an inbound handle back to its `p<slot>~<gen>` peer name (#1294).

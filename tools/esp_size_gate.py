@@ -72,7 +72,9 @@ TRANSPORT_ROWS = (
     # the off build's cost is accepted. Main's pin plus the measured delta.
     # 2,454 -> 2,472 B (+18): #2911, a reply goes to the session that asked
     # and a send to one session checks its tenancy inside the egress (item 108).
-    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2472, None),
+    # 2,472 -> 2,476 B (+4): #2923, a subscription push to a peer-named session checks
+    # that session's tenancy (item 108).
+    ("datagram (UDP)", ("transport_udp", "builtin_transport_udp"), 2476, None),
     # 9,216 -> 9,446 B (#2147): a frame read resumes across readiness turns, so frame ingress is
     # out of line and the connection and listener each gain a callback (maintainer ruling 60).
     # 9,446 -> 9,422 B (#2830): image-only re-pin; no byte from the image, 24 B of old slack.
@@ -84,7 +86,9 @@ TRANSPORT_ROWS = (
     # no strike cap, no condemn on a stall).
     # 9,124 -> 9,208 B (+84): #2911, a reply goes to the session that asked
     # and a send to one session checks its tenancy inside the egress (item 108).
-    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9208, None),
+    # 9,208 -> 9,326 B (+118): #2923, a subscription push to a peer-named session checks
+    # that session's tenancy (item 108).
+    ("stream (TCP)", ("transport_tcp", "builtin_transport_tcp"), 9326, None),
     # 8,896 -> 9,080 B (#2147): the poll loops give way to turn functions, the write-interest
     # arm and disarm, and the thread-per-link fallback's block (maintainer ruling 60).
     # 9,080 -> 9,262 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys back
@@ -102,7 +106,9 @@ TRANSPORT_ROWS = (
     # 9,290 -> 9,184 B (-106, #2899): the egress stall verdict is deleted.
     # 9,184 -> 9,318 B (+134): #2911, a reply goes to the session that asked
     # and a send to one session checks its tenancy inside the egress (item 108).
-    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9318, None),
+    # 9,318 -> 9,322 B (+4): #2923, a subscription push to a peer-named session checks
+    # that session's tenancy (item 108).
+    ("socket endpoint (shared by UDP and TCP)", ("posix_endpoint",), 9322, None),
     ("CAN (transport_can + TWAI link)", ("transport_can", "twai_link", "socketcan_link_stub"),
      None, "compiled, not linked: full_node creates no CAN connection, so --gc-sections drops it"),
     ("WebSocket (httpd server + client link)", ("httpd_ws_link", "esp_ws_client_link"),
@@ -132,7 +138,9 @@ FOOTPRINT_PINS = {
     # full_node).
     # 14,376 -> 14,434 B (+58): #2911, a reply goes to the session that asked
     # and a send to one session checks its tenancy inside the egress (item 108).
-    "CAN (transport_can + TWAI link)": 14434,
+    # 14,434 -> 14,510 B (+76): #2923, a subscription push to a peer-named session checks
+    # that session's tenancy (item 108).
+    "CAN (transport_can + TWAI link)": 14510,
     # 33,387 -> 33,513 B: ruling 73 (2026-11-11), #2751 teardown fix; follow-up #2801 buys
     # back ~110 B.
     # 33,513 -> 33,511 B (#2830): image-only re-pin. GCC 15.3.0 adds 2 B (33,509 on 15.2.0),
@@ -153,7 +161,9 @@ FOOTPRINT_PINS = {
     # links lwip_sendmsg (+502 B, outside this row), accepted. Every other row stays at main.
     # 33,465 -> 33,641 B (+176): #2911, a reply goes to the session that asked
     # and a send to one session checks its tenancy inside the egress (item 108).
-    "WebSocket (httpd server + client link)": 33641,
+    # 33,641 -> 33,653 B (+12): #2923, a subscription push to a peer-named session checks
+    # that session's tenancy (item 108).
+    "WebSocket (httpd server + client link)": 33653,
 }
 
 
