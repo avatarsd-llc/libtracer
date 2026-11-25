@@ -1221,7 +1221,7 @@ class transport_t {
      * to all of them. The DEFAULT is @ref inbound_peer's handle as one integer, which is the
      * session on a stream listener and 0 (the link itself) on a link with no per-peer
      * identity. A UDP listener answers the datagram's source instead. Valid on the same terms
-     * as @ref inbound_peer: only inside a receive callback, on the thread running it.
+     * as @ref inbound_peer, that is only inside a receive callback, on the thread running it.
      */
     [[nodiscard]] virtual std::uint64_t inbound_reply_to() const noexcept {
         return inbound_peer().bits();

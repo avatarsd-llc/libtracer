@@ -450,7 +450,7 @@ class tcp_server_transport_t final : public stream_server_base_t {
 
         /** @brief A reply to this facade's peer (#2911): a nonzero @p reply_to is the
          *         session's handle, and a slot another session took since sheds the frame,
-         *         counted. Zero sends to whichever session holds the slot, as @ref send. */
+         *         counted. Zero sends to whichever session holds the slot, as `send` does. */
         void send_to(std::uint64_t reply_to,
                      std::span<const std::span<const std::byte>> iov) override;
 
