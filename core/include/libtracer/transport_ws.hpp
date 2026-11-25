@@ -362,6 +362,12 @@ class ws_server_transport_t final : public stream_server_base_t {
         void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
                   const graph::delivery_lane_t& lane) override;
 
+        /** @brief A reply to this facade's peer (#2911): a nonzero @p reply_to is the
+         *         session's handle, and a slot another session took since sheds the frame,
+         *         counted. Zero sends to whichever session holds the slot, as @ref send. */
+        void send_to(std::uint64_t reply_to,
+                     std::span<const std::span<const std::byte>> iov) override;
+
         /** @brief The owning server's snapshot (#932): a directed facade counts into the
          *         link's own counters, so it reports them rather than a fabricated zero. */
         [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override;
@@ -376,7 +382,8 @@ class ws_server_transport_t final : public stream_server_base_t {
     /** @brief The one send body: frame @p parts as one BINARY message, then to every open
      *         peer (@p to null) or to @p to alone, in @p lane, keeping @p value if it waits. */
     void send_record(session_base_t* to, std::span<const std::span<const std::byte>> parts,
-                     const graph::value_t* value, const graph::delivery_lane_t& lane);
+                     const graph::value_t* value, const graph::delivery_lane_t& lane,
+                     std::uint32_t tenancy = 0);
 
     /** @brief A retained send's message laid out on the stack for `send_record`; a value
      *         too wide for that takes the base's copy path. */

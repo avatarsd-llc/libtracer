@@ -391,6 +391,12 @@ class egress_t {
         constexpr void operator()() const noexcept {}
     };
 
+    /** @brief The @p current of a send to whoever holds the peer: every tenancy is current. */
+    struct any_tenant_t {
+        /** @brief Always current. */
+        constexpr bool operator()() const noexcept { return true; }
+    };
+
     /**
      * @brief Put one record on the wire toward @p p, or queue it on its vertex's lane behind
      *        the write in flight.
@@ -418,11 +424,17 @@ class egress_t {
      *               call still holds the writer role, and only once
      *               @ref egress_peer_t::wants_write reports the frame (#2775): a waiter that
      *               disarms and then looks again either sees the frame or is re-armed here.
+     * @param current Whether the peer is still the session the record is for (#2911). Asked
+     *               where the peer cannot be closed and reopened under the answer: holding the
+     *               writer role, or under the lane lock with the peer open. A record for a
+     *               session that has gone, whose slot another session took, is shed. The
+     *               default takes whoever holds the peer.
      */
-    template <class Direct, class Write, class Arm = no_arm_t>
+    template <class Direct, class Write, class Arm = no_arm_t, class Current = any_tenant_t>
     egress_result_t send(egress_peer_t& p, const graph::delivery_lane_t& lane,
                          function_ref_t<egress_frame_t*()> frame, Direct&& direct, Write&& write,
-                         function_ref_t<void()> condemn, Arm&& arm = Arm{}) {
+                         function_ref_t<void()> condemn, Arm&& arm = Arm{},
+                         Current&& current = Current{}) {
         egress_result_t r;
         // The role first, by try-lock and no mutex (#2145): only its holder may read wire_.
         // A closed peer refuses the claim, so it is told apart before anything is built.
@@ -434,7 +446,9 @@ class egress_t {
         // Nothing waits: no lane (the seq_cst read pairs with a pusher's, see drain_owned) and
         // no frame on the wire. A send to a peer that keeps up takes no mutex at all.
         if (own && p.tail_.load(std::memory_order_seq_cst) == nullptr && p.wire_ == nullptr) {
-            const egress_step_t s = std::forward<Direct>(direct)();
+            // The role is held, so the peer cannot close and reopen for another session.
+            const egress_step_t s =
+                current() ? std::forward<Direct>(direct)() : egress_step_t{0, false, true};
             bool held = false;
             if (s.failed) {
                 ++r.shed;
@@ -463,7 +477,8 @@ class egress_t {
         } else {
             f->retain();
             const lanes_guard_t lock(p);
-            if ((lock.role & egress_peer_t::kClosed) != 0)
+            // Open under the lane lock: a close waits for it, so no reopen moves the tenancy.
+            if ((lock.role & egress_peer_t::kClosed) != 0 || !current())
                 ++r.shed;
             else
                 out = admit(p, lane, f, r, lost);
