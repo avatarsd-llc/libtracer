@@ -683,25 +683,28 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
     set_tests_properties(httpd_ws_in_call_reply
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
-    # #2911 — on a FLAT link, a reply goes to the WebSocket session that asked: a READ in the
-    # handler frame, a deferred AWAIT from the application's thread, and none to a session
-    # that took a departed one's slot. A real graph_t + fwd_router_t behind the link.
-    add_executable(httpd_ws_flat_reply_test
-        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_flat_reply_test.cpp"
-        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
-        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
-    target_include_directories(httpd_ws_flat_reply_test PRIVATE
-        "${LIBTRACER_ESP_DIR}/tests/host"
-        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
-        "${LIBTRACER_ESP_DIR}/libtracer/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(httpd_ws_flat_reply_test PRIVATE libtracer)
-    target_link_options(httpd_ws_flat_reply_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
-    libtracer_test_warnings(httpd_ws_flat_reply_test)
-    add_test(NAME httpd_ws_flat_reply COMMAND httpd_ws_flat_reply_test)
-    set_tests_properties(httpd_ws_flat_reply
-        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+    # The router behind the link is the net plane's.
+    if(LIBTRACER_NET_PLANE)
+        # #2911 — on a FLAT link, a reply goes to the WebSocket session that asked: a READ in the
+        # handler frame, a deferred AWAIT from the application's thread, and none to a session
+        # that took a departed one's slot. A real graph_t + fwd_router_t behind the link.
+        add_executable(httpd_ws_flat_reply_test
+            "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_flat_reply_test.cpp"
+            "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+            "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+        target_include_directories(httpd_ws_flat_reply_test PRIVATE
+            "${LIBTRACER_ESP_DIR}/tests/host"
+            "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+            "${LIBTRACER_ESP_DIR}/libtracer/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_link_libraries(httpd_ws_flat_reply_test PRIVATE libtracer)
+        target_link_options(httpd_ws_flat_reply_test PRIVATE
+            "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+        libtracer_test_warnings(httpd_ws_flat_reply_test)
+        add_test(NAME httpd_ws_flat_reply COMMAND httpd_ws_flat_reply_test)
+        set_tests_properties(httpd_ws_flat_reply
+            PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+    endif()
 
     # #961 — the FAN-OUT path's allocation, on the same fake. The instrument is what is
     # new: the suite replaces the WHOLE global operator new/delete family (whole because a
@@ -2766,7 +2769,8 @@ endif()
 
 # #2911 — a terminus reply on a link that carries several sessions (a flat TCP or WS
 # listener, a UDP listener) goes to the session that sent the request.
-if(LIBTRACER_TRANSPORT_TCP OR LIBTRACER_TRANSPORT_WS OR LIBTRACER_TRANSPORT_UDP)
+if(LIBTRACER_NET_PLANE AND (LIBTRACER_TRANSPORT_TCP OR LIBTRACER_TRANSPORT_WS OR
+                             LIBTRACER_TRANSPORT_UDP))
     add_executable(flat_server_reply_test flat_server_reply_test.cpp)
     target_link_libraries(flat_server_reply_test PRIVATE libtracer)
     libtracer_test_warnings(flat_server_reply_test)

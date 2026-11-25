@@ -455,6 +455,12 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "counted exactly by addressing the subscribers through the bus-peer tier.",
         "ns per write, median with range \u00b7 deliveries and resolutions per write"),
     instrument_t(
+        "bench_reply_dispatch.cpp", "framed", (),
+        "Drives a READ through the router's receive path to its reply on the same stub link, "
+        "once on a link with no per-peer identity and once on a link whose delivering session "
+        "has a handle, interleaved; the rows are reply-p2p and reply-flat-handle.",
+        "ns per answered READ, best of rounds"),
+    instrument_t(
         "bench_target_binding.cpp", "inproc", (),
         "Prices `graph::target_binding_t` on the LOCAL target-edge delivery leg: the "
         "same `dispatch_edge_target` in ONE binary, taking its bound `deref_vertex_slot` "
