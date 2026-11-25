@@ -945,20 +945,24 @@ class transport_t {
     virtual void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
                       const graph::delivery_lane_t& lane) {
         (void)lane;  // written in-call: nothing waits, so there is no ring to choose
-        // The #1620 (c) table: a delivery's head is a handful of spans and a value is one or
-        // two links, so the stack array holds the common frame and the overflow block (from
-        // this link's egress store) is the exception, not a per-send allocation.
-        std::array<std::span<const std::byte>, 8> inline_iov;
-        iov_table_t<std::span<const std::byte>> table(inline_iov, egress_source());
-        const std::size_t n = head.size() + value.link_count();
-        std::span<const std::byte>* const iov = table.acquire(n);
-        // Overflow refused: the frame is dropped exactly as the base gather above drops a
-        // refused temporary — a link with a counter overrides one of the two entries.
-        if (iov == nullptr) return;
-        std::size_t i = 0;
-        for (const std::span<const std::byte>& h : head) iov[i++] = h;
-        for (const view::view_t& l : value.links()) iov[i++] = l.bytes();
-        send(std::span<const std::span<const std::byte>>(iov, n));
+        lower_retained(egress_source(), head, value,
+                       [this](std::span<const std::span<const std::byte>> iov) { send(iov); });
+    }
+
+    /**
+     * @brief The retained send to the session @p to names (#2923): a subscription push to a
+     *        session, which reaches that session and no other.
+     *
+     * @p to is the session's handle as `peer_handle_t::bits()`, read off the push edge. The
+     * DEFAULT ignores it and calls the retained @ref send, which is right for a link that is
+     * one session. A link's per-session endpoint checks it where the frame enters the
+     * session's egress, and drops and counts the frame (`dropped_tx`) when another session
+     * has taken the slot since. 0 sends to whichever session holds the slot.
+     */
+    virtual void send_to(std::uint64_t to, std::span<const std::span<const std::byte>> head,
+                         const graph::value_t& value, const graph::delivery_lane_t& lane) {
+        (void)to;
+        send(head, value, lane);
     }
 
     /**
@@ -980,6 +984,33 @@ class transport_t {
      */
     [[nodiscard]] mem::block_source_t& egress_source() const noexcept { return *egress_src_; }
 
+   protected:
+    /**
+     * @brief Lay `head ++ value.links()` out as one gathered frame and hand it to @p sink: the
+     *        copy path of a retained send, shared by the default and by a link whose own table
+     *        is too narrow for the value.
+     *
+     * The #1620 (c) table: a delivery's head is a handful of spans and a value is one or two
+     * links, so the stack array holds the common frame and the overflow block (from @p src)
+     * is the exception, not a per-send allocation. Overflow refused: the frame is dropped
+     * exactly as the base gather drops a refused temporary, and @p sink is not called.
+     */
+    static void lower_retained(
+        mem::block_source_t& src, std::span<const std::span<const std::byte>> head,
+        const graph::value_t& value,
+        function_ref_t<void(std::span<const std::span<const std::byte>>)> sink) {
+        std::array<std::span<const std::byte>, 8> inline_iov;
+        iov_table_t<std::span<const std::byte>> table(inline_iov, src);
+        const std::size_t n = head.size() + value.link_count();
+        std::span<const std::byte>* const iov = table.acquire(n);
+        if (iov == nullptr) return;
+        std::size_t i = 0;
+        for (const std::span<const std::byte>& h : head) iov[i++] = h;
+        for (const view::view_t& l : value.links()) iov[i++] = l.bytes();
+        sink(std::span<const std::span<const std::byte>>(iov, n));
+    }
+
+   public:
     /**
      * @brief Wire this link's egress store — the transport-factory injection point.
      *

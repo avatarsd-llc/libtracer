@@ -417,17 +417,19 @@ void tcp_server_transport_t::send(std::span<const std::span<const std::byte>> he
 void tcp_server_transport_t::send_retained(session_base_t* to,
                                            std::span<const std::span<const std::byte>> head,
                                            const graph::value_t& value,
-                                           const graph::delivery_lane_t& lane) {
+                                           const graph::delivery_lane_t& lane,
+                                           std::uint32_t tenancy) {
     std::array<std::span<const std::byte>, kMaxInlineIov> parts;
     const std::size_t n = retained_parts(parts, head, value);
     if (n > parts.size()) {  // too wide for the stack table: the base's copy path
-        if (to == nullptr)
-            transport_t::send(head, value, lane);
-        else
-            static_cast<session_t*>(to)->endpoint.transport_t::send(head, value, lane);
+        lower_retained(egress_source(), head, value,
+                       [&](std::span<const std::span<const std::byte>> iov) {
+                           send_record(to, iov, nullptr, {}, tenancy);
+                       });
         return;
     }
-    send_record(to, std::span<const std::span<const std::byte>>(parts.data(), n), &value, lane);
+    send_record(to, std::span<const std::span<const std::byte>>(parts.data(), n), &value, lane,
+                tenancy);
 }
 
 void tcp_server_transport_t::send_record(session_base_t* to,
@@ -466,6 +468,14 @@ void tcp_server_transport_t::peer_endpoint_t::send_to(
     if (slot_ != nullptr)
         static_cast<tcp_server_transport_t&>(server_of(*slot_))
             .send_record(slot_, iov, nullptr, {}, peer_handle_t::from_bits(reply_to).generation);
+}
+
+void tcp_server_transport_t::peer_endpoint_t::send_to(
+    std::uint64_t to, std::span<const std::span<const std::byte>> head, const graph::value_t& value,
+    const graph::delivery_lane_t& lane) {
+    if (slot_ != nullptr)
+        static_cast<tcp_server_transport_t&>(server_of(*slot_))
+            .send_retained(slot_, head, value, lane, peer_handle_t::from_bits(to).generation);
 }
 
 void tcp_server_transport_t::peer_endpoint_t::send(std::span<const std::span<const std::byte>> head,

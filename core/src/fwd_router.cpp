@@ -2529,6 +2529,9 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
     // (`sub.return_route`) stays alive for this call even if the slot is concurrently
     // unsubscribed.
     transport_t* out = link;
+    // The session the edge was made with (#2923): its handle, checked where the push enters
+    // that session's egress. A link with no per-session endpoint ignores it.
+    std::uint64_t to = sub.link.peer.bits();
     std::span<const std::byte> dst = route;
     stack_writer_t<6> ref_head;  // the PAIR-chain form's PATH header; empty for the full route
     // The chain delivery (RFC-0029 §7.1, learned with no flag since #2245): consume the
@@ -2549,6 +2552,7 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
     if (e0) {
         if (transport_t* const bound = bound_egress(*e0, sub.caller, graph::acl_right_t::WRITE)) {
             out = bound;
+            to = 0;  // the bound vertex's link is not the edge's session endpoint
             dst = rev.subspan(4u + wire::kPathPairRecordBytes);
             // Six bytes hold either header width: a hop leaves off a list past 0xFFFF
             // (`fwd_frame_view.hpp`), and a peer's own oversized child widens to `LL`.
@@ -2584,7 +2588,7 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
                                                              std::span<const std::byte>(empty_src)};
     // The edge's lane rides along (ADR-0087 §2): a link that queues per peer waits it in
     // that vertex's own ring, so one vertex's backlog never sheds another's.
-    out->send(std::span<const std::span<const std::byte>>(head_iov), val, sub.lane);
+    out->send_to(to, std::span<const std::span<const std::byte>>(head_iov), val, sub.lane);
 }
 
 // --- deferred remote AWAIT (ADR-0084) ------------------------------------------------

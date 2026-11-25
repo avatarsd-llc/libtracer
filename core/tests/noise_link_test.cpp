@@ -259,6 +259,7 @@ class mem_carrier_t final : public tr::net::transport_t {
         send_to(peer_address(), iov);
     }
     /** @brief Log and queue one datagram. */
+    using tr::net::transport_t::send_to;
     void send_to(std::uint64_t to, std::span<const std::span<const std::byte>> iov) {
         datagram_t d{.from = side_, .to = to, .bytes = {}};
         for (const auto s : iov) d.bytes.insert(d.bytes.end(), s.begin(), s.end());

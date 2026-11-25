@@ -855,6 +855,11 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * has gone, or a token that names none, drops the frame and counts it in `dropped_tx`.
      */
     void send_to(std::uint64_t reply_to, std::span<const std::span<const std::byte>> iov) override;
+    /// @cond
+    // The retained send to one session keeps the base's (#2923); hidden from the
+    // API docs, which would list the iovec override twice.
+    using transport_t::send_to;
+    /// @endcond
 
     /**
      * @brief Close the open peer named @p peer, freeing its slot for reuse.
