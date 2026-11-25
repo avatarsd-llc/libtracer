@@ -711,6 +711,9 @@ void slot_server_t::broadcast(std::span<const ::iovec> rec, const graph::value_t
 
 void slot_server_t::send_to(session_base_t& s, std::span<const ::iovec> rec,
                             const graph::value_t* value, const graph::delivery_lane_t& lane) {
+    if constexpr (graph::kFaultInjection) {
+        if (detail::directed_send_hook != nullptr) detail::directed_send_hook();
+    }
     egress_once_t once([&] { return frame_of(rec, value); });
     send_one(s, once, rec, lane);  // a departed session's egress is closed: a counted shed
 }

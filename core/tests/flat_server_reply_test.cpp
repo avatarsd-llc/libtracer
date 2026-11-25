@@ -21,6 +21,7 @@
  * Subscription pushes are not replies and keep their fan-out; they are covered elsewhere.
  */
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -31,6 +32,7 @@
 #include <span>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
@@ -88,6 +90,13 @@ struct frame_sink_t {
     bool wait_count(std::size_t n, std::chrono::milliseconds timeout) {
         std::unique_lock lock(m);
         return cv.wait_for(lock, timeout, [&] { return frames.size() >= n; });
+    }
+    /** @brief True if any frame received so far contains @p bytes. */
+    bool holds(std::span<const std::byte> bytes) {
+        const std::lock_guard lock(m);
+        for (const std::vector<std::byte>& f : frames)
+            if (!std::ranges::search(f, bytes).empty()) return true;
+        return false;
     }
     /** @brief Frames received so far. */
     std::size_t count() {
@@ -209,6 +218,80 @@ void replies_go_to_the_asking_session(const char* kind) {
     check(rx_b.count() == b0, "  after A has left, the write answers nobody else");
 }
 
+#if defined(LIBTRACER_TEST_HAS_TCP)
+/** @brief What the directed-send seam does once: let A leave and C take A's slot. */
+struct slot_reuse_t {
+    std::unique_ptr<tr::net::tcp_transport_t>* a = nullptr;
+    std::unique_ptr<tr::net::tcp_transport_t>* c = nullptr;
+    frame_sink_t* rx_c = nullptr;
+    tr::net::tcp_server_transport_t* server = nullptr;
+    std::uint16_t port = 0;
+    bool fired = false;
+    bool reused = false;
+};
+slot_reuse_t g_reuse;
+
+/**
+ * @brief A deferred AWAIT whose session leaves, and whose slot a new session takes, between the
+ *        reply's resolve and its send: the new session never receives the reply.
+ */
+void slot_reuse_between_resolve_and_send(bool peer_named) {
+    std::printf("tcp listener (%s): a slot reused between a reply's resolve and its send:\n",
+                peer_named ? "peer-named" : "flat");
+    if constexpr (!tr::graph::kFaultInjection) {
+        std::printf("  SKIP: this build binds no fault-injection seams\n");
+        return;
+    } else {
+        node_t n;
+        tr::net::tcp_server_transport_t server(
+            0, tr::net::tcp_server_config_t{.max_peers = 4, .peer_named = peer_named});
+        (void)n.router.attach_link("cli", server);
+        const std::uint16_t port = server.local_port();
+        frame_sink_t rx_a;
+        frame_sink_t rx_c;
+        auto a = std::make_unique<tr::net::tcp_transport_t>("127.0.0.1", port);
+        std::unique_ptr<tr::net::tcp_transport_t> c;
+        a->set_receiver(rx_a);
+        (void)a->start_receiving();
+        check(eventually(
+                  [&] {
+                      a->send(b_read("other"));
+                      return rx_a.wait_count(1, 50ms);
+                  },
+                  3s),
+              "  session A is open and answered");
+        a->send(b_await("sink"));
+        check(eventually([&] { return n.router.pending_awaits() == 1; }, 2s), "  A's AWAIT parks");
+
+        g_reuse = slot_reuse_t{.a = &a, .c = &c, .rx_c = &rx_c, .server = &server, .port = port};
+        tr::net::detail::directed_send_hook = [] {
+            if (std::exchange(g_reuse.fired, true)) return;
+            g_reuse.a->reset();  // A leaves ...
+            *g_reuse.c = std::make_unique<tr::net::tcp_transport_t>("127.0.0.1", g_reuse.port);
+            (*g_reuse.c)->set_receiver(*g_reuse.rx_c);
+            (void)(*g_reuse.c)->start_receiving();
+            // ... and C, answered once, holds A's slot in the next tenancy.
+            const tr::net::peer_handle_t next{tr::wire::pair_t{.index = 0, .generation = 2}};
+            g_reuse.reused = eventually(
+                [&] {
+                    (*g_reuse.c)->send(b_read("other"));
+                    return g_reuse.rx_c->wait_count(1, 50ms) &&
+                           g_reuse.server->peer_link_of(next) != nullptr;
+                },
+                3s);
+        };
+        const std::uint64_t dropped0 = server.drop_stats().dropped_tx;
+        (void)n.graph.write(n.sink, make_value(b_value_u32(3)));
+        tr::net::detail::directed_send_hook = nullptr;
+        check(g_reuse.fired && g_reuse.reused, "  C took A's slot while the reply was in flight");
+        std::this_thread::sleep_for(300ms);
+        // A's reply carries the written value; C's own READs of `/other` never do.
+        check(!rx_c.holds(b_value_u32(3)), "  and C never receives A's reply");
+        check(server.drop_stats().dropped_tx > dropped0, "  the reply is dropped and counted");
+    }
+}
+#endif
+
 #if defined(LIBTRACER_TEST_HAS_UDP)
 /**
  * @brief A UDP listener answers a deferred AWAIT to the source that sent it, even when another
@@ -271,6 +354,10 @@ int main() {
 #if defined(LIBTRACER_TEST_HAS_WS)
     replies_go_to_the_asking_session<tr::net::ws_server_transport_t,
                                      tr::net::ws_client_transport_t>("ws");
+#endif
+#if defined(LIBTRACER_TEST_HAS_TCP)
+    slot_reuse_between_resolve_and_send(false);
+    if constexpr (tr::net::kBusLinks) slot_reuse_between_resolve_and_send(true);
 #endif
 #if defined(LIBTRACER_TEST_HAS_UDP)
     udp_answers_the_awaits_sender();

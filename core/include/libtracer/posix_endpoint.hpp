@@ -97,6 +97,15 @@ inline void (*slot_taken_hook)() = nullptr;
  * Same rules as @ref slot_taken_hook .
  */
 inline void (*slot_teardown_hook)() = nullptr;
+
+/**
+ * @brief Test seam: called by a stream server's send to ONE session once the session is
+ *        resolved and before its frame is offered to the session's egress, with no lock held. A
+ *        test parks the send here to let the session leave and another take its slot.
+ *
+ * Same rules as @ref slot_taken_hook .
+ */
+inline void (*directed_send_hook)() = nullptr;
 }  // namespace detail
 
 /**
