@@ -163,7 +163,10 @@ FOOTPRINT_PINS = {
     # and a send to one session checks its tenancy inside the egress (item 108).
     # 33,641 -> 33,653 B (+12): #2923, a subscription push to a peer-named session checks
     # that session's tenancy (item 108).
-    "WebSocket (httpd server + client link)": 33653,
+    # 33,653 -> 33,463 B (-190, #2908): the httpd link's stall strikes and the per-peer walk on
+    # each refused large draw are deleted; a per-peer cap of one large block replaces them.
+    # Every other row and the RAM stay at main.
+    "WebSocket (httpd server + client link)": 33463,
 }
 
 
