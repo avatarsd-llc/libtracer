@@ -14,10 +14,12 @@
  *   2. a deferred AWAIT from A, answered by a write from the application's thread, goes to A
  *      alone;
  *   3. an AWAIT whose session left before the write is answered to nobody, and a new session
- *      in A's slot does not receive it either.
+ *      in A's slot does not receive it either;
+ *   4. (#2910) a session that leaves with AWAITs parked, and never comes back, has its waiters
+ *      released at its departure, while another session's waiter stays parked.
  *
  * Ablation: `httpd_ws_link_t::send_to` calling `send` (the broadcast) reddens 1 and 2;
- * dropping its handle compare reddens 3.
+ * dropping its handle compare reddens 3; not firing the departure on a flat link reddens 4.
  */
 
 #include <cstddef>
@@ -164,10 +166,51 @@ void replies_go_to_the_asking_session() {
     run_server();
 }
 
+/** @brief #2910: a session that leaves releases its parked AWAITs at once. */
+void a_departed_session_releases_its_awaits() {
+    std::printf("#2910 flat httpd WS link: a session that leaves releases its AWAITs:\n");
+    fake_httpd::instance().close_all();
+    run_server();
+    fake_httpd::instance().clear_sent_frames();
+
+    graph_t g;
+    const auto sink = g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
+    (void)g.write(sink, make_value(b_value_u32(1)));
+    fwd_router_t router(g);
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = false});
+    check(router.attach_link("cli", *link), "the link is a routed child");
+
+    constexpr int kA = 940;
+    constexpr int kB = 941;
+    const std::vector<std::byte> read = b_fwd(fwd_op_t::READ, b_path({"sink"}), b_path({"cli"}));
+    for (const int fd : {kA, kB}) {
+        (void)fake_httpd::instance().open_session(fd);
+        (void)fake_httpd::instance().deliver_frame(fd, read);
+    }
+    run_server();
+    (void)fake_httpd::instance().deliver_frame(kB, b_await());
+    (void)fake_httpd::instance().deliver_frame(kA, b_await());
+    (void)fake_httpd::instance().deliver_frame(kA, b_await());
+    run_server();
+    check(router.pending_awaits() == 3, "A parks two AWAITs and B parks one");
+    fake_httpd::instance().close_session(kA);
+    run_server();
+    check(router.pending_awaits() == 1, "A's departure releases A's waiters, B's stays parked");
+    clear_sends({kB});
+    (void)g.write(sink, make_value(b_value_u32(2)));
+    run_server();
+    check(received(kB) != 0 && router.pending_awaits() == 0, "a write answers B's AWAIT to B");
+
+    fake_httpd::instance().close_all();
+    run_server();
+}
+
 }  // namespace
 
 int main() {
     replies_go_to_the_asking_session();
+    a_departed_session_releases_its_awaits();
     if (g_failures == 0) {
         std::printf("httpd_ws_flat_reply: OK\n");
         return 0;

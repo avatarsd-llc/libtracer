@@ -18,6 +18,10 @@
  *   when another source sent a datagram in between; distinct sources park within the link's
  *   one `kMaxAwaitsPerLink` cap, since a source is not a session.
  *
+ * - **departure (#2910).** A session that leaves with a deferred AWAIT parked, and never
+ *   reconnects, has its waiter released at once, while another session's waiter on the same
+ *   listener stays parked: no write to the vertex and no slot reuse is needed.
+ *
  * Subscription pushes are not replies and keep their fan-out; they are covered elsewhere.
  */
 
@@ -218,6 +222,59 @@ void replies_go_to_the_asking_session(const char* kind) {
     check(rx_b.count() == b0, "  after A has left, the write answers nobody else");
 }
 
+/**
+ * @brief #2910: a session that leaves a flat listener of kind @p Server with a deferred AWAIT
+ *        parked, and never reconnects, has its waiter released at once; the other session's
+ *        waiter on the same listener stays parked and is still answered.
+ */
+template <class Server, class Client>
+void a_departed_session_releases_its_awaits(const char* kind) {
+    std::printf("%s listener: a session that leaves releases its parked AWAITs at once:\n", kind);
+    node_t n;
+    Server server(0);
+    (void)n.router.attach_link("cli", server);
+    const std::uint16_t port = server.local_port();
+
+    frame_sink_t rx_a;
+    frame_sink_t rx_b;
+    auto a = std::make_unique<Client>("127.0.0.1", port);
+    Client b("127.0.0.1", port);
+    a->set_receiver(rx_a);
+    b.set_receiver(rx_b);
+    (void)a->start_receiving();
+    (void)b.start_receiving();
+    check(eventually(
+              [&] {
+                  b.send(b_read("other"));
+                  return rx_b.wait_count(1, 50ms);
+              },
+              3s),
+          "  session B is open and answered");
+    check(eventually(
+              [&] {
+                  a->send(b_read("other"));
+                  return rx_a.wait_count(1, 50ms);
+              },
+              3s),
+          "  session A is open and answered");
+    std::this_thread::sleep_for(200ms);
+    const std::size_t b0 = rx_b.count();
+
+    b.send(b_await("other"));
+    a->send(b_await("sink"));
+    a->send(b_await("sink"));
+    check(eventually([&] { return n.router.pending_awaits() == 3; }, 2s),
+          "  A parks two AWAITs and B parks one");
+    a.reset();  // A leaves and never comes back
+    check(eventually([&] { return n.router.pending_awaits() == 1; }, 2s),
+          "  A's departure releases A's waiters, with no write and no slot reuse");
+    std::this_thread::sleep_for(200ms);
+    check(n.router.pending_awaits() == 1, "  and B's waiter stays parked");
+    (void)n.graph.write(n.other, make_value(b_value_u32(5)));
+    check(rx_b.wait_count(b0 + 1, 2s) && n.router.pending_awaits() == 0,
+          "  a write answers B's AWAIT to B");
+}
+
 #if defined(LIBTRACER_TEST_HAS_TCP)
 /** @brief What the directed-send seam does once: let A leave and C take A's slot. */
 struct slot_reuse_t {
@@ -354,6 +411,14 @@ int main() {
 #if defined(LIBTRACER_TEST_HAS_WS)
     replies_go_to_the_asking_session<tr::net::ws_server_transport_t,
                                      tr::net::ws_client_transport_t>("ws");
+#endif
+#if defined(LIBTRACER_TEST_HAS_TCP)
+    a_departed_session_releases_its_awaits<tr::net::tcp_server_transport_t,
+                                           tr::net::tcp_transport_t>("tcp");
+#endif
+#if defined(LIBTRACER_TEST_HAS_WS)
+    a_departed_session_releases_its_awaits<tr::net::ws_server_transport_t,
+                                           tr::net::ws_client_transport_t>("ws");
 #endif
 #if defined(LIBTRACER_TEST_HAS_TCP)
     slot_reuse_between_resolve_and_send(false);
