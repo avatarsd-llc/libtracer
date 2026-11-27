@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-11-27
+
 ### Added
 
 - **Both WS links report each peer's TX queue peak (#2464).** `link_counters_t::tx_queue_peak`
@@ -23,6 +25,97 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   waiting frames are already counted, the client on the budget draw. Neither
   `link_counters_t` (it fills padding) nor the server session slot grows; the client link
   object grows by 12 bytes.
+- **An application can bind the router's frame observer (#2595).** Set
+  `LIBTRACER_FRAME_OBSERVER_HEADER` (the header that defines it) and
+  `LIBTRACER_FRAME_OBSERVER_TYPE` (its type) in the project's `CMakeLists.txt` before
+  `project()`, and the generated `libtracer/config_override.hpp` includes that header by its
+  absolute path and binds `config_t::frame_observer_t` (#2580) to the type. Before this the
+  generated `esp_config_t` had no slot for it, and an application's own override fragment would
+  have been a second definition. Unset, the generated config is unchanged. Requested by a
+  downstream ESP32-C6 consumer. `examples/full_node` binds a counting observer and checks that
+  it saw frames.
+- **`httpd_ws_link_t` counts READs per session for the core READ budget (#2774).** Each slot
+  keeps its own READ tally, and the link answers the new `transport_t::inbound_tally()` with the
+  delivering session's slot on either `peer_named` setting, so a build that turns
+  `kReadBudget` on refuses one browser tab's READ burst without refusing another tab. It now
+  records the in-flight handle (`inbound_peer()`) on a peer-named link too. With the budget off
+  (the default), no byte and no behaviour changes.
+- **`CONFIG_LIBTRACER_READ_BUDGET`, a menuconfig knob for the per-session READ budget (#2865).**
+  An `int` from 0 to 254, default 0, generated into `libtracer/config.hpp` as `kReadBudget`
+  (#2774), so a build turns the budget on from menuconfig instead of carrying a hand-written
+  config override. The default 0 keeps the budget compiled away: a default image is
+  byte-identical to before.
+
+### Changed
+
+- **`httpd_ws_link_t` reassembles with core's `ws_assembler_t`
+  ([#2483](https://github.com/avatarsd-llc/libtracer/issues/2483)).** Each fragment is received
+  straight into a segment (from `memory.rx` on an owning link, from `memory.state` on a
+  borrowed one) and chained, so a fragmented message on an owning link reaches the rope sink
+  with no copy (it used to take two). A borrowed link, and a fragmented credential, copy the
+  completed message once, as before. Two behaviours change with it:
+  - fragments whose charged cost passes the 32 KiB cap now close the session, as one over-cap
+    frame does and as core does, counted on `rx_dropped_oversize` (they used to drop the
+    message and keep the session);
+  - each fragment is charged its real cost, `ws_assembler_t::kFragmentCost` (about 60 B on
+    esp32c6), not 2 B, so a message cut into a few hundred fragments is refused.
+  The private copy buffer, the duplicate WS header encoder and the copy-into-pool step are
+  deleted.
+- **`tr::esp::static_condvar_t` waits are untimed only; `wait_for` is removed (#2632).** The
+  condition variable #2454 added took a tick-timeout `wait_for`, and #2579 and #2337 removed its
+  last callers: libtracer reads no clock, so a deadline is the application's, driven through its
+  `now`. `wait` and the predicate `wait` are unchanged. A waiter now returns only after a notify
+  has given its semaphore. A take that `xTaskAbortDelay` ends early is retried, so the record no
+  longer carries a `linked` flag.
+- **`tr::esp::static_mutex_t::lock()` retries a take that `xTaskAbortDelay` ends early
+  (#2634).** IDF enables `xTaskAbortDelay`, which can end even a `portMAX_DELAY` semaphore take.
+  `lock()` now returns only once it holds the mutex, as `static_condvar_t`'s wait does (#2632).
+- **The WS client link's send-side drops survive a reconnect, and say why (#2788).**
+  `esp_ws_client_link_t` counted outbound drops in a per-connection counter it reset at every
+  handshake, so the drops that preceded a connection loss vanished with it. They are now counted
+  in the link's drop tally, never reset: `stats().c.tx_drops` and `drop_stats().dropped_tx` are
+  one number, counted since the link was constructed, like `c.rx_drops` already was.
+  The link's `kind_stats()` publishes `dropped_tx_cause` in `:stats.link.<child>`, naming the last
+  drop's cause: `OVERSIZE` (past `tx_bytes`), `LINK_DOWN` (no connection, or it went down with
+  the frame still waiting) or `SHED` (a full lane ring, the `tx_bytes` budget, or a refused
+  `memory.io` block). No write waits since #2787, so there is no write-timeout cause. The link
+  is 4 bytes larger on 32-bit targets (the cause byte, padded), and a send that loses nothing no
+  longer takes an atomic add.
+- **`recv_stack` states how much of the receive task's stack libtracer uses (#2879).** The doc
+  on `esp_ws_client_config_t::recv_stack` now gives libtracer's own measured worst-case use of
+  the calling task's stack on `recv_loop`, per delivery arm: 5,296 B borrowed (`memory.rx`
+  unset) and 6,592 B owning (`memory.rx` set) on esp32c6, branch writes included, as measured
+  by `tools/esp_stack_gate.py`. The platform's frames and an application handler's or
+  subscriber's own frames come on top.
+- **`httpd_ws_link_t`: a quiet session is no longer charged for another session's frames (#2891).**
+  Every frame the link writes is now one `sendmsg`, header and payload together, so a small reply
+  is one TCP segment instead of two. The Nagle switch a flooding drain used to apply is gone: under
+  load from other sessions it was handed to whichever session was read last, quiet ones included,
+  and each of their replies then waited for a delayed ACK. The ADR-0085 drain budget is now counted
+  per session: a session waits for its core to idle only once it has read its share of the budget
+  (the budget divided among the sessions that read in the drain), once the in-call replies written
+  to it reach half lwIP's segment queue or a quarter of its send buffer, or once the whole drain
+  reaches twice the budget. A drain therefore reads at most min(budget x H_N, 2 x budget) plus one
+  frame per session, where H_N = 1 + 1/2 + ... + 1/N for N sessions joining one after another; at
+  the defaults that is about 0.58 s, inside the 1 s minimum task watchdog. A frame that arrives
+  while the link is parked still waits for that park, which ends when the core idles.
+  `CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_FRAMES` is now limited to 0–254 (it was 0–4096), because a
+  session's drain count is one byte. With both budgets set, one count bounds frames and bytes
+  together, so a drain of mixed frames can end slightly before either budget alone would end it;
+  with the byte budget alone, every frame costs at least one unit.
+- **Documentation only (#2899).** `esp_ws_client_link_t`'s egress notes no longer mention a
+  stall verdict: the shared egress module has none, and a stalled write is counted, never a
+  reason to close the connection.
+- **An in-call reply is charged by its bytes or one segment, with no round-up (#2916).** The httpd
+  WebSocket link charged each in-call reply one unit plus one per 180 B against a bound of 8, so a
+  reply of 360–479 B cost 3 and a session parked a reply earlier than lwIP's limits require. A reply
+  now costs the more of one segment's share and its bytes' share of the bound, in 6 B units at
+  IDF's defaults: 200 B replies reach the segment half (8 per drain), 360–479 B replies reach four,
+  and larger ones stop where their bytes reach a quarter of the send buffer (1440 B), as before.
+  Raising lwIP's send buffer raises both halves.
+- **`httpd_ws_link_t` keeps the base retained `send_to` in scope (#2923).** It overrides only the
+  iovec `send_to`, and now declares `using transport_t::send_to;` so the retained overload
+  `transport_t::send_to(to, head, value, lane)` stays callable on it.
 
 ### Fixed
 
@@ -96,6 +189,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `std::__detail::__waiter_pool_base::_S_for::__w` (2,048 B) into `.bss` on esp32c6 in v0.22.0.
   Both now park through core's `tr::park_wait` / `tr::park_wake`; teardown still waits for
   every sender in flight, with no clock and no spin.
+- **`CONFIG_LIBTRACER_NOISE_CRYPTO_PSA` works on ESP-IDF 5.5 (#2076).** The option now also selects
+  `CONFIG_MBEDTLS_POLY1305_C`, which ChaCha20-Poly1305 depends on in ESP-IDF 5.5, and
+  `CONFIG_MBEDTLS_HKDF_C`, which Noise's key derivation needs and 5.5 leaves off. Before, an image
+  with the option on failed mbedTLS's config check there, and once past it every Noise link stayed
+  inert because its PSK state could not be derived. ESP-IDF 6.0 has neither option and is
+  unaffected. A new one-concept example, `examples/concepts/noise_link`, carries one request and its
+  reply over two Noise links on esp32c6 and on the `linux` target.
+- **The built-in `udp`, `tcp` and `ws` factories now get the transport vertex's egress store
+  (#2439).** The component built its `register_builtin_transports` calls by hand, and those calls
+  dropped the `egress_src` argument (#1287 added it to core's copies only). Every chip build, and a
+  `linux`-target build with any transport turned off, therefore wired the process net pool into
+  every link those factories built, whatever `egress_src` the `transport_vertex_t` was constructed
+  with. A node that passed its own egress store, and set no node-wide `link_memory_t::io`, had it
+  ignored. The dispatcher is now generated from core's one template, so the component passes the
+  same arguments a core build does. The transports each build registers are unchanged. A node that
+  passes no egress store sees no change.
+- **ESP links follow the core teardown lifetime rules (#2751).** The WebSocket client's receive
+  thread, the httpd handler and the TWAI receive task count as callback threads. A
+  `shut_down` of the WebSocket client made on a callback thread only shuts down; the
+  destructor joins its receive thread and releases the connection.
+- **The WS client link no longer tears its connection down when the peer stops reading
+  (#2787).** `esp_ws_client_link_t` used to treat a send that could not finish within the write
+  timeout as a dead connection, so under load a peer whose TCP receive window filled lost every
+  wire on the link. A frame is now one `send()` with `MSG_DONTWAIT` on the TCP socket: what the
+  window will not take stays on the wire and leaves on the next send or the recv thread's next
+  poll turn, and frames sent meanwhile wait in their lane's ring or are shed by its arm, counted
+  in `stats().c.tx_drops`. No sending task waits on the peer, and the connection goes down only
+  on a transport error the recv thread reads, the application's frozen-peer check, or teardown.
+  `SO_SNDTIMEO` is no longer set on the dialled socket; `timing().write_timeout_ms` now bounds
+  only the opening handshake's write. PONG and CLOSE replies ride the egress's control lane, so
+  their frames are drawn from `memory.io` like a send's. An empty send now goes out as an empty
+  message instead of being counted as a drop. Teardown no longer waits out a write.
+- **`httpd_ws_link_t` answers a request to the session that sent it (#2911).** On a FLAT link
+  (`peer_named` false), a reply, including a deferred `AWAIT` answered later, now goes to the
+  WebSocket session that asked instead of to every session. A reply whose session has gone, or
+  whose slot a later connection took, is dropped and counted as a send to a departed peer.
 
 ### Changed (breaking)
 
@@ -121,22 +250,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   TX, or an auth stamp still inside the window, is next due (0 = none) instead of a count; the
   closes are counted in `stats_t::peers_frozen` and `stats_t::auth_expired`. A link created
   through the node's transport vertex is reached by `transport_vertex_t::sweep`.
-
-### Changed
-
-- **`httpd_ws_link_t` reassembles with core's `ws_assembler_t`
-  ([#2483](https://github.com/avatarsd-llc/libtracer/issues/2483)).** Each fragment is received
-  straight into a segment (from `memory.rx` on an owning link, from `memory.state` on a
-  borrowed one) and chained, so a fragmented message on an owning link reaches the rope sink
-  with no copy (it used to take two). A borrowed link, and a fragmented credential, copy the
-  completed message once, as before. Two behaviours change with it:
-  - fragments whose charged cost passes the 32 KiB cap now close the session, as one over-cap
-    frame does and as core does, counted on `rx_dropped_oversize` (they used to drop the
-    message and keep the session);
-  - each fragment is charged its real cost, `ws_assembler_t::kFragmentCost` (about 60 B on
-    esp32c6), not 2 B, so a message cut into a few hundred fragments is refused.
-  The private copy buffer, the duplicate WS header encoder and the copy-into-pool step are
-  deleted.
+- **The socket links need `CONFIG_LWIP_NETIF_LOOPBACK=y`, and a full node holds 4 of lwIP's
+  10 sockets, up from 2 (#2147).** On a chip the links now wait on one `poll(2)` wait module
+  (`wait_poll.cpp`), whose doorbell is a loopback socket pair. The component refuses to
+  configure when the poll adapter is built without `CONFIG_LWIP_NETIF_LOOPBACK`, so a project
+  that turned it off must set it back on in its `sdkconfig`. The module and its doorbell take
+  two more of `CONFIG_LWIP_MAX_SOCKETS` (default 10) on a full node: a project that sized
+  that limit to its own sockets plus libtracer's old 2 must raise it by 2. The `full_node` and
+  `concepts/one_link` examples set the option.
+- **The ESP WebSocket links report through the core's link-state notifier (#2147).** The
+  client link (`esp_ws_client_link_t`) and the `httpd` server link fire
+  `transport_t::set_link_state_notifier`'s notifier with `up = false` on every path where they
+  fired the link-down notifier. Code that installs its own notifier on one of these links
+  calls `set_link_state_notifier` and takes a `bool up` parameter. The core changelog has the
+  details.
+- **The WS client's reconnect backoff runs on the application's clock (#2337).**
+  `esp_ws_client_link_t` no longer waits out `CONFIG_LIBTRACER_WS_CLIENT_RECONNECT_BACKOFF_MS`
+  on a timed condition wait; it reads no clock to space its re-dials. It now overrides
+  `transport_t::sweep(now, deadline)`: while the link backs off, the first call stamps the end
+  at `now` plus the backoff and answers it, and a call at or past that time starts the next
+  dial. A link that is down for another reason answers one backoff after `now`, and an up link
+  answers 0. The backoff is read in `now`'s units, so a node passes `now` in milliseconds.
+  `transport_vertex_t::sweep` already calls it on every connection's link. A link whose
+  application never calls `sweep` re-dials after a backoff on its next `send()` instead, and
+  otherwise stays parked; a receive-only client link therefore needs `sweep` driven to recover
+  from a refused or failed dial. The first `sweep` call hands the spacing to the clock for good,
+  so sends no longer end a backoff. A connection that delivered a message and then died still
+  re-dials at once, and teardown still ends a pending backoff at once.
+- **The WebSocket client's `shut_down` waits for no thread (#2813).** On every thread it stores
+  the stop, shuts the connection's socket down (the peer sees the close then), wakes the backoff
+  and condemns a dial in flight, then returns; its one wait is a sender's non-blocking `send()`.
+  `link_up()` reads false once it returns, except that a dial already resolved before the stop may
+  report up until the receive task ends, one poll turn later; that task releases the connection as
+  it ends. The destructor, at the graph's next `collect()`, joins the receive task, so the
+  task's stack stays held until then.
+- **A stalled peer holds at most one large block, and no refused publish closes a session
+  (#2908).** `httpd_ws_link_t::kTxStallStrikes` and `stats_t::tx_stall_strikes` are removed.
+  The link no longer counts other publishes' refused large-class draws against a peer whose
+  last write moved no byte, which a producer loop could reach in microseconds and so close a
+  live peer. Instead each session holds at most `httpd_ws_link_t::kTxLargePerPeer` (1) blocks of
+  the large class: a further large frame for it is refused at its own queue and counted in
+  `stats_t::enqueue_drops`, while every other peer still takes the block. Size the large class
+  as the stalled peers to tolerate + 1 slots. A peer that stopped reading is closed by the
+  application's liveness check (`sweep`) and counted in `stats_t::peers_frozen`; a socket error
+  part-way through a frame still closes the session at once.
 
 ## [0.22.0] — 2026-11-02
 
