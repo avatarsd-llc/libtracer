@@ -346,23 +346,17 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     static constexpr std::size_t kDefaultTxInlineBytes = 1600;
 
     /**
-     * @brief Refused large frames, each while a peer pinned a block of the large class
-     *        after a write its socket took zero bytes of, that strike the peer (#2095).
+     * @brief Blocks of the large size class one session may hold at once, across its wire
+     *        frame and its waiting ones (#2908). Compile-time.
      *
-     * A frame refused at the full queue (@ref kTxWaitDepth) never counts: a healthy peer
-     * subscribed to many vertices fills its queue in one burst while its TCP window is shut,
-     * and striking it would loop it through reconnects (#2195). So a peer that receives only
-     * small frames and whose socket never drains holds its seat, and at most
-     * 1 + @ref kTxWaitDepth frames, until the transport fails it (a failed write strikes).
-     *
-     * The flush writes without waiting, so a full socket is never an error. What this bound
-     * stops is a peer that never drains pinning the large class's blocks, which every other
-     * peer's large frames need. Counted in refused publishes, not time — this link reads no
-     * clock. Any byte the socket takes clears the count. The strike closes the session
-     * through the ordinary strike path (@ref stats_t::tx_stall_strikes counts it,
-     * @ref stats_t::sessions_condemned too). Compile-time.
+     * A large frame offered to a session that already holds this many is refused at that
+     * session's queue and counted in @ref stats_t::enqueue_drops, as a full queue is: the
+     * receiver pays. Every other peer still takes the block, so a peer whose socket takes
+     * nothing pins at most this many blocks, and a class of (stalled peers to tolerate) + 1
+     * slots keeps large frames flowing to the rest. Nothing is closed for it: a peer that
+     * stopped reading is closed by the application's liveness check (@ref sweep).
      */
-    static constexpr std::uint32_t kTxStallStrikes = 64;
+    static constexpr std::size_t kTxLargePerPeer = 1;
     /**
      * @brief Frames that may wait behind one session's wire frame (#2195), in order, across
      *        every lane.
@@ -803,10 +797,6 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
          * @ref enqueue_drops.
          */
         std::uint32_t tx_conflated = 0;
-        /** @brief Sessions closed after @ref kTxStallStrikes refused large frames while they
-         *         pinned the class and their socket took nothing (#2095); never because their
-         *         queue was full (#2195). A subset of @ref sessions_condemned. */
-        std::uint32_t tx_stall_strikes = 0;
         /**
          * @brief Of @ref enqueue_drops, the ones that found the LARGE size class exhausted
          *        (#1566) — the `dropped` noun of `core/STYLE.md` §Introspection for that
@@ -1766,9 +1756,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *         (`mem::exhausted_at_init`, ADR-0083, #1880). Per-peer frames are drawn per
      *         session slot instead (@ref peer_tx_bytes). */
     void alloc_buffers();
-    /** @brief Empty @p frame, dropping its block reference. Needs no link, so it is safe on
+    /** @brief Empty @p frame of session @p s, dropping its block reference and, for a block
+     *         of the large class, @p s's hold on it (#2908). Needs no link, so it is safe on
      *         any task that owns the frame. */
-    static void release_frame(tx_frame_t& frame);
+    static void release_frame(session_t& s, tx_frame_t& frame);
     /** @brief Return @p w, its frame already moved out or released, to where stage took
      *         it from: @p s's spare, or the egress store (#2195). Under `tx_m`. */
     void free_waiting(session_t& s, tx_wait_t* w);
@@ -1786,8 +1777,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * result carried back for a session that has since departed must strike NOBODY, and
      * charging it to whoever inherited the descriptor condemns a stranger (#954).
      */
-    void note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes,
-                        bool stalled = false);
+    void note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes);
 
     /**
      * @brief Resolve @p to to the socket it may be sent on RIGHT NOW, or refuse it
@@ -2249,8 +2239,6 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     void note_rx_pool_refusal(std::size_t len);
     /** @brief See @ref stats_t::tx_conflated. */
     std::atomic<std::uint32_t> tx_conflated_{0};
-    /** @brief See @ref stats_t::tx_stall_strikes. */
-    std::atomic<std::uint32_t> tx_stall_strikes_{0};
     /** @brief See @ref stats_t::peers_frozen. */
     std::atomic<std::uint32_t> peers_frozen_{0};
     /** @brief A frame was left held on a full socket by the last flush (httpd task writes,
@@ -2423,11 +2411,6 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief Re-sample @ref stats_t::tx_large_peak from the class's occupancy — called
      *         from @ref claim_tx_large, the only edge that can raise it. */
     void note_tx_large_peak();
-    /** @brief A refused large-class draw: one stall for every peer that holds a block of the
-     *         class with no byte moved since, and the striking flush once one reaches
-     *         @ref kTxStallStrikes (#2095). Without it a peer that never drains could pin the
-     *         class's last block, and no replacement would ever count against it. */
-    void note_large_pinned();
     /**
      * @brief The handler-admission gate registered as the URI's `user_ctx` — every
      *        dispatch resolves this link through it (see @ref close_gate).
