@@ -27,9 +27,10 @@
  *   8. the RAM: per-link and per-peer costs are reported and bind to the constructor sizes;
  *   9. a producer that posts once and goes quiet: the newest frame still arrives whole, moved
  *      by the link's own events (a write that took bytes, an inbound frame, flush_held);
- *  10. a burst past the full queue into a shut TCP window is counted and never a strike
- *      (#2195), but a peer that pins the large class's only block is struck (refused
- *      draws count against it);
+ *  10. a burst past the full queue into a shut TCP window is counted refusals and the link
+ *      stays up (#2195, #2908); a stalled peer holds at most one block of the large class
+ *      while a healthy peer receives every large frame, and only the application's liveness
+ *      check closes it; a hard socket error mid-frame condemns at once;
  *  11. producers racing session close and reclaim on the httpd task (the TSan lane);
  *  12. latest wins per PATH, never across paths (#2195): two vertices written back to back
  *      on a busy wire both deliver, one path still conflates to its newest value (counted in
@@ -525,14 +526,16 @@ void test_a_quiet_producer_still_delivers_the_newest_frame() {
 }
 
 // ---------------------------------------------------------------------------
-// 10 — a full queue never strikes; pinning the large class does.
+// 10 — a burst keeps the link up; a stalled peer pins one large block; only the
+//      application's liveness check or a socket error closes a peer.
 // ---------------------------------------------------------------------------
 /**
- * @brief More than kTxWaitDepth + kTxStallStrikes frames into a peer whose socket takes
- *        nothing, with a flush between each, are counted refusals and no strike: the peer
- *        stays connected. A slow peer that drains a little at a time is never struck either.
+ * @brief A burst far past the full queue into a peer whose socket takes nothing, with a flush
+ *        between each frame, is counted refusals and nothing else: the peer stays connected,
+ *        and its held frames go out once its window opens. A peer that drains a little at a
+ *        time stays connected too, however long it is slow.
  */
-void test_a_full_queue_never_strikes() {
+void test_a_burst_keeps_the_link_up() {
     std::printf("a burst into a peer whose TCP window is shut:\n");
     auto link = make_link();
     claim(kStalled);
@@ -547,14 +550,13 @@ void test_a_full_queue_never_strikes() {
     // A subtree subscribe or a many-field settings write fans one frame per vertex out in a
     // step, and the first KiB fill the send buffer until the next ACK. The first frame goes on
     // the wire, kTxWaitDepth wait, and every later one is refused, each followed by a flush
-    // whose write moves no byte. None of that is a stall strike (#2195, as #2174 rules).
+    // whose write moves no byte (#2195, as #2174 rules).
     constexpr std::size_t kFill = 1 + httpd_ws_link_t::kTxWaitDepth;
-    constexpr std::size_t kBurst = kFill + httpd_ws_link_t::kTxStallStrikes + 16;
+    constexpr std::size_t kBurst = kFill + 200;
     const std::uint32_t drops_before = link->stats().enqueue_drops;
     for (std::size_t i = 0; i < kBurst; ++i) push(i);
     check_eq(link->stats().enqueue_drops - drops_before, kBurst - kFill,
              "every frame past the queue is a counted refusal");
-    check_eq(link->stats().tx_stall_strikes, 0, "and none of them is a stall strike");
     check_eq(link->stats().sessions_condemned, 0, "no session condemned");
     check(fake_httpd::instance().has_session(kStalled), "the peer stays connected");
     std::size_t census = 0;
@@ -567,39 +569,40 @@ void test_a_full_queue_never_strikes() {
     drain();
     check_eq(frames_to(kStalled).size(), kFill, "its held frames all go out once it drains");
 
-    // A peer that drains a little at a time is not struck, however long it is slow.
+    // A peer that drains a little at a time stays connected, however long it is slow.
     reset(link);
     link = make_link();
     claim(kStalled);
     drain();
     std::vector<send_result_t> slow;
-    for (std::size_t i = 0; i < 4 * httpd_ws_link_t::kTxStallStrikes; ++i) {
+    for (std::size_t i = 0; i < 256; ++i) {
         slow.push_back(send_result_t::TIMEOUT);
         slow.push_back(send_result_t::TIMEOUT);
         slow.push_back(send_result_t::FULL);
         slow.push_back(send_result_t::FULL);
     }
     fake_httpd::instance().set_send_script(kStalled, slow);
-    for (std::size_t i = 0; i < 3 * httpd_ws_link_t::kTxStallStrikes; ++i) push(i);
-    check_eq(link->stats().tx_stall_strikes, 0, "a peer whose socket takes bytes is never struck");
+    for (std::size_t i = 0; i < 192; ++i) push(i);
+    check_eq(link->stats().sessions_condemned, 0, "a slow peer is never condemned");
     check(fake_httpd::instance().has_session(kStalled), "and stays connected");
 
     reset(link);
 }
 
 /**
- * @brief A peer that never drains and holds the large class's ONLY block is struck too: every
- *        later large frame is refused at the draw, so no replacement ever reaches the peer,
- *        and the refused draws count against it instead. Once it is struck the block comes
- *        back and the healthy peer receives large frames again.
+ * @brief A peer whose socket takes nothing holds at most ONE block of the large class (#2908):
+ *        every later large frame offered to it is refused at its own queue and counted, while
+ *        the healthy peer receives every large frame from a class sized as the stalled peers
+ *        plus one. Nothing closes the stalled peer but the application's liveness check, and
+ *        its block is back in the class once it is closed.
  */
-void test_a_peer_pinning_the_last_large_block_is_struck() {
-    std::printf("a peer that pins the large class's only block:\n");
-    auto link = make_link({.tx_large = {.bytes = 4096, .slots = 1}});
-    check_eq(link->tx_large_slot_capacity(), 1, "the large class has one block");
+void test_a_stalled_peer_pins_one_large_block() {
+    std::printf("a stalled peer and the large class:\n");
+    auto link = make_link({.tx_large = {.bytes = 4096, .slots = 2}});
     claim(kStalled);
     claim(kHealthy);
     drain();
+    check_eq(link->sweep(100, 50), 0, "the liveness check stamps both peers");
     fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
     fake_httpd::instance().clear_sent_frames();
     const auto push = [&](std::size_t tag) {
@@ -608,22 +611,49 @@ void test_a_peer_pinning_the_last_large_block_is_struck() {
         link->send(std::span<const std::byte>(frame));
         drain();
     };
-    push(0);  // the class's one block: the healthy peer takes it, the stalled one pins it
-    check_eq(frames_to(kHealthy).size(), 1, "the first large frame reached the healthy peer");
-    check_eq(link->tx_large_in_use(), 1, "and the stalled peer still holds the block");
-    for (std::size_t i = 1; i < httpd_ws_link_t::kTxStallStrikes; ++i) push(i);
-    check_eq(link->stats().tx_large_dropped, httpd_ws_link_t::kTxStallStrikes - 1,
-             "every later large frame was refused at the draw, for every peer");
-    check_eq(link->stats().tx_stall_strikes, 0, "one refused draw short of the bound: not struck");
-    push(httpd_ws_link_t::kTxStallStrikes);
-    check_eq(link->stats().tx_stall_strikes, 1, "the bound reached: the pinning peer is struck");
-    check_eq(link->stats().sessions_condemned, 1, "through the strike path (condemned)");
-    check_eq(link->tx_large_in_use(), 0, "and the block is back in the class");
-    fake_httpd::instance().clear_sent_frames();
-    push(200);
+    constexpr std::size_t kFrames = 200;
+    const std::uint32_t drops_before = link->stats().enqueue_drops;
+    for (std::size_t i = 0; i < kFrames; ++i) push(i);
     const auto healthy = frames_to(kHealthy);
-    check(healthy.size() == 1 && healthy[0].size() == 2000 && healthy[0][0] == std::byte{200},
-          "the healthy peer receives large frames again");
+    check_eq(healthy.size(), kFrames, "the healthy peer received every large frame");
+    check(!healthy.empty() && healthy.back()[0] == std::byte{(kFrames - 1) & 0xFF},
+          "the newest one last");
+    check_eq(link->stats().tx_large_dropped, 0, "the class was never spent");
+    check_eq(link->tx_large_in_use(), 1, "the stalled peer holds one block, no more");
+    check_eq(link->stats().enqueue_drops - drops_before, kFrames - 1,
+             "every later large frame for it is a counted refusal at its own queue");
+    check_eq(link->stats().sessions_condemned, 0, "nothing condemned it");
+    check(fake_httpd::instance().has_session(kStalled), "the stalled peer is still connected");
+    check_eq(link->sweep(110, 105), 0, "past the deadline the liveness check finds it frozen");
+    drain();
+    check(!fake_httpd::instance().has_session(kStalled), "and it is closed on the httpd task");
+    check_eq(link->stats().peers_frozen, 1, "counted in peers_frozen");
+    check_eq(link->tx_large_in_use(), 0, "its block is back in the class");
+    check(fake_httpd::instance().has_session(kHealthy), "the healthy peer is kept");
+    reset(link);
+}
+
+/**
+ * @brief A hard socket error part-way through a frame condemns the session at once: the peer's
+ *        byte stream no longer parses (#951), so there is nothing to wait for.
+ */
+void test_a_hard_error_mid_frame_condemns_at_once() {
+    std::printf("a hard socket error mid-frame:\n");
+    auto link = make_link();
+    claim(kStalled);
+    claim(kHealthy);
+    drain();
+    fake_httpd::instance().set_send_script(
+        kStalled, {send_result_t::SHORT, send_result_t::TIMEOUT, send_result_t::FAIL});
+    const auto a = payload(0x10);
+    link->send(std::span<const std::byte>(a));
+    drain();
+    check(fake_httpd::instance().has_session(kStalled), "the first half is held, not a fault");
+    link->send(std::span<const std::byte>(a));
+    drain();
+    check(!fake_httpd::instance().has_session(kStalled), "the error on its rest condemns it");
+    check_eq(link->stats().sessions_condemned, 1, "counted once");
+    check(fake_httpd::instance().has_session(kHealthy), "the other peer is kept");
     reset(link);
 }
 
@@ -1076,8 +1106,9 @@ int main() {
     test_producers_and_the_drain_race_without_wedging();
     test_the_ram_is_reported_and_binds();
     test_a_quiet_producer_still_delivers_the_newest_frame();
-    test_a_full_queue_never_strikes();
-    test_a_peer_pinning_the_last_large_block_is_struck();
+    test_a_burst_keeps_the_link_up();
+    test_a_stalled_peer_pins_one_large_block();
+    test_a_hard_error_mid_frame_condemns_at_once();
     test_producers_race_close_and_reclaim();
     test_two_vertices_both_deliver();
     test_one_path_still_conflates();

@@ -66,8 +66,8 @@ flowchart LR
 | **ring admission** | a **byte** budget: `try_alloc(retained_bytes)` against the receiving vertex's own source | `vertex_policy_t::ring_source` (`core/include/libtracer/graph.hpp:vertex_policy_t::ring_source`), per vertex, never a shared pool | **arm-dependent** — see §2 | `ring_reserved_bytes()` / `stream_gaps()` (`core/include/libtracer/graph.hpp:graph_t::ring_reserved_bytes`) |
 | **fan-out** | the subscriber snapshot's inline prefix, then a stack frame of `8 * kInlineFanout` views, then one block of the graph's table source | `kInlineFanout`, then the source `graph_t` was given — a wide fan-out sizes it (#1912) | counted shed of the tail past the inline prefix (`fan_out_truncated`) | `graph_t::delivery_drops()` |
 | **flat / egress seams** | the reply-flatten and egress span tables | `fwd_router_t`'s `flat` / `egress` seams — `flatten_backend()`, `egress_backend()` (`core/include/libtracer/fwd_router.hpp:fwd_router_t::flatten_backend`) | counted drop of the reply or the forward hop — **drop, never truncate** | `router_stats_t::flatten_dropped`, `reply_iov_dropped`, `forward_iov_dropped`, `delivery_iov_dropped` |
-| **TX slot** | one frame on the wire per peer and up to `kTxWaitDepth` (8) waiting behind it, in order; on the ESP httpd link only a newer SAMPLE of the same path replaces a waiting frame, and each lane is bounded by its depth (#2195) | references per peer to frames gathered once per send into a refcounted block from the link's `memory.io` store, shared by every destination peer; the first waiting frame's node is in the slot, each further one draws a node from `memory.io` (`integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:httpd_ws_link_t::peer_tx_bytes`) | a replaced SAMPLE or a shed best-effort STREAM frame is counted in `tx_conflated`; a frame offered to a full queue or a full reliable or control lane is refused and counted in `enqueue_drops` (a slow peer holds a bounded backlog of its own, at most 9 frames); a full queue never strikes a peer; one that pins the large class while its socket takes no byte is struck after `kTxStallStrikes` refused large frames (`tx_stall_strikes`); a refused enqueue names the queue it could not enter | `transport_t::drop_stats()`; the link's own richer `stats()` where it has one |
-| **TX payload size classes** (ESP httpd link) | which storage a send's shared block is drawn from: the link's `memory.io` store, an optional bounded LARGE class, or the exceptional tail (#1880) | the link's ctor — `tx_inline_bytes()`, and `tx_large_bytes()` × `tx_large_slot_capacity()` where an integrator declared the second class (#1566, `integrations/esp-idf/libtracer/httpd_ws_link.cpp`) | an exhausted large class is a counted `dropped` — fail-closed, never a heap fallback | `stats().tx_large_dropped` and `stats().tx_large_peak`, against `tx_large_in_use()` |
+| **TX slot** | one frame on the wire per peer and up to `kTxWaitDepth` (8) waiting behind it, in order; on the ESP httpd link only a newer SAMPLE of the same path replaces a waiting frame, and each lane is bounded by its depth (#2195) | references per peer to frames gathered once per send into a refcounted block from the link's `memory.io` store, shared by every destination peer; the first waiting frame's node is in the slot, each further one draws a node from `memory.io` (`integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:httpd_ws_link_t::peer_tx_bytes`) | a replaced SAMPLE or a shed best-effort STREAM frame is counted in `tx_conflated`; a frame offered to a full queue or a full reliable or control lane is refused and counted in `enqueue_drops` (a slow peer holds a bounded backlog of its own, at most 9 frames); a full queue never strikes a peer; a peer already holding `kTxLargePerPeer` (1) blocks of the large class refuses another large frame, counted in `enqueue_drops` (#2908); a refused enqueue names the queue it could not enter | `transport_t::drop_stats()`; the link's own richer `stats()` where it has one |
+| **TX payload size classes** (ESP httpd link) | which storage a send's shared block is drawn from: the link's `memory.io` store, an optional bounded LARGE class, or the exceptional tail (#1880) | the link's ctor — `tx_inline_bytes()`, and `tx_large_bytes()` × `tx_large_slot_capacity()` where an integrator declared the second class (#1566, `integrations/esp-idf/libtracer/httpd_ws_link.cpp`) | an exhausted large class is a counted `dropped` — fail-closed, never a heap fallback; size it as the stalled peers to tolerate + 1 slots, since each peer holds at most one block (#2908) | `stats().tx_large_dropped` and `stats().tx_large_peak`, against `tx_large_in_use()` |
 
 Two reading rules for this table:
 
@@ -168,9 +168,11 @@ queue or shed — and what every other stage does instead.
   waiting frame (counted in `tx_conflated`), and a frame offered to its full queue is refused
   and counted. A held frame resumes on the link's own events (a
   flush that still moves bytes re-posts itself; the next post, an inbound frame, or the app's
-  `flush_held()` resumes it), never on a timer, and a full queue never strikes a peer. One that
-  pins the large class while its socket takes no byte is struck after `kTxStallStrikes`
-  refused large frames. In-call replies bypass the slots.
+  `flush_held()` resumes it), never on a timer, and a full queue never strikes a peer. A peer
+  holds at most `kTxLargePerPeer` (1) block of the large class; a further large frame for it is
+  refused and counted, while every other peer takes the block (#2908). A peer that stopped
+  reading is closed only by the application's liveness check (`sweep`, #2198). In-call replies
+  bypass the slots.
 - **Designated pressure point**: **two**, one per flow — the receiving vertex's ring on the
   best-effort arm for sensor streams, the in-call reply on the reliable arm for control.
 - **Everything else refuses**: the rx arena answers `TLV_NESTING_TOO_DEEP`, the value store
@@ -213,7 +215,8 @@ Four sizing rules follow. §3.1 is where an embedder should apply them:
    `stats_t::tx_conflated` (a path fed faster than its peer drains) and `stats_t::enqueue_drops`
    (`integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:httpd_ws_link_t::stats_t`),
    both link totals. A climbing `enqueue_drops` means a peer fed more frames than its queue
-   holds (`tx_stall_strikes` counts the ones that never drain), and nobody else waits for it.
+   holds, and nobody else waits for it. A peer that never drains is closed by the application's
+   liveness check (`sweep`) and counted in `stats_t::peers_frozen`.
 2. **The seam budgets are not the bound; the heap and the task stacks are.** The flat seam never
    went past 4.2 % of a 24 KiB reservation. Applying §5 literally (`capacity = peak + margin`)
    would size it near 2 KiB and give about 22 KiB back to a heap whose whole idle surplus is
@@ -225,8 +228,10 @@ Four sizing rules follow. §3.1 is where an embedder should apply them:
    `tx_inline_bytes()`, plus any large class; each admitted session adds
    `httpd_ws_link_t::peer_tx_bytes()` (one wire frame and one in-slot waiting node). A
    stalled peer draws up to 7 more 16 B nodes from `memory.io` and pins up to 9 shared blocks
-   (1 on the wire + 8 waiting), which with the large class enabled can be the whole class
-   (`tx_large_slots`); budget that per peer, not 2.
+   (1 on the wire + 8 waiting); budget that per peer, not 2. At most one of them is a block of
+   the large class (`httpd_ws_link_t::kTxLargePerPeer`, #2908), so **size the large class as
+   the stalled peers to tolerate + 1 slots** (`tx_large.slots`): each stalled peer pins one,
+   and the one left over carries every healthy peer's newest large frame, which they share.
 3. **Budget the transient heap, not the idle heap.** Steady-state RAM was never the constraint.
    The constraint was a working-set dip of about 56 KiB under saturating ingest, against about
    80 KiB free. A deployment sized from idle free heap passes every static audit and still fails
