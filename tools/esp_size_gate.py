@@ -166,7 +166,9 @@ FOOTPRINT_PINS = {
     # 33,653 -> 33,463 B (-190, #2908): the httpd link's stall strikes and the per-peer walk on
     # each refused large draw are deleted; a per-peer cap of one large block replaces them.
     # Every other row and the RAM stay at main.
-    "WebSocket (httpd server + client link)": 33463,
+    # 33,463 -> 33,471 B (+8, #2916): an in-call reply is charged the more of one segment and
+    # its bytes, with no round-up. Every other row and the RAM stay at main.
+    "WebSocket (httpd server + client link)": 33471,
 }
 
 

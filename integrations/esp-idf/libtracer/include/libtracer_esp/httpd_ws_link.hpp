@@ -1571,7 +1571,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * The drain is counted per SESSION (#2891): the session @p sess_ctx (httpd's
      * `req->sess_ctx`) waits only once it has read its share of the budget (the budget divided
      * among the sessions that read in the drain), once the in-call replies written to it reach
-     * half lwIP's segment queue or a quarter of its send buffer (ADR-0085 §7: while this task
+     * half lwIP's segment queue or a quarter of its send buffer, each reply charged the more of
+     * one segment and its bytes, with no round-up (#2916) (ADR-0085 §7: while this task
      * holds unread ingress, lwIP drops the peer's data-bearing segments and the ACKs they
      * carry, so more replies would wait for an ACK only this task can release), or once the
      * whole drain reaches twice the budget. No session is charged for another session's

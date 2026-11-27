@@ -387,9 +387,35 @@ constexpr std::size_t kRxDrainTxBytes = kTcpSndBuf / 4;
 constexpr std::size_t kRxDrainTxReplies = std::min<std::size_t>(kTcpSndQueueLen / 2, 254);
 static_assert(kRxDrainTxReplies >= 1, "a reply bound of zero would park every frame");
 
-/** @brief Reply bytes counted as one more reply, so that one tally bounds both the segments
- *         and the bytes: @ref kRxDrainTxReplies of these are @ref kRxDrainTxBytes. */
-constexpr std::size_t kRxDrainTxReplyBytes = kRxDrainTxBytes / kRxDrainTxReplies;
+/**
+ * @brief The reply bound in one byte (#2916): a session's in-call replies are charged in units
+ *        of @ref kRxDrainTxUnitBytes, at least @ref kRxDrainTxSegmentUnits per reply, and its
+ *        drain is spent at @ref kRxDrainTxUnits.
+ *
+ * A reply costs `max(kRxDrainTxSegmentUnits, bytes / kRxDrainTxUnitBytes)`: one segment's share
+ * of the segment half, or its bytes' share of the byte half, whichever is more, so each half
+ * ends the drain where it would alone (8 one-segment replies, or 1440 B, at IDF's defaults:
+ * 6 B units, 30 per segment, 240 per drain). A reply past the MSS is several segments, but its
+ * bytes already cost more than that many segments' units, so the floor is the only segment term.
+ * The bytes round DOWN, where rounding up parked a session a reply early. What a drain writes
+ * to one session is therefore the byte half, plus the one reply that crossed it, plus under one
+ * unit per earlier reply: the bound is checked when the session next reads (`pace_rx`) and a
+ * reply is charged after it is written, so the reply that crosses the bound is always sent. That
+ * one-reply overshoot is as old as the bound. At the defaults: 1916 B for 479 B replies, 2048 B
+ * for 1 KiB ones. The unit is the smallest that fits the one-byte tally (below 255 with one
+ * reply's charge to spare).
+ */
+constexpr std::size_t kRxDrainTxUnitBytes =
+    (kRxDrainTxBytes / kRxDrainTxReplies + 254 / kRxDrainTxReplies - 1) / (254 / kRxDrainTxReplies);
+constexpr std::size_t kRxDrainTxUnits = kRxDrainTxBytes / kRxDrainTxUnitBytes;
+constexpr std::size_t kRxDrainTxSegmentUnits = kRxDrainTxUnits / kRxDrainTxReplies;
+static_assert(kRxDrainTxUnits <= 254 && kRxDrainTxSegmentUnits >= 1,
+              "the reply bound fits a session's one-byte tally");
+// IDF's defaults (TCP_SND_BUF 5760, TCP_SND_QUEUELEN 16), which the host build binds too.
+static_assert(kTcpSndBuf != 5760 || kTcpSndQueueLen != 16 ||
+                  (kRxDrainTxUnitBytes == 6 && kRxDrainTxUnits == 240 &&
+                   kRxDrainTxSegmentUnits == 30),
+              "6 B reply units, 30 per segment, 240 per drain");
 
 /**
  * @brief A drain's budget in UNITS (@ref drain_units): one per frame, plus payload units, so
@@ -451,7 +477,7 @@ constexpr std::size_t kRxDrainLinkUnits = 2 * kRxDrainUnits;
 struct drain_tally_t {
     std::uint16_t epoch = 0;  /**< @brief Low half of the idle epoch of the drain counted. */
     std::uint8_t units = 0;   /**< @brief Frame and payload units read (saturating). */
-    std::uint8_t replies = 0; /**< @brief In-call replies written to it (saturating). */
+    std::uint8_t replies = 0; /**< @brief Its in-call replies, in reply units (saturating). */
 };
 /** @brief What a @ref drain_tally_t becomes when the build does not pace: no byte. */
 struct no_drain_tally_t {};
@@ -2469,7 +2495,7 @@ void httpd_ws_link_t::pace_rx(void* sess_ctx, std::size_t frame_bytes) {
     // The drain is the run of frames since this core last idled; an epoch that moved since
     // starts a new one. A session waits only once it has read ITS SHARE of the budget, the
     // budget divided among the sessions that have read in this drain, or once its own in-call
-    // replies reach what lwIP can hold unacknowledged for it (kRxDrainTxReplies), or once the
+    // replies reach what lwIP can hold unacknowledged for it (kRxDrainTxUnits), or once the
     // whole drain reaches twice the budget (kRxDrainLinkUnits, which only sessions joining one
     // after another reach). So no session is charged for another session's frames, and a
     // drain reads at most min(U * H_N, 2 U) units plus one frame per session. A task that
@@ -2489,10 +2515,9 @@ void httpd_ws_link_t::pace_rx(void* sess_ctx, std::size_t frame_bytes) {
     // (httpd_parse.c httpd_req_new -> httpd_ws_get_frame_type), so a handler that returns
     // without the payload desynchronises the stream.
     const auto now = static_cast<std::uint16_t>(epoch);
-    const bool spent =
-        s.drain.epoch == now && rx_drain_epoch_ == now &&
-        (std::size_t{s.drain.units} * rx_drain_sessions_ >= kRxDrainUnits ||
-         s.drain.replies >= kRxDrainTxReplies || rx_drain_units_ >= kRxDrainLinkUnits);
+    const bool spent = s.drain.epoch == now && rx_drain_epoch_ == now &&
+                       (std::size_t{s.drain.units} * rx_drain_sessions_ >= kRxDrainUnits ||
+                        s.drain.replies >= kRxDrainTxUnits || rx_drain_units_ >= kRxDrainLinkUnits);
     if (spent) {
         rx_drain_waits_.fetch_add(1, std::memory_order_relaxed);
         gate.waiters.fetch_add(1, std::memory_order_seq_cst);
@@ -3668,7 +3693,8 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
         if (err == ESP_OK) {
             join_drain(*to.slot, rx_drain_epoch_);
             to.slot->drain.replies =
-                saturating_add(to.slot->drain.replies, 1 + total / kRxDrainTxReplyBytes);
+                saturating_add(to.slot->drain.replies,
+                               std::max(kRxDrainTxSegmentUnits, total / kRxDrainTxUnitBytes));
         }
     note_tx_result(to, err == ESP_OK, total);
 }
