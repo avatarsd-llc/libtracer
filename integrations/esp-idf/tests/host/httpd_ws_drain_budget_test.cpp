@@ -430,6 +430,7 @@ void test_a_quiet_session_never_waits_for_a_flood() {
 // 10 — sessions that join one after another are stopped by the link-wide ceiling: twice
 //      the budget, whatever their shares add up to (#2891).
 // ---------------------------------------------------------------------------
+
 void test_sessions_joining_in_turn_stop_at_twice_the_budget() {
     constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
     std::printf("sessions bursting one after another park at twice the budget:\n");
@@ -615,6 +616,56 @@ void test_in_call_reply_bytes_end_a_drain() {
     finish(std::move(link));
 }
 
+/**
+ * @brief Where a drain of in-call replies parks, by reply size (#2916): each reply is charged
+ *        its bytes in exact units with a one-segment floor, so the byte half of the bound
+ *        (a quarter of the send buffer, 1440 B on the host's lwIP defaults) and the segment
+ *        half (8 replies) each end the drain where they would alone, with no coarse round-up.
+ */
+void test_reply_sizes_park_where_the_bound_says() {
+    std::printf("in-call replies park where the segment or byte half of the bound ends:\n");
+    struct case_t {
+        std::size_t reply;  /**< @brief Bytes per in-call reply. */
+        std::size_t frames; /**< @brief Frames read, each answered, before the drain parks. */
+    };
+    // 1440 B per drain and 8 segments: a small reply is one segment; from 240 B up the bytes
+    // decide. 360 and 479 B fit four times (1440 and 1916 B are both past the bound only at
+    // the fourth); 480 B is exactly a third. The old charge (one per reply plus one per 180 B)
+    // parked 200 B replies at four and 360-479 B replies at three.
+    constexpr case_t kCases[] = {{16, 8},  {200, 8},  {360, 4}, {479, 4},
+                                 {480, 3}, {1024, 2}, {1440, 1}};
+    int fd = 850;
+    for (const case_t& c : kCases) {
+        auto link = fresh_link(fd);
+        (void)fake_httpd::instance().run_pending();
+        replier_t app;
+        link->set_peer_receiver(app);
+        tr::net::transport_t* const peer = only_peer(*link);
+        if (peer == nullptr) {
+            check(false, "the peer resolved to a directed endpoint");
+            finish(std::move(link));
+            return;
+        }
+        const std::vector<std::byte> reply(c.reply, std::byte{0x7E});
+        app.arm(peer, std::span<const std::byte>(reply));
+        fake_httpd::instance().clear_sent_frames();
+        g_payload_reads.store(0);
+        ingress_t in(fd, c.frames + 1, 8);
+        char what[96];
+        std::snprintf(what, sizeof(what), "%zu B replies: the drain parks after %zu frames",
+                      c.reply, c.frames);
+        check(wait_until([&] { return parked_after(c.frames); }), what);
+        // The core idles as often as the drain needs, so a case that parked early still ends.
+        check(wait_until([&] {
+                  (void)fake_httpd::run_idle_hooks();
+                  return in.delivered() == c.frames + 1;
+              }),
+              "  then finishes");
+        finish(std::move(link));
+        ++fd;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 5 — the hook could not be installed: the link must NOT pace (it would wait forever).
 // ---------------------------------------------------------------------------
@@ -675,6 +726,7 @@ int main(int argc, char** argv) {
         test_park_sends_each_frame_once();
         test_a_quiet_session_never_waits_for_a_flood();
         test_in_call_reply_bytes_end_a_drain();
+        test_reply_sizes_park_where_the_bound_says();
         test_sessions_joining_in_turn_stop_at_twice_the_budget();
         test_an_in_call_reply_counts_for_a_stale_destination();
         test_a_session_closing_mid_drain();
