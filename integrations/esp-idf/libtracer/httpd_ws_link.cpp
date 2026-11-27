@@ -3714,6 +3714,17 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
                                std::max(kRxDrainTxSegmentUnits, total / kRxDrainTxUnitBytes));
         }
     note_tx_result(to, out, total);
+    // Not taken within the bound is a stall, a whole reply out ends one (#2921), so the next
+    // reply to a stalled session does not wait (send_now). Under tx_m for the liveness check:
+    // a stalled session owes bytes, and the reply that ends the stall is a byte that moved.
+    // No count of timeouts closes anything; a stopped peer closes through the application's
+    // `sweep`. The session is the one live_fd vouched for: only this task reclaims a slot, and
+    // only it writes the flag, so its read needs no lock.
+    const bool stall = out == tx_outcome_t::HELD;
+    if (out == tx_outcome_t::FAILED || to.slot->tx_stalled == stall) return;
+    const std::lock_guard lock(to.slot->tx_m);
+    to.slot->tx_stalled = stall;
+    to.slot->tx_moved |= !stall;
 }
 
 void httpd_ws_link_t::queue_send(const session_ref_t& to, std::span<const std::byte> frame) {
@@ -3867,9 +3878,9 @@ void httpd_ws_link_t::note_tx_result(const session_ref_t& to, tx_outcome_t out, 
     slot_name_t peer;
     char addr[kEndpointChars] = {};
     int fd = -1;
-    session_t* const slot = to.slot;
     {
         const std::lock_guard lock(peers_m_);
+        session_t* const slot = to.slot;
         if (slot == nullptr) return;
         // The result belongs to the session the frame was gathered for or to nobody. The
         // old fd-keyed scan handed it to whichever session held the descriptor by the time
@@ -3886,27 +3897,13 @@ void httpd_ws_link_t::note_tx_result(const session_ref_t& to, tx_outcome_t out, 
         } else {
             ++slot->st.tx_drops;  // "did anything get lost toward this peer?"
         }
-        if (failed) {
-            peer = slot->name;
-            std::memcpy(addr, slot->endpoint_str, sizeof(addr));
-            fd = slot->fd;
-            // A hard socket error is a socket that is gone: condemned at once (#2921), UNDER
-            // the lock that reached the verdict, so the fan-out stops feeding it from here.
-            slot->dead = true;
-        }
-    }
-    // Not taken within the bound is a stall, a whole frame out ends one (#2921). Under tx_m,
-    // after peers_m_, for the liveness check: a stalled session owes bytes, and the frame that
-    // ends the stall is a byte that moved. No count of timeouts closes anything; a stopped
-    // peer closes through the application's `sweep`. Only the httpd task writes the flag and
-    // the slot is not reclaimed but on this task, so the read before the lock is its own.
-    if (!failed) {  // the drop itself is already logged by its writer
-        const bool stall = out == tx_outcome_t::HELD;
-        if (slot->tx_stalled == stall) return;
-        const std::lock_guard lock(slot->tx_m);
-        slot->tx_stalled = stall;
-        slot->tx_moved |= !stall;
-        return;
+        if (!failed) return;  // the drop itself is already logged by its writer
+        peer = slot->name;
+        std::memcpy(addr, slot->endpoint_str, sizeof(addr));
+        fd = slot->fd;
+        // A hard socket error is a socket that is gone: condemned at once (#2921), UNDER the
+        // lock that reached the verdict, so the fan-out stops feeding it from here.
+        slot->dead = true;
     }
     // BOTH names, because after #994 neither one alone identifies the peer: `p<slot>~<gen>` is
     // what an operator can address the session by, and `<ip>:<port>` is what tells them
@@ -4218,14 +4215,17 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
             // A stalled session can be frozen with nothing held: what it owes is the reply its
             // socket did not take (#2921), so the verdict is read before the held test.
             frozen = std::exchange(s->tx_frozen, false);
-            if (!f->held() && !frozen) return progress;
+            if (!f->held()) {
+                if (!frozen) return progress;
+                f->gen = s->gen;  // nothing held: the verdict names the session itself
+            }
         }
         if (superseded.held()) note_tx_conflated(session_ref_t{s, superseded.gen});
         release_frame(*s, superseded);
         // The frame names the session it was staged for (#954), and the server's own verdict
         // is the second opinion. A skip is not a send result: it feeds the cumulative tally,
         // never the stall (note_tx_skip).
-        const session_ref_t to{s, f->held() ? f->gen : s->gen};
+        const session_ref_t to{s, f->gen};
         const int fd = live_fd(to);
         if (h == nullptr || fd < 0 || httpd_ws_get_fd_info(h, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
             release_frame(*s, *f);

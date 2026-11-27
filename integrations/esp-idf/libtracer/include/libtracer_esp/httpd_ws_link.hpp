@@ -1754,6 +1754,9 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * released inside this call and posted nowhere. A frame a flush left part-way on the
      * same socket is finished first (@ref finish_wire).
      *
+     * A reply the socket took nothing of within the bound marks the session stalled, and a
+     * whole one ends the stall (#2921): a stalled session's replies do not wait.
+     *
      * @param to  The destination session, resolved and identity-checked by the caller.
      * @param iov The reply, as the rope's segments — sent as ONE WebSocket frame.
      */
@@ -1775,14 +1778,14 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     void free_waiting(session_t& s, tx_wait_t* w);
 
     /**
-     * @brief Per-session SEND accounting (takes @ref peers_m_ and then the session's
-     *        `tx_m` — callers must hold neither): @p out FAILED condemns the session at
-     *        once; HELD (nothing taken within the bound) is a counted drop that marks it
-     *        stalled; SENT ends a stall (#2921).
+     * @brief Per-session SEND accounting (takes @ref peers_m_ — callers must not hold
+     *        it): @p out FAILED condemns the session at once; HELD (nothing taken within
+     *        the bound) is a counted drop and nothing more (#2921).
      *
-     * No count of timeouts closes a session: a stalled one's replies are written without
-     * waiting (@ref send_now), and one that stays stopped owes bytes to the application's
-     * liveness check (@ref sweep), which closes it. Fed by every send that names a peer;
+     * No count of timeouts closes a session: @ref send_in_call marks a session whose reply
+     * was not taken stalled, its next replies are written without waiting (@ref send_now),
+     * and one that stays stopped owes bytes to the application's liveness check
+     * (@ref sweep), which closes it. Fed by every send that names a peer;
      * it is the peer's OWN socket that did not accept the bytes, so the destination is the
      * culprit by construction (#835). Keyed by @ref session_ref_t and not by fd: a
      * result carried back for a session that has since departed must strike NOBODY, and
