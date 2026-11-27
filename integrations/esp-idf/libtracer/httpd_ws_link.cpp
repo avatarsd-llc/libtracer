@@ -3398,7 +3398,7 @@ bool httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
     // lane, a full queue with nothing of this lane waiting, or a refused node draw refuses the
     // NEW frame — the link's counted drop. A slow peer holds no more
     // than its own few frames and no part of the httpd task that another peer needs. Neither
-    // a replacement nor a refusal is a stall strike: a healthy peer subscribed to many
+    // a replacement nor a refusal closes anything: a healthy peer subscribed to many
     // vertices fills its queue in one burst while its TCP window is shut for an RTT, and
     // striking it would loop it through reconnects (#2174 rules the same).
     session_t* const s = to.slot;
@@ -3434,12 +3434,14 @@ bool httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
         // the tail, which keeps the STREAM's own arm even when it is the peer's queue that is
         // full); else refuse.
         // The large band's cap (#2908): a session already holding kTxLargePerPeer blocks of
-        // the class takes no more, and the frame falls to the refusal below, counted as a full
-        // queue is. Every other peer still takes the block, so a peer whose socket takes nothing
-        // pins this many and no more. A large block is only ever gathered for the control lane,
-        // which refuses rather than replaces, so the cap loses no newer value of a path.
-        const bool over = blk->large_busy != nullptr &&
-                          s->tx_large.load(std::memory_order_relaxed) >= kTxLargePerPeer;
+        // the class appends no more. Every other peer still takes the block, so a peer whose
+        // socket takes nothing pins this many and no more. A frame over the cap may still take
+        // the place of its lane's oldest frame when that one holds a large block too (a
+        // retained SAMPLE or STREAM whose header and head pass the inline capacity): the old
+        // block lets go as the new one is held, so the count stays. Otherwise it falls to the
+        // refusal below, counted as a full queue is. Bitwise, so the small band pays one test.
+        const bool large = blk->large_busy != nullptr;
+        const bool over = large & (s->tx_large.load(std::memory_order_relaxed) >= kTxLargePerPeer);
         tx_wait_t* node = nullptr;
         if (!over && count < cap && waiting < kTxWaitDepth) {
             void* raw = &s->tx_spare;  // the in-slot spare: one waiting frame draws nothing
@@ -3450,7 +3452,8 @@ bool httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
             node = raw != nullptr ? new (raw) tx_wait_t : nullptr;
             refused = node == nullptr;
             waiting += !refused;
-        } else if (policy != tx_frame_t::kRefuse && at != nullptr) {
+        } else if (policy != tx_frame_t::kRefuse && at != nullptr &&
+                   (!over | ((*at)->frame.blk->large_busy != nullptr))) {
             tx_wait_t* const w = *at;
             old = std::exchange(w->frame, fresh);
             if (policy == tx_frame_t::kShed && w != s->tx_tail) {  // the tail stays in place
@@ -3461,8 +3464,7 @@ bool httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
             refused = full = true;
         }
         blk->refs.fetch_add(static_cast<std::uint32_t>(!refused), std::memory_order_relaxed);
-        if (!refused && blk->large_busy != nullptr)
-            s->tx_large.fetch_add(1, std::memory_order_relaxed);
+        if (large) s->tx_large.fetch_add(!refused, std::memory_order_relaxed);
         if (node != nullptr) {
             node->frame = fresh;
             node->next = nullptr;

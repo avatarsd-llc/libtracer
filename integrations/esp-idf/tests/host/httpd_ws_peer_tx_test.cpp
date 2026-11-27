@@ -593,8 +593,9 @@ void test_a_burst_keeps_the_link_up() {
  * @brief A peer whose socket takes nothing holds at most ONE block of the large class (#2908):
  *        every later large frame offered to it is refused at its own queue and counted, while
  *        the healthy peer receives every large frame from a class sized as the stalled peers
- *        plus one. Nothing closes the stalled peer but the application's liveness check, and
- *        its block is back in the class once it is closed.
+ *        plus one. Nothing closes the stalled peer but the application's liveness check, its
+ *        block is back in the class once it is closed, and its slot's next tenant starts with
+ *        no hold.
  */
 void test_a_stalled_peer_pins_one_large_block() {
     std::printf("a stalled peer and the large class:\n");
@@ -630,6 +631,19 @@ void test_a_stalled_peer_pins_one_large_block() {
     check_eq(link->stats().peers_frozen, 1, "counted in peers_frozen");
     check_eq(link->tx_large_in_use(), 0, "its block is back in the class");
     check(fake_httpd::instance().has_session(kHealthy), "the healthy peer is kept");
+    // The freed slot's next tenant starts with no hold: its socket takes nothing either, and it
+    // still takes a large frame, so the departed session's count went with it.
+    claim(kStalled);
+    drain();
+    bool slot_zero_again = false;
+    link->enumerate_peers([&](std::string_view p) { slot_zero_again |= p == "p0~2"; });
+    check(slot_zero_again, "the new tenant is slot 0's second session (p0~2)");
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+    const std::uint32_t drops_after = link->stats().enqueue_drops;
+    push(250);
+    check_eq(link->stats().enqueue_drops - drops_after, 0,
+             "the slot's new tenant takes a large frame");
+    check_eq(link->tx_large_in_use(), 1, "and holds that one block");
     reset(link);
 }
 
