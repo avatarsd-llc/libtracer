@@ -3244,16 +3244,14 @@ httpd_ws_link_t::slot_name_t httpd_ws_link_t::reclaim_slot(session_t* slot, peer
 }
 
 void httpd_ws_link_t::notify_departed(peer_handle_t handle, std::string_view peer) {
-    // Peer-named mode evicts just the departed peer's edges. A FLAT link has ONE routing
-    // identity for every peer it carries — the registered child NAME — so its only seam is
-    // the whole link, and firing that on a MID-LIFE close would evict the surviving tabs'
-    // edges along with the departed one's. It waits for the last open session (#889) —
-    // the same fork slot_server_t::teardown_slot takes, for the same reason.
-    if (peer_named_) {
-        notify_peer_down(handle, peer);
-    } else if (!any_open_session()) {
-        notify_down();
-    }
+    // Every session's departure goes through the facet's departure slot: peer-named mode
+    // evicts just the departed peer's edges, and a FLAT link releases the router's state for
+    // that session alone (#2910). The whole link goes down only in flat mode: it has ONE
+    // routing identity for every peer it carries, so reporting it on a MID-LIFE close would
+    // evict the surviving tabs' edges along with the departed one's. It waits for the last
+    // open session (#889), the same fork slot_server_t::teardown_slot takes.
+    notify_peer_down(handle, peer);
+    if (!peer_named_ && !any_open_session()) notify_down();
 }
 
 void httpd_ws_link_t::notify_arrived(peer_handle_t handle, std::string_view peer) {

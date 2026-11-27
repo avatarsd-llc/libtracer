@@ -518,6 +518,16 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      */
     [[nodiscard]] bool peer_named() const noexcept override { return peer_named_; }
 
+    /**
+     * @brief A FLAT link's session-departure notifier (#2910): fired once per departed
+     *        session that completed its handshake, as @ref notify_departed runs. Stored in the
+     *        bus facet's departure slot, which a flat link never fills otherwise; ignored on a
+     *        peer-named link, whose departures go through `set_peer_down_notifier`.
+     */
+    void set_session_down_notifier(session_down_fn_t fn, void* ctx) noexcept override {
+        if (!peer_named_) store_peer_down(fn, ctx);
+    }
+
     /** @brief Visit the currently-open peers' names, `<ip>:<port>`. */
     void enumerate_peers(const peer_visitor_t& visit) const override;
 

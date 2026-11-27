@@ -990,6 +990,17 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
     // once, #2306) is evicted below, once the control lock is let go: the eviction takes
     // graph locks, the notifier's own discipline.
     const bool gone_already = link.set_link_state_notifier(gone, &ctx);
+    // A flat link that carries several sessions reports each one's departure (#2910): the
+    // deferred AWAITs filed under that session's handle are released at once. Its edges stay:
+    // they are the link's, and leave with the link's down above.
+    link.set_session_down_notifier(
+        [](void* c, peer_handle_t handle, std::string_view) {
+            auto* const cc = static_cast<child_rx_ctx_t*>(c);
+            const frame_scope_t scope;
+            const std::lock_guard lock(cc->self->awaits_.m);
+            (void)cc->self->cancel_awaits_locked(cc->name, handle, false);
+        },
+        &ctx);
     if (link.delivers_ropes()) {
         link.set_rope_receiver(
             [](void* c, view::rope_t frame) {
@@ -2814,13 +2825,16 @@ std::size_t fwd_router_t::cancel_awaits_locked(std::string_view link_name, peer_
         pending_await_t* const next = p->next;
         // An empty name is every link (teardown).
         const bool on_link = link_name.empty() || p->name() == link_name;
+        const bool same = p->peer() == peer;
         // The arriving session's own waiters, when parking: counted and kept.
-        const bool mine = count_peer && p->peer() == peer;
-        // With no handle, every waiter of the link goes. With one, every waiter in its slot
-        // goes: the departing session's own, and any of an earlier session the link no longer
-        // holds in that slot (a different generation; one slot holds one live session, so this
-        // stays right when the generation wraps).
-        const bool gone = peer.valid() ? p->peer().index == peer.index : !count_peer;
+        const bool mine = count_peer && same;
+        // With no handle, every waiter of the link goes. A departure (#2910) takes exactly the
+        // departed session's: a successor already in its slot keeps its own. A park takes every
+        // waiter in its slot but its own: those of an earlier session the link no longer holds
+        // there (a different generation; one slot holds one live session, so this stays right
+        // when the generation wraps).
+        const bool gone =
+            peer.valid() ? (count_peer ? p->peer().index == peer.index : same) : !count_peer;
         kept += static_cast<std::size_t>(on_link && mine);
         if (on_link && gone && !mine) {
             // A waiter released while parking is reclaimed from a departed session: counted

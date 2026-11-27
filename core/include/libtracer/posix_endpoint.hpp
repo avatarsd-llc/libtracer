@@ -1348,11 +1348,25 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
  * so which arm's members they see is a compile-time fact. Nothing is dispatched.
  */
 class flat_slot_server_t : public slot_server_t {
+   public:
+    /** @brief Install the session-departure notifier (#2910): every listener of this arm is
+     *         flat, so it is always the one this link fires. */
+    void set_session_down_notifier(session_down_fn_t fn, void* ctx) noexcept override {
+        session_down_ctx_.store(ctx, std::memory_order_relaxed);  // ctx before fn
+        session_down_fn_.store(fn, std::memory_order_release);
+    }
+
    protected:
     using slot_server_t::slot_server_t;
     /** @brief Destroyed only as the concrete server it is, never through this base (#2022):
      *         the derived destructor's `stop_and_join` must run first. */
     ~flat_slot_server_t() = default;
+
+    /** @brief Departure: fire the session-departure notifier (#2910). */
+    void announce_peer_down(peer_handle_t handle, std::string_view peer) override {
+        const session_down_fn_t fn = session_down_fn_.load(std::memory_order_acquire);
+        if (fn != nullptr) fn(session_down_ctx_.load(std::memory_order_relaxed), handle, peer);
+    }
 
     /**
      * @name The per-frame peer-delivery seam, inert (see @ref bus_slot_server_t for the live
@@ -1373,6 +1387,12 @@ class flat_slot_server_t : public slot_server_t {
         return false;
     }
     /** @} */
+
+   private:
+    /** @brief The session-departure sink. Atomic, as the bus facet's departure sink is:
+     *         the driving thread may fire it while `add_child` is still installing it. */
+    std::atomic<session_down_fn_t> session_down_fn_{nullptr};
+    std::atomic<void*> session_down_ctx_{nullptr}; /**< @brief Its caller-owned context. */
 };
 
 /**
@@ -1410,7 +1430,9 @@ class bus_slot_server_t : public slot_server_t, public bus_link_t {
      *       mode reports the whole link down (`notify_down()`) — but only when the LAST
      *       open session departs (#889). A flat link has ONE routing identity for all its
      *       peers (the registered child NAME), so firing that on a mid-life close would
-     *       evict the surviving peers' edges too.
+     *       evict the surviving peers' edges too. Each flat session's own departure still
+     *       fires, through the same departure slot installed by
+     *       @ref set_session_down_notifier (#2910).
      */
     [[nodiscard]] bus_link_t* bus() override { return bus_mode() ? this : nullptr; }
 
@@ -1444,6 +1466,12 @@ class bus_slot_server_t : public slot_server_t, public bus_link_t {
         return slot_server_t::close_peer(peer);
     }
 
+    /** @brief A FLAT listener's session-departure notifier (#2910), in the facet's departure
+     *         slot: a flat listener never installs a peer-down notifier, so the slot is free. */
+    void set_session_down_notifier(session_down_fn_t fn, void* ctx) noexcept override {
+        if (!peer_named()) store_peer_down(fn, ctx);
+    }
+
    protected:
     using slot_server_t::slot_server_t;
     /** @brief Destroyed only as the concrete server it is, never through this base (#2022):
@@ -1455,7 +1483,8 @@ class bus_slot_server_t : public slot_server_t, public bus_link_t {
         notify_peer_up(handle, peer);
     }
 
-    /** @brief Departure: fire the facet's peer-down notifier (RFC-0009 §D.5). */
+    /** @brief Departure: fire the facet's departure slot (RFC-0009 §D.5): the peer-down
+     *         notifier, or a flat listener's session-departure notifier (#2910). */
     void announce_peer_down(peer_handle_t handle, std::string_view peer) override {
         notify_peer_down(handle, peer);
     }

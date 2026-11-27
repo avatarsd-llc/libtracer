@@ -237,21 +237,15 @@ class bus_link_t {
      * frames flow, like the receivers; a kind with no departure concept simply never
      * fires it. The peer's HANDLE rides alongside the name (#1294) so a consumer that keyed
      * per-peer state by handle at arrival can drop it here without a name lookup.
-     * @note REFUSED on a link that is not @ref peer_named — a flat link's departure is the
-     *       whole link's (`transport_t::set_link_state_notifier`), so this wiring would be dead.
+     * @note REFUSED on a link that is not @ref peer_named — a flat link has no per-peer routing
+     *       identity to evict. Its sessions' departures reach the router through
+     *       `transport_t::set_session_down_notifier` instead (#2910), and the whole link's
+     *       through `transport_t::set_link_state_notifier`.
      * @param fn  The notifier; @p ctx is passed back as its first argument.
      * @param ctx Caller-owned context; must outlive every possible notification.
      */
     void set_peer_down_notifier(peer_down_fn_t fn, void* ctx) noexcept {
-        if (!peer_named()) return;
-        // Publish ctx-before-fn with a release store on fn: a transport thread
-        // that observes a non-null fn (acquire, in notify_peer_down) is
-        // guaranteed to see the paired ctx. Atomic because an internal transport
-        // thread may fire the notifier concurrently with this wiring — a fast
-        // remote hangup can beat fwd_router_t::add_child's install (the callback
-        // thread is already live once the connection opens in the ctor).
-        peer_down_ctx_.store(ctx, std::memory_order_relaxed);
-        peer_down_fn_.store(fn, std::memory_order_release);
+        if (peer_named()) store_peer_down(fn, ctx);
     }
 
     /** @brief The peer-ARRIVAL notifier fn: (ctx, the arriving peer's HANDLE, its NAME).
@@ -374,6 +368,23 @@ class bus_link_t {
 
    protected:
     ~bus_link_t() = default;  // never deleted through this facet
+
+    /**
+     * @brief Install the departure notifier with no mode gate: the one store behind
+     *        @ref set_peer_down_notifier (peer-named) and a flat link's
+     *        `transport_t::set_session_down_notifier` (#2910). The mode is fixed at
+     *        construction, so the two never share a link and the one slot serves both.
+     */
+    void store_peer_down(peer_down_fn_t fn, void* ctx) noexcept {
+        // Publish ctx-before-fn with a release store on fn: a transport thread
+        // that observes a non-null fn (acquire, in notify_peer_down) is
+        // guaranteed to see the paired ctx. Atomic because an internal transport
+        // thread may fire the notifier concurrently with this wiring — a fast
+        // remote hangup can beat fwd_router_t::add_child's install (the callback
+        // thread is already live once the connection opens in the ctor).
+        peer_down_ctx_.store(ctx, std::memory_order_relaxed);
+        peer_down_fn_.store(fn, std::memory_order_release);
+    }
 
     /**
      * @brief Fire the peer-departure notifier for @p peer (no-op when none installed).
@@ -1354,6 +1365,38 @@ class transport_t {
         // hangup before fwd_router_t::add_child finishes this install.
         state_ctx_.store(ctx, std::memory_order_relaxed);
         return state_fn_.exchange(fn, std::memory_order_acq_rel) == &missed_down;
+    }
+
+    /** @brief The session-departure notifier fn: the bus facet's departure shape, (ctx, the
+     *         departed session's HANDLE, its name). The handle is retired by the call. */
+    using session_down_fn_t = bus_link_t::peer_down_fn_t;
+
+    /**
+     * @brief Register the SESSION-departure notifier of a FLAT link that carries several
+     *        sessions (#2910): a stream or WebSocket listener constructed with
+     *        `peer_named = false`.
+     *
+     * Such a link has one routing identity for all its sessions, so a mid-life departure is
+     * not the link's (@ref set_link_state_notifier fires only when the last session goes),
+     * and it has no bus facet to report one through. Yet the router keeps state per session
+     * on it: a deferred AWAIT is answered to the session that asked (#2911) and is filed
+     * under that session's handle. The link fires this once per departed session that
+     * reached `open`, carrying the handle @ref inbound_peer answered for its frames, from the
+     * thread that observed the departure, after its own slot bookkeeping and with none of its
+     * locks held (the @ref set_link_state_notifier discipline). A last session's departure
+     * fires it before the link's down.
+     *
+     * `fwd_router_t::add_child` installs a notifier that releases the departed session's
+     * deferred AWAITs at once, matched by the child's name and the handle. The DEFAULT
+     * ignores the call: a link that is one session, or that has no sessions (a datagram
+     * kind), never fires it. A peer-named link ignores it too: its departures go through
+     * `bus_link_t::set_peer_down_notifier`.
+     * @param fn  The notifier; @p ctx is passed back as its first argument.
+     * @param ctx Caller-owned context; must outlive every possible notification.
+     */
+    virtual void set_session_down_notifier(session_down_fn_t fn, void* ctx) noexcept {
+        (void)fn;
+        (void)ctx;
     }
 
    protected:

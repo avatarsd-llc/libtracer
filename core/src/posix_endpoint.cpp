@@ -934,16 +934,15 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     // notifier re-enters the routing plane. Only a session that reached `open` can have
     // flowed frames (subscriptions), and only then.
     //
-    // WHICH seam is the constructed mode's answer, not "is a peer sink installed" (#889):
-    // peer-named mode evicts exactly the departed peer's edges under its own name, while a
-    // FLAT link has ONE routing identity for every peer it carries — the registered child
-    // NAME — so its only seam is the whole link. Firing that on a mid-life close evicts the
-    // SURVIVING peers' edges too, which is why it waits for the last open session to go.
+    // Every session's departure is announced: peer-named mode evicts exactly the departed
+    // peer's edges under its own name, and a FLAT link releases the router's state for that
+    // session alone (#2910). The whole link goes down only in flat mode (#889), where it has
+    // ONE routing identity for every peer it carries — the registered child NAME — and
+    // reporting it on a mid-life close evicts the SURVIVING peers' edges too, which is why it
+    // waits for the last open session to go.
     if (was_open && departed[0] != '\0') {
-        if (bus_mode())
-            announce_peer_down(departed_handle, departed);
-        else if (!open_left)
-            notify_down();
+        announce_peer_down(departed_handle, departed);
+        if (!bus_mode() && !open_left) notify_down();
     }
 }
 
