@@ -14,6 +14,476 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-11-27
+
+### Added
+
+- **`config_t::sync_t` and `%sync.hpp`: the build's blocking primitives, bound at compile time
+  (#2454).** Every mutex, shared mutex and condition variable core holds or waits on is now
+  `tr::mutex_t`, `tr::shared_mutex_t` or `tr::condvar_t`, the members of `config_t::sync_t`.
+  The default, `tr::std_sync_t`, names `std::mutex`, `std::shared_mutex` and
+  `std::condition_variable`, so a host build is unchanged. A target whose standard primitives
+  allocate binds its own: the ESP-IDF component binds `tr::esp::static_sync_t` on every chip.
+  A member or parameter that was spelled `std::unique_lock<std::mutex>` is now
+  `std::unique_lock<tr::mutex_t>` (the same type on a host).
+- **`default_config_t::kParkStripes` (#2454)**: the stripe count of the park table
+  `tr::park_wait` / `tr::park_wake` sleep on, a compile-time knob (default 8, as before). The
+  ESP-IDF component sets it from `CONFIG_LIBTRACER_PARK_STRIPES`.
+- **`config_t::frame_observer_t`, a compile-time per-frame observer on the router (#2580).**
+  `fwd_router_t` calls `frame_observer_t::on_frame(std::string_view inbound_link_name)` once per
+  inbound frame, on every link and both receive tiers, before dispatch, on the receiving task,
+  including a frame that dispatch then refuses or drops, but not a frame the node originates
+  itself. It is given only the link name (a bus peer's name for a frame from a bus peer), valid
+  for the call, and it is observe-only: `void` and `noexcept`, checked by the
+  `tr::net::frame_observer` concept. It runs on the receiving task and must not block. The
+  default, `tr::net::no_frame_observer_t`, does nothing and compiles away, so a build that names no
+  observer is unchanged. The router holds no state for it. Bind one in
+  `libtracer/config_override.hpp` with `using frame_observer_t = my_link_tally_t;` for
+  per-link liveness or traffic accounting kept in the application. This is the production
+  shape of the runtime `on_raw` observer #2277 deleted, with no function pointer.
+- **`tr::net::drop_tally_t` and `tr::net::drop_classes_t` (#2482).** The three shed-frame
+  counters of `transport_drop_stats_t` as one embeddable value: `count_dropped_rx(n)`,
+  `count_malformed_rx(n)`, `count_dropped_tx(n)` and `snapshot()`. Every counting link keeps
+  its counters in one and answers `drop_stats()` with its snapshot; a per-peer facade still
+  reports its owner's. `drop_classes_t` leaves out at build time a class a link never drops
+  (CAN has no `malformed_rx` word), so the tally costs no more than the counters it replaces.
+- **`ws_assembler_t` is a public header, `libtracer/ws_assembler.hpp` (#2483).** The RFC 6455
+  fragmented-message assembler that core's WS server and dial-out client use moves out of
+  `transport_ws.cpp` unchanged, so every WebSocket link shares one reassembly: each fragment is
+  an owning rope link, chained without a copy, and charged its bytes plus `kFragmentCost` (its
+  segment and chain slot) against the receive cap. Its outcome types are nested
+  (`ws_assembler_t::status_t`, `ws_assembler_t::result_t`). The ESP-IDF httpd link is its
+  first user outside core.
+- **`ws_framing_t` is a public header, `libtracer/ws_framing.hpp` (#2484).** The RFC 6455
+  receive rules (header judgement against the cap, unmasking, fragment chaining, the opcode's
+  answer) move out of `transport_ws.cpp`, so a link that frames its own byte stream shares
+  them. The end adapter gains `closing(bytes)`, its answer to a CLOSE (core's ends answer none,
+  as before). Also added: `ws::header_value` (the case-insensitive, trimmed header lookup),
+  `ws::upgrade_accepted` (the client's `101` + `Sec-WebSocket-Accept` check), and
+  `frame_ingress_t::read_with`, which drives the ingress from a single-buffer read such as
+  `esp_transport_read`. The ESP-IDF WebSocket client link is the first user outside core.
+- **`tr::park_wait` / `tr::park_wake`, `libtracer/park.hpp` (#2507).** `std::atomic::wait` and
+  `notify_all` over an 8-stripe table of mutex + condition-variable pairs. libstdc++ builds
+  `std::atomic::wait` on a shared 2,048 B waiter table on every target; on esp32c6 that table
+  was the whole of v0.22.0's +2 KB `.bss`. `egress_t` (its lane lock and `close`) and the
+  ESP-IDF WS client's teardown drain now park here, so no MCU image links the libstdc++
+  table. Same contract, no clock; only contended and teardown paths reach the table. The stripe
+  table behind them (`park_stripe_t`, `park_stripe_of`, `kParkStripes`) is `tr::detail` (#2510).
+- **Noise link: rekey and session boundaries (#2074).** A `noise_link_t` now rekeys as reference/23
+  §6 specifies: at `noise_config_t::rekey_after`, at a send nonce of 2^60, or on
+  `noise_link_t::rekey()`. The old and new sessions overlap, so no frame in flight is lost, and the
+  replaced session keeps receiving until `noise_config_t::previous_expiry`. `reject_after` and the
+  2^62 nonce limit discard a session, counted in `noise_expired`. A DIAL link that lost its session
+  reports `RECONNECTING` while it re-establishes one. A session boundary fires the link-down
+  notifier; a routine rekey does not.
+- **Noise link: the counter and the mark across reboots (#2075).** A `noise_link_t` host can now
+  keep the responder's mark across reboots: a host that also has `restore_mark(ref)` and
+  `persist_mark(ref, mark)` (the `noise::mark_store` concept, detected at compile time) has the mark
+  restored when a LISTEN link is built and persisted each time it changes, once per accepted first
+  message. `persist_mark` returns whether the write succeeded, and a write that fails refuses the
+  message. A host without them keeps the mark in RAM, as before, at no cost. `noise_link_t::clear_mark()`
+  clears the mark, and `noise_link_t::replace_psk(ref)` replaces the link's PSK and resets the mark to
+  0. `noise::boot_counter_t` builds an initiator counter from a persisted boot counter and an attempt
+  counter, for a node with no clock that survives its reboots.
+- **`:schema` serves a borrowed intent document (RFC-0010 Amendment 5, #2107).** New
+  `graph_t::set_intent_document(v, doc)` installs or replaces a vertex's intent document, the
+  device maker's UTF-8 statement of what the vertex is, and `graph_t::clear_intent_document(v)`
+  (or an empty `doc`) removes it. `read <v>:schema` then serves it verbatim as
+  `NAME "doc"` → `VALUE <doc>` at the `POINT` level, after the protocol part and before the owner
+  part, which stays present iff a field table is installed. The document is a borrowed view: the
+  runtime holds no copy and never parses or validates it, and the caller keeps the bytes alive
+  while they are installed (typically a constant in flash, which many vertices may share). Each
+  `:schema` read copies the bytes into its reply under the vertex lock, so once a clear or a
+  replacement returns, the caller may reuse them. It never appears
+  in a `:settings` read, and no wire operation installs it. The view is held off the vertex, in one
+  graph-side node per vertex address that ever installed a document, so a vertex without one
+  pays no byte: `sizeof(vertex_t)`, `sizeof(vertex_ext_t)` and the app-field group are
+  unchanged, and a vertex without a document serves the same `:schema` bytes as before.
+- **`tr::net::wait_module_t` and `tr::net::wait_source_t` (#2147), and a `wait` member on
+  `tcp_config_t`, `tcp_server_config_t`, `udp_config_t`, `ws_server_config_t` and
+  `ws_client_config_t`.** A link given the node's module puts its sockets on it and spawns no
+  thread; the application drives it with `wait_module_t::run` on the thread it chooses, and
+  every delivery runs there to completion. A link given none keeps a thread of its own, which
+  drives a private module (the thread-per-link fallback adapter). `wait_module_test` holds both
+  adapters to one conformance suite, and checks 0 idle wakeups at 32 TCP dialers and 32 UDP
+  peers on one module, with no thread spawned.
+- **A `wait` argument on both `transport_vertex_t` constructors, read back through
+  `transport_vertex_t::wait_module()` (#2147).** Every link the built-in udp, tcp and ws
+  factories build from a SPEC puts its sockets on that module and spawns no receive thread:
+  a listener or an eagerly built link owns no thread at all, and a self-healing dial keeps
+  only its engine's worker. `nullptr` (the default) changes nothing. A factory registered
+  through `register_transport_type` reads the same module off the vertex.
+- **A node-wide link memory default on `transport_vertex_t` (#2574).** Both constructors take a
+  trailing `const link_memory_t* link_memory = nullptr`, read back through
+  `transport_vertex_t::link_memory()`. The built-in `udp`, `tcp` and `ws` factories build every link
+  from it: its `io` becomes the link's egress store (a null `io` keeps the ctor's `egress_src`).
+  `io` is not null by default: its initialiser is the net pool, so a default that leaves it out,
+  such as `link_memory_t{.state = &s, .stack = &k}`, moves every such link's egress store from
+  `egress_src` to the net pool; write `.io = nullptr` to keep `egress_src` (#2612). Its `state` and
+  `stack` take a connected peer's session and the receive thread. Its `rx` is not read; the ctor's
+  `rx_backend` stays the receive plane. A deployer can now bound or account the per-peer memory of
+  SPEC-created links without writing a factory of its own. With no default, nothing changes: those
+  links draw from the net pool, as before. A factory that names its own memory keeps it. New helpers
+  in `%builtin_transports.hpp`: `builtin_link_memory` and `builtin_egress`. The default and its
+  sources must outlive the vertex and the `graph_t::collect()` that frees a removed link.
+  `transport_vertex_t` grows by one pointer (8 B on a 64-bit host).
+- **A borrowed value can draw its control block from a graph's injected source (#2660).**
+  `tr::mem::borrowed_backend_t` is public (it was `tr::mem::detail::borrowed_backend_t`), and
+  `tr::view::borrow_const(bytes, backend)` wraps caller-owned bytes with the control block
+  drawn from `backend`'s source. Build the backend over `graph_t::value_source()` and a
+  `borrow_const` write to a graph over an injected source draws from that source, not from the
+  default value source. A refusal is a null segment, which the caller answers as
+  BACKPRESSURE. The single-argument `borrow_const` is unchanged.
+- **A writable borrow can draw its control block from a graph's injected source (#2665).**
+  `tr::view::borrow(bytes, backend)` is the writable twin of #2660's
+  `borrow_const(bytes, backend)`: it wraps caller-owned writable bytes with the control block
+  drawn from `backend`'s source. Build the backend over `graph_t::value_source()` and a
+  `borrow` write to a graph over an injected source draws from that source, not from the
+  default value source. A refusal is a null segment, which the caller answers as
+  BACKPRESSURE. The single-argument `borrow` is unchanged.
+- **A per-session READ budget under contention (#2774), off by default.** A build that sets
+  `static constexpr std::uint8_t kReadBudget = N;` in its `config_override.hpp` answers a READ
+  this node terminates with the existing `tr::flow::backpressure` reply when it is beyond the
+  sending session's N-th in the current run and at least two sessions have READ in that run. A
+  session alone in a run is never refused, and neither is a WRITE, a subscribe, an AWAIT, a REPLY,
+  or a frame this node forwards. The application closes a run with the new
+  `fwd_router_t::close_read_run()` from any task or timer on its own clock, e.g. every 100 ms (a
+  starved idle task stretches the run). A close is a compare-and-swap on one atomic word that
+  moves the run stamp forward by exactly one, safe from any thread and from several closers; the
+  library reads no clock, and the call is a no-op when the budget is off. A session is one slot of the TCP or WS listener or the ESP-IDF WS link (each slot keeps
+  its own count), or a whole link otherwise. The router finds the delivering session's count
+  through the new virtual `transport_t::inbound_tally()`, which answers null by default (the link
+  is one session) and which a custom multi-session link may override, as it does `inbound_peer()`.
+  Off (the default, `kReadBudget = 0`), every member the budget adds is an empty
+  `[[no_unique_address]]` type and the check is not compiled: no byte in any object, no branch. On
+  (x86_64, measured), a stream-server session slot grows 8 B (a 4-byte tally plus padding) and the
+  router 8 B (a 4-byte census word plus padding); no link object grows, and a registered link's
+  receive context keeps its tally in existing padding. A connected WS peer draws 8 B more. New
+  public names: `tr::net::read_tally_t`, `no_read_tally_t`, `session_read_tally_t`, `tally_of`,
+  `read_census_t`, `kReadBudgetOn`.
+- **A link can name why it last dropped an outbound frame (#2788).** `tr::net::drop_cause_t`
+  (`NONE`, `OVERSIZE`, `LINK_DOWN`, `SHED`, `TRANSPORT_ERROR`) is one byte a `drop_tally_t` keeps
+  when its `drop_classes_t` sets `dropped_tx_cause`: the link counts each outbound drop with
+  `count_dropped_tx(n, cause)`, and the tally's `dropped_tx_cause()` reads the last one. A tally
+  that does not set it pays nothing, and the shared `transport_drop_stats_t` snapshot is
+  unchanged. A link that keeps a cause publishes it from its own `kind_stats()` as the fourth noun
+  of `:stats.link.<child>`, `dropped_tx_cause`, right after `dropped_tx` (RFC-0010 Amendment 6).
+  The ESP-IDF WebSocket client link is the first to keep it.
+- **A per-link bound on parked waiters (#2902).** `config_t::kMaxAwaitsPerLink` (default 8)
+  caps how many deferred remote AWAITs one link may hold at once, per session on a listener
+  that carries several (the waiter is keyed by its link name and session handle). One more is
+  answered `BACKPRESSURE` and counted in the new `fwd_router_t::await_refusals()`, which also
+  counts an AWAIT whose waiter block the link plane refused. Other links and sessions still
+  park. When a session takes a slot a departed session held, that session's parked waiters are
+  released without a reply and counted in the new `fwd_router_t::await_reclaims()`. The bound
+  costs no byte per link; each waiter block grows by one session handle (8 B).
+- **`transport_t::send_to(reply_to, iov)` and `transport_t::inbound_reply_to()` (#2911).** The
+  reply path of a link that carries several sessions: `inbound_reply_to()` answers, inside a
+  receive callback, a token naming the session that sent the frame, and `send_to` sends to that
+  session alone. The defaults keep a single-session link as it was: the token is
+  `inbound_peer().bits()` and `send_to` calls `send`. `peer_handle_t::from_bits` is the inverse of
+  `peer_handle_t::bits`.
+- **`transport_t::send_to(to, head, value, lane)` (#2923).** The retained send to the session
+  `to` names (a `peer_handle_t::bits()`, 0 for whichever session holds the slot). The default
+  calls the retained `send`, so a single-session link is unchanged; the TCP and WebSocket
+  listeners' per-session endpoints check it.
+
+### Changed
+
+- **`fwd_router_t`'s terminus refusal reply is built by the one addressed-error builder (#2480).**
+  The `STATUS{BACKPRESSURE}` answer to a request the terminus could not serve for want of memory
+  is now `assemble_error_reply` over a 384 B stack store that never overflows into an allocator,
+  the same builder the bus-NAME-hop refusal uses; the frames are byte-identical to before. A
+  request whose two routes are longer than that store can hold (on a 64-bit host, 316 B of route
+  for an unstamped request and 308 B for a stamped one) is no longer answered: the arm's drop counter still moves, and nothing goes on the wire. A
+  stamped request whose stamp straddles a rope link now gets its stamp back. Every error reply and
+  acknowledgement is one link, its echo stamp at the end of the head segment.
+- **Errors and acks draw their echo stamp in the same allocation as the reply (#2480).** A
+  backend with room for the reply but not for 8 more bytes now refuses the reply, where it used
+  to send it unstamped. A reply with a payload still drops only the stamp.
+- **`wait_module_t::detach` waits for its own source only (#2147).** The driver no longer
+  holds the module's lock across a batch of callbacks. A detach from another thread waits
+  only while the detached source's own callback runs, never for the rest of the batch. So
+  tearing a link down while holding a lock that some other link's callback takes no longer
+  deadlocks with the driver. Holding a lock that the same link's callback takes still does,
+  as it did with a link's own receive thread. The wait blocks, never spins. On the lwIP
+  adapter an attach no longer waits out a running callback either.
+- **`can_transport_t`'s destructor states its precondition and checks it (#2403).** The
+  destructor's `@pre` now says what the `transport_t::shut_down()` contract already required:
+  no send into the transport remains when it is destroyed. A build with asserts on (debug
+  builds, and ESP-IDF's default) now trips an `assert` if a send group is still in flight; a
+  release build compiles the check out. The destructor still never waits.
+- **A point-to-point mount's per-child router context is 8 B smaller (#2413).** The atomic
+  tenancy pointer #2282 added to every child context moves into the bus token cache, which only
+  bus mounts allocate: `fwd_router_t`'s per-child context is back to 104 B on a 64-bit host, and
+  the NARROW T=24 graph store drops from 29,128 to 28,744 B. A bus mount's slot-holder lookup
+  takes one more dependent load. A name that was a bus mount and is re-added as a point-to-point
+  child now reports no session-slot holder, as the bus token cache already did; a peer departure
+  that arrives in between still retires its anchor.
+- **CAN and loopback send a gathered frame natively (#2679, ADR-0089 step 1).**
+  `can_transport_t` and its directed per-peer endpoint now override `send(iov)`: one cursor cuts
+  every CAN slice straight from the caller's spans, a slice free to straddle two of them, so a
+  routed frame (the router's `send(iov)`, or a retained send lowered onto it) no longer takes the
+  base gather from the link's egress store. A routed CAN frame goes from 1 payload copy and 1
+  allocation to 0 (2 and 2 before #2661); the wire bytes are unchanged. `loopback_endpoint_t`
+  gathers a `send(iov)` straight into the block it draws from the receiver's source: 2 copies
+  and 2 blocks become 1 and 1. `udp_transport_t`'s span send is now a one-entry `sendmsg`
+  through the gather body, and its separate `sendto` body is gone (same datagram).
+  `can_frame_at` keeps no production caller; it stays public as the definition the tests hold
+  the transport's cut to. Not breaking: every call site and override compiles as before.
+- **`tr::mem::pool_source_t` keeps its hot shapes at the front of its class table (#2709).**
+  A lookup that finds a shape moves its class one slot toward the front, so the shapes a node
+  draws every frame are found in the first one or two slots instead of in claim order. A
+  borrowed value's control block, drawn from a graph's injected pool since #2660, no longer
+  scans every wiring-time class on each draw and return. The class span's order is not part
+  of the contract; `classes_used()`, `overflowed()` and the free lists are unchanged.
+- **A one-span UDP send goes out through `sendto` again (#2723).** `udp_transport_t` keeps one
+  send body, but a datagram of one span (every `send(span)`, and a `send(iov)` of one span) now
+  calls `sendto` instead of a one-entry `sendmsg`, which measured 35-45 ns slower per send on
+  Linux after #2679. A gather of two or more spans still leaves in one `sendmsg` with no
+  per-frame allocation. The no-socket and no-peer drops are one check, so the esp32c6 UDP flash
+  row shrinks by 6 B (2,608 to 2,602). Not breaking.
+- **`tr::mem::pool_source_t` no longer swaps a front-slot hit with itself (#2747).** A lookup
+  that finds its shape in the first class slot returns at once; one further back still moves
+  one slot forward, as #2709 made it. The shape a node draws on every frame sits in that first
+  slot, so each draw and return skips six loads and stores: the forward hop runs 6 fewer
+  instructions per frame on the WIDE and MID bench arms. `find` is 78 B on riscv32 (84 B before).
+- **A stream server's shut-down walks its sessions once (#2801).** `slot_server_t` detaches
+  and tears each session down in one walk of its table instead of a detach walk followed by
+  a teardown walk; the destructor's `stop_and_join` takes the same walk without the
+  teardown. A flat server's "is any session still open" question is asked in the teardown's
+  existing critical section, together with clearing the departing session's `open`, so of
+  concurrent teardowns exactly one reports the link down. The protected
+  `slot_server_t::stop_for_shut_down` and `any_open_session` are gone, `shut_down_slots`
+  takes a `tear_down` flag, and `tcp_server_transport_t` and `ws_server_transport_t` inherit
+  `shut_down` from `slot_server_t` instead of each forwarding to it. Behaviour of
+  `shut_down` is unchanged for callers.
+- **A subscriber edge's admission charges are one record, given back by one release
+  (#2814).** The admission step takes the session's ADMIT, the link hold, the departure index
+  entry and the listener count in that order, the count with the slot change under one map
+  hold, and from the ADMIT on every refusal gives the whole record back: the count inside that
+  hold, and the hold and the session charge through `graph_t::release_admission`, the same
+  release a replace's displaced edge, a clear and a retirement use. A replace gives the
+  displaced edge's record back right behind the slot change, as a clear does, so the count
+  never reads one high across its observer calls or its latched replay. A refused index entry is now answered as
+  the slot verb's REFUSED (`BACKPRESSURE`, as before). The record stores nothing: the release
+  names the session from the edge's cold half through the link-name seam, so a refused
+  admission's `RELEASE` follows the contract `graph_hooks_t::link_name` already states for a
+  clear or a replace. A local edge has no session: `link_index_t::index_vertex` and the
+  session-event step answer the empty one inline, so a local subscribe makes no call for
+  either, and a local `:subscribers[]` edge whose write carried a link is handed no session at
+  its door, so it is still never offered nor indexed. Not breaking: no public signature
+  changes.
+- **A one-peer TCP listener opens its peer exactly once, at accept (#2824).** The constructor
+  of a listening `tr::net::tcp_transport_t` now leaves its peer closed, and each accept opens
+  it once, paired with one close at the peer's teardown or in the destructor. A send before
+  the first accept is shed and counted in `drop_stats().dropped_tx`, as before. A dialer still
+  opens its peer in its constructor. `tr::net::stream_endpoint_t`'s constructor flag
+  `one_peer` is now `dials`: a class deriving from it passes false when it listens, and its
+  peer then opens at each accept. A build that binds `kFaultInjection` can count the opens and
+  closes through `tr::detail::egress_open_close_hook`.
+- A subtree walk now yields to a thread waiting to take the graph's map lock exclusively (vertex registration, `retire`, `collect`, ...). The composed branch read and the `:children` listing answer `BACKPRESSURE` when a writer is waiting, and `graph_t::for_each_vertex` returns `false`; a retry completes once no writer waits. An exclusive operation now waits about one node visit, not every overlapping walk (#2846).
+- **The in-call delivery path takes less stack (#2871).** From v0.21.0 the receive path of the
+  ESP-IDF WebSocket client grew by about 1 KiB of static stack, enough to overflow a 6,144 B
+  receive task on esp32c6. Three cuts take about 830 B back on borrowed delivery and about 350 B
+  on owning delivery, measured from the receive loop through the in-call write and the replies
+  it sends. A terminus over a contiguous frame no longer copies a request's field
+  names into a 512 B stack buffer, because the names already view the decoded frame, which
+  outlives the resolve. A reply's scatter-gather table keeps 4 entries on the stack instead of
+  16; a wider reply draws its table from the receiving link's source, as one wider than 16 did
+  before. `ws_assembler_t::on_piece` now returns an unfragmented `BINARY` message as `COMPLETE`
+  at once, uncharged, and `ws_framing_t` sends every data frame through it, so the framing
+  frames on that path merge into one. CI now pins the worst static stack of both delivery arms
+  on esp32c6 (`tools/esp_stack_gate.py`), so a raise needs a maintainer ruling.
+- **A remote subscription keeps one segment, drawn from the router's link plane (#2875).** What a
+  peer's `:subscribers[]` append keeps for the life of the subscription (the `SUBSCRIBER` TLV, the
+  return route and the completed reverse chain) is now ONE segment that the edge holds three
+  windows into, where it was two or three. A router that is not given `router_planes_t::retained`
+  draws it from `router_planes_t::link_src`, the long-lived link plane, instead of `flat`, so a
+  node that bounds and counts its link plane bounds and counts its subscriptions. `link_src` must
+  therefore outlive the router's subscriptions, which live in the graph. A refused segment answers
+  the subscribe `BACKPRESSURE` and binds nothing; a refused reverse chain no longer degrades on its
+  own, because it is the same segment. The router draws through the new
+  `mem::detached_source_backend_t`, whose segments name their source in their own block and so
+  may outlive the adapter; they are reclaimed by `mem::detached_reclaimer()`.
+- **Branch writes draw their scratch from the injected source instead of a 4 KiB stack array
+  (#2879).** `graph_t::write_branch` decoded a branch POINT into a 4 KiB array on the caller's
+  stack, so every task that could deliver a write budgeted that frame, though most writes never
+  take the branch path. The decode arena, the root key, the plan and the landing sites now draw
+  from the graph's table source. A refused draw for the decode, the root key, the plan or the
+  sites (`write` or `assign`) answers `BACKPRESSURE` and is counted once in
+  `delivery_drops().out_of_memory`; an exhausted decode used to answer `TYPE_MISMATCH`, which
+  reads as a malformed value. The value flatten and vertex creation are not counted there. A
+  value refused for its shape is still `TYPE_MISMATCH` and counts nothing.
+- A subtree walk (the composed branch read, both `:children` listings and `graph_t::for_each_vertex`) that starts while a thread waits to take the graph's map lock exclusively now answers `BACKPRESSURE` (`for_each_vertex`: `false`) without taking its shared hold. Walks that retry back to back no longer keep the lock's read phase open, so the waiting exclusive operation runs after about one node visit per walk already inside, independent of the number of walkers (#2900).
+- **Deferred AWAIT waiter lifetime no longer tied to per-frame receive scratch (#2902).** A
+  remote AWAIT's waiter outlives the frame that parked it, so `fwd_router_t` now draws it from
+  the router's long-lived link plane (`router_planes_t::link_src`) and returns it there when
+  the reply is sent, on `link_down` / `remove_child` and at router destruction. The child's rx
+  source holds only per-frame scratch. An embedder that bounds AWAITs sizes the link plane for
+  them; a refused draw is still answered `BACKPRESSURE`.
+
+### Removed
+
+- **`wire::path_ref_store_element` (`path_ref.hpp`, #2557).** It was a one-line wrapper around
+  `pair_store_le` and the last public function that wrote a `PATH_REF` element; only tests
+  called it. Write an element with `pair_store_le`, which has the same byte layout. The decode
+  side (`path_ref_element_count`, `path_ref_element_at`, `path_ref_body_valid`) is unchanged
+  and no wire byte moves.
+- **`vertex_t::set_app_fields` and `vertex_t::set_app_fields_static` (#2547).** Neither had a
+  caller. Install an app-field table with `graph_t::set_policy` (a `vertex_policy_t` naming
+  `app_fields`) or at `graph_t::register_vertex`; both normalize an empty borrowed table to the
+  null span (#2546), which `set_app_fields_static` skipped.
+
+### Fixed
+
+- **An empty borrowed app-field table is the empty table, whatever its pointer (#2453).**
+  `app_fields_decl_t` now holds an empty borrowed view as the null span once copied or moved,
+  which every `register_vertex` and `set_policy` does. Before, a
+  `borrowed_fields_t::unchecked` span with a non-null pointer and no entries compared unequal to
+  the vertex's own empty table, so declaring it on a vertex with none drew an extension block
+  for nothing. `borrowed_fields_t::unchecked` itself is unchanged.
+- **`fwd_router_t::attach_link` refuses a name it cannot encode (#2147).**
+- **A self-heal connection no longer hides its first state change (#2353).** A frame routed to a
+  new connection before its `DORMANT` birth state was written started the engine's worker, whose
+  `DIALING` or `UP` report was then lost or overwritten, so the vertex read `DORMANT` until the
+  next transition. The worker now starts only after the birth write; the early frame is still a
+  counted drop and its dial still happens. `self_heal_link_t` gains `born()`, which a directly
+  constructed engine must call before it can dial.
+- **`batch_view_t::sample_time_ns` no longer trips GCC 13's `-Wmaybe-uninitialized` (#2393).**
+  A caller that tested the `std::optional` view from `read_batch` or `read_packed_batch` and
+  then dereferenced it behind the same short-circuit (`if (v && v->size() > 2)
+  v->sample_time_ns(2)`) got a false-positive warning at `-O2`, which failed a `-Werror`
+  build. The uniform and non-uniform arms now share one unsigned sum and one overflow test,
+  with two fewer branches; the answers are unchanged, including `nullopt` for a time past
+  either end of the epoch. A new `-Werror` compile test, `batch_caller_warnings_test`, keeps
+  the caller shape building.
+- **`can_transport_t::send` no longer copies the payload (#2661).** The copy drew from the wrong
+  source: the process value pool rather than a store the deployer injects. The data slices are
+  now carved straight out of the caller's span, which every slice is written from inside the
+  call, so a CAN send draws no memory at all and the drop it counted when that copy was refused
+  is gone. The wire bytes are unchanged.
+- **A folded read's member names draw from the graph's injected source (#2665).** The
+  `:children` listing, the composed subtree read and the FOLD sweep framed each member's name
+  by borrowing it through the one-argument `view::borrow_const`, whose control block came from
+  the process value pool, so on a graph over an injected source they drew from the wrong
+  source. The name text is now copied into the member's header segment, which already comes
+  from the graph's value backend: a named member is one draw and one link instead of two of
+  each. The bytes on the wire are unchanged. A refused draw still answers `BACKPRESSURE`.
+- **`graph_t::set_policy` and `graph_t::set_intent_document` refuse a vertex that is no longer
+  registered (#2669).** The check runs under the map lock, the hold registration and retirement
+  take, and both calls answer `NOT_FOUND`, as `set_creation_hook` and `hide_from_enumeration` do.
+  A policy or an intent document installed through a handle held across a `retire` no longer
+  reaches the next registration at the same path.
+
+- **Teardown no longer waits on a callback; joins happen at `collect()` (#2751).** Removing a
+  connection used to wait for the link's callbacks while holding the transport vertex's
+  control lock, and a callback inside a control-plane operation needs that lock. The waits now
+  run after the lock is released. Lifetime rules:
+  - A teardown on a thread that runs link callbacks is deferred, and only shuts down; it
+    doesn't close. A link's descriptors stay owned and open until its destructor runs.
+  - Destructors always join, and run off callback threads.
+  - `graph_t::collect()` called on a callback thread returns at once and frees nothing. Links
+    removed from a callback are joined and freed at the next `collect()` or at graph
+    destruction.
+  - A shut stream server accepts no new session, and its session buffers live until its
+    destructor. A session's egress close and departure seam run once.
+  - The last hold on a self-heal socket is the engine's, never a send's. A direct send on a
+    self-heal engine must be quiesced before the engine is destroyed.
+  - An application liveness subscriber must not create or remove any connection from inside
+    the liveness callback.
+  - A self-healing link's liveness publish resolves its connection first, so a publish after
+    the removal writes nothing.
+
+  New `tr::net::on_callback_thread()` reports whether the calling thread runs link callbacks,
+  and `tr::net::callback_thread_scope_t` marks one. Every thread that delivers a link's
+  callbacks holds it: a wait module's `run`, a CAN receive thread, and the self-heal worker's
+  liveness publish.
+  QUIC and WebTransport follow the same rules: every msquic callback counts as a callback
+  thread, a `shut_down` made on one only shuts the connection down and closes no handle, and
+  the destructor closes every handle. A stream server's accept that took its slot before a
+  deferred teardown walked the table tears that session down after its attach.
+- **A frame cut short by a full socket is no longer stranded (#2775).** A TCP or WebSocket
+  sender armed write interest as soon as its write was cut short, but reported the frame as
+  held (`egress_peer_t::wants_write`) only as it let the writer role go. A driving thread
+  that disarmed in between saw nothing held, so nothing resumed the frame and the link to that
+  peer stalled for good. `egress_t::send` now takes an `arm` callback that it runs inside the
+  role after the frame is reported held, and the endpoints arm through it.
+- **A server session's first frame cut short by the socket is no longer stranded (#2781).**
+  A stream server writes a session's first frame (a WebSocket `101` response) by flushing
+  its egress before any writability event, and that flush armed no write interest, so a first
+  frame the socket took only part of waited for the next send to that peer. After a flush,
+  write interest now follows the held frame: armed while one is held, disarmed once none is.
+- **`can_transport_t`'s destructor no longer asserts on its own receive thread's reply
+  (#2783).** It checked that no group was still being sent before it released the link, but a
+  delivery on the link's receive thread (a router answering the frame it had just received)
+  could still be sending then, and no owner can quiesce that thread. The check now runs after
+  the link is released, which waits that delivery out.
+- **TCP and WebSocket dialers: the liveness check closes a server frozen mid-frame (#2812).**
+  `transport_t::sweep` on a `tcp_transport_t` or `ws_client_transport_t` (and a one-peer TCP
+  listener) now applies the server's rule to the read side too: the peer owes RX while it has begun
+  a frame and not finished it, and one that sent no byte of it since the last check is shut down,
+  counted in `frozen_closed`, and its link goes down, so a self-healing link over it redials.
+  Before, a dialer owed TX only, and a server that stopped mid-frame with its socket open wedged
+  the downlink for good. An idle dialer is still never closed. `egress_t::condemn_held` takes a
+  third argument, `rx_stuck`, which condemns the peer with no frame on its wire. No dialer object
+  grows: the two progress flags sit in the padding beside the TX flag.
+- **A POSIX link no longer pays 8 B for its deferred-teardown flag (#2827).** #2751 added the
+  flag after the link's last pointer, which grew every UDP, TCP and WebSocket link object by
+  8 B on x86-64 (4 B on a 32-bit target). It now sits in the tail padding of the link's wait
+  registration, so a link costs what it did before #2751: the RAM ledger reads 232 B for a
+  UDP link and 504 B for a WebSocket server link at rest again. `wait_source_t` declares its
+  list link ahead of the socket, so the padding is there with either wait adapter; its size
+  is unchanged.
+- **Clear and admit change the subscriber count and the slot under one lock (#2836).** An
+  unsubscribe (or a `:subscribers[N]` clear) and a subscribe now change a vertex's delivering-edge
+  count and its subscriber slot under one lock, the one suspend/resume and link eviction already
+  take, so a retire always sees a count that equals the live edges and leaves the vertex and its
+  descendants at zero. An admission lands only on the registration it was decided against: a
+  vertex retired since, registered again or not, takes no edge, so a retired vertex carries no
+  edges into a later registration. A vertex whose retire generation is saturated takes no edge
+  either, as every other generation check refuses the ceiling. A refused admission answers
+  `NOT_FOUND`, as an unsubscribe and the owner-side setters (#2669) do for a vertex that is no
+  longer registered. No public signature, wire byte or `sizeof` changes.
+- **Destroying the transport plane joins its links even when the reclaim table is full
+  (#2840).** `~transport_vertex_t` waits for the router frames and dispatches open at that
+  point through a notice in the shared reclaim table. When every slot was taken, the notice
+  was refused, the destructor returned at once, and the links it had removed stayed parked
+  until the embedder's next `collect()`. The notice now takes any slot not mid-step
+  (`detail_qsbr::retire_onto`): an empty one, or one another pair holds, whose pair it
+  releases first. So the destructor always waits, and its `collect()` destroys and joins
+  those links before it returns.
+- **`graph_t::retire` grows the park geometrically (#2845).** Since v0.19.0 (#1778), each
+  retire not followed by a `collect()` grew the park to exactly the entries it needed, so it
+  copied the whole park: N such retires cost O(N²). A park that must grow now takes at least
+  twice its capacity, as `reserve_park` already did, so a run of retires copies it a
+  logarithmic number of times. Retire falls back to exact growth when the doubled request is
+  refused, so it is refused only where exact growth would be. A retire/revive loop with no
+  `collect()` holds about 3.6M cycles/s with 50,000 entries parked, where it fell to about
+  41k.
+- **A send burst could close a healthy stream link (#2899).** A TCP or WebSocket link whose
+  producer sent faster than a still-reading peer drained counted each send that found the
+  socket full, and closed the connection after 64 lane depths of them in a row. The count
+  was of calls, not time, so a send loop reached it in microseconds and the link went down
+  while its reader was keeping up. Such a send now only sheds what its lane cannot hold,
+  counted in `drop_stats().dropped_tx` and `stalled_tx()`, and the link stays up. A peer that
+  has stopped reading is closed by the application's liveness check (`transport_t::sweep`,
+  #2198) and counted in `frozen_closed()`; an application that never runs the check sees
+  counted drops. A socket error still closes the link at once.
+- **Replies on a multi-session listener go to the session that asked (#2911).** On a FLAT TCP or
+  WebSocket listener, a reply to a request, including a deferred `AWAIT` answered later, now goes
+  to the session that sent the request instead of to every session on the listener. An `AWAIT`
+  whose session has gone is answered to nobody and counted in `dropped_tx`, including when a new
+  session has taken the departed one's slot by the time the answer is sent; this holds on a
+  peer-named listener too. A UDP listener answers each request at the datagram's source, not at
+  the most recent source.
+- **A subscription push to a peer-named session reaches that session and no other (#2923).** On a
+  peer-named TCP or WebSocket listener, a push carries the subscriber session's handle from the
+  push edge and is checked where it enters that session's egress. If the session has gone and
+  a new connection has taken its slot by then, the push is dropped and counted in `dropped_tx`.
+  On a WebSocket listener, a directed push whose value is too wide for the stack table now draws
+  its overflow table from the listener's injected egress source, so the receiving link pays.
+
 ### Changed (breaking)
 
 - **`path_t` drops its learned-chain slot: 40 → 24 B on a 64-bit host, 24 → 16 B on rv32
@@ -113,20 +583,192 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   contiguous advertise appends the path after `encode_advertise_header`'s 18 bytes.
   `tlv_emit.hpp` no longer includes `path_ref.hpp`, and `can.hpp` no longer includes
   `mem_source.hpp`.
-
-### Changed
-
-- **`fwd_router_t`'s terminus refusal reply is built by the one addressed-error builder (#2480).**
-  The `STATUS{BACKPRESSURE}` answer to a request the terminus could not serve for want of memory
-  is now `assemble_error_reply` over a 384 B stack store that never overflows into an allocator,
-  the same builder the bus-NAME-hop refusal uses; the frames are byte-identical to before. A
-  request whose two routes are longer than that store can hold (on a 64-bit host, 316 B of route
-  for an unstamped request and 308 B for a stamped one) is no longer answered: the arm's drop counter still moves, and nothing goes on the wire. A
-  stamped request whose stamp straddles a rope link now gets its stamp back. Every error reply and
-  acknowledgement is one link, its echo stamp at the end of the head segment.
-- **Errors and acks draw their echo stamp in the same allocation as the reply (#2480).** A
-  backend with room for the reply but not for 8 more bytes now refuses the reply, where it used
-  to send it unstamped. A reply with a payload still drops only the stamp.
+- **The POSIX socket links wait with no timeout, on one wait module (#2147).** Every
+  receive wait is now a registration with `tr::net::wait_module_t` (`wait.hpp`, ADR-0087 §3):
+  an `epoll` set on a Linux host, `poll(2)` over lwIP sockets on a chip. The 100 ms receive
+  quanta are deleted: the `SO_RCVTIMEO` on the UDP and TCP sockets and the `poll(..., 100)`
+  in the TCP and WS dialers, the one-peer listener and the multi-peer server loop, so a quiet
+  link wakes 0 times a second. Shutdown wakes the wait instead. The protected
+  `posix_endpoint_t` scaffold changes with it: `start` takes a stack size and a source, no
+  body, and `set_rcv_timeout`, `poll_readable`, `poll_accept`, `stream_endpoint_t::poll_io`,
+  `stream_endpoint_t::run_accept_loop` and `slot_server_t::run` are removed (a server calls
+  `slot_server_t::serve`). A server session is now a `wait_source_t` (its `fd` is the
+  source's). The WS client's opening handshake reads with plain blocking reads. An idle
+  stream server now draws 0 B from its own seam (was 64 B: its poll set), and a connected WS
+  peer 56 B less; a fallback link draws its private module from `link_memory_t::stack`
+  alongside its thread.
+- **The receiving link pays for its place on the lwIP wait adapter, and the module draws no
+  memory (#2147).** On a build that compiles that adapter, `wait_source_t` gains `next`, its
+  link in the adapter's list (4 B on a 32-bit chip, in the record the link owns), and the
+  adapter waits with `select(2)` over fixed `fd_set`s instead of `poll(2)` over sets it grew.
+  The module's table and both descriptor sets are gone, 28 B per attached socket on a 32-bit
+  chip, so an attach is never refused for memory; a socket numbered past `FD_SETSIZE` is
+  refused instead, which an lwIP socket never is. The link is the new compile-time member
+  `config_t::kListedWaitSources`: the ESP-IDF component binds it for chip targets, the
+  PlatformIO package binds it to `true` on every platform (it always compiles the lwIP
+  adapter), a non-Linux host build binds it in its override fragment, and each adapter refuses
+  to compile under the other binding. A `config_override.hpp` of your own that the PlatformIO
+  package's generated fragment yields to must bind `kListedWaitSources = true` too. An `epoll`
+  build carries no link, so a Linux host's records are unchanged.
+  `wait_module_t(mem::block_source_t&)` is removed: construct it with no argument.
+- **One link-state notifier replaces the link-down notifier (#2147).**
+  `transport_t::set_down_notifier(down_fn_t, void*)` is now
+  `transport_t::set_link_state_notifier(link_state_fn_t, void*)`, and the notifier takes the
+  new state: `void (*)(void* ctx, bool up)`. A transport fires it with `up = false` exactly
+  where it fired the down notifier, on the same thread, with the same rules. The return value
+  is unchanged: true when the link went down before the install. A custom transport still
+  fires a loss with the protected `notify_down()`, and the new protected `notify_up()` fires
+  `up = true` when its connection comes up after construction; no built-in transport fires an
+  up yet. A notifier that only cares about a loss returns at once on `up = true`, as the
+  router's does. To migrate, rename the install and add a `bool up` parameter to the notifier.
+- **`child_registry_t::encode_mount_name` refuses a name wider than a path (#2147).** It returns
+  0 for a name of more than `graph::kMaxSegments` segments, and the registry refuses such a
+  name. `add_child` and `attach_link` give the same verdicts as before.
+- **No stream write waits; the send bound and the `liveness_window` key are deleted (#2147,
+  #2252).** A dialer's and a one-peer listener's writes are nonblocking (`MSG_DONTWAIT`), as a
+  server's already were (#2144): what the socket does not take stays held in the peer's egress
+  and the link's driving thread resumes it on writability, so no producer blocks on a peer that
+  stopped reading. A peer that stays frozen is closed by the application's liveness check
+  (`transport_t::sweep`, #2198); a stalled write is counted, never a verdict (#2899). With
+  nothing left to bound, these go: the
+  `steady_clock` record deadline (no clock read remains on the send path), `SO_SNDTIMEO` and
+  `posix_endpoint_t::set_snd_timeout`, `kBoundedWaitMs`, `kDefaultLivenessWindowMs`,
+  `kMaxConsecutiveStalls`, `derive_send_bound_ms`, `slot_server_t::directed_send_bound_ms`, the
+  `liveness_window_ms` field of `tcp_config_t`, `tcp_server_config_t`, `ws_server_config_t` and
+  `ws_client_config_t`, the `liveness_window_ms()` accessors, the `tcp`/`ws` factory key
+  `liveness_window`, and the `bound_ms`/`nonblock` parameters of the protected
+  `stream_endpoint_t` write helpers. `slot_server_t`'s constructor loses its window argument. A
+  write that a signal interrupts is no longer resumed: a nonblocking write never sleeps, so
+  `EINTR` is an ordinary malformed call. The WS client's handshake request and its PONG are
+  nonblocking too, so a server that stops reading no longer holds the driving thread. UDP
+  sends are nonblocking: a full send buffer is a counted drop. A dialer drops 8 B (the window
+  and its padding).
+- **`register_builtin_transports` has one source, `core/src/builtin_transports.cpp.in`
+  (#2439).** Every build generates the dispatcher from it, calling only the transports it compiles:
+  core CMake and the ESP-IDF component through `libtracer_generate_builtin_transports` in
+  `core/cmake/libtracer_sources.cmake`, PlatformIO in its build script. The hand-written
+  `core/src/builtin_transports.cpp` and the PlatformIO udp+tcp copy are gone. A build that compiles
+  `core/src` by its own glob instead of these build files must now generate the dispatcher too.
+  `tools/check_builtin_transports.py` fails when the generators disagree or a build spells the calls
+  itself. The transports each build registers are unchanged.
+- **`graph_t::await` runs its deadline on the application's `now`, not a timed wait (#2579).**
+  `await(vertex_handle_t, std::chrono::nanoseconds, caller)` becomes `await(vertex_handle_t,
+  std::uint64_t now, std::uint64_t deadline, caller)`, and the path overload `await(const path_t&,
+  std::chrono::nanoseconds)` becomes `await(const path_t&, now, deadline)`. Both values are the
+  application's, in the monotonic unit it picks; libtracer reads no clock. A `deadline` at or
+  before `now` answers `TIMEOUT` at once (after the READ gate). Otherwise the wait ends on the
+  next change, or when the application calls the new `graph_t::expire_awaits(now)`, which ends
+  every blocking await on that graph whose deadline `now` has reached and returns the earliest
+  deadline still pending (0 when none). An application that never calls it gets the change only;
+  `tr::graph::kNoDeadline` asks for that, and `expire_awaits(kNoDeadline)` ends every blocking
+  await, the call to make before teardown. `vertex_t::wait_for_change(seq0, timeout)` becomes
+  `wait_for_change(seq0, await_deadline_t&)`: a blocking await is now an armed `await_waiter_t`
+  with no `fire` (its `ctx` points at the new `await_deadline_t`), so it rides the stripe's armed
+  list like the deferred form, and an expiry unlinks it the way a change does. The synchronous wire `AWAIT`
+  arm (an `op_resolver_t` with no deferral sink) no longer runs the request's `await_timeout`
+  hint, which RFC-0004 Amendment 3 lets a terminus ignore: it waits with `kNoDeadline`. With it
+  go `deferred_await_t::timeout` (the router already ignored it) and `kDefaultAwaitTimeout`.
+  `graph_t::arm_await` now answers `TYPE_MISMATCH` for a waiter with no `fire`, the blocking
+  form's shape, and arms nothing.
+- **`fwd_router_t::link_down(link_name, peer)` returns `std::size_t`, was `bool` (#2591).** It
+  returns the number of subscriber edges the call reclaimed, the count the eviction itself
+  reports, so a ghost-session sweep (a downstream ESP32-C6 consumer retires bus peers that went
+  quiet) learns what each departure freed without walking the edges again. It returns 0 for an
+  unknown mount, a flat link, a handle the bus does not mint, or a peer with nothing left to
+  reclaim; the old `true` for a recognised peer with no edges is now 0 as well. A caller that
+  tested the `bool` tests the count instead. `link_down(link_name)` is unchanged.
+- **A vertex no longer carries a write sequence (#2655, ruled under #1621).** `await` wakes
+  because a write unlinks its waiter. It no longer compares a per-vertex counter, so every
+  write drops one `seq_cst` read-modify-write. `sizeof(vertex_t)` falls from 88 to
+  80 B on x86-64 and from 64 to 60 B on rv32, and `kMaxVertexBytes64` / `kMaxVertexBytes32` are
+  lowered to match. `await` behaves as before: it is edge-triggered and sees a write ordered
+  after it arms.
+  **Removed:** `tr::graph::write_seq_t`, `tr::graph::write_seq_counter_t`,
+  `tr::graph::bound_rmw_counter_t`, `vertex_t::current_seq()`, `vertex_t::note_write()`, the
+  `kForceGuardedRmw` configuration knob, the fused publish `basic_single_writer_slot_t::store(v,
+  in_section)`, its `guard_type` alias and the `publishes_under` concept (#1715), and
+  `rmw_counter_t::bump(anchor)` / `bump_in_section()`, and the test-only door
+  `tr::graph::vertex_seq_test_door_t`.
+  **Migration:** call `vertex_t::wake_waiters()` where `note_write()` was called.
+  `vertex_t::wait_for_change` is now static and takes the caller's ARMED blocking waiter
+  (`arm_waiter` first, `disarm_waiter` on exit). It returns `false` when
+  `graph_t::expire_awaits` ended the wait, which that call now records in the new
+  `await_deadline_t::expired`. `graph_t::await(vertex_handle_t, …)` arms before its ACL gate, so
+  a write that lands after the call begins wakes it. The path overload resolves the path first,
+  then calls it. A configuration fragment that still sets `kForceGuardedRmw`
+  compiles, but nothing reads the value.
+- **A vertex references its name in the graph's name block, and `path_key_t` is gone (#2672).**
+  `vertex_t` held its own NAME record as a 24 B `path_key_t` (16 inline bytes, a length, the #1486
+  slot memo). It now holds a pointer to the record, which the graph carves into a block of chunks
+  drawn from its table source and keeps until the graph is destroyed, plus one word packing the
+  length and the slot memo. `sizeof(vertex_t)` drops 60 → **44 B** on rv32 and 80 → **72 B** on
+  x86-64; `config_t::kMaxVertexBytes32` and `kMaxVertexBytes64` are lowered to match. `graph_t`
+  grows by three words for the block. Each entry of a parent's child list carries a pointer-wide
+  prefix of the child's name beside the child pointer, so a lookup compares in the list: +4 B per
+  child on rv32 (an entry is 8 B), +8 B on x86-64 (16 B). The bytes are the same canonical record, and a refused
+  chunk makes registration answer `BACKPRESSURE`, as every other refused registration draw does.
+  - `vertex_t::name()` returns `std::span<const std::byte>` instead of `const path_key_t&`: drop
+    the `.bytes()` call.
+  - The `vertex_t` constructor takes the name as `std::span<const std::byte>` and copies nothing:
+    the bytes must outlive the vertex. A record longer than `vertex_t::kMaxNameBytes` (511) stops
+    the node.
+  - `path_key_t`, `path_key_hash_t` and `path_key_eq_t` are deleted. Nothing outside the vertex
+    name used them; a caller that wants an owned copy of a key keeps its own bytes.
+  - A parent's child list grows by 4 entries up to 16, then by a quarter (#2676, RAM cut 6),
+    instead of doubling from 8. The name block's own saving is 8 B per leaf on x86-64 (main's 112 B
+    at 512 children = 96 B of vertex and tables + an 8 B entry + 8 B of doubling slack; this change
+    = 88 B + a 16 B entry + about 0.6 B of slack); the further drop below main, to 104 B, comes
+    from removing doubling's slack at that worst-case point, not from the name block.
+- **The own-subscriber count moves into the edge block (#2673).** `vertex_t` no longer holds
+  its own delivering-slot count: it lives in `edge_block_t`, which a vertex has only once it was
+  subscribed to. `vertex_t::own_subs()` and `own_subs_ordered()` read zero for a vertex without a
+  block, and the fan-out's zero-subscriber gate is now a null block pointer first (ADR-0075 note).
+  `vertex_t::bump_own_subs` requires the block; the new `vertex_t::reserve_edges(src)` reserves
+  it and `vertex_t::has_edges()` tests for it. `graph_t` subscribe refuses `BACKPRESSURE` before
+  any other admission step when the table source cannot fund the block. `sizeof(vertex_t)` drops
+  44 → **40 B** on rv32 and 72 → **64 B** on x86-64, and `config_t::kMaxVertexBytes32` and
+  `kMaxVertexBytes64` are lowered to match. `edge_block_t` grows 24 → 28 B (rv32) and 48 → 56 B
+  (x86-64), so a subscribed vertex costs the same as before.
+- **A remote subscription takes three blocks, not five (#2737).** The `:subscribers[N]` slot table is
+  gone: `subscriber_slot_t` and `edge_block_t::slots` are removed, the published edge array
+  (`edge_pub_t`) holds each slot's retained SUBSCRIBER view in a tail after its entries
+  (`edge_pub_t::views()`, sized by `edge_pub_bytes(n)`), `pub_edge_t::cleared` marks a cleared
+  slot's dead entry, and `edge_block_t::slot_count` is the table's length (indices stay stable,
+  RFC-0009 §D.2). The cold half carries its caller in its own block:
+  `subscriber_t::ensure_remote(src)` is replaced by `make_remote(src, caller)`,
+  `subscriber_remote_t::caller` is now a `caller()` accessor returning `std::string_view`, and
+  `sizeof(subscriber_remote_t)` drops 104 → 88 B (x86-64) plus the caller bytes.
+  `detached_edges_t` is default-constructed. A remote subscription on a vertex with no
+  subscriber falls from 542 B / 5 blocks to 238 B / 3 blocks (x86-64, `bench_conn_ram`).
+  An append refused with `BACKPRESSURE` no longer lengthens the table: `slot_count` grows only
+  when the publish succeeds, so a later `vertex_t::replace_edge` at that index answers
+  `OUT_OF_RANGE` where it used to answer `FILLED_EMPTY`. A rebuild that leaves no live edge
+  publishes no array.
+- **`transport_t::shut_down` never waits; the destructor is the one join (#2813, closes #2786).**
+  A `shut_down` now behaves the same on every thread: it stops delivery, shuts the link's
+  descriptors down and stops its driver, then returns, joining no thread and waiting out no
+  callback. Before, a `shut_down` made off a callback thread joined the link's threads and closed
+  its descriptors in place. Now the destructor alone joins, closes and frees, off every callback
+  thread. For a link a `transport_vertex_t` owns, that happens at the graph's next `collect()`.
+  Destroying the `transport_vertex_t` is such a point: it waits until every router frame and
+  dispatch open at that point has left, then runs `collect()`, so the links it removes are joined
+  before it returns, while the router, the graph and the sinks their callbacks reach still live
+  (on a link-callback thread, or inside a frame, it does not wait, and the next `collect()` frees
+  what is not yet ripe). So destroy it where `collect()` may run: no direct graph read or write
+  in flight on another thread. A removed link keeps its thread stack, its record and its (shut-down)
+  descriptors until it is destroyed: what it held while live, for longer. Peak RAM is unchanged for a node that calls `collect()`
+  after it removes a link, before it creates the next. A TCP listener's port is freed when the
+  link is destroyed, not at `shut_down`. A callback already in flight when `shut_down` returns may
+  still finish, and the link is not put back on the wait after it. A self-heal link's destructor
+  waits for a direct send still holding its socket (one non-blocking write), so the socket goes
+  before the link does. New
+  `wait_module_t::disarm` takes a source off the wait without waiting for its callback; `detach`
+  is `disarm` plus that wait. A self-heal link still joins its worker off a callback thread until
+  #2815.
+- **The egress stall verdict is deleted (#2899).** `tr::net::kEgressStallStrikes` and the
+  `strike_cap` parameter of `tr::net::egress_t`'s constructor are removed: no stalled write
+  condemns a peer. `egress_result_t::stalled` stays, as a counter; `egress_result_t::condemn`
+  is now set only by a failed write that cut a frame mid-way.
 
 ### Removed (breaking)
 
@@ -148,81 +790,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   | `tr::wire::grammar::rope_cursor` | `tr::wire::grammar::rope_cursor_t` |
   | `tr::crc::crc32c_state` | `tr::crc::crc32c_state_t` |
   | `tr::crc::crc16_ccitt_state` | `tr::crc::crc16_ccitt_state_t` |
-
-### Added
-
-- **`config_t::sync_t` and `%sync.hpp`: the build's blocking primitives, bound at compile time
-  (#2454).** Every mutex, shared mutex and condition variable core holds or waits on is now
-  `tr::mutex_t`, `tr::shared_mutex_t` or `tr::condvar_t`, the members of `config_t::sync_t`.
-  The default, `tr::std_sync_t`, names `std::mutex`, `std::shared_mutex` and
-  `std::condition_variable`, so a host build is unchanged. A target whose standard primitives
-  allocate binds its own: the ESP-IDF component binds `tr::esp::static_sync_t` on every chip.
-  A member or parameter that was spelled `std::unique_lock<std::mutex>` is now
-  `std::unique_lock<tr::mutex_t>` (the same type on a host).
-- **`default_config_t::kParkStripes` (#2454)**: the stripe count of the park table
-  `tr::park_wait` / `tr::park_wake` sleep on, a compile-time knob (default 8, as before). The
-  ESP-IDF component sets it from `CONFIG_LIBTRACER_PARK_STRIPES`.
-- **`config_t::frame_observer_t`, a compile-time per-frame observer on the router (#2580).**
-  `fwd_router_t` calls `frame_observer_t::on_frame(std::string_view inbound_link_name)` once per
-  inbound frame, on every link and both receive tiers, before dispatch, on the receiving task,
-  including a frame that dispatch then refuses or drops, but not a frame the node originates
-  itself. It is given only the link name (a bus peer's name for a frame from a bus peer), valid
-  for the call, and it is observe-only: `void` and `noexcept`, checked by the
-  `tr::net::frame_observer` concept. It runs on the receiving task and must not block. The
-  default, `tr::net::no_frame_observer_t`, does nothing and compiles away, so a build that names no
-  observer is unchanged. The router holds no state for it. Bind one in
-  `libtracer/config_override.hpp` with `using frame_observer_t = my_link_tally_t;` for
-  per-link liveness or traffic accounting kept in the application. This is the production
-  shape of the runtime `on_raw` observer #2277 deleted, with no function pointer.
-- **`tr::net::drop_tally_t` and `tr::net::drop_classes_t` (#2482).** The three shed-frame
-  counters of `transport_drop_stats_t` as one embeddable value: `count_dropped_rx(n)`,
-  `count_malformed_rx(n)`, `count_dropped_tx(n)` and `snapshot()`. Every counting link keeps
-  its counters in one and answers `drop_stats()` with its snapshot; a per-peer facade still
-  reports its owner's. `drop_classes_t` leaves out at build time a class a link never drops
-  (CAN has no `malformed_rx` word), so the tally costs no more than the counters it replaces.
-- **`ws_assembler_t` is a public header, `libtracer/ws_assembler.hpp` (#2483).** The RFC 6455
-  fragmented-message assembler that core's WS server and dial-out client use moves out of
-  `transport_ws.cpp` unchanged, so every WebSocket link shares one reassembly: each fragment is
-  an owning rope link, chained without a copy, and charged its bytes plus `kFragmentCost` (its
-  segment and chain slot) against the receive cap. Its outcome types are nested
-  (`ws_assembler_t::status_t`, `ws_assembler_t::result_t`). The ESP-IDF httpd link is its
-  first user outside core.
-- **`ws_framing_t` is a public header, `libtracer/ws_framing.hpp` (#2484).** The RFC 6455
-  receive rules (header judgement against the cap, unmasking, fragment chaining, the opcode's
-  answer) move out of `transport_ws.cpp`, so a link that frames its own byte stream shares
-  them. The end adapter gains `closing(bytes)`, its answer to a CLOSE (core's ends answer none,
-  as before). Also added: `ws::header_value` (the case-insensitive, trimmed header lookup),
-  `ws::upgrade_accepted` (the client's `101` + `Sec-WebSocket-Accept` check), and
-  `frame_ingress_t::read_with`, which drives the ingress from a single-buffer read such as
-  `esp_transport_read`. The ESP-IDF WebSocket client link is the first user outside core.
-- **`tr::park_wait` / `tr::park_wake`, `libtracer/park.hpp` (#2507).** `std::atomic::wait` and
-  `notify_all` over an 8-stripe table of mutex + condition-variable pairs. libstdc++ builds
-  `std::atomic::wait` on a shared 2,048 B waiter table on every target; on esp32c6 that table
-  was the whole of v0.22.0's +2 KB `.bss`. `egress_t` (its lane lock and `close`) and the
-  ESP-IDF WS client's teardown drain now park here, so no MCU image links the libstdc++
-  table. Same contract, no clock; only contended and teardown paths reach the table. The stripe
-  table behind them (`park_stripe_t`, `park_stripe_of`, `kParkStripes`) is `tr::detail` (#2510).
-
-### Fixed
-
-- **An empty borrowed app-field table is the empty table, whatever its pointer (#2453).**
-  `app_fields_decl_t` now holds an empty borrowed view as the null span once copied or moved,
-  which every `register_vertex` and `set_policy` does. Before, a
-  `borrowed_fields_t::unchecked` span with a non-null pointer and no entries compared unequal to
-  the vertex's own empty table, so declaring it on a vertex with none drew an extension block
-  for nothing. `borrowed_fields_t::unchecked` itself is unchanged.
-
-### Removed
-
-- **`wire::path_ref_store_element` (`path_ref.hpp`, #2557).** It was a one-line wrapper around
-  `pair_store_le` and the last public function that wrote a `PATH_REF` element; only tests
-  called it. Write an element with `pair_store_le`, which has the same byte layout. The decode
-  side (`path_ref_element_count`, `path_ref_element_at`, `path_ref_body_valid`) is unchanged
-  and no wire byte moves.
-- **`vertex_t::set_app_fields` and `vertex_t::set_app_fields_static` (#2547).** Neither had a
-  caller. Install an app-field table with `graph_t::set_policy` (a `vertex_policy_t` naming
-  `app_fields`) or at `graph_t::register_vertex`; both normalize an empty borrowed table to the
-  null span (#2546), which `set_app_fields_static` skipped.
 
 ## [0.22.0] — 2026-11-02
 
