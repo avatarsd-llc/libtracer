@@ -1377,7 +1377,10 @@ jobs:
     # A landing runs the default slot and WIDE (hazard_slot_t with acl_full=ON,
     # presets/wide); the nightly, a tag and a dispatch add the plain hazard_slot_t leg
     # (header, LANDING VERSUS NIGHTLY; #2449). `changes` lists the legs (`sanitizer_legs`).
+    # One leg at a time: each ASan + UBSan Debug tree links several GB into the shared runner
+    # workspace, and two or three legs linking together ran it out of space (2026-11-27).
     strategy:
+      max-parallel: 1
       matrix:
         include: ${{ fromJSON(needs.changes.outputs.sanitizer_legs) }}
     name: sanitizers (slot=${{ matrix.lkv_slot }})${{ matrix.acl_full == 'ON' && ' acl_full=ON' || '' }}
