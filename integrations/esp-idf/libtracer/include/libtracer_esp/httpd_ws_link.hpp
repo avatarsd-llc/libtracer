@@ -1527,8 +1527,9 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief What one frame write came to (@ref write_frame). */
     enum class tx_outcome_t : std::uint8_t {
         SENT, /**< @brief The whole frame is on the wire. */
-        /** @brief The socket is full. A flush keeps the frame held, maybe part-way; a write
-         *         that waited (@ref send_now) took nothing within its bound, so the frame is
+        /** @brief The socket had no room for the rest of the frame. From a flush the frame
+         *         stays held, with what the socket did take counted in its `sent`; from
+         *         @ref send_now it means nothing was taken within the bound, so the frame is
          *         dropped and the session stalled (#2921). */
         HELD,
         FAILED /**< @brief A hard socket error, or a frame cut off part-way: the frame is lost

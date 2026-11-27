@@ -3699,8 +3699,6 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     // No `httpd_sess_update_lru_counter` here, unlike @ref tx_work: that call exists for a
     // push the adopted server's LRU cannot see, and this send is INSIDE `httpd_sess_process`
     // — the one place IDF advances the counter by itself.
-    if (out != tx_outcome_t::SENT && on_wire == 0)
-        ESP_LOGW(kTag, "ws reply not sent fd=%d len=%u - frame dropped", fd, (unsigned)total);
     // Charged to the destination session's drain (ADR-0085 §7): an in-call reply is written
     // by the receive context, on the httpd task, so this is the one writer the drain accounts,
     // and lwIP's send limits are that connection's own.
@@ -3720,8 +3718,15 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     // No count of timeouts closes anything; a stopped peer closes through the application's
     // `sweep`. The session is the one live_fd vouched for: only this task reclaims a slot, and
     // only it writes the flag, so its read needs no lock.
+    // Logged once, where the stall starts: the replies dropped after it are counted, not
+    // logged one by one. A hard error is logged where it condemns (note_tx_result).
     const bool stall = out == tx_outcome_t::HELD;
     if (out == tx_outcome_t::FAILED || to.slot->tx_stalled == stall) return;
+    if (stall)
+        ESP_LOGW(kTag,
+                 "ws reply not taken within the send bound fd=%d len=%u - dropped; replies "
+                 "stop waiting until one goes out",
+                 fd, (unsigned)total);
     const std::lock_guard lock(to.slot->tx_m);
     to.slot->tx_stalled = stall;
     to.slot->tx_moved |= !stall;
@@ -4226,18 +4231,21 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
         // is the second opinion. A skip is not a send result: it feeds the cumulative tally,
         // never the stall (note_tx_skip).
         const session_ref_t to{s, f->gen};
+        if (frozen) {
+            // The application's liveness check found this peer owing bytes and taking none
+            // past its deadline (#2198): condemned here, on the task that owns the fd. Ahead of
+            // the skip below, which a stalled session with nothing held must not reach: it
+            // would count a frame that never existed (#2921). close_frozen refuses a session
+            // that has gone, and a held frame of one is skipped on the next flush.
+            close_frozen(to);
+            return true;
+        }
         const int fd = live_fd(to);
         if (h == nullptr || fd < 0 || httpd_ws_get_fd_info(h, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
             release_frame(*s, *f);
             note_tx_skip(to);
             progress = true;
             continue;
-        }
-        if (frozen) {
-            // The application's liveness check found this peer owing bytes and taking none
-            // past its deadline (#2198): condemned here, on the task that owns the fd.
-            close_frozen(to);
-            return true;
         }
         const std::uint32_t before = f->sent;
         const tx_outcome_t out = write_frame(h, fd, *s, *f, /*nonblock=*/true);
