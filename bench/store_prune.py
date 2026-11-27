@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""@brief Keep the bench-local history store under GitHub's 100 MB file limit (#2229).
+"""@brief Keep a benchmark-action history store under GitHub's 100 MB file limit (#2229, #2937).
 
 `dev/bench-local/data.js` grows by one entry per series per banked point. It averaged
 0.29 MB per point (both suites) over its life, and about 1.0 MB per point now; it passed 100 MB after 361 points and every gh-pages push
