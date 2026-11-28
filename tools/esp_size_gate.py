@@ -179,7 +179,11 @@ FOOTPRINT_PINS = {
     # 33,661 -> 33,685 B (+24, #2943): a flush submit ESP-IDF refuses is counted
     # (stats_t::flush_post_refused). The RAM, sizeof(httpd_ws_link_t) and every httpd_ws_link
     # frame's stack stay at main.
-    "WebSocket (httpd server + client link)": 33685,
+    # 33,685 -> 33,891 B (+206, #2944): IDF's PONG and CLOSE echoes are bracketed in the send
+    # override, so a torn echo closes the session and a stalled session's echo does not wait.
+    # The RAM and sizeof(session_t) stay at main; send_guarded's frame grows 32 -> 64 B, on
+    # IDF's echo path only (orchestrator-approved, #2944).
+    "WebSocket (httpd server + client link)": 33891,
 }
 
 

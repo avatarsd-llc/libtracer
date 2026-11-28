@@ -39,6 +39,11 @@
  * drop response rests on is now measured per frame rather than assumed, and the two are
  * pinned as the pair they are (cases 9 and 10).
  *
+ * #2944 applies both rules to the frames IDF writes itself, its PONG and CLOSE echoes (case
+ * 12). A stalled session's echo is offered the socket without waiting and is skipped whole,
+ * an echo that waits out the bound marks the session stalled, and an echo cut after its
+ * header closes the session as any truncated frame does.
+ *
  * The fourth was added after the first on-silicon gate, which passed 1-3 and still failed:
  *   4. deciding to close a session is not closing it. The decision must take effect in the
  *      link's OWN state at the instant it is reached — refusing new frames to that fd and
@@ -661,6 +666,114 @@ void test_retained_frame_never_started_is_dropped() {
     fake_httpd::instance().close_all();
 }
 
+// ---------------------------------------------------------------------------
+// 12 — IDF's own PONG and CLOSE echoes (#2944).
+// ---------------------------------------------------------------------------
+/**
+ * @brief An echo exactly as `httpd_ws_send_frame_async` writes it through the session's send
+ *        function: a 2-byte header, then the payload in a second call only if there is one,
+ *        and only if the header call succeeded.
+ * @return True when IDF would report the echo sent.
+ */
+bool idf_echo(int fd, std::uint8_t opcode, std::size_t payload_len) {
+    const char header[2] = {static_cast<char>(0x80u | opcode), static_cast<char>(payload_len)};
+    if (fake_httpd::instance().socket_send(fd, header, sizeof(header), 0) < 0) return false;
+    if (payload_len == 0) return true;
+    const std::vector<char> payload(payload_len, 'p');
+    return fake_httpd::instance().socket_send(fd, payload.data(), payload.size(), 0) >= 0;
+}
+constexpr std::uint8_t kPong = 0x0A;
+constexpr std::uint8_t kClose = 0x08;
+
+/**
+ * @brief A peer that stopped reading and keeps sending PINGs costs the httpd task one send
+ *        bound in all: the first echo that waits it out marks the session stalled, every echo
+ *        after it is offered the socket without waiting and skipped whole, and once the
+ *        socket takes an echo again the stall ends.
+ */
+void test_a_stalled_peer_pinging_costs_one_bound() {
+    std::printf("a peer that stopped reading and keeps sending PINGs:\n");
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    claim(920);
+    fake_httpd::instance().clear_wire(920);
+    fake_httpd::instance().set_send_script(920, {send_result_t::TIMEOUT});
+    const std::size_t waited = fake_httpd::instance().waited_writes(920);
+    bool any_sent = false;
+    for (int i = 0; i < 6; ++i) any_sent |= idf_echo(920, kPong, 4);
+    any_sent |= idf_echo(920, kClose, 0);
+    drain();
+    check(fake_httpd::instance().waited_writes(920) == waited + 1,
+          "seven echoes cost the httpd task one send bound in all");
+    check(!any_sent && fake_httpd::instance().wire(920).empty(),
+          "every echo was skipped whole: no byte of any of them is on the wire");
+    check(fake_httpd::instance().has_session(920),
+          "skipping an echo closes nothing; a peer that stays stopped closes through sweep");
+
+    // The socket takes bytes again: the next echo goes out whole, without waiting, and ends
+    // the stall, so a later full socket is met with the bound again rather than skipped.
+    fake_httpd::instance().set_send_script(920, {send_result_t::FULL});
+    check(idf_echo(920, kPong, 4), "an echo the socket has room for goes out");
+    check(fake_httpd::instance().wire(920).size() == 6, "header and payload, whole");
+    check(fake_httpd::instance().waited_writes(920) == waited + 1, "without waiting");
+    fake_httpd::instance().set_send_script(920, {send_result_t::TIMEOUT});
+    (void)idf_echo(920, kPong, 4);
+    check(fake_httpd::instance().waited_writes(920) == waited + 2,
+          "and it ended the stall: the next full socket is given the bound once more");
+
+    link.reset();
+    fake_httpd::instance().close_all();
+}
+
+/**
+ * @brief An echo whose header went out and whose payload the socket then refused leaves a
+ *        header on the wire promising bytes that never come. With no stall involved, that
+ *        torn stream closes the session as any truncated frame does (#951).
+ */
+void test_an_echo_cut_after_its_header_closes() {
+    std::printf("an echo whose header went out and whose payload did not:\n");
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    claim(921);
+    fake_httpd::instance().clear_wire(921);
+    fake_httpd::instance().set_send_script(921, {send_result_t::FULL, send_result_t::TIMEOUT});
+    check(!idf_echo(921, kPong, 4), "IDF sees the echo fail");
+    drain();
+    check(fake_httpd::instance().wire(921).size() == 2, "its header alone is on the wire");
+    check(!fake_httpd::instance().has_session(921),
+          "the torn stream closes the session; the peer cannot parse past it");
+
+    link.reset();
+    fake_httpd::instance().close_all();
+}
+
+/**
+ * @brief On a stalled session the same tear closes it too, and an echo header the socket
+ *        takes only part of is a short write that closes it at once: skipping an echo never
+ *        leaves part of one on the wire.
+ */
+void test_a_stalled_echo_is_whole_or_closes() {
+    std::printf("a stalled session's echo, taken in part:\n");
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    claim(922);
+    claim(923);
+    for (int fd : {922, 923}) {
+        fake_httpd::instance().set_send_script(fd, {send_result_t::TIMEOUT});
+        (void)idf_echo(fd, kPong, 4);  // waits the bound once: the session is stalled
+    }
+    fake_httpd::instance().set_send_script(922, {send_result_t::FULL, send_result_t::TIMEOUT});
+    check(!idf_echo(922, kPong, 4), "header taken, payload refused: IDF sees the echo fail");
+    fake_httpd::instance().set_send_script(923, {send_result_t::SHORT});
+    check(!idf_echo(923, kClose, 0), "half a header taken: IDF sees the echo fail");
+    drain();
+    check(!fake_httpd::instance().has_session(922), "the torn echo closes its session");
+    check(!fake_httpd::instance().has_session(923), "the short header closes its session");
+
+    link.reset();
+    fake_httpd::instance().close_all();
+}
+
 }  // namespace
 
 int main() {
@@ -677,6 +790,9 @@ int main() {
     test_retained_frame_is_whole();
     test_retained_frame_cut_off_closes();
     test_retained_frame_never_started_is_dropped();
+    test_a_stalled_peer_pinging_costs_one_bound();
+    test_an_echo_cut_after_its_header_closes();
+    test_a_stalled_echo_is_whole_or_closes();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;
