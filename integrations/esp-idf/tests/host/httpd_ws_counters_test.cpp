@@ -191,7 +191,7 @@ void test_refusal_and_conflation_are_told_apart() {
 
     auto after = link->stats();
     check(after.enqueue_drops == before.enqueue_drops + 1, "the refused flush is counted");
-    check(after.flush_post_refused == before.flush_post_refused + 1,
+    check(after.work_post_refused == before.work_post_refused + 1,
           "and so is the refused submit itself (#2943)");
     check(after.tx_conflated == before.tx_conflated, "and is NOT a conflation");
     check(after.tx_to_dead_peer == before.tx_to_dead_peer,
@@ -237,7 +237,7 @@ void test_refused_flush_submit_is_counted() {
     link->flush_held();
     fake_httpd::instance().set_queue_refusing(false);
     const auto after = link->stats();
-    check(after.flush_post_refused == before.flush_post_refused + 2,
+    check(after.work_post_refused == before.work_post_refused + 2,
           "each refused submit is counted once");
     check(after.enqueue_drops == before.enqueue_drops &&
               link->drop_stats().dropped_tx == drops_before.dropped_tx,
@@ -250,7 +250,7 @@ void test_refused_flush_submit_is_counted() {
     drain();
     check(fake_httpd::instance().frames_sent() == sent_before + 1,
           "the held frame goes out on the next accepted submit");
-    check(link->stats().flush_post_refused == after.flush_post_refused,
+    check(link->stats().work_post_refused == after.work_post_refused,
           "an accepted submit counts nothing");
 
     link.reset();

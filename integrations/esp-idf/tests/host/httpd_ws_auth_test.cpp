@@ -382,12 +382,12 @@ void test_refused_auth_sweep_submit_is_counted() {
           "and the session claimed its slot, unauthenticated");
     check(check_inside(*link) == kStampedDue, "the first check stamps it");
     run_server();
-    const std::uint32_t before = link->stats().flush_post_refused;
+    const std::uint32_t before = link->stats().work_post_refused;
 
     fake_httpd::instance().set_queue_refusing(true);
     (void)check_past(*link);
     fake_httpd::instance().set_queue_refusing(false);
-    check(link->stats().flush_post_refused == before + 1, "the refused submit is counted once");
+    check(link->stats().work_post_refused == before + 1, "the refused submit is counted once");
     run_server();
     check(link->stats().auth_expired == 0 && fake_httpd::instance().has_session(kFd),
           "and nothing ran: the session is still open");
@@ -395,7 +395,7 @@ void test_refused_auth_sweep_submit_is_counted() {
     (void)check_past(*link);
     run_server();
     check(link->stats().auth_expired == 1, "the next check posts the sweep, which closes it");
-    check(link->stats().flush_post_refused == before + 1, "an accepted submit counts nothing");
+    check(link->stats().work_post_refused == before + 1, "an accepted submit counts nothing");
     run_server();
 }
 

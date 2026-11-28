@@ -66,14 +66,14 @@ static_assert(kBusLinks,
 
 // stats_t's layout is what a dashboard or a pinned integrator reads (#2195). Sixteen
 // 32-bit tallies, in this order, a new one only ever appended (#2198's peers_frozen, #2943's
-// flush_post_refused) and one removed only by a breaking change (#2908's tx_stall_strikes); a
+// work_post_refused) and one removed only by a breaking change (#2908's tx_stall_strikes); a
 // field added, moved or widened fails here first.
 static_assert(sizeof(httpd_ws_link_t::stats_t) == 16 * sizeof(std::uint32_t));
 static_assert(offsetof(httpd_ws_link_t::stats_t, enqueue_drops) == 0);
 static_assert(offsetof(httpd_ws_link_t::stats_t, tx_conflated) == 4);
 static_assert(offsetof(httpd_ws_link_t::stats_t, rx_drain_waits) == 52);
 static_assert(offsetof(httpd_ws_link_t::stats_t, peers_frozen) == 56);
-static_assert(offsetof(httpd_ws_link_t::stats_t, flush_post_refused) == 60);
+static_assert(offsetof(httpd_ws_link_t::stats_t, work_post_refused) == 60);
 
 namespace {
 
@@ -3618,7 +3618,7 @@ bool httpd_ws_link_t::post_flush(httpd_handle_t h) {
     flush_posted_.store(false, std::memory_order_seq_cst);
     // Counted here, so every caller's refused submit is (#2943); what the caller does about
     // it is unchanged.
-    flush_post_refused_.fetch_add(1, std::memory_order_relaxed);
+    work_post_refused_.fetch_add(1, std::memory_order_relaxed);
     return false;
 }
 
@@ -3786,7 +3786,7 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
     s.peers_refused = peers_refused_.load(std::memory_order_relaxed);
     s.sessions_condemned = sessions_condemned_.load(std::memory_order_relaxed);
     s.peers_frozen = peers_frozen_.load(std::memory_order_relaxed);
-    s.flush_post_refused = flush_post_refused_.load(std::memory_order_relaxed);
+    s.work_post_refused = work_post_refused_.load(std::memory_order_relaxed);
     s.rx_dropped_oversize = rx_dropped_oversize_.load(std::memory_order_relaxed);
     s.rx_dropped_alloc = rx_dropped_alloc_.load(std::memory_order_relaxed);
     s.rx_dropped_pool = rx_dropped_pool_.load(std::memory_order_relaxed);
@@ -4408,12 +4408,12 @@ std::uint64_t httpd_ws_link_t::sweep(std::uint64_t now, std::uint64_t deadline) 
     const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
     if (frozen != 0 && h != nullptr) (void)post_flush(h);
     auth_cutoff_.store(deadline, std::memory_order_relaxed);
-    // A refused submit is counted with the refused flushes (#2954); the next check finds the
-    // same sessions still expired and posts again.
+    // A refused submit is counted with the link's other refused work (#2954); the next check finds
+    // the same sessions still expired and posts again.
     if (expired != 0 && h != nullptr &&
         httpd_queue_work(h, &httpd_ws_link_t::auth_sweep_work,
                          gate_.load(std::memory_order_relaxed)) != ESP_OK)
-        flush_post_refused_.fetch_add(1, std::memory_order_relaxed);
+        work_post_refused_.fetch_add(1, std::memory_order_relaxed);
     return sw.next;
 }
 
