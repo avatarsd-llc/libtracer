@@ -422,12 +422,18 @@ static_assert(kTcpSndBuf != 5760 || kTcpSndQueueLen != 16 ||
  * @brief A drain's budget in UNITS (@ref drain_units): one per frame, plus payload units, so
  *        that one count ends a drain no later than either budget would.
  *
- * A session's own tally is one byte (@ref drain_tally_t), which is what bounds the frame
- * budget to 254 (`Kconfig` ranges it). With the frame budget off the bytes are counted in
+ * One budget for the whole link (#2958): every session's frames count toward it, and reaching
+ * it is the one thing that parks a drain. A drain therefore reads at most U units plus the one
+ * frame that crosses the line, which at the defaults' 32 frames and ~7.3 ms a small request is
+ * 33 frames, ~0.24 s, inside the 1 s minimum task watchdog. The per-session share it replaced
+ * (#2891) parked the task every session shares when one session spent it, so it held every
+ * other session's frames too; and its twice-the-budget link ceiling went with it.
+ *
+ * `Kconfig` ranges the frame budget to 254. With the frame budget off the bytes are counted in
  * 32nds of the byte budget, rounded UP, and every frame costs at least one, an empty one too.
  */
 constexpr std::size_t kRxDrainUnits = kRxDrainFrames != 0 ? kRxDrainFrames : 32;
-static_assert(kRxDrainUnits <= 254, "a session's drain tally is one byte (ADR-0085)");
+static_assert(kRxDrainUnits <= 254, "the frame budget's Kconfig range (ADR-0085)");
 
 /**
  * @brief The units one frame of @p len payload bytes costs under a frame budget of
@@ -454,30 +460,18 @@ static_assert(drain_units(65536, 32, 0) == 1);
 static_assert(32 * drain_units(8, 0, 32768) >= 32, "byte-only: 32 small frames spend 32 units");
 
 /**
- * @brief The link-wide ceiling on one drain's units: twice the budget (#2891).
- *
- * Shares alone bound a drain's frames by about one budget only when the sessions interleave.
- * Sessions that join ONE AFTER ANOTHER each read their share at the time they joined, so N of
- * them read U(1 + 1/2 + ... + 1/N), about 2.6 U at seven. The ceiling stops that at 2 U; under
- * fair interleaving the shares stop the drain long before it. So a drain reads at most
- * min(U * H_N, 2 U) units plus one frame per session (the frame that crosses its line), which
- * at the defaults' 32 frames, 16 sockets and ~7.3 ms a small request is 80 frames, ~0.58 s,
- * still inside the 1 s minimum task watchdog.
- */
-constexpr std::size_t kRxDrainLinkUnits = 2 * kRxDrainUnits;
-
-/**
- * @brief One session's share of the current drain (ADR-0085, per session since #2891): the
- *        drain it belongs to, and what it read and was answered in it (httpd task only).
+ * @brief One session's place in the current drain (ADR-0085, per session since #2891): the
+ *        drain it belongs to, and what it was answered in-call in it (httpd task only).
  *
  * Four bytes, and none when the build does not pace (@ref session_drain_tally_t). A tag that
  * is not the current drain's means zero; the tag is the low half of the core's idle epoch, so
  * it repeats every 65536 idle passes, and a tally last written exactly that many passes ago is
- * read as a member of the current drain for that one drain: at most one early wait.
+ * read as a member of the current drain for that one drain: at most one reply queued early.
+ * What a session READS is not counted per session any more (#2958): a share could only be
+ * enforced by parking the task every session shares.
  */
 struct drain_tally_t {
     std::uint16_t epoch = 0;  /**< @brief Low half of the idle epoch of the drain counted. */
-    std::uint8_t units = 0;   /**< @brief Frame and payload units read (saturating). */
     std::uint8_t replies = 0; /**< @brief Its in-call replies, in reply units (saturating). */
 };
 /** @brief What a @ref drain_tally_t becomes when the build does not pace: no byte. */
@@ -1231,7 +1225,7 @@ struct httpd_ws_link_t::session_t {
      * mean "admitted at the transport level, serving nothing".
      */
     bool auth_pending = false;
-    /** @brief This session's share of the current drain (ADR-0085, #2891): reset at the claim,
+    /** @brief This session's place in the current drain (ADR-0085, #2891): reset at the claim,
      *         written only on the httpd task. No byte when the build does not pace; it sits in the
      *         padding after `auth_pending`, so the slot does not grow on 32- or 64-bit targets. */
     [[no_unique_address]] session_drain_tally_t drain{};
@@ -2478,8 +2472,7 @@ void httpd_ws_link_t::join_drain(session_t& s, std::uint16_t tag) {
         rx_drain_units_ = 0;
     }
     // A tally of another drain counts nothing in this one: it starts here, and its session
-    // joins the divisor. A session that left mid-drain stays counted, so the divisor can only
-    // OVERCOUNT the sessions reading, which only makes the others' waits come earlier.
+    // is counted in the drain, which is what makes the drain exist for send_in_call.
     if (s.drain.epoch != tag || rx_drain_sessions_ == 0) {
         s.drain = drain_tally_t{.epoch = tag};
         ++rx_drain_sessions_;
@@ -2490,56 +2483,62 @@ void httpd_ws_link_t::pace_rx(void* sess_ctx, std::size_t frame_bytes) {
     if constexpr (!kRxDrainPaced) return;
     idle_gate_t& gate = g_idle_gates[static_cast<std::size_t>(xPortGetCoreID())];
     if (!gate.hooked.load(std::memory_order_acquire)) return;
-    // The drain is counted per SESSION (#2891), on the session httpd hands the request
-    // (`req->sess_ctx`). A socket whose session is not claimed yet (its first frame claims it)
-    // or that was refused after its upgrade has no tally: that one frame is not paced, and
-    // every frame after it is.
+    // The frame joins its session to the drain, on the session httpd hands the request
+    // (`req->sess_ctx`), so its in-call replies are charged in this drain (#2891). A socket
+    // whose session is not claimed yet (its first frame claims it) or that was refused after
+    // its upgrade has no tally: that one frame is not paced, and every frame after it is.
     if (sess_ctx == nullptr || sess_ctx == gate_.load(std::memory_order_relaxed)) return;
     session_t& s = *static_cast<session_t*>(sess_ctx);
     std::uint32_t epoch = gate.epoch.load(std::memory_order_seq_cst);
     // The drain is the run of frames since this core last idled; an epoch that moved since
-    // starts a new one. A session waits only once it has read ITS SHARE of the budget, the
-    // budget divided among the sessions that have read in this drain, or once the
-    // whole drain reaches twice the budget (kRxDrainLinkUnits, which only sessions joining one
-    // after another reach). Its in-call replies never make it wait: the ones past what lwIP can
-    // hold unacknowledged for it wait in its own queue instead (send_in_call, #2942), so one
-    // session's replies never park the task every session shares. So no session is charged
-    // for another session's frames, and a
-    // drain reads at most min(U * H_N, 2 U) units plus one frame per session. A task that
-    // migrated reads another core's epoch, which almost never matches the tag, and starts a
-    // new drain; one that matches by chance waits once early, never for good.
+    // starts a new one. The drain waits once every session together has read the budget
+    // (kRxDrainUnits); no session's own count parks it (#2958), because the wait holds the task
+    // every session shares, and a share spent by one session would hold all of them. In-call
+    // replies never make it wait either: the ones past what lwIP can hold unacknowledged for a
+    // session wait in its own queue (send_in_call, #2942). So a drain reads at most U units
+    // plus one frame. A task that migrated reads another core's epoch, which
+    // almost never matches the tag, and starts a new drain; one that matches by chance waits
+    // once early, never for good.
+    //
+    // The wait ends when the core idles, or at the application's next sweep or flush_held
+    // (release_drain), whichever comes first, so a core whose idle task is starved holds the
+    // link for at most one application tick. No timer and no clock read.
     //
     // While it waits it is still the httpd task, the one drain of this link's queued
     // sends, so a send posted to it by another task (a held frame) is RUN FROM HERE,
     // on this task, the socket write and all, and the park goes on. The frame stays unread:
-    // egress wakes the park, ingress waits for idle, and a peer who can make this link
-    // post a send per frame (a subscriber over another link, an app that replies off-task)
-    // buys no ingress with it. The waiter counts itself in, THEN re-reads the epoch and the
-    // pending count (the handshake on idle_gate_t, which egress_posted joins from the
-    // producer's side), so neither an idle pass nor a post in between is slept through.
+    // egress wakes the park, ingress waits for idle or the application's tick, and a peer
+    // who can make this link post a send per frame (a subscriber over another link, an app
+    // that replies off-task) buys no ingress with it. The waiter counts itself in, THEN re-reads
+    // the epoch and the pending count (the handshake on idle_gate_t, which egress_posted joins from
+    // the producer's side), so neither an idle pass nor a post in between is slept through.
     // Returning instead, to let the server loop run the item, is not an option: IDF has
     // consumed the frame's first header byte before this handler is called
     // (httpd_parse.c httpd_req_new -> httpd_ws_get_frame_type), so a handler that returns
     // without the payload desynchronises the stream.
-    const auto now = static_cast<std::uint16_t>(epoch);
-    const bool spent = s.drain.epoch == now && rx_drain_epoch_ == now &&
-                       (std::size_t{s.drain.units} * rx_drain_sessions_ >= kRxDrainUnits ||
-                        rx_drain_units_ >= kRxDrainLinkUnits);
-    if (spent) {
+    if (rx_drain_epoch_ == static_cast<std::uint16_t>(epoch) && rx_drain_units_ >= kRxDrainUnits) {
         rx_drain_waits_.fetch_add(1, std::memory_order_relaxed);
+        // The release flag joins the idle handshake: release_drain stores it, then reads
+        // waiters; this side counts itself in, then reads the flag.
         gate.waiters.fetch_add(1, std::memory_order_seq_cst);
-        while (gate.epoch.load(std::memory_order_seq_cst) == epoch) {
+        while (gate.epoch.load(std::memory_order_seq_cst) == epoch &&
+               !rx_released_.load(std::memory_order_acquire)) {
             if (flush_egress()) continue;  // more may have been posted while those went out
             (void)xSemaphoreTake(gate.sem, portMAX_DELAY);
         }
         gate.waiters.fetch_sub(1, std::memory_order_seq_cst);
+        // Cleared HERE and nowhere else, by the httpd task as it resumes: the application only
+        // ever sets it. A release that came while no drain waited ends the next wait at once,
+        // so the application's tick costs at most one early drain per tick.
+        rx_released_.store(false, std::memory_order_relaxed);
+        // Ended by the application rather than an idle pass: the next drain starts here.
+        if (gate.epoch.load(std::memory_order_seq_cst) == epoch) rx_drain_units_ = 0;
         epoch = gate.epoch.load(std::memory_order_seq_cst);
     }
     join_drain(s, static_cast<std::uint16_t>(epoch));
     const std::size_t units = drain_units(frame_bytes, kRxDrainFrames, kRxDrainBytes);
-    s.drain.units = saturating_add(s.drain.units, units);
-    rx_drain_units_ = static_cast<std::uint16_t>(
-        std::min<std::size_t>(rx_drain_units_ + units, kRxDrainLinkUnits));
+    rx_drain_units_ =
+        static_cast<std::uint16_t>(std::min<std::size_t>(rx_drain_units_ + units, kRxDrainUnits));
 }
 
 void httpd_ws_link_t::egress_posted() noexcept {
@@ -2553,6 +2552,16 @@ void httpd_ws_link_t::egress_posted() noexcept {
     // gate with no waiter costs one load.
     for (idle_gate_t& gate : g_idle_gates)
         if (gate.waiters.load(std::memory_order_seq_cst) != 0) (void)xSemaphoreGive(gate.sem);
+}
+
+void httpd_ws_link_t::release_drain() noexcept {
+    if constexpr (!kRxDrainPaced) return;
+    // The application's tick ends a wait the idle task could not (#2958): the flag first, then
+    // the gates' waiters, the order pace_rx's handshake relies on. The fence keeps the store
+    // ahead of egress_posted's read of `waiters`. Only the httpd task clears the flag (pace_rx).
+    rx_released_.store(true, std::memory_order_release);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    egress_posted();
 }
 
 esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
@@ -4368,6 +4377,7 @@ std::uint64_t httpd_ws_link_t::sweep(std::uint64_t now, std::uint64_t deadline) 
     // the sweep this posts to the httpd task. Never extended by the peer's own traffic, so a
     // record is judged as stuck at every check, and one still inside the window is due again
     // one window after its stamp.
+    release_drain();  // the application's tick also ends a parked drain (#2958)
     sweep_t sw{.now = now, .deadline = deadline};
     session_t* batch[kFanoutChunk];
     std::size_t next = 0;
@@ -4434,6 +4444,7 @@ void httpd_ws_link_t::flush_held() {
     // The application's own tick, for a link that has gone quiet with a frame still held on a
     // full socket: nothing else would offer it the socket again. No clock is read here; the
     // caller's cadence is the whole policy. One flush, as any post makes.
+    release_drain();  // and a drain parked on a core whose idle task is starved (#2958)
     if (!tx_held_.load(std::memory_order_relaxed)) return;
     const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
     if (h != nullptr) (void)post_flush(h);

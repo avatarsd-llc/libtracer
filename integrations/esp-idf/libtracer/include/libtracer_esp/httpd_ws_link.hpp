@@ -1589,30 +1589,32 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * (ping, close) included: each costs the same handler pass. A drain belongs to the core
      * it started on; a task that migrated starts a new one (see ADR-0085, dual core).
      *
-     * The drain is counted per SESSION (#2891): the session @p sess_ctx (httpd's
-     * `req->sess_ctx`) waits only once it has read its share of the budget (the budget divided
-     * among the sessions that read in the drain), once the in-call replies written to it reach
-     * half lwIP's segment queue or a quarter of its send buffer, each reply charged the more of
-     * one segment and its bytes, with no round-up (#2916) (ADR-0085 §7: while this task
-     * holds unread ingress, lwIP drops the peer's data-bearing segments and the ACKs they
-     * carry, so more replies would wait for an ACK only this task can release), or once the
-     * whole drain reaches twice the budget. No session is charged for another session's
-     * frames; a frame that arrives while the task is parked still waits for that park.
+     * The budget is the LINK's (#2958): every session's frames count toward it, and no
+     * session's own count makes the drain wait, because the wait holds the task every session
+     * shares. In-call replies never make it wait either: a session's replies past what lwIP can
+     * hold unacknowledged for it go through its own queue (@ref send_in_call, ADR-0085 §7).
+     * The wait ends when the core idles, or at the application's next @ref sweep or
+     * @ref flush_held (@ref release_drain), so a core whose idle task is starved holds the
+     * link for at most one application tick. A frame that arrives while the task is parked
+     * still waits for that park.
      *
      * The wait is also where this link's held frames go out while it lasts. The parked
      * task is the httpd task, the one that writes them, so a frame stored by another task
      * is flushed from inside the wait (@ref flush_egress) and the wait goes on: egress wakes the
-     * park, ingress waits for idle, and no peer can buy ingress by provoking egress. The frame is
-     * not read before the core idles.
+     * park, and only an idle pass or the application's tick ends it, so no peer can buy ingress
+     * by provoking egress.
      */
     void pace_rx(void* sess_ctx, std::size_t frame_bytes);
     /** @brief Make @p s a member of the drain tagged @p tag: a link whose drain has another tag
-     *         starts this one, and a tally of another drain starts at zero and joins the
-     *         divisor (httpd task only; see @ref pace_rx). */
+     *         starts this one, and a tally of another drain starts at zero (httpd task only;
+     *         see @ref pace_rx). */
     void join_drain(session_t& s, std::uint16_t tag);
     /** @brief Wake a drain parked for idle so it flushes the frame just stored (any task; the
      *         producer's side of the idle-gate handshake, after the store). */
     void egress_posted() noexcept;
+    /** @brief End a drain parked in @ref pace_rx from the application's tick (@ref sweep,
+     *         @ref flush_held), as an idle pass would (#2958). Any task; never blocks. */
+    void release_drain() noexcept;
     /**
      * @brief Turn @p fd into a peer slot: enforce `max_peers`, take a free or fresh slot,
      *        name it, stamp its identity and its authentication state (httpd task only;
@@ -2398,12 +2400,17 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief The low half of the idle-gate epoch the current drain began in (see
      *         @ref pace_rx). httpd task only, like @ref rx_scratch_. */
     std::uint16_t rx_drain_epoch_ = 0;
-    /** @brief Sessions that have read a frame in the current drain: the divisor of each
-     *         one's share of the budget (see @ref pace_rx). httpd task only. */
+    /** @brief Sessions that have read a frame in the current drain; non-zero once a drain
+     *         exists, which is what @ref send_in_call charges replies against. httpd task
+     *         only. */
     std::uint16_t rx_drain_sessions_ = 0;
-    /** @brief Units read in the current drain by every session, held at twice the budget:
-     *         the link-wide ceiling of @ref pace_rx. httpd task only. */
+    /** @brief Units read in the current drain by every session, held at the budget: the one
+     *         count that parks @ref pace_rx. httpd task only. */
     std::uint16_t rx_drain_units_ = 0;
+    /** @brief Set by the application's tick (@ref release_drain, release order) to end a
+     *         parked drain; cleared ONLY by the httpd task, in @ref pace_rx, as it resumes
+     *         (#2958). */
+    std::atomic<bool> rx_released_{false};
     /** @brief The in-call reply scratch, `tx_inline_bytes_` from `memory.io`: used only on
      *         the httpd task inside @ref send_in_call to gather a rope reply into one
      *         WebSocket frame. */

@@ -26,7 +26,13 @@
  *     one drain of its own control queue) never holds the link's egress, and a peer that
  *     provokes a send per frame buys no ingress with it: the budget stays spent until idle;
  *   - a session's in-call replies past its bound wait in its own queue, so they never park
- *     the drain and never hold another session's reads or replies (#2942).
+ *     the drain and never hold another session's reads or replies (#2942);
+ *   - the budget is the link's: one session reading far past what a share would have been
+ *     holds no other session back, and the application's next sweep or flush_held ends a
+ *     park the idle task cannot (#2958).
+ *
+ * The executable also has a `bench` mode, which is not a test: it counts the waits and the
+ * frames read per wait for 1-16 sessions, interleaved or bursting in turn (see run_bench).
  *
  * What it cannot show is the silicon half: that the idle task really runs once the httpd
  * task parks, and what the pacing costs in throughput. That is the on-silicon plan in
@@ -37,10 +43,13 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -393,12 +402,12 @@ void test_park_sends_each_frame_once() {
 }
 
 // ---------------------------------------------------------------------------
-// 8 — the drain is counted per session (#2891): a quiet session never waits for another
-//     session's flood, and the flooder waits once it has read its share.
+// 8 — the budget is the link's (#2958): a quiet session waits for no flooder's share, only
+//     for the budget every session together reads.
 // ---------------------------------------------------------------------------
 void test_a_quiet_session_never_waits_for_a_flood() {
     constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
-    std::printf("a quiet session is read while another session has spent a budget:\n");
+    std::printf("a quiet session waits only for the link's budget, never for a flooder's share:\n");
     auto link = fresh_link(810);
     claimed_session(811);
     (void)fake_httpd::run_idle_hooks();
@@ -406,44 +415,42 @@ void test_a_quiet_session_never_waits_for_a_flood() {
     const std::byte body[8] = {};
     std::atomic<std::size_t> step{0};
     std::thread httpd([&] {
-        // A whole budget from the flooder, alone in the drain: its share is the budget.
-        for (std::size_t i = 0; i < kBudget; ++i)
+        // Nearly the whole budget from the flooder: far past any share of two (#2958).
+        for (std::size_t i = 0; i < kBudget - 3; ++i)
             (void)fake_httpd::instance().deliver_frame(810, std::span<const std::byte>(body));
-        step.store(1);
-        // The quiet session speaks with the budget spent: under one link-wide count this frame
-        // would wait for the core to idle. It has read nothing in this drain, so it is read.
+        // The quiet session speaks: nothing waits, the link has read less than its budget.
         for (int i = 0; i < 3; ++i)
             (void)fake_httpd::instance().deliver_frame(811, std::span<const std::byte>(body));
+        step.store(1);
+        // The budget is spent by both together: the next frame waits, whichever session's.
+        (void)fake_httpd::instance().deliver_frame(811, std::span<const std::byte>(body));
         step.store(2);
-        // The flooder's next frame waits: it has read more than its share of two.
-        (void)fake_httpd::instance().deliver_frame(810, std::span<const std::byte>(body));
-        step.store(3);
     });
-    check(wait_until([&] { return step.load() == 2 && parked_after(kBudget + 3); }),
-          "the quiet session's frames were read, and then the flooder's next frame parked");
-    check(link->stats().rx_drain_waits == 1, "one wait, the flooder's");
+    check(wait_until([&] { return step.load() == 1 && parked_after(kBudget); }),
+          "the quiet session's frames were read, then the link's budget parked the next one");
+    check(link->stats().rx_drain_waits == 1, "one wait, for the link's budget");
     (void)fake_httpd::run_idle_hooks();
-    check(wait_until([&] { return step.load() == 3; }), "and it is read once the core idles");
+    check(wait_until([&] { return step.load() == 2; }), "and it is read once the core idles");
     httpd.join();
     finish(std::move(link));
 }
 
 // ---------------------------------------------------------------------------
-// 10 — sessions that join one after another are stopped by the link-wide ceiling: twice
-//      the budget, whatever their shares add up to (#2891).
+// 10 — sessions that join one after another are stopped by the link's one budget, whatever
+//      their old shares would have added up to (#2891, #2958).
 // ---------------------------------------------------------------------------
 
-void test_sessions_joining_in_turn_stop_at_twice_the_budget() {
+void test_sessions_joining_in_turn_park_at_one_budget() {
     constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
-    std::printf("sessions bursting one after another park at twice the budget:\n");
+    std::printf("sessions bursting one after another park at one budget:\n");
     constexpr int kFds[] = {820, 821, 822, 823, 824, 825, 826};
     auto link = fresh_link(kFds[0]);
     for (std::size_t i = 1; i < std::size(kFds); ++i) claimed_session(kFds[i]);
     (void)fake_httpd::run_idle_hooks();
     g_payload_reads.store(0);
     const std::byte body[8] = {};
-    // Session k (1-based) reads ceil(budget / k) frames, the most its share lets it read
-    // before its next frame would wait: shares alone would let 85 frames through at 32.
+    // Session k (1-based) reads ceil(budget / k) frames, what its share let it read before
+    // #2958: shares alone let 85 frames through at 32, which main capped at twice the budget.
     std::size_t by_shares = 0;
     for (std::size_t k = 1; k <= std::size(kFds); ++k) by_shares += (kBudget + k - 1) / k;
     std::thread httpd([&] {
@@ -452,21 +459,21 @@ void test_sessions_joining_in_turn_stop_at_twice_the_budget() {
                 (void)fake_httpd::instance().deliver_frame(kFds[k - 1],
                                                            std::span<const std::byte>(body));
     });
-    check(by_shares > 2 * kBudget, "the shares alone add up to more than twice the budget");
-    check(wait_until([&] { return parked_after(2 * kBudget); }),
-          "the drain parks after exactly twice the budget, inside a session's share");
+    check(by_shares > 2 * kBudget, "the old shares alone add up to more than twice the budget");
+    check(wait_until([&] { return parked_after(kBudget); }),
+          "the drain parks after exactly one budget, whichever sessions read it");
     check(link->stats().rx_drain_waits == 1, "one wait");
-    // Every later frame belongs to a session that has read in this drain, so each further
-    // idle releases the drain again.
-    for (int i = 0; i < 4 && g_payload_reads.load() < by_shares; ++i) {
+    // Each further idle releases exactly one more budget of the burst.
+    bool each_one_budget = true;
+    for (std::size_t read = 2 * kBudget; read < by_shares; read += kBudget) {
         (void)fake_httpd::run_idle_hooks();
-        (void)wait_until([&] {
-            return g_payload_reads.load() == by_shares || fake_httpd::semaphore_waiters() == 1;
-        });
+        each_one_budget = wait_until([&] { return parked_after(read); }) && each_one_budget;
     }
+    check(each_one_budget, "each idle pass lets exactly one more budget through");
     (void)fake_httpd::run_idle_hooks();
     httpd.join();
     check(g_payload_reads.load() == by_shares, "every frame was read in the end");
+    check(link->stats().rx_drain_waits == (by_shares - 1) / kBudget, "one wait per budget");
     finish(std::move(link));
 }
 
@@ -534,11 +541,11 @@ void test_an_in_call_reply_counts_for_a_stale_destination() {
 }
 
 // ---------------------------------------------------------------------------
-// 12 — a session closing mid-drain: the slot's next tenant starts with nothing (#2891).
+// 12 — a session closing mid-drain: the link's budget is unchanged by it (#2891, #2958).
 // ---------------------------------------------------------------------------
 void test_a_session_closing_mid_drain() {
     constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
-    std::printf("a session that closes mid-drain leaves nothing to its successor:\n");
+    std::printf("a session that closes mid-drain changes nothing in the link's budget:\n");
     auto link = fresh_link(840);
     g_payload_reads.store(0);
     const std::byte body[8] = {};
@@ -549,13 +556,13 @@ void test_a_session_closing_mid_drain() {
     (void)fake_httpd::instance().run_pending();
     claimed_session(840);
     const std::size_t before = g_payload_reads.load();
-    // The departed session still counts in the divisor (it only overcounts), so the new one's
-    // share is half the budget; it inherits none of its predecessor's units.
-    ingress_t in(840, kBudget / 2 + 1, 8);
-    check(wait_until([&] { return parked_after(before + kBudget / 2); }),
-          "the new tenant reads its own share, from zero, before it waits");
+    // The budget is the link's, so a departure neither refunds nor charges it: the new tenant
+    // reads what is left of this drain's budget, and its next frame waits for idle (#2958).
+    ingress_t in(840, 5, 8);
+    check(wait_until([&] { return parked_after(before + 4); }),
+          "the new tenant reads the rest of the link's budget, then waits");
     (void)fake_httpd::run_idle_hooks();
-    check(wait_until([&] { return in.delivered() == kBudget / 2 + 1; }), "and finishes after idle");
+    check(wait_until([&] { return in.delivered() == 5; }), "and finishes after idle");
     finish(std::move(link));
 }
 
@@ -786,6 +793,153 @@ void test_full_hook_table_leaves_the_link_unpaced() {
     finish(std::move(link));
 }
 
+// ---------------------------------------------------------------------------
+// 13 — one session past what used to be its share does not hold another session (#2958).
+// ---------------------------------------------------------------------------
+/** @brief An application that answers every frame in-call, to the session that sent it. */
+class responder_t {
+   public:
+    explicit responder_t(httpd_ws_link_t& link) : link_(link) {}
+    void operator()(peer_handle_t from, std::span<const std::byte>) {
+        const std::byte reply[4] = {};
+        if (tr::net::transport_t* const to = link_.peer_link_of(from); to != nullptr)
+            to->send(std::span<const std::byte>(reply));
+    }
+
+   private:
+    httpd_ws_link_t& link_;
+};
+
+/** @brief Frames recorded for @p fd since the last clear. */
+std::size_t frames_to(int fd) {
+    std::size_t n = 0;
+    for (const auto& f : fake_httpd::instance().sent_frames()) n += f.fd == fd ? 1 : 0;
+    return n;
+}
+
+void test_one_session_past_its_share_does_not_hold_another() {
+    constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
+    std::printf("one session reading past half the budget does not hold another's READ:\n");
+    auto link = fresh_link(850);  // A
+    claimed_session(851);         // B
+    (void)fake_httpd::run_idle_hooks();
+    g_payload_reads.store(0);
+    responder_t app(*link);
+    link->set_peer_receiver(app);
+    fake_httpd::instance().clear_sent_frames();
+    const std::byte body[8] = {};
+    std::atomic<int> step{0};
+    // One thread plays the httpd task every session shares; the idle hook never fires.
+    std::thread httpd([&] {
+        (void)fake_httpd::instance().deliver_frame(851, std::span<const std::byte>(body));
+        for (std::size_t i = 0; i < kBudget / 2 + 2; ++i)
+            (void)fake_httpd::instance().deliver_frame(850, std::span<const std::byte>(body));
+        step.store(1);
+        (void)fake_httpd::instance().deliver_frame(851, std::span<const std::byte>(body));
+        step.store(2);
+    });
+    const bool read = wait_until([&] { return step.load() == 2; });
+    check(read, "B's READ is read while A is past half the budget, with no idle step");
+    for (int i = 0; i < 4 && step.load() != 2; ++i) {  // unpark a drain that waited, so it joins
+        (void)fake_httpd::run_idle_hooks();
+        (void)wait_until([&] { return step.load() == 2 || fake_httpd::semaphore_waiters() == 1; });
+    }
+    httpd.join();
+    check(read && frames_to(851) == 2, "and both of B's frames were answered in-call");
+    check(link->stats().rx_drain_waits == 0, "nothing waited: no session's share parks the task");
+    finish(std::move(link));
+}
+
+// ---------------------------------------------------------------------------
+// 14 — the application's tick also ends the link-wide wait (#2958).
+// ---------------------------------------------------------------------------
+/**
+ * @brief A drain parked at the link-wide ceiling on a core whose idle task never runs is
+ *        released by the application's next `sweep` or `flush_held`, and starts a new drain.
+ */
+void test_the_application_tick_ends_a_park() {
+    constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
+    std::printf("the application's sweep and flush_held end a park the idle task cannot:\n");
+    auto link = fresh_link(855);
+    const std::byte body[8] = {};
+    std::atomic<std::size_t> done{0};
+    std::thread httpd([&] {
+        for (std::size_t i = 0; i < 2 * kBudget + 2; ++i) {
+            (void)fake_httpd::instance().deliver_frame(855, std::span<const std::byte>(body));
+            done.fetch_add(1);
+        }
+    });
+    check(wait_until([&] { return parked_after(kBudget); }),
+          "the drain parks at the link's budget");
+    (void)link->sweep(100, 0);
+    check(wait_until([&] { return parked_after(2 * kBudget); }),
+          "the application's sweep releases it, and a new drain parks at the budget again");
+    link->flush_held();
+    check(wait_until([&] { return done.load() == 2 * kBudget + 2; }),
+          "flush_held releases it too, with the idle hook never run");
+    for (int i = 0; i < 8 && done.load() != 2 * kBudget + 2; ++i) {  // a park nothing ended
+        (void)fake_httpd::run_idle_hooks();
+        (void)wait_until(
+            [&] { return done.load() == 2 * kBudget + 2 || fake_httpd::semaphore_waiters() == 1; });
+    }
+    httpd.join();
+    check(link->stats().rx_drain_waits == 2, "two waits, each ended by the application");
+    finish(std::move(link));
+}
+
+// ---------------------------------------------------------------------------
+// bench: not a test. `httpd_ws_drain_budget_test bench <sessions> <payload> <frames> [run]`:
+//      <sessions> sessions (1-16) each send <frames> frames of <payload> bytes on one httpd
+//      thread, taking turns of [run] frames each (default 1: interleaved frame by frame; a
+//      longer run is sessions bursting one after another), and an idle thread lets the core
+//      idle as soon as the drain waits. What it reports first is COUNTED, the same on any host: the
+//      waits, and the frames read per wait, which is how much every session together reads before
+//      the shared task waits. The ns per frame is the host fake's cost, for a base-vs-head
+//      comparison on one machine only; a wait's real price (the time until an ESP32 core
+//      idles) is not in it. Builds against any tree whose link has stats().rx_drain_waits.
+// ---------------------------------------------------------------------------
+int run_bench(int sessions, std::size_t payload, std::size_t frames, std::size_t run) {
+    if (sessions < 1 || sessions > 16 || frames == 0 || run == 0) {
+        std::printf("usage: bench <sessions 1-16> <payload bytes> <frames per session> [run]\n");
+        return 2;
+    }
+    constexpr int kFirstFd = 960;
+    auto link = fresh_link(kFirstFd);
+    for (int i = 1; i < sessions; ++i) claimed_session(kFirstFd + i);
+    (void)fake_httpd::run_idle_hooks();
+    const std::uint64_t waits_before = link->stats().rx_drain_waits;
+    const std::vector<std::byte> body(payload, std::byte{0x5A});
+    std::atomic<bool> done{false};
+    std::thread idle([&] {
+        while (!done.load()) {
+            if (fake_httpd::semaphore_waiters() != 0) (void)fake_httpd::run_idle_hooks();
+            std::this_thread::yield();
+        }
+    });
+    const auto start = std::chrono::steady_clock::now();
+    for (std::size_t f = 0; f < frames; f += run)
+        for (int i = 0; i < sessions; ++i)
+            for (std::size_t r = f; r < std::min(f + run, frames); ++r)
+                (void)fake_httpd::instance().deliver_frame(kFirstFd + i,
+                                                           std::span<const std::byte>(body));
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+    done.store(true);
+    idle.join();
+    const std::uint64_t waits = link->stats().rx_drain_waits - waits_before;
+    const std::size_t total = frames * static_cast<std::size_t>(sessions);
+    std::printf(
+        "RESULT httpd-ws-drain sessions=%d payload=%zu run=%zu frames=%zu waits=%llu "
+        "frames_per_wait=%.2f ns_per_frame=%.1f\n",
+        sessions, payload, run, total, static_cast<unsigned long long>(waits),
+        waits == 0 ? static_cast<double>(total)
+                   : static_cast<double>(total) / static_cast<double>(waits),
+        static_cast<double>(ns) / static_cast<double>(total));
+    finish(std::move(link));
+    return 0;
+}
+
 }  // namespace
 
 // This suite links with --wrap=setsockopt (the keepalive suite does the same, with its own
@@ -810,6 +964,11 @@ int main(int argc, char** argv) {
     }
     fake_httpd::instance().set_frame_hook([] { g_payload_reads.fetch_add(1); });
     fake_httpd::instance().set_sustained_ingress(true);  // the core idles only when told
+    if (argc > 4 && std::string(argv[1]) == "bench") {
+        return run_bench(std::atoi(argv[2]), std::strtoul(argv[3], nullptr, 10),
+                         std::strtoul(argv[4], nullptr, 10),
+                         argc > 5 ? std::strtoul(argv[5], nullptr, 10) : 1);
+    }
     if (argc > 1 && std::string(argv[1]) == "unhooked") {
         test_full_hook_table_leaves_the_link_unpaced();
     } else {
@@ -822,10 +981,12 @@ int main(int argc, char** argv) {
         test_a_quiet_session_never_waits_for_a_flood();
         test_in_call_reply_bytes_end_a_drain();
         test_reply_sizes_park_where_the_bound_says();
-        test_sessions_joining_in_turn_stop_at_twice_the_budget();
+        test_sessions_joining_in_turn_park_at_one_budget();
         test_an_in_call_reply_counts_for_a_stale_destination();
         test_a_session_closing_mid_drain();
         test_replies_past_the_bound_do_not_hold_other_sessions();
+        test_one_session_past_its_share_does_not_hold_another();
+        test_the_application_tick_ends_a_park();
     }
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
