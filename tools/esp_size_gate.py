@@ -183,7 +183,11 @@ FOOTPRINT_PINS = {
     # override, so a torn echo closes the session and a stalled session's echo does not wait.
     # The RAM and sizeof(session_t) stay at main; send_guarded's frame grows 32 -> 64 B, on
     # IDF's echo path only (maintainer-approved, #2944).
-    "WebSocket (httpd server + client link)": 33891,
+    # 33,891 -> 33,999 B (+108, #2958): the drain has one budget for the whole link, and the
+    # application's sweep and flush_held end a parked drain (release_drain). The RAM,
+    # sizeof(session_t) (456 B) and sizeof(httpd_ws_link_t) (1,136 B) stay at main; pace_rx's
+    # frame grows 32 -> 48 B and flush_held's 0 -> 16 B.
+    "WebSocket (httpd server + client link)": 33999,
 }
 
 

@@ -381,6 +381,13 @@ std::size_t run_idle_hooks(unsigned core = 0);
 /** @brief Callers parked in the fake `xSemaphoreTake` right now — a link waiting for idle. */
 [[nodiscard]] std::size_t semaphore_waiters();
 
+/**
+ * @brief Run @p hook once, on the taking thread, at the next `xSemaphoreTake`'s entry, before
+ *        it blocks: the point between a waiter's last check of its condition and its block.
+ *        One-shot; an empty function disarms it.
+ */
+void set_before_take(std::function<void()> hook);
+
 /** @brief The one fake server; its address IS the `httpd_handle_t` the link adopts. */
 server_t& instance();
 

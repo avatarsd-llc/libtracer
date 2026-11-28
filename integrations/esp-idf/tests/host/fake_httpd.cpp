@@ -66,6 +66,9 @@ std::array<std::array<esp_freertos_idle_cb_t, kIdleHookSlots>, portNUM_PROCESSOR
 std::mutex g_hooks_m;
 /** @brief Callers inside the fake `xSemaphoreTake` right now. */
 std::atomic<std::size_t> g_sem_waiters{0};
+/** @brief The one-shot hook the next `xSemaphoreTake` runs before it blocks. */
+std::function<void()> g_before_take;
+std::mutex g_before_take_m;
 
 }  // namespace
 
@@ -88,6 +91,11 @@ std::size_t run_idle_hooks(unsigned core) {
 }
 
 std::size_t semaphore_waiters() { return g_sem_waiters.load(std::memory_order_seq_cst); }
+
+void set_before_take(std::function<void()> hook) {
+    const std::lock_guard lock(g_before_take_m);
+    g_before_take = std::move(hook);
+}
 
 route_t registered_route() { return g_route; }
 
@@ -895,6 +903,12 @@ SemaphoreHandle_t xSemaphoreCreateBinaryStatic(StaticSemaphore_t* /*storage*/) {
 }
 
 BaseType_t xSemaphoreTake(SemaphoreHandle_t semaphore, TickType_t ticks_to_wait) {
+    std::function<void()> before;
+    {
+        const std::lock_guard hook_lock(fake_httpd::g_before_take_m);
+        before.swap(fake_httpd::g_before_take);
+    }
+    if (before) before();  // outside the semaphore's lock: the hook may give it
     std::unique_lock lock(semaphore->m);
     fake_httpd::g_sem_waiters.fetch_add(1, std::memory_order_seq_cst);
     // Only the block-forever form is modelled: it is the only one the idle gate uses. A
