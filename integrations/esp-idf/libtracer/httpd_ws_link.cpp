@@ -1113,6 +1113,11 @@ struct httpd_ws_link_t::session_t {
      * on the receive side.
      */
     bool tx_frame_open = false;
+    /** @brief IDF's last write on this session was a whole echo header announcing a payload,
+     *         so its next one is that payload: a header already on the wire, if the payload
+     *         fails (#2944). Set and read by @ref httpd_ws_link_t::send_guarded only (httpd
+     *         task). */
+    bool tx_echo_owed = false;
     /**
      * @brief Bytes of that frame the socket has already accepted (httpd task only).
      *
@@ -3224,8 +3229,10 @@ httpd_ws_link_t::slot_name_t httpd_ws_link_t::reclaim_slot(session_t* slot, peer
         // live hazard: a slot handed to a new peer carries no TX state of its
         // predecessor's, the rule the dead mark above is here for having broken twice. Left
         // standing, an open bracket would let the FIRST failed write to the next peer read
-        // as a truncation of a frame that peer was never sent.
+        // as a truncation of a frame that peer was never sent. An echo header's owed payload
+        // goes with it for the same reason (#2944).
         (void)slot->close_tx_frame();
+        slot->tx_echo_owed = false;
     }
     {
         // Every TX frame goes with the session (#2095): the one on the wire is this task's own
@@ -4059,7 +4066,34 @@ int httpd_ws_link_t::send_guarded(httpd_handle_t handle, int fd, const char* buf
     // same verdicts the link's own frames get.
     if (buf == nullptr) return HTTPD_SOCK_ERR_INVALID;
     iovec one{const_cast<char*>(buf), len};
-    return send_gathered(handle, fd, &one, 1, flags);
+    // Every frame of the link's own is written inside a bracket. A write outside one, on a
+    // claimed session, is IDF's own write, such as a PONG or CLOSE echo or the handshake
+    // response. An echo is a 2-byte header and then, only if there is one, the payload in a
+    // second call (#2944): a whole control header announcing a payload means IDF's next write
+    // is that payload.
+    const auto* const b = reinterpret_cast<const std::uint8_t*>(buf);
+    const bool header = len == 2 && (b[0] & 0x88u) == 0x88u && (b[1] & 0x7Fu) != 0;
+    auto* const slot = static_cast<session_t*>(httpd_sess_get_ctx(handle, fd));
+    if (slot == nullptr || slot->tx_frame_open) return send_gathered(handle, fd, &one, 1, flags);
+    // Bracketed like a frame of ours, so the verdicts are the same: a header taken in part is
+    // a short write, and a payload that fails after its header went out is a truncated frame;
+    // either closes the session (#951). A stalled session's echo is offered the socket
+    // without waiting: nothing taken skips it whole, before IDF writes its payload.
+    const bool payload = std::exchange(slot->tx_echo_owed, false);
+    slot->open_tx_frame(false, payload ? 2 : 0);
+    const int ret =
+        send_gathered(handle, fd, &one, 1, slot->tx_stalled ? flags | MSG_DONTWAIT : flags);
+    (void)slot->close_tx_frame();
+    slot->tx_echo_owed = !payload && header && ret == 2;
+    // An echo that waited out the bound with nothing taken stalls the session, so the next
+    // one does not wait; a whole write ends the stall, as a whole reply does (#2921).
+    const bool stall = ret == HTTPD_SOCK_ERR_TIMEOUT;
+    if (ret != HTTPD_SOCK_ERR_FAIL && slot->tx_stalled != stall) {
+        const std::lock_guard lock(slot->tx_m);
+        slot->tx_stalled = stall;
+        slot->tx_moved |= !stall;
+    }
+    return ret;
 }
 
 int httpd_ws_link_t::send_gathered(httpd_handle_t handle, int fd, iovec* iov, std::size_t iovcnt,
