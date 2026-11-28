@@ -942,6 +942,17 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
          *         @ref sweep): they owed TX and moved no byte past the
          *         application's deadline. A subset of @ref sessions_condemned. */
         std::uint32_t peers_frozen = 0;
+        /**
+         * @brief Flush submits ESP-IDF refused: `httpd_queue_work` failed, typically because
+         *        the server's control queue was full (#2943).
+         *
+         * Not a drop: no frame is lost by it. The frames stay held, and the next post (a new
+         * frame, an inbound frame, `flush_held()` or `sweep`) submits the flush again. A
+         * steadily rising count means the control queue is too short for the load the server
+         * carries. A refused submit for a frame staged by a send also takes that frame back,
+         * counted in @ref enqueue_drops.
+         */
+        std::uint32_t flush_post_refused = 0;
     };
 
     /**
@@ -2268,6 +2279,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     std::atomic<std::uint32_t> tx_conflated_{0};
     /** @brief See @ref stats_t::peers_frozen. */
     std::atomic<std::uint32_t> peers_frozen_{0};
+    /** @brief See @ref stats_t::flush_post_refused. Bumped by @ref post_flush only. */
+    std::atomic<std::uint32_t> flush_post_refused_{0};
     /** @brief A frame was left held on a full socket by the last flush (httpd task writes,
      *         any task reads): what @ref flush_held and the handler entry test first. */
     std::atomic<bool> tx_held_{false};
