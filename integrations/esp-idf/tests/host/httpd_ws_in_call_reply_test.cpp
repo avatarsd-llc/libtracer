@@ -339,6 +339,152 @@ void test_an_off_task_send_still_takes_the_queue() {
     reset(link);
 }
 
+// ---------------------------------------------------------------------------
+// 5..8 — #2921: a reply that times out is a drop, never a strike.
+// ---------------------------------------------------------------------------
+/** @brief A replying link with the one peer claimed and resolved, or nullptr. */
+tr::net::transport_t* serve_one(tr::mem::poly_ptr_t<httpd_ws_link_t>& link, replier_t& app) {
+    link->set_peer_receiver(app);
+    claim(kFd);
+    drain();
+    return only_peer(*link);
+}
+
+/** @brief Ask @p n times; each request draws one reply, written inside the handler. */
+void ask(std::size_t n) {
+    for (std::size_t i = 0; i < n; ++i) {
+        (void)fake_httpd::instance().deliver_frame(kFd, kBody);
+        drain();
+    }
+}
+
+/**
+ * @brief A slow peer is never closed by timeouts alone: a reply its socket does not take
+ *        within the bound is a counted drop, and the next ones do not wait at all.
+ *
+ * Before #2921 three such timeouts in a row closed the session. Now the first one costs the
+ * httpd task its bound and marks the session stalled; every later reply is offered the socket
+ * without waiting, so a run of them costs nothing. The first one the socket takes whole ends
+ * the stall, and the reply after it waits again like any other.
+ */
+void test_a_slow_peer_is_never_closed_by_timeouts() {
+    std::printf("a slow peer whose replies time out (#2921):\n");
+    auto link = make_link();
+    replier_t app;
+    tr::net::transport_t* const to = serve_one(link, app);
+    check(to != nullptr, "the peer resolved to a directed endpoint");
+    if (to == nullptr) return;
+    const std::span<const std::byte> reply[] = {std::span<const std::byte>(kHead)};
+    app.arm(to, reply);
+    fake_httpd::instance().set_send_script(kFd, {send_result_t::TIMEOUT});
+    fake_httpd::instance().clear_sent_frames();
+    const std::size_t waited_before = fake_httpd::instance().waited_writes(kFd);
+
+    ask(10);
+    check(fake_httpd::instance().has_session(kFd), "ten timed-out replies do not close it");
+    check_eq(link->stats().sessions_condemned, 0, "nothing condemned it");
+    check_eq(link->stats().tx_send_failed, 10, "each one is a counted drop");
+    check_eq(fake_httpd::instance().waited_writes(kFd) - waited_before, 1,
+             "only the first spent the send bound; the rest did not wait");
+
+    fake_httpd::instance().set_send_script(kFd, {send_result_t::FULL});
+    ask(1);
+    check_eq(fake_httpd::instance().sent_frames().size(), 1, "the reply after it goes out whole");
+
+    fake_httpd::instance().set_send_script(kFd, {send_result_t::TIMEOUT});
+    ask(1);
+    check_eq(fake_httpd::instance().waited_writes(kFd) - waited_before, 2,
+             "that whole frame ended the stall: the next reply waits again");
+    check(fake_httpd::instance().has_session(kFd), "and the session is still up");
+    reset(link);
+}
+
+/**
+ * @brief A stopped peer costs the httpd task one send bound, then its replies stop waiting,
+ *        and it closes through the application's liveness check, not through a count.
+ *
+ * The per-session reply bound lets a drain write up to eight replies to one peer; at one bound
+ * each that is past the smallest watchdog. Stalled, the seven after the first cost nothing.
+ */
+void test_a_stopped_peer_costs_one_bound_and_closes_through_the_sweep() {
+    std::printf("a stopped peer (#2921):\n");
+    auto link = make_link();
+    replier_t app;
+    tr::net::transport_t* const to = serve_one(link, app);
+    check(to != nullptr, "the peer resolved to a directed endpoint");
+    if (to == nullptr) return;
+    check_eq(link->sweep(100, 50), 0, "the liveness check stamps the peer");
+    const std::span<const std::byte> reply[] = {std::span<const std::byte>(kHead)};
+    app.arm(to, reply);
+    fake_httpd::instance().set_send_script(kFd, {send_result_t::TIMEOUT});
+    const std::size_t waited_before = fake_httpd::instance().waited_writes(kFd);
+
+    ask(8);
+    check_eq(fake_httpd::instance().waited_writes(kFd) - waited_before, 1,
+             "eight replies cost the httpd task one send bound");
+    check(fake_httpd::instance().has_session(kFd), "the timeouts alone close nothing");
+    check_eq(link->sweep(110, 105), 0, "past the deadline the liveness check finds it owing");
+    drain();
+    check(!fake_httpd::instance().has_session(kFd), "and it is closed on the httpd task");
+    check_eq(link->stats().peers_frozen, 1, "counted in peers_frozen");
+    reset(link);
+}
+
+/**
+ * @brief A peer that only ever receives replies recovers by itself: a stalled session's reply
+ *        is offered the socket without waiting, a whole frame ends the stall, and the sweep
+ *        then finds the peer moving.
+ *
+ * A reply the socket takes only part of cannot be left half on the wire, so the rest is
+ * written within one bound, and the frame arrives whole.
+ */
+void test_a_reply_only_peer_recovers() {
+    std::printf("a peer that only receives replies, recovering (#2921):\n");
+    auto link = make_link();
+    replier_t app;
+    tr::net::transport_t* const to = serve_one(link, app);
+    check(to != nullptr, "the peer resolved to a directed endpoint");
+    if (to == nullptr) return;
+    check_eq(link->sweep(100, 50), 0, "the liveness check stamps the peer");
+    const std::span<const std::byte> reply[] = {std::span<const std::byte>(kHead),
+                                                std::span<const std::byte>(kTail)};
+    app.arm(to, reply);
+    fake_httpd::instance().set_send_script(kFd, {send_result_t::TIMEOUT});
+    ask(2);
+    // The socket drains part-way: the stalled reply's write takes half, the rest goes out.
+    fake_httpd::instance().set_send_script(kFd, {send_result_t::SHORT, send_result_t::FULL});
+    fake_httpd::instance().clear_sent_frames();
+    fake_httpd::instance().clear_wire(kFd);
+    ask(1);
+    const std::byte whole[] = {std::byte{0x82}, std::byte{0x05}, kHead[0], kHead[1],
+                               kTail[0],        kTail[1],        kTail[2]};
+    check(same_bytes(fake_httpd::instance().wire(kFd), whole),
+          "the reply the socket took part of arrives whole, not torn");
+    check_eq(link->sweep(110, 105), 0, "the liveness check finds it moving");
+    drain();
+    check(fake_httpd::instance().has_session(kFd), "so the sweep does not close it");
+    check_eq(link->stats().peers_frozen, 0, "nothing frozen");
+    check_eq(link->stats().sessions_condemned, 0, "nothing condemned");
+    reset(link);
+}
+
+/** @brief A hard socket error is a socket that is gone: the session is condemned at once. */
+void test_a_hard_error_condemns_at_once() {
+    std::printf("a reply that meets a hard socket error (#2921):\n");
+    auto link = make_link();
+    replier_t app;
+    tr::net::transport_t* const to = serve_one(link, app);
+    check(to != nullptr, "the peer resolved to a directed endpoint");
+    if (to == nullptr) return;
+    const std::span<const std::byte> reply[] = {std::span<const std::byte>(kHead)};
+    app.arm(to, reply);
+    fake_httpd::instance().set_send_script(kFd, {send_result_t::FAIL});
+    ask(1);
+    check(!fake_httpd::instance().has_session(kFd), "one hard error closes the session");
+    check_eq(link->stats().sessions_condemned, 1, "counted as condemned");
+    reset(link);
+}
+
 }  // namespace
 
 /** @brief Run every case; non-zero exit on the first failed assertion anywhere. */
@@ -348,6 +494,10 @@ int main() {
     test_a_full_pool_and_a_refused_queue_do_not_wedge_the_reply();
     test_a_rope_reply_is_one_frame_and_strands_no_slot();
     test_an_off_task_send_still_takes_the_queue();
+    test_a_slow_peer_is_never_closed_by_timeouts();
+    test_a_stopped_peer_costs_one_bound_and_closes_through_the_sweep();
+    test_a_reply_only_peer_recovers();
+    test_a_hard_error_condemns_at_once();
     std::printf(g_failures == 0 ? "OK\n" : "FAILED\n");
     return g_failures == 0 ? 0 : 1;
 }

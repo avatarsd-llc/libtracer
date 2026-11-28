@@ -207,10 +207,11 @@ void test_broadcast_frame_does_not_follow_the_descriptor() {
  *
  * B's socket is scripted to fail — but only AFTER B exists, which is load-bearing: a
  * script set during A's session dies with A's entry in the session table, and a peer
- * whose writes all succeed accrues no strikes at all, so the assertion below would hold
+ * whose writes all succeed is never condemned at all, so the assertion below would hold
  * for the wrong reason and pin nothing. B never had a frame of its own offered to it, so
- * the ONLY way its strike counter can reach kMaxConsecutiveTxDrops is by inheriting A's,
- * and the ONLY way its session can close here is that misattribution. A condemned session
+ * the ONLY way a hard send error can be charged to it is by inheriting A's (one condemns
+ * at once since #2921), and the ONLY way its session can close here is that
+ * misattribution. A condemned session
  * is `shutdown` and reaped by the server's select arm, so its absence after the drain is
  * the observable.
  */
@@ -223,7 +224,7 @@ void test_inherited_failures_do_not_condemn_the_successor() {
     tr::net::transport_t* const to_a = only_peer(*link);
     check(to_a != nullptr, "peer A resolved to a directed endpoint");
     if (to_a == nullptr) return;
-    // Enough queued frames to trip the streak cap on whoever ends up being charged.
+    // Queued frames, any one of which would condemn whoever ends up being charged.
     for (int i = 0; i < 4; ++i) to_a->send(std::span<const std::byte>(kBody));
     // One flush for the link and A's newest frame in A's slot (#2095).
     check(fake_httpd::instance().queue_depth() == 1, "A's frames are held behind one flush");
@@ -233,7 +234,7 @@ void test_inherited_failures_do_not_condemn_the_successor() {
     // Script B's socket to fail, now that B's session exists to carry the script. Any
     // write the drain performs here is a failed one, and every such failure is evidence
     // about a send B never asked for.
-    fake_httpd::instance().set_send_script(kFd, {send_result_t::TIMEOUT});
+    fake_httpd::instance().set_send_script(kFd, {send_result_t::FAIL});
 
     const std::size_t writes_before = fake_httpd::instance().writes(kFd);
     drain();

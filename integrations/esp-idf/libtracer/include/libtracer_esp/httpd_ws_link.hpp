@@ -74,10 +74,12 @@
  *     discarded the datagram inside lwIP with ESP_OK returned, and the link carried
  *     compensation for that until #949 deleted it with the floor raised. Each
  *     failure kind is aimed at what it is actually evidence about (#835): a failed
- *     SEND strikes its DESTINATION — the peer that did not drain — and
- *     kMaxConsecutiveTxDrops of them in a row, with no success between, closes that
- *     session; a refused ENQUEUE is evidence about the shared control queue, not
- *     about any one peer, so it is a dropped frame on a link-level counter
+ *     SEND is charged to its DESTINATION — the peer that did not drain: a hard socket
+ *     error closes that session at once, and a write that took nothing within its
+ *     bound is a counted drop that stops the session's writes from waiting until a
+ *     whole frame goes out again, never a close (#2921; a stopped peer closes through
+ *     the application's @ref sweep); a refused ENQUEUE is evidence about the shared control queue,
+ * not about any one peer, so it is a dropped frame on a link-level counter
  *     (@ref enqueue_drops) and strikes no session at all. A full socket on a flush
  *     is neither: the frame is held, not failed.
  *   - Every upgraded socket gets a SHORT, derived SO_SNDTIMEO of its own (@ref
@@ -153,10 +155,10 @@
  *
  * Everything else stays fixed ON PURPOSE, and each one says why where it is defined in
  * `httpd_ws_link.cpp`. In short: the send bound is DERIVED (from
- * `CONFIG_ESP_TASK_WDT_TIMEOUT_S`, the peer cap and the strike cap) and a knob over a
- * derivation is a way to configure a node into a watchdog panic; the consecutive-TX-drop
- * strike cap is a brokenness DETECTOR, not a tunable — it is what keeps one silently
- * stalled peer from parking the httpd task, and it is a divisor of the send bound; the
+ * `CONFIG_ESP_TASK_WDT_TIMEOUT_S`, the peer cap and the send bounds one stalled peer may
+ * spend) and a knob over a derivation is a way to configure a node into a watchdog panic;
+ * a stalled peer's writes stop waiting after one bound, which is what keeps it from parking
+ * the httpd task, and no count of timeouts closes it (#2921); the
  * frame ceiling bounds an ABUSE case and costs no RAM; the socket slack and the assumed
  * peer cap are already reachable through `max_peers`. The teardown has no drain bound
  * at all: it hands the session detach to the server task and does not wait (#2339).
@@ -751,7 +753,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * enqueue says the httpd control queue is saturated — which under #835's failure shape
      * is caused by whichever peer is stalling the task, not by the peer whose frame is
      * being enqueued at that instant. Charging it to that peer closed HEALTHY sessions
-     * while the culprit never accrued a strike; the per-session streak now counts failed
+     * while the culprit never accrued a strike; the per-session verdicts now come from
      * SENDS, which do name their peer. A spent large class or a refused payload says the
      * same thing about this link's memory. A frame a newer one replaced or shed is not here:
      * that is the peer's own loss, counted as @ref stats_t::tx_conflated (#2095, #2195).
@@ -840,7 +842,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
          *
          * The send bound (`send_timeout_ms`) is what usually spends it: the peer's TCP window
          * stayed shut for the whole bound, so the frame was dropped and the session kept (the
-         * #481 shape; three in a row condemn it, see `sessions_condemned`). Each one is also
+         * #481 shape) and marked stalled: its replies are written without waiting until one
+         * goes out whole, and a stopped peer closes through @ref sweep (#2921). A hard socket
+         * error is counted here too and condemns the session at once (`sessions_condemned`).
+         * Each one is also
          * charged to the session's own `tx_drops`. Before this field the only trace was the
          * `ws send failed` / `ws reply failed` WARN line, so a listener reading counters
          * could see a reply go missing and count no drop. A frame cut off mid-write (#951)
@@ -855,7 +860,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
          *         answers instead of aborting; see @ref kMaxPendingHandshakes. These never
          *         reach a slot, so no session can carry them. */
         std::uint32_t peers_refused = 0;
-        /** @brief Sessions this link KILLED — a three-strike streak, a rejected short
+        /** @brief Sessions this link KILLED — a hard send error, a rejected short
          *         write, an auth verdict (@ref auth_rejected / @ref auth_expired name the
          *         cause), or an administrative @ref close_peer — the count that separates
          *         a peer that left from one torn down. */
@@ -1521,9 +1526,14 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     static void tx_work(void* gate_arg);
     /** @brief What one frame write came to (@ref write_frame). */
     enum class tx_outcome_t : std::uint8_t {
-        SENT,  /**< @brief The whole frame is on the wire. */
-        HELD,  /**< @brief The socket is full; the frame stays held, maybe part-way. */
-        FAILED /**< @brief The write failed; the frame is lost (and, part-way, the session). */
+        SENT, /**< @brief The whole frame is on the wire. */
+        /** @brief The socket had no room for the rest of the frame. From a flush the frame
+         *         stays held, with what the socket did take counted in its `sent`; from
+         *         @ref send_now it means nothing was taken within the bound, so the frame is
+         *         dropped and the session stalled (#2921). */
+        HELD,
+        FAILED /**< @brief A hard socket error, or a frame cut off part-way: the frame is lost
+                *          and the session condemned (#2921, #951). */
     };
     /**
      * @brief Offer every session its turn on the wire (httpd task only: from @ref tx_work, or
@@ -1745,6 +1755,9 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * released inside this call and posted nowhere. A frame a flush left part-way on the
      * same socket is finished first (@ref finish_wire).
      *
+     * A reply the socket took nothing of within the bound marks the session stalled, and a
+     * whole one ends the stall (#2921): a stalled session's replies do not wait.
+     *
      * @param to  The destination session, resolved and identity-checked by the caller.
      * @param iov The reply, as the rope's segments — sent as ONE WebSocket frame.
      */
@@ -1767,18 +1780,19 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
 
     /**
      * @brief Per-session SEND accounting (takes @ref peers_m_ — callers must not hold
-     *        it): a send that completed resets the session's consecutive-failure
-     *        counter; one that failed bumps it and, once kMaxConsecutiveTxDrops is
-     *        reached, triggers the session's close so the peer reconnects instead of
-     *        missing frames silently.
+     *        it): @p out FAILED condemns the session at once; HELD (nothing taken within
+     *        the bound) is a counted drop and nothing more (#2921).
      *
-     * Fed from @ref tx_work only — the one result that names a peer. It is the peer's
-     * OWN socket that did not accept the bytes within its bound, so the destination is
-     * the culprit by construction (#835). Keyed by @ref session_ref_t and not by fd: a
+     * No count of timeouts closes a session: @ref send_in_call marks a session whose reply
+     * was not taken stalled, its next replies are written without waiting (@ref send_now),
+     * and one that stays stopped owes bytes to the application's liveness check
+     * (@ref sweep), which closes it. Fed by every send that names a peer;
+     * it is the peer's OWN socket that did not accept the bytes, so the destination is the
+     * culprit by construction (#835). Keyed by @ref session_ref_t and not by fd: a
      * result carried back for a session that has since departed must strike NOBODY, and
      * charging it to whoever inherited the descriptor condemns a stranger (#954).
      */
-    void note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes);
+    void note_tx_result(const session_ref_t& to, tx_outcome_t out, std::size_t bytes);
 
     /**
      * @brief Resolve @p to to the socket it may be sent on RIGHT NOW, or refuse it
@@ -1848,11 +1862,11 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * @brief Count a queued frame that @ref tx_work skipped rather than attempted
      *        (takes @ref peers_m_ — callers must not hold it).
      *
-     * A skip is deliberately NOT evidence for the consecutive-failure streak (see
+     * A skip is deliberately NOT evidence for the stall verdict (see
      * @ref note_tx_result): the peer departed, or it was already condemned and the
      * verdict is in. It IS still a frame this connection never received, so it belongs
      * in the cumulative count — that count answers "did anything get lost toward this
-     * peer?", which the streak (reset on every success) never could.
+     * peer?", which the stall flag (cleared on every whole frame) never could.
      *
      * @p to is the destination identity minted when the frame was ENQUEUED, and its
      * `(slot, gen)` pair must still match for the charge to land — the same test
@@ -1931,7 +1945,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
 
     /**
      * @brief Handle a detected stream desynchronisation on @p slot's socket: log it and
-     *        close that session immediately, bypassing the streak (takes @ref peers_m_).
+     *        close that session at once (takes @ref peers_m_).
      *
      * Takes the SLOT, not the fd. @ref send_guarded is inside the write when it calls
      * this, on the httpd task, so the server's own session table is authoritative about
@@ -2187,7 +2201,12 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * already holds its session, so it needs neither the pool nor `httpd_queue_work` — the
      * queue exists to marshal sends from OTHER tasks onto this one. Since #1494 the
      * directed reply travels the same way (@ref send_in_call). Bracketed like @ref tx_work's
-     * send so a short write is judged by the same rule (@ref send_guarded).
+     * send so a short write is judged by the same rule (@ref send_guarded). A stalled
+     * session's frame is written without waiting, and one the socket took only part of is
+     * finished within one bound (#2921).
+     *
+     * @return SENT, HELD (nothing taken within the bound: a drop, not a close) or FAILED
+     *         (a hard error, or the frame cut off).
      *
      * @param on_wire Optional: receives the bracket's byte count for this frame. Non-zero
      *                after a failure is the DESYNC (#951) — the frame was announced and cut
@@ -2195,8 +2214,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *                a caller that logs an ordinary drop must not also log that one. The
      *                teardown callers pass nullptr: they are closing the session anyway.
      */
-    esp_err_t send_now(session_t* slot, int fd, int ws_type, std::span<const std::byte> payload,
-                       std::size_t* on_wire = nullptr);
+    tx_outcome_t send_now(session_t* slot, int fd, int ws_type, std::span<const std::byte> payload,
+                          std::size_t* on_wire = nullptr);
     /**
      * @brief Send a WebSocket CLOSE with @p code and tear the session down (httpd task only;
      *        @ref peers_m_ must NOT be held).

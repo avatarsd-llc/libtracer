@@ -13,12 +13,12 @@
  * measurement rather than a code reading.
  *
  * The defect: enumerating the ways an inbound session can end gives peer CLOSE/FIN, a
- * handler returning `ESP_FAIL`, the TX failure streak, the short-write condemn, and
+ * handler returning `ESP_FAIL`, a hard send error, the short-write condemn, and
  * `httpd_stop`. There is no timer among them, and both constructors set
  * `lru_purge_enable = false` on purpose (the admission contract: never evict a LIVE peer
  * to make room for a new one), which removes the one reclaim `esp_http_server` has for an
- * idle socket. The TX streak cannot substitute — `note_tx_result` is fed only from
- * `tx_work`, so a session the link never sends to accrues no evidence at all. So a peer
+ * idle socket. The TX verdicts cannot substitute — `note_tx_result` is fed only by
+ * sends, so a session the link never sends to accrues no evidence at all. So a peer
  * that disappeared without a FIN held its slot AND one unit of `max_peers` for the life
  * of the process. Keepalive probes are what turn that into an ordinary socket error, on
  * which httpd closes the session and the existing free_ctx → reclaim_slot →

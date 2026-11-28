@@ -63,8 +63,9 @@
  *     WebSocket fragments — the server bumps them at reassembly-complete delivery.
  *     That makes a client's `tx_frames` directly comparable with the server's
  *     `rx_frames` across a link, which is what an end-to-end test wants to assert.
- *   - `tx_drops`/`rx_drops` are CUMULATIVE, never a streak (the server keeps its
- *     3-strike consecutive counter separately, and its semantics are untouched). On the
+ *   - `tx_drops`/`rx_drops` are CUMULATIVE, never a streak (no count of drops closes a
+ *     server session since #2921: a hard error does, and a stopped peer is closed by the
+ *     application's liveness check). On the
  *     server they count since the session was established; on the client, since the link
  *     was constructed: they survive a reconnect, and why the last send was dropped is
  *     the `dropped_tx_cause` noun its `kind_stats()` publishes (#2788).

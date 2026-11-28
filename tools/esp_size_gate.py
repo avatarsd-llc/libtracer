@@ -168,7 +168,11 @@ FOOTPRINT_PINS = {
     # Every other row and the RAM stay at main.
     # 33,463 -> 33,471 B (+8, #2916): an in-call reply is charged the more of one segment and
     # its bytes, with no round-up. Every other row and the RAM stay at main.
-    "WebSocket (httpd server + client link)": 33471,
+    # 33,471 -> 33,621 B (+150, #2921): a reply that times out is a drop, never a strike; a
+    # stalled session's replies are written without waiting (the part-taken finish in send_now
+    # and the three-way send outcome), and a frozen stalled session closes with nothing held.
+    # Every other row, the RAM and every httpd_ws_link frame's stack stay at main.
+    "WebSocket (httpd server + client link)": 33621,
 }
 
 
