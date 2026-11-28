@@ -532,7 +532,7 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/read-budget-3/libtracer/config_override.hpp
 "/**
  * @file
- * @brief GENERATED test fixture: the bus links on and the READ budget at 3 (#2959).
+ * @brief GENERATED test fixture: the peer-named tier on and the READ budget at 3 (#2959).
  */
 #pragma once
 
@@ -540,10 +540,9 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
 
 namespace tr::graph {
 
-/** @brief The defaults, with the peer-named tier, the S5 engine and a READ budget of 3. */
+/** @brief The defaults, with the peer-named tier and a READ budget of 3. */
 struct read_budget_3_config_t : default_config_t {
     static constexpr bool kBusLinks = true;
-    static constexpr bool kSelfHealLinks = true;
     static constexpr std::uint8_t kReadBudget = 3;
 };
 
@@ -554,7 +553,7 @@ using config_t = read_budget_3_config_t;
         libtracer_generate_builtin_transports(
             ${CMAKE_CURRENT_BINARY_DIR}/read-budget-3/builtin_transports.cpp)
         add_library(libtracer_read_budget_3 STATIC ${LIBTRACER_SOURCES_REQUIRED}
-            ${LIBTRACER_SOURCES_NET_PLANE} ${LIBTRACER_SOURCES_SELF_HEAL_LINKS}
+            ${LIBTRACER_SOURCES_NET_PLANE}
             ${CMAKE_CURRENT_BINARY_DIR}/read-budget-3/builtin_transports.cpp)
         target_include_directories(libtracer_read_budget_3 BEFORE PUBLIC
             ${CMAKE_CURRENT_BINARY_DIR}/read-budget-3)

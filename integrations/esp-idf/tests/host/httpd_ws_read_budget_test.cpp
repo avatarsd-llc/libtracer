@@ -17,10 +17,15 @@
  *      run is never refused).
  *   1. B sends 1 READ: answered.
  *   2. A sends 5 READs: the 1st to 3rd are answered, the 4th and 5th get BACKPRESSURE.
- *   3. B sends 1 READ: answered, because it is B's 2nd in the run (a link-wide tally would make
- *      it the 7th READ and refuse it).
+ *   3. B sends 1 READ: answered, because it is B's 2nd in the run. This step catches B being
+ *      charged to another session's slot (for example a stale peer left over from A).
  *   4. B sends 2 more: its 3rd is answered, its 4th gets BACKPRESSURE.
  *   5. After the run is closed, B's next READ is answered.
+ *
+ * What each step catches. If `inbound_tally()` answered null or one link-wide tally on this
+ * peer-named link, A and B would share one tally and a run would never count two sessions, so
+ * nothing would ever be refused: step 2 (A's 4th and 5th get BACKPRESSURE) and step 4's last
+ * check (B's 4th) fail.
  */
 
 #include <cstddef>
@@ -186,7 +191,8 @@ void test_the_budget_is_charged_per_session() {
     check(is(reads(kFdA, 3), 3, 0), "2: A's 1st to 3rd READ are answered");
     check(is(reads(kFdA, 2), 0, 2), "2: A's 4th and 5th get BACKPRESSURE");
     // 3
-    check(is(reads(kFdB, 1), 1, 0), "3: B's 2nd READ is answered (not charged for A's)");
+    check(is(reads(kFdB, 1), 1, 0),
+          "3: B's 2nd READ is answered (not charged to another session's slot)");
     // 4
     check(is(reads(kFdB, 1), 1, 0), "4: B's 3rd READ is answered");
     check(is(reads(kFdB, 1), 0, 1), "4: B's 4th READ gets BACKPRESSURE");
