@@ -888,11 +888,53 @@ void test_the_application_tick_ends_a_park() {
 }
 
 // ---------------------------------------------------------------------------
+// 15 — a release made while no drain waits is dropped (#2958): the httpd task clears the flag
+//      as a wait begins, so the next park still waits for idle or a later tick.
+// ---------------------------------------------------------------------------
+void test_a_release_with_nothing_parked_is_dropped() {
+    constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
+    std::printf("a release made while nothing waits does not shorten the next wait:\n");
+    auto link = fresh_link(870);
+    (void)link->sweep(100, 0);
+    link->flush_held();
+    ingress_t in(870, kBudget + 2, 8);
+    check(wait_until([&] { return parked_after(kBudget); }),
+          "the drain still parks at the budget after two earlier releases");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    check(parked_after(kBudget), "and stays parked: nothing since the park began has ended it");
+    check(link->stats().rx_drain_waits == 1, "one wait, which blocked");
+    link->flush_held();
+    check(wait_until([&] { return in.delivered() == kBudget + 2; }),
+          "the first flush_held after the park began ends it");
+    finish(std::move(link));
+}
+
+// ---------------------------------------------------------------------------
+// 16 — a release that lands after the wait cleared the flag and checked it, just before it
+//      blocks, still wakes it (#2958): the release side stores the flag, then gives any waiter.
+// ---------------------------------------------------------------------------
+void test_a_release_just_before_the_block_wakes_it() {
+    constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
+    std::printf("a release between the wait's last check and its block wakes it:\n");
+    auto link = fresh_link(875);
+    // Runs on the httpd thread inside the fake xSemaphoreTake, before it blocks: the
+    // window between the loop's check of the flag and the block.
+    fake_httpd::set_before_take([&] { link->flush_held(); });
+    ingress_t in(875, kBudget + 2, 8);
+    check(wait_until([&] { return in.delivered() == kBudget + 2; }),
+          "every frame is read, with no idle step and no later tick");
+    check(link->stats().rx_drain_waits == 1, "one wait, counted: it reached the block");
+    fake_httpd::set_before_take({});
+    finish(std::move(link));
+}
+
+// ---------------------------------------------------------------------------
 // bench: not a test. `httpd_ws_drain_budget_test bench <sessions> <payload> <frames> [run]`:
 //      <sessions> sessions (1-16) each send <frames> frames of <payload> bytes on one httpd
 //      thread, taking turns of [run] frames each (default 1: interleaved frame by frame; a
 //      longer run is sessions bursting one after another), and an idle thread lets the core
-//      idle as soon as the drain waits. What it reports first is COUNTED, the same on any host: the
+//      idle as soon as the drain waits (frames_per_wait reads 0 when nothing waited). What it
+//      reports first is COUNTED, the same on any host: the
 //      waits, and the frames read per wait, which is how much every session together reads before
 //      the shared task waits. The ns per frame is the host fake's cost, for a base-vs-head
 //      comparison on one machine only; a wait's real price (the time until an ESP32 core
@@ -933,8 +975,7 @@ int run_bench(int sessions, std::size_t payload, std::size_t frames, std::size_t
         "RESULT httpd-ws-drain sessions=%d payload=%zu run=%zu frames=%zu waits=%llu "
         "frames_per_wait=%.2f ns_per_frame=%.1f\n",
         sessions, payload, run, total, static_cast<unsigned long long>(waits),
-        waits == 0 ? static_cast<double>(total)
-                   : static_cast<double>(total) / static_cast<double>(waits),
+        waits == 0 ? 0.0 : static_cast<double>(total) / static_cast<double>(waits),
         static_cast<double>(ns) / static_cast<double>(total));
     finish(std::move(link));
     return 0;
@@ -964,7 +1005,12 @@ int main(int argc, char** argv) {
     }
     fake_httpd::instance().set_frame_hook([] { g_payload_reads.fetch_add(1); });
     fake_httpd::instance().set_sustained_ingress(true);  // the core idles only when told
-    if (argc > 4 && std::string(argv[1]) == "bench") {
+    if (argc > 1 && std::string(argv[1]) == "bench") {
+        if (argc < 5) {
+            std::printf(
+                "usage: bench <sessions 1-16> <payload bytes> <frames per session> [run]\n");
+            return 2;
+        }
         return run_bench(std::atoi(argv[2]), std::strtoul(argv[3], nullptr, 10),
                          std::strtoul(argv[4], nullptr, 10),
                          argc > 5 ? std::strtoul(argv[5], nullptr, 10) : 1);
@@ -987,6 +1033,8 @@ int main(int argc, char** argv) {
         test_replies_past_the_bound_do_not_hold_other_sessions();
         test_one_session_past_its_share_does_not_hold_another();
         test_the_application_tick_ends_a_park();
+        test_a_release_with_nothing_parked_is_dropped();
+        test_a_release_just_before_the_block_wakes_it();
     }
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);

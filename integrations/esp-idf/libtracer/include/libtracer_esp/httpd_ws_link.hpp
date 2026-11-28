@@ -925,7 +925,11 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
         std::uint32_t auth_expired = 0;
         /**
          * @brief Times the receive path stopped reading because its drain budget was spent
-         *        and waited for its core's idle task to run (ADR-0085).
+         *        and waited for its core's idle task to run, or for the application's
+         *        release (ADR-0085).
+         *
+         * Counts only waits that blocked: a drain whose idle pass or release came before it
+         * blocked is not counted (#2958).
          *
          * Not a drop: the unread bytes stayed in the socket and were read after the wait.
          * Zero on a link that never saturates its core. A count that tracks inbound traffic
@@ -1593,10 +1597,13 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * session's own count makes the drain wait, because the wait holds the task every session
      * shares. In-call replies never make it wait either: a session's replies past what lwIP can
      * hold unacknowledged for it go through its own queue (@ref send_in_call, ADR-0085 §7).
-     * The wait ends when the core idles, or at the application's next @ref sweep or
-     * @ref flush_held (@ref release_drain), so a core whose idle task is starved holds the
-     * link for at most one application tick. A frame that arrives while the task is parked
-     * still waits for that park.
+     * The wait ends at the core's next idle pass, or at the first @ref sweep or
+     * @ref flush_held (@ref release_drain) after the wait began; a release made while no
+     * drain waits is dropped. While this link is the only waiter on its core's idle gate, a
+     * core whose idle task does not run holds the link for at most one application tick; a
+     * second link parked on the same core can take that wake-up (the gate's semaphore is
+     * binary), and this one then waits for the next. A frame that arrives while the task is
+     * parked still waits for that park.
      *
      * The wait is also where this link's held frames go out while it lasts. The parked
      * task is the httpd task, the one that writes them, so a frame stored by another task
@@ -2408,8 +2415,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *         count that parks @ref pace_rx. httpd task only. */
     std::uint16_t rx_drain_units_ = 0;
     /** @brief Set by the application's tick (@ref release_drain, release order) to end a
-     *         parked drain; cleared ONLY by the httpd task, in @ref pace_rx, as it resumes
-     *         (#2958). */
+     *         parked drain; cleared ONLY by the httpd task, in @ref pace_rx, as a wait begins,
+     *         so a release made while no drain waits is dropped (#2958). */
     std::atomic<bool> rx_released_{false};
     /** @brief The in-call reply scratch, `tx_inline_bytes_` from `memory.io`: used only on
      *         the httpd task inside @ref send_in_call to gather a rope reply into one

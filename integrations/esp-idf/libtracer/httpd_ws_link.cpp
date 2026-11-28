@@ -2500,9 +2500,11 @@ void httpd_ws_link_t::pace_rx(void* sess_ctx, std::size_t frame_bytes) {
     // almost never matches the tag, and starts a new drain; one that matches by chance waits
     // once early, never for good.
     //
-    // The wait ends when the core idles, or at the application's next sweep or flush_held
-    // (release_drain), whichever comes first, so a core whose idle task is starved holds the
-    // link for at most one application tick. No timer and no clock read.
+    // The wait ends at the core's next idle pass, or at the first sweep or flush_held
+    // (release_drain) after it began, whichever comes first. While this link is its core's
+    // only waiter that is at most one application tick; a second waiter on the same core can
+    // take the binary semaphore's give, and this one waits for the next. No timer and no
+    // clock read.
     //
     // While it waits it is still the httpd task, the one drain of this link's queued
     // sends, so a send posted to it by another task (a held frame) is RUN FROM HERE,
@@ -2517,22 +2519,29 @@ void httpd_ws_link_t::pace_rx(void* sess_ctx, std::size_t frame_bytes) {
     // (httpd_parse.c httpd_req_new -> httpd_ws_get_frame_type), so a handler that returns
     // without the payload desynchronises the stream.
     if (rx_drain_epoch_ == static_cast<std::uint16_t>(epoch) && rx_drain_units_ >= kRxDrainUnits) {
-        rx_drain_waits_.fetch_add(1, std::memory_order_relaxed);
-        // The release flag joins the idle handshake: release_drain stores it, then reads
-        // waiters; this side counts itself in, then reads the flag.
+        // The release flag is cleared HERE, as the wait begins, and nowhere else: the httpd task
+        // is its only writer of false, the application only ever sets it. A release that came
+        // while no drain waited is dropped; the wait ends at the next idle pass or at the first
+        // sweep or flush_held after this point. Then the flag joins the idle handshake:
+        // release_drain stores it, then reads waiters; this side counts itself in, then reads
+        // the flag, seq_cst on both sides (a store then a load each way), so a release
+        // between this clear and the block is never slept through.
+        rx_released_.store(false, std::memory_order_relaxed);
         gate.waiters.fetch_add(1, std::memory_order_seq_cst);
+        bool blocked = false;
         while (gate.epoch.load(std::memory_order_seq_cst) == epoch &&
-               !rx_released_.load(std::memory_order_acquire)) {
+               !rx_released_.load(std::memory_order_seq_cst)) {
             if (flush_egress()) continue;  // more may have been posted while those went out
+            if (!blocked) rx_drain_waits_.fetch_add(1, std::memory_order_relaxed);
+            blocked = true;  // counted once, at its first block, not per wake-up
             (void)xSemaphoreTake(gate.sem, portMAX_DELAY);
         }
         gate.waiters.fetch_sub(1, std::memory_order_seq_cst);
-        // Cleared HERE and nowhere else, by the httpd task as it resumes: the application only
-        // ever sets it. A release that came while no drain waited ends the next wait at once,
-        // so the application's tick costs at most one early drain per tick.
-        rx_released_.store(false, std::memory_order_relaxed);
-        // Ended by the application rather than an idle pass: the next drain starts here.
-        if (gate.epoch.load(std::memory_order_seq_cst) == epoch) rx_drain_units_ = 0;
+        // The next drain starts here. After an idle pass join_drain would reset the units too
+        // (the tag moved); after the application's release the tag is unchanged, so the
+        // sessions' count and reply tallies carry into the next drain: the #2942 reply bound
+        // then counts across both, which only sends more replies through their own queues.
+        rx_drain_units_ = 0;
         epoch = gate.epoch.load(std::memory_order_seq_cst);
     }
     join_drain(s, static_cast<std::uint16_t>(epoch));
@@ -2558,7 +2567,8 @@ void httpd_ws_link_t::release_drain() noexcept {
     if constexpr (!kRxDrainPaced) return;
     // The application's tick ends a wait the idle task could not (#2958): the flag first, then
     // the gates' waiters, the order pace_rx's handshake relies on. The fence keeps the store
-    // ahead of egress_posted's read of `waiters`. Only the httpd task clears the flag (pace_rx).
+    // ahead of egress_posted's read of `waiters`. Only the httpd task clears the flag, as a
+    // wait begins (pace_rx), so a release with no drain waiting is dropped.
     rx_released_.store(true, std::memory_order_release);
     std::atomic_thread_fence(std::memory_order_seq_cst);
     egress_posted();
@@ -4444,10 +4454,9 @@ void httpd_ws_link_t::flush_held() {
     // The application's own tick, for a link that has gone quiet with a frame still held on a
     // full socket: nothing else would offer it the socket again. No clock is read here; the
     // caller's cadence is the whole policy. One flush, as any post makes.
-    release_drain();  // and a drain parked on a core whose idle task is starved (#2958)
-    if (!tx_held_.load(std::memory_order_relaxed)) return;
     const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
-    if (h != nullptr) (void)post_flush(h);
+    if (tx_held_.load(std::memory_order_relaxed) && h != nullptr) (void)post_flush(h);
+    release_drain();  // and end a parked drain the idle pass has not ended (#2958)
 }
 
 httpd_ws_link_t::tx_outcome_t httpd_ws_link_t::write_frame(httpd_handle_t h, int fd, session_t& s,
