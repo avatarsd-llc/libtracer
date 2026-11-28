@@ -755,37 +755,12 @@ jobs:
       # ~10 points). The guard then fails here, with a named message, if the store nears
       # the limit anyway, instead of a GH001 rejection from the push after the bench.
       - name: Bound the history store (prune to an archive) + size guard
-        run: |
-          # A failed earlier run must not wedge this persistent runner: clear any leftover
-          # worktree first, and always remove ours on exit.
-          clean() {
-            cd "$GITHUB_WORKSPACE"
-            git worktree remove --force ../ghp-prune 2>/dev/null || true
-            rm -rf ../ghp-prune
-            git worktree prune
-          }
-          clean
-          trap clean EXIT
-          git fetch --no-tags --depth=1 origin gh-pages
-          git worktree add ../ghp-prune FETCH_HEAD
-          cd ../ghp-prune
-          if [ -f dev/bench-local/data.js ]; then
-            python3 "$GITHUB_WORKSPACE/bench/store_prune.py" prune --dir dev/bench-local --keep 40 --trigger 50
-            if [ -n "$(git status --porcelain dev/bench-local)" ]; then
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git add dev/bench-local
-              git commit -m "bench-local: archive older points, keep the live store small (#2229)"
-              # The prune is idempotent, so a lost race is not fatal: retry once on a fresh
-              # fetch, else warn and let the next run prune. Banking this point goes on.
-              if ! git push origin HEAD:gh-pages; then
-                git fetch --no-tags --depth=1 origin gh-pages
-                git rebase FETCH_HEAD && git push origin HEAD:gh-pages \
-                  || echo "::warning::the store prune push was rejected; the next run re-prunes"
-              fi
-            fi
-            python3 "$GITHUB_WORKSPACE/bench/store_prune.py" guard --data dev/bench-local/data.js
-          fi
+        # A push that loses a race to another gh-pages writer re-fetches and re-prunes (the
+        # prune is idempotent), never rebases a shallow fetch (#2939); the guard checks what
+        # is on gh-pages after the step, pushed or not. The tool always removes its worktree.
+        run: >-
+          python3 bench/store_prune.py sync --dir dev/bench-local --keep 40 --trigger 50
+          --worktree ../ghp-prune --message "bench-local: archive older points, keep the live store small (#2229)"
 
       # BANKING is unconditional (2026-10-07). A sample a guard distrusts is banked
       # FLAGGED (`CONTAMINATED` in `extra`): the page draws it marked, and no gating

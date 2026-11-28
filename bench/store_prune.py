@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
 """@brief Keep a benchmark-action history store under GitHub's 100 MB file limit (#2229, #2937).
 
-`dev/bench-local/data.js` grows by one entry per series per banked point. It averaged
-0.29 MB per point (both suites) over its life, and about 1.0 MB per point now; it passed 100 MB after 361 points and every gh-pages push
-was rejected. This tool bounds the live store and moves older entries into an archive
-beside it, so nothing is deleted.
+Two stores on gh-pages use it, each from the step that runs before its benchmark-action push:
 
+| Store | Workflow | Growth | `--keep` / `--trigger` |
+| --- | --- | --- | --- |
+| `dev/bench-local/data.js` (pinned host) | perf-local.yml | ~1.0 MB a point | 40 / 50 |
+| `dev/bench/data.js` (hosted runners) | perf.yml | ~0.2 MB a point | 150 / 200 |
+
+Each grows by one entry per series per banked point, and both passed 100 MB before they
+were bounded (bench-local after 361 points, the hosted store at ~970), after which every
+gh-pages push was rejected. This tool bounds the live store and moves older entries into
+an archive beside it, so nothing is deleted.
+
+    store_prune.py sync  --dir D --worktree W --message M [--keep 40] [--trigger 50]
     store_prune.py prune --dir D [--keep 40] [--trigger 50]
     store_prune.py guard --data F [--warn-mb 60] [--fail-mb 85]
 
-**Window.** The live store keeps the newest `--keep` entries of every series, about 1.0 MB
-a point, so 40 points is about 40 MB. That is NOT enough history for the rolling baseline
-(#1301): it needs 21 TRUSTED points and on the real store only about 11 of the newest 40
-entries are trusted. So the readers never read `data.js` alone: `store_load.py` is their one
-loader and concatenates the archives and the live store (drift, density, step detection and
-the results page all go through it). The live window only bounds the file GitHub sees.
+**Window.** The live store keeps the newest `--keep` entries of every series. That is not
+enough history for the rolling baseline (#1301), which needs 21 TRUSTED points, so the
+readers never read `data.js` alone: `store_load.py` is their one loader and concatenates
+the archives and the live store (drift, density, step detection and the results page all
+go through it). The live window only bounds the file GitHub sees.
 
-**Hysteresis.** Pruning only starts once a series holds more than `--trigger` entries
-(about 46 MB at the peak), then cuts back to `--keep`: one gh-pages commit per ~10 points.
+**Hysteresis.** Pruning only starts once a series holds more than `--trigger` entries,
+then cuts back to `--keep`: one gh-pages commit per `trigger - keep` points.
 
 **Archive.** Each prune writes its evicted entries to a NEW `data-archive-NNN.js`, the
 same `window.BENCHMARK_DATA = {...}` shape as `data.js`, oldest range first, at most
@@ -27,6 +34,13 @@ file can approach the limit.
 
 **Guard.** `guard` exits 1 above `--fail-mb` and prints a warning above `--warn-mb`, so
 the next breach is a named failure before the push, not a `GH001` after it.
+
+**Sync** is the workflow step (#2939): fetch gh-pages shallow into worktree `W`, prune,
+commit and push. A push that loses a race to another gh-pages writer is not rebased (a
+shallow fetch has no merge base, so a rebase replays the grafted root and stops on an
+add/add conflict): the worktree is thrown away, gh-pages fetched again and the prune
+re-run, which is idempotent. If every attempt loses, it warns and guards the store as
+it is on gh-pages, unpruned, so the guard always checks what the next push builds on.
 """
 from __future__ import annotations
 
@@ -34,6 +48,8 @@ import argparse
 import json
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 
 PREFIX = "window.BENCHMARK_DATA = "
@@ -125,21 +141,72 @@ def guard(path: pathlib.Path, warn_mb: float, fail_mb: float) -> int:
     return 0
 
 
+def _git(*args: str, cwd: pathlib.Path | str = ".", check: bool = True) -> subprocess.CompletedProcess:
+    """@brief Run one git command, output captured; raises on failure when @p check."""
+    return subprocess.run(["git", *args], cwd=cwd, check=check, text=True, capture_output=True)
+
+
+def _drop_worktree(wt: pathlib.Path) -> None:
+    """@brief Remove worktree @p wt and any leftover of it, so a failed run never wedges the runner."""
+    _git("worktree", "remove", "--force", str(wt), check=False)
+    shutil.rmtree(wt, ignore_errors=True)
+    _git("worktree", "prune", check=False)
+
+
+def sync(d: str, wt: pathlib.Path, message: str, keep: int, trigger: int, attempts: int,
+         warn_mb: float, fail_mb: float) -> int:
+    """@brief Prune gh-pages' store @p d through worktree @p wt and push; guard what is pushed."""
+    try:
+        for attempt in range(attempts + 1):
+            _drop_worktree(wt)
+            _git("fetch", "--no-tags", "--depth=1", "origin", "gh-pages")
+            _git("worktree", "add", "--detach", str(wt), "FETCH_HEAD")
+            data = wt / d / "data.js"
+            if not data.exists():
+                return 0
+            if attempt == attempts:
+                print(f"::warning::the store prune push lost {attempts} races; guarding gh-pages "
+                      f"as it is, and the next run re-prunes")
+                break
+            print(prune(wt / d, keep, trigger))
+            if not _git("status", "--porcelain", d, cwd=wt).stdout.strip():
+                break
+            _git("add", d, cwd=wt)
+            _git("-c", "user.name=github-actions[bot]",
+                 "-c", "user.email=github-actions[bot]@users.noreply.github.com",
+                 "commit", "-q", "-m", message, cwd=wt)
+            if _git("push", "origin", "HEAD:gh-pages", cwd=wt, check=False).returncode == 0:
+                break
+            print(f"store prune push {attempt + 1} lost a race; fetching gh-pages again")
+        return guard(data, warn_mb, fail_mb)
+    finally:
+        _drop_worktree(wt)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("prune")
-    p.add_argument("--dir", required=True)
-    p.add_argument("--keep", type=int, default=40)
-    p.add_argument("--trigger", type=int, default=50)
+    s = sub.add_parser("sync")
     g = sub.add_parser("guard")
+    for c in (p, s):
+        c.add_argument("--dir", required=True)
+        c.add_argument("--keep", type=int, default=40)
+        c.add_argument("--trigger", type=int, default=50)
+    s.add_argument("--worktree", required=True)
+    s.add_argument("--message", required=True)
+    s.add_argument("--attempts", type=int, default=3)
     g.add_argument("--data", required=True)
-    g.add_argument("--warn-mb", type=float, default=60.0)
-    g.add_argument("--fail-mb", type=float, default=85.0)
+    for c in (s, g):
+        c.add_argument("--warn-mb", type=float, default=60.0)
+        c.add_argument("--fail-mb", type=float, default=85.0)
     a = ap.parse_args(argv)
+    if a.cmd != "guard" and (a.keep < 1 or a.trigger < a.keep):
+        ap.error("need 1 <= keep <= trigger")
+    if a.cmd == "sync":
+        return sync(a.dir, pathlib.Path(a.worktree), a.message, a.keep, a.trigger, a.attempts,
+                    a.warn_mb, a.fail_mb)
     if a.cmd == "prune":
-        if a.keep < 1 or a.trigger < a.keep:
-            ap.error("need 1 <= keep <= trigger")
         print(prune(pathlib.Path(a.dir), a.keep, a.trigger))
         return 0
     return guard(pathlib.Path(a.data), a.warn_mb, a.fail_mb)

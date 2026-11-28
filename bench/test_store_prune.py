@@ -1,9 +1,12 @@
-"""@brief Tests for bench/store_prune.py (#2229)."""
+"""@brief Tests for bench/store_prune.py (#2229, #2939)."""
 import json
+import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import store_prune as sp  # noqa: E402
@@ -93,6 +96,99 @@ class StorePrune(unittest.TestCase):
         f = d / "data.js"
         self.assertEqual(sp.guard(f, 60, 85), 0)
         self.assertEqual(sp.guard(f, 0, 0.0001), 1)
+
+
+def _sh(cwd, *args):
+    return subprocess.run(["git", *args], cwd=cwd, check=True, text=True, capture_output=True).stdout
+
+
+class StoreSync(unittest.TestCase):
+    """@brief `sync` against a scratch gh-pages remote, with another writer forced to win the push race."""
+
+    D = "dev/bench"
+
+    def setUp(self):
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        root = pathlib.Path(t.name)
+        env = {f"GIT_{w}_{k}": v for w in ("AUTHOR", "COMMITTER") for k, v in (("NAME", "t"), ("EMAIL", "t@t"))}
+        patch = mock.patch.dict(os.environ, env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.url = (root / "remote.git").as_uri()
+        _sh(root, "init", "-q", "--bare", "remote.git")
+        seed = root / "seed"
+        _sh(root, "init", "-q", "-b", "gh-pages", "seed")
+        (seed / self.D).mkdir(parents=True)
+        for n in (7, 8):  # two commits, so the shallow fetch has a grafted root to trip on
+            (seed / self.D / "data.js").write_text(sp.render(_store(n)))
+            _sh(seed, "add", ".")
+            _sh(seed, "commit", "-qm", f"bank {n}")
+        _sh(seed, "push", "-q", self.url, "gh-pages")
+        self.work, self.other = root / "work", root / "other"
+        _sh(root, "clone", "-q", self.url, "work")
+        _sh(root, "clone", "-q", "-b", "gh-pages", self.url, "other")
+        cwd = os.getcwd()
+        os.chdir(self.work)
+        self.addCleanup(os.chdir, cwd)
+        self.wt = root / "wt"
+
+    def _bank_elsewhere(self):
+        """@brief Another writer (benchmark-action) appends a point to the unpruned store and pushes."""
+        _sh(self.other, "pull", "-q", "--rebase", "origin", "gh-pages")
+        f = self.other / self.D / "data.js"
+        doc = sp.parse(f.read_text())
+        for ents in doc["entries"].values():
+            ents.append({"commit": {"id": "rival"}, "date": 999, "benches": []})
+        f.write_text(sp.render(doc))
+        _sh(self.other, "commit", "-qam", "rival point")
+        _sh(self.other, "push", "-q", "origin", "HEAD:gh-pages")
+        return _sh(self.other, "rev-parse", "HEAD").strip()
+
+    def _sync(self, races, **kw):
+        """@brief Run sync; before each of its first @p races pushes, the rival pushes first."""
+        real, rivals = sp._git, []
+
+        def git(*args, **k):
+            if args[0] == "push" and len(rivals) < races:
+                rivals.append(self._bank_elsewhere())
+            return real(*args, **k)
+
+        args = dict(keep=4, trigger=6, attempts=3, warn_mb=60, fail_mb=85) | kw
+        with mock.patch.object(sp, "_git", git):
+            rc = sp.sync(self.D, self.wt, "prune", **args)
+        return rc, rivals
+
+    def _remote(self, name):
+        _sh(self.work, "fetch", "-q", "origin", "gh-pages")
+        return _sh(self.work, "show", f"FETCH_HEAD:{self.D}/{name}")
+
+    def test_no_race_prunes_and_pushes(self):
+        rc, _ = self._sync(0)
+        self.assertEqual(rc, 0)
+        for ents in sp.parse(self._remote("data.js"))["entries"].values():
+            self.assertEqual([e["date"] for e in ents], [4, 5, 6, 7])
+        self.assertFalse(self.wt.exists())
+
+    def test_lost_race_refetches_and_reprunes(self):
+        rc, rivals = self._sync(2)
+        self.assertEqual((rc, len(rivals)), (0, 2))
+        _sh(self.work, "merge-base", "--is-ancestor", rivals[-1], "FETCH_HEAD")  # rival kept
+        live = sp.parse(self._remote("data.js"))["entries"]
+        arch = sp.parse(self._remote("data-archive-001.js"))["entries"]
+        for suite, ents in live.items():
+            self.assertEqual([e["date"] for e in ents], [6, 7, 999, 999])
+            self.assertEqual([e["date"] for e in arch[suite]], [0, 1, 2, 3, 4, 5])
+        with self.assertRaises(subprocess.CalledProcessError):  # one archive: no stale prune landed
+            self._remote("data-archive-002.js")
+        self.assertFalse(self.wt.exists())
+
+    def test_every_race_lost_guards_the_remote_store(self):
+        unpruned = len(sp.render(_store(8)).encode()) / 1e6
+        rc, rivals = self._sync(9, fail_mb=unpruned * 0.9)  # a pruned local copy would pass
+        self.assertEqual((rc, len(rivals)), (1, 3))
+        self.assertGreater(len(sp.parse(self._remote("data.js"))["entries"]["thr (bigger is better)"]), 6)
+        self.assertFalse(self.wt.exists())
 
 
 if __name__ == "__main__":
