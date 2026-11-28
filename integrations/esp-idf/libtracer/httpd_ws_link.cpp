@@ -4408,9 +4408,12 @@ std::uint64_t httpd_ws_link_t::sweep(std::uint64_t now, std::uint64_t deadline) 
     const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
     if (frozen != 0 && h != nullptr) (void)post_flush(h);
     auth_cutoff_.store(deadline, std::memory_order_relaxed);
-    if (expired != 0 && h != nullptr)
-        (void)httpd_queue_work(h, &httpd_ws_link_t::auth_sweep_work,
-                               gate_.load(std::memory_order_relaxed));
+    // A refused submit is counted with the refused flushes (#2954); the next check finds the
+    // same sessions still expired and posts again.
+    if (expired != 0 && h != nullptr &&
+        httpd_queue_work(h, &httpd_ws_link_t::auth_sweep_work,
+                         gate_.load(std::memory_order_relaxed)) != ESP_OK)
+        flush_post_refused_.fetch_add(1, std::memory_order_relaxed);
     return sw.next;
 }
 

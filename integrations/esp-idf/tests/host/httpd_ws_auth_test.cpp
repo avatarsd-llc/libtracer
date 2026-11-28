@@ -367,6 +367,38 @@ void test_deadline_closes_a_squatter() {
     run_server();
 }
 
+/** @brief A refused auth-sweep submit is counted with the refused work submits (#2954), and
+ *         loses nothing: the next check finds the same session expired and closes it. */
+void test_refused_auth_sweep_submit_is_counted() {
+    std::printf("#2954 a refused auth-sweep submit is counted, and the next check closes it:\n");
+    reset_server();
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    link->set_auth_cb(&recording_auth, nullptr);
+    reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
+    constexpr int kFd = 668;
+    check(fake_httpd::instance().open_session(kFd), "the handshake was answered");
+    check(fake_httpd::instance().deliver_frame(kFd, kCredential) == ESP_OK,
+          "and the session claimed its slot, unauthenticated");
+    check(check_inside(*link) == kStampedDue, "the first check stamps it");
+    run_server();
+    const std::uint32_t before = link->stats().flush_post_refused;
+
+    fake_httpd::instance().set_queue_refusing(true);
+    (void)check_past(*link);
+    fake_httpd::instance().set_queue_refusing(false);
+    check(link->stats().flush_post_refused == before + 1, "the refused submit is counted once");
+    run_server();
+    check(link->stats().auth_expired == 0 && fake_httpd::instance().has_session(kFd),
+          "and nothing ran: the session is still open");
+
+    (void)check_past(*link);
+    run_server();
+    check(link->stats().auth_expired == 1, "the next check posts the sweep, which closes it");
+    check(link->stats().flush_post_refused == before + 1, "an accepted submit counts nothing");
+    run_server();
+}
+
 /** @brief An expired squatter must not be able to deny a real peer its slot for longer than
  *         the application's deadline — the whole reason the deadline exists. */
 void test_expired_squatter_cannot_consume_the_cap() {
@@ -994,6 +1026,7 @@ int main() {
     test_continue_carries_a_reply();
     test_reject_closes_with_its_own_code();
     test_deadline_closes_a_squatter();
+    test_refused_auth_sweep_submit_is_counted();
     test_expired_squatter_cannot_consume_the_cap();
     test_pending_departure_notifies_nobody();
     test_hook_arms_no_timer();

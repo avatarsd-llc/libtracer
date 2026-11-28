@@ -183,7 +183,9 @@ FOOTPRINT_PINS = {
     # override, so a torn echo closes the session and a stalled session's echo does not wait.
     # The RAM and sizeof(session_t) stay at main; send_guarded's frame grows 32 -> 64 B, on
     # IDF's echo path only (maintainer-approved, #2944).
-    "WebSocket (httpd server + client link)": 33891,
+    # 33,891 -> 33,903 B (+12, #2954): a refused auth-sweep submit is counted in
+    # stats_t::flush_post_refused. The RAM and every httpd_ws_link frame's stack stay at main.
+    "WebSocket (httpd server + client link)": 33903,
 }
 
 
