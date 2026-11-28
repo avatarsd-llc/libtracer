@@ -182,7 +182,7 @@ FOOTPRINT_PINS = {
     # 33,685 -> 33,891 B (+206, #2944): IDF's PONG and CLOSE echoes are bracketed in the send
     # override, so a torn echo closes the session and a stalled session's echo does not wait.
     # The RAM and sizeof(session_t) stay at main; send_guarded's frame grows 32 -> 64 B, on
-    # IDF's echo path only (orchestrator-approved, #2944).
+    # IDF's echo path only (maintainer-approved, #2944).
     "WebSocket (httpd server + client link)": 33891,
 }
 

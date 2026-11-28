@@ -3229,8 +3229,10 @@ httpd_ws_link_t::slot_name_t httpd_ws_link_t::reclaim_slot(session_t* slot, peer
         // live hazard: a slot handed to a new peer carries no TX state of its
         // predecessor's, the rule the dead mark above is here for having broken twice. Left
         // standing, an open bracket would let the FIRST failed write to the next peer read
-        // as a truncation of a frame that peer was never sent.
+        // as a truncation of a frame that peer was never sent. An echo header's owed payload
+        // goes with it for the same reason (#2944).
         (void)slot->close_tx_frame();
+        slot->tx_echo_owed = false;
     }
     {
         // Every TX frame goes with the session (#2095): the one on the wire is this task's own
@@ -4065,9 +4067,10 @@ int httpd_ws_link_t::send_guarded(httpd_handle_t handle, int fd, const char* buf
     if (buf == nullptr) return HTTPD_SOCK_ERR_INVALID;
     iovec one{const_cast<char*>(buf), len};
     // Every frame of the link's own is written inside a bracket. A write outside one, on a
-    // claimed session, is IDF's: a PONG or CLOSE echo, written as a 2-byte header and then,
-    // only if there is one, the payload in a second call (#2944). A whole control header
-    // announcing a payload means IDF's next write is that payload.
+    // claimed session, is IDF's own write, such as a PONG or CLOSE echo or the handshake
+    // response. An echo is a 2-byte header and then, only if there is one, the payload in a
+    // second call (#2944): a whole control header announcing a payload means IDF's next write
+    // is that payload.
     const auto* const b = reinterpret_cast<const std::uint8_t*>(buf);
     const bool header = len == 2 && (b[0] & 0x88u) == 0x88u && (b[1] & 0x7Fu) != 0;
     auto* const slot = static_cast<session_t*>(httpd_sess_get_ctx(handle, fd));
