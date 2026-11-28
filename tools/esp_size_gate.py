@@ -176,7 +176,10 @@ FOOTPRINT_PINS = {
     # through that session's own queue instead of parking the drain; a core with no idle hook
     # has no drain and charges no reply. Every other row, the RAM and every httpd_ws_link
     # frame's stack stay at main.
-    "WebSocket (httpd server + client link)": 33661,
+    # 33,661 -> 33,685 B (+24, #2943): a flush submit ESP-IDF refuses is counted
+    # (stats_t::flush_post_refused). The RAM, sizeof(httpd_ws_link_t) and every httpd_ws_link
+    # frame's stack stay at main.
+    "WebSocket (httpd server + client link)": 33685,
 }
 
 

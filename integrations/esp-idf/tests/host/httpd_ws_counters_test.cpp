@@ -191,6 +191,8 @@ void test_refusal_and_conflation_are_told_apart() {
 
     auto after = link->stats();
     check(after.enqueue_drops == before.enqueue_drops + 1, "the refused flush is counted");
+    check(after.flush_post_refused == before.flush_post_refused + 1,
+          "and so is the refused submit itself (#2943)");
     check(after.tx_conflated == before.tx_conflated, "and is NOT a conflation");
     check(after.tx_to_dead_peer == before.tx_to_dead_peer,
           "nor a dead-peer drop — the destination was alive");
@@ -204,6 +206,53 @@ void test_refusal_and_conflation_are_told_apart() {
     check(after.enqueue_drops == before.enqueue_drops + 1, "and none of them is an enqueue drop");
 
     drain();
+    link.reset();
+    fake_httpd::instance().close_all();
+}
+
+// ---------------------------------------------------------------------------
+// 4b — a refused flush submit for a frame already held is counted, and loses nothing.
+// ---------------------------------------------------------------------------
+void test_refused_flush_submit_is_counted() {
+    std::printf("#2943 a flush submit the server refuses is counted, and the frame stays held:\n");
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    claim(735);
+    drain();
+    fake_httpd::instance().set_send_script(735, {fake_httpd::send_result_t::TIMEOUT});
+    tr::net::transport_t* const to = link->peer_link("p0~1");
+    check(to != nullptr, "the directed endpoint resolved");
+    if (to == nullptr) {
+        link.reset();
+        fake_httpd::instance().close_all();
+        return;
+    }
+    to->send(std::span<const std::byte>(kBody));
+    drain();  // the flush finds the socket full: the frame is held
+    const auto before = link->stats();
+    const auto drops_before = link->drop_stats();
+
+    fake_httpd::instance().set_queue_refusing(true);
+    link->flush_held();
+    link->flush_held();
+    fake_httpd::instance().set_queue_refusing(false);
+    const auto after = link->stats();
+    check(after.flush_post_refused == before.flush_post_refused + 2,
+          "each refused submit is counted once");
+    check(after.enqueue_drops == before.enqueue_drops &&
+              link->drop_stats().dropped_tx == drops_before.dropped_tx,
+          "and none of them is a drop: the frame is still held");
+
+    // Behaviour unchanged: the next submit the server takes delivers the held frame.
+    fake_httpd::instance().set_send_script(735, {fake_httpd::send_result_t::FULL});
+    const std::size_t sent_before = fake_httpd::instance().frames_sent();
+    link->flush_held();
+    drain();
+    check(fake_httpd::instance().frames_sent() == sent_before + 1,
+          "the held frame goes out on the next accepted submit");
+    check(link->stats().flush_post_refused == after.flush_post_refused,
+          "an accepted submit counts nothing");
+
     link.reset();
     fake_httpd::instance().close_all();
 }
@@ -468,6 +517,7 @@ int main() {
     test_rx_oversize_is_counted();
     test_send_to_departed_peer_is_counted();
     test_refusal_and_conflation_are_told_apart();
+    test_refused_flush_submit_is_counted();
     test_condemn_is_counted();
     test_condemned_peer_leaves_the_facet();
     test_stats_snapshot_tracks();
