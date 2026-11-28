@@ -763,6 +763,27 @@ void test_full_hook_table_leaves_the_link_unpaced() {
     check(link->stats().rx_drain_waits == 0,
           "and rx_drain_waits reads 0 — indistinguishable from an unsaturated link");
     finish(std::move(link));
+    // Its in-call replies are not bounded either: with no drain to charge them to, none of
+    // them is sent to the queue, however many the session draws (#2942).
+    constexpr std::size_t kReplies = 8;  // four times the two 1 KiB replies a hooked core bounds
+    link = fresh_link(806);
+    (void)fake_httpd::instance().run_pending();
+    replier_t app;
+    link->set_peer_receiver(app);
+    const std::byte probe[1] = {std::byte{0}};
+    (void)fake_httpd::instance().deliver_frame(806, std::span<const std::byte>(probe));
+    tr::net::transport_t* const peer = only_peer(*link);
+    check(peer != nullptr, "the peer resolved to a directed endpoint");
+    if (peer != nullptr) {
+        const std::vector<std::byte> reply(1024, std::byte{0x7E});
+        app.arm(peer, std::span<const std::byte>(reply));
+        fake_httpd::instance().clear_sent_frames();
+        check(read_without_idle(806, kReplies), "every frame is read with no idle step");
+        check(fake_httpd::instance().sent_frames().size() == kReplies,
+              "every reply was written in-call, none queued past a bound");
+        app.arm(nullptr, {});
+    }
+    finish(std::move(link));
 }
 
 }  // namespace

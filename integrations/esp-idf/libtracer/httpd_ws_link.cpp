@@ -3629,6 +3629,8 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     // falls into the general pool, where an in-call send never waits (the #814 deadlock
     // reason) and therefore drops at once. Off the queue, none of that arithmetic applies:
     // a reply cannot be lost to a full pool, to a full mbox, or to a fan-out's occupancy.
+    // (Up to the session's per-drain reply bound: a reply past it takes the queued path
+    // below, and that path's refusals, #2942.)
     //
     // It is also the shape that cannot strand a slot in ANY ESP-IDF, which is the other
     // half of #1494's report. Above this component's floor (`idf: ">=5.5.5"`) the enqueue
@@ -3722,8 +3724,11 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     // and lwIP's send limits are that connection's own.
     // The destination joins the current drain first, exactly as its own next frame would
     // join it, or a tally left from an earlier drain would drop these replies there.
+    // A drain exists once pace_rx has joined a session to one (rx_drain_sessions_ never
+    // returns to 0 after that). On a core whose idle hook could not be installed, pace_rx
+    // joins none, so nothing is charged there and no reply is sent to the queue by the bound.
     if constexpr (kRxDrainPaced)
-        if (out == tx_outcome_t::SENT) {
+        if (out == tx_outcome_t::SENT && rx_drain_sessions_ != 0) {
             join_drain(*to.slot, rx_drain_epoch_);
             to.slot->drain.replies =
                 saturating_add(to.slot->drain.replies,
