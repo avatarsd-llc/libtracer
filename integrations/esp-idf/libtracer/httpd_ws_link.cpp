@@ -347,7 +347,8 @@ constexpr std::uint32_t kSendBoundsPerPeer = 3;
 constexpr std::uint32_t kIdfWsWriteLegs = 2;
 
 /**
- * @brief In-call reply bytes a session may be sent in one drain before its next frame waits:
+ * @brief In-call reply bytes a session may be written in one drain before its replies go
+ *        through its own queue (#2942):
  *        a quarter of lwIP's send buffer (ADR-0085 §7).
  *
  * Why a drain's replies are bounded at all. The receive context is the task that writes the
@@ -361,7 +362,10 @@ constexpr std::uint32_t kIdfWsWriteLegs = 2;
  * write never waits for send-buffer space the writer itself is withholding.
  *
  * Both limits are a connection's own (lwIP keeps them per pcb), so the charge is per
- * SESSION: a session is never held back by replies written to another.
+ * SESSION: a session is never held back by replies written to another. Reaching the bound
+ * parks nothing (#2942): the replies past it are staged on the session's own queue and the
+ * flush writes them without waiting, so only that session's replies wait, behind its own
+ * socket, and the httpd task every session shares goes on reading.
  *
  * In-call replies only. Pushes posted by other tasks and sent from inside the park
  * (@ref httpd_ws_link_t::flush_egress) are outside this bound, and need none since #2095:
@@ -381,25 +385,25 @@ constexpr std::size_t kRxDrainTxBytes = kTcpSndBuf / 4;
  * needed (a reply was two segments, so 32 of them were 64 against a queue of 16).
  */
 constexpr std::size_t kRxDrainTxReplies = std::min<std::size_t>(kTcpSndQueueLen / 2, 254);
-static_assert(kRxDrainTxReplies >= 1, "a reply bound of zero would park every frame");
+static_assert(kRxDrainTxReplies >= 1, "a reply bound of zero would queue every reply");
 
 /**
  * @brief The reply bound in one byte (#2916): a session's in-call replies are charged in units
  *        of @ref kRxDrainTxUnitBytes, at least @ref kRxDrainTxSegmentUnits per reply, and its
- *        drain is spent at @ref kRxDrainTxUnits.
+ *        in-call replies stop at @ref kRxDrainTxUnits (the rest queue, #2942).
  *
  * A reply costs `max(kRxDrainTxSegmentUnits, bytes / kRxDrainTxUnitBytes)`: one segment's share
  * of the segment half, or its bytes' share of the byte half, whichever is more, so each half
- * ends the drain where it would alone (8 one-segment replies, or 1440 B, at IDF's defaults:
- * 6 B units, 30 per segment, 240 per drain). A reply past the MSS is several segments, but its
- * bytes already cost more than that many segments' units, so the floor is the only segment term.
- * The bytes round DOWN, where rounding up parked a session a reply early. What a drain writes
- * to one session is therefore the byte half, plus the one reply that crossed it, plus under one
- * unit per earlier reply: the bound is checked when the session next reads (`pace_rx`) and a
- * reply is charged after it is written, so the reply that crosses the bound is always sent. That
- * one-reply overshoot is as old as the bound. At the defaults: 1916 B for 479 B replies, 2048 B
- * for 1 KiB ones. The unit is the smallest that fits the one-byte tally (below 255 with one
- * reply's charge to spare).
+ * ends the in-call replies where it would alone (8 one-segment replies, or 1440 B, at IDF's
+ * defaults: 6 B units, 30 per segment, 240 per drain). A reply past the MSS is several segments,
+ * but its bytes already cost more than that many segments' units, so the floor is the only segment
+ * term. The bytes round DOWN, where rounding up stopped a session's in-call replies one early. What
+ * a drain writes in-call to one session is therefore the byte half, plus the one reply that crossed
+ * it, plus under one unit per earlier reply: the bound is checked before each in-call reply
+ * (`send_in_call`) and a reply is charged after it is written, so the reply that crosses the bound
+ * is always sent. That one-reply overshoot is as old as the bound. At the defaults: 1916 B for
+ * 479 B replies, 2048 B for 1 KiB ones. The unit is the smallest that fits the one-byte tally
+ * (below 255 with one reply's charge to spare).
  */
 constexpr std::size_t kRxDrainTxUnitBytes =
     (kRxDrainTxBytes / kRxDrainTxReplies + 254 / kRxDrainTxReplies - 1) / (254 / kRxDrainTxReplies);
@@ -2489,10 +2493,12 @@ void httpd_ws_link_t::pace_rx(void* sess_ctx, std::size_t frame_bytes) {
     std::uint32_t epoch = gate.epoch.load(std::memory_order_seq_cst);
     // The drain is the run of frames since this core last idled; an epoch that moved since
     // starts a new one. A session waits only once it has read ITS SHARE of the budget, the
-    // budget divided among the sessions that have read in this drain, or once its own in-call
-    // replies reach what lwIP can hold unacknowledged for it (kRxDrainTxUnits), or once the
+    // budget divided among the sessions that have read in this drain, or once the
     // whole drain reaches twice the budget (kRxDrainLinkUnits, which only sessions joining one
-    // after another reach). So no session is charged for another session's frames, and a
+    // after another reach). Its in-call replies never make it wait: the ones past what lwIP can
+    // hold unacknowledged for it wait in its own queue instead (send_in_call, #2942), so one
+    // session's replies never park the task every session shares. So no session is charged
+    // for another session's frames, and a
     // drain reads at most min(U * H_N, 2 U) units plus one frame per session. A task that
     // migrated reads another core's epoch, which almost never matches the tag, and starts a
     // new drain; one that matches by chance waits once early, never for good.
@@ -2512,7 +2518,7 @@ void httpd_ws_link_t::pace_rx(void* sess_ctx, std::size_t frame_bytes) {
     const auto now = static_cast<std::uint16_t>(epoch);
     const bool spent = s.drain.epoch == now && rx_drain_epoch_ == now &&
                        (std::size_t{s.drain.units} * rx_drain_sessions_ >= kRxDrainUnits ||
-                        s.drain.replies >= kRxDrainTxUnits || rx_drain_units_ >= kRxDrainLinkUnits);
+                        rx_drain_units_ >= kRxDrainLinkUnits);
     if (spent) {
         rx_drain_waits_.fetch_add(1, std::memory_order_relaxed);
         gate.waiters.fetch_add(1, std::memory_order_seq_cst);
@@ -3623,6 +3629,8 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     // falls into the general pool, where an in-call send never waits (the #814 deadlock
     // reason) and therefore drops at once. Off the queue, none of that arithmetic applies:
     // a reply cannot be lost to a full pool, to a full mbox, or to a fan-out's occupancy.
+    // (Up to the session's per-drain reply bound: a reply past it takes the queued path
+    // below, and that path's refusals, #2942.)
     //
     // It is also the shape that cannot strand a slot in ANY ESP-IDF, which is the other
     // half of #1494's report. Above this component's floor (`idf: ">=5.5.5"`) the enqueue
@@ -3662,6 +3670,18 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
         note_enqueue_drop(fd, total);
         return;
     }
+    // A session whose in-call replies have reached what lwIP holds unacknowledged for it in
+    // this drain (kRxDrainTxUnits, ADR-0085 §7) gets the rest through its own queue, exactly as
+    // a reply from another task does (#2942): written without waiting by the flush, resumed on
+    // the link's own events, refused and counted when the session's control lane is full. Only
+    // that session's replies wait; the drain is not parked for them, so no other session's
+    // reads or replies are held behind one session's reply load.
+    // A tally of an earlier drain counts nothing here.
+    if constexpr (kRxDrainPaced)
+        if (to.slot->drain.epoch == rx_drain_epoch_ && to.slot->drain.replies >= kRxDrainTxUnits) {
+            queue_send(to, iov);
+            return;
+        }
     // One span is the reply's ordinary shape, and it needs NO buffer of ours at all: the
     // caller's memory is alive for this whole call (it is the caller's stack frame, one
     // level up), which is exactly what the asynchronous path could not assume and had to
@@ -3704,8 +3724,11 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     // and lwIP's send limits are that connection's own.
     // The destination joins the current drain first, exactly as its own next frame would
     // join it, or a tally left from an earlier drain would drop these replies there.
+    // A drain exists once pace_rx has joined a session to one (rx_drain_sessions_ never
+    // returns to 0 after that). On a core whose idle hook could not be installed, pace_rx
+    // joins none, so nothing is charged there and no reply is sent to the queue by the bound.
     if constexpr (kRxDrainPaced)
-        if (out == tx_outcome_t::SENT) {
+        if (out == tx_outcome_t::SENT && rx_drain_sessions_ != 0) {
             join_drain(*to.slot, rx_drain_epoch_);
             to.slot->drain.replies =
                 saturating_add(to.slot->drain.replies,

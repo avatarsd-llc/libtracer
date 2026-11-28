@@ -1748,6 +1748,13 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * a reply cannot be lost to a full pool, a full mbox or a fan-out's occupancy, and it
      * can strand no slot on any ESP-IDF. The definition carries the full argument.
      *
+     * That holds up to the session's per-drain reply bound (ADR-0085 §7, #2942). A reply
+     * past it goes through @ref queue_send like any other send, so it can be refused and
+     * counted in @ref stats_t::enqueue_drops: by a full control lane, by a second large
+     * block for the session, or by a flush that could not be posted (@ref ring_doorbell
+     * takes the reply back). On a core whose idle hook is not installed there is no drain
+     * and no bound: every reply is written in-call.
+     *
      * Accounted exactly as @ref flush_peer accounts a held frame: the same two liveness
      * tests, @ref note_tx_skip for a peer that is gone and @ref note_tx_result for a
      * result that names one. A single-span reply is written from the CALLER's memory with

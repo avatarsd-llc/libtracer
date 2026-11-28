@@ -24,7 +24,9 @@
  *   - a core that idles on its own between bursts never makes the link wait;
  *   - a send queued from another task is sent from INSIDE the park, so the httpd task (the
  *     one drain of its own control queue) never holds the link's egress, and a peer that
- *     provokes a send per frame buys no ingress with it: the budget stays spent until idle.
+ *     provokes a send per frame buys no ingress with it: the budget stays spent until idle;
+ *   - a session's in-call replies past its bound wait in its own queue, so they never park
+ *     the drain and never hold another session's reads or replies (#2942).
  *
  * What it cannot show is the silicon half: that the idle task really runs once the httpd
  * task parks, and what the pacing costs in throughput. That is the on-silicon plan in
@@ -507,22 +509,26 @@ void test_an_in_call_reply_counts_for_a_stale_destination() {
     // A new drain: B's tally is now an earlier drain's.
     (void)fake_httpd::run_idle_hooks();
     app.arm(b);
-    g_payload_reads.store(0);
+    fake_httpd::instance().clear_sent_frames();
     std::atomic<int> step{0};
     std::thread httpd([&] {
-        // A's frames, each answered in-call to B, up to B's reply bound.
-        for (std::size_t i = 0; i < 8; ++i)
+        // A's frames, each answered in-call to B: eight reach B's reply bound, the ninth waits.
+        for (std::size_t i = 0; i < 9; ++i)
             (void)fake_httpd::instance().deliver_frame(830, std::span<const std::byte>(body));
         step.store(1);
-        // B's own next frame meets its reply bound: the replies were kept.
+        app.arm(nullptr);  // B's own frame draws no reply
         (void)fake_httpd::instance().deliver_frame(831, std::span<const std::byte>(body));
         step.store(2);
     });
-    check(wait_until([&] { return step.load() == 1 && parked_after(8); }),
-          "B's next frame waits: the replies written to it in this drain were counted");
-    (void)fake_httpd::run_idle_hooks();
-    check(wait_until([&] { return step.load() == 2; }), "and it is read once the core idles");
+    check(wait_until([&] { return step.load() == 2; }), "every frame is read, with no idle step");
     httpd.join();
+    check(fake_httpd::instance().sent_frames().size() == 8,
+          "eight replies were written in-call: B's tally was joined to this drain and counted");
+    check(link->stats().rx_drain_waits == 0, "and nothing parked for them (#2942)");
+    while (fake_httpd::instance().run_pending() != 0) {
+    }
+    check(fake_httpd::instance().sent_frames().size() == 9,
+          "the ninth went out through B's own queue");
     app.arm(nullptr);
     finish(std::move(link));
 }
@@ -554,8 +560,8 @@ void test_a_session_closing_mid_drain() {
 }
 
 // ---------------------------------------------------------------------------
-// 9 — a drain also ends on its own egress: in-call replies worth a quarter of lwIP's send
-//     buffer end it before the frame budget would (ADR-0085 §7).
+// 9 — a session's in-call replies are bounded at a quarter of lwIP's send buffer (ADR-0085
+//     §7); past it they wait in the session's own queue, never in a parked drain (#2942).
 // ---------------------------------------------------------------------------
 /** @brief An application that answers every frame in-call with a fixed reply. */
 class replier_t {
@@ -573,14 +579,30 @@ class replier_t {
     std::span<const std::byte> reply_;
 };
 
+/** @brief Deliver @p n frames to @p fd on a thread playing the httpd task; true when all were
+ *         read with no idle step (a parked drain would need one). */
+bool read_without_idle(int fd, std::size_t n) {
+    const std::byte body[8] = {};
+    std::atomic<bool> done{false};
+    std::thread httpd([&] {
+        for (std::size_t i = 0; i < n; ++i)
+            (void)fake_httpd::instance().deliver_frame(fd, std::span<const std::byte>(body));
+        done.store(true);
+    });
+    const bool ok = wait_until([&] { return done.load(); });
+    if (!ok) (void)fake_httpd::run_idle_hooks();  // unpark so the join returns
+    httpd.join();
+    return ok;
+}
+
 void test_in_call_reply_bytes_end_a_drain() {
-    // The host binds lwIP's defaults: TCP_SND_BUF 5760, so a drain ends once its in-call
-    // replies reach 1440 B. Two 1 KiB replies cross it; the third frame parks.
+    // The host binds lwIP's defaults: TCP_SND_BUF 5760, so a session's in-call replies reach
+    // their bound at 1440 B. Two 1 KiB replies cross it; the third waits in its queue.
     constexpr std::size_t kReply = 1024;
-    constexpr std::size_t kFramesPerDrain = 2;
-    std::printf(
-        "in-call replies of %zu B end a drain after %zu frames (a quarter of the send buffer):\n",
-        kReply, kFramesPerDrain);
+    constexpr std::size_t kInCall = 2;
+    constexpr std::size_t kFrames = 5;
+    std::printf("in-call replies of %zu B: %zu written in-call, the rest queued, no park:\n",
+                kReply, kInCall);
     auto link = fresh_link(809);
     (void)fake_httpd::instance().run_pending();
     replier_t app;
@@ -597,41 +619,34 @@ void test_in_call_reply_bytes_end_a_drain() {
     const std::vector<std::byte> reply(kReply, std::byte{0x7E});
     app.arm(peer, std::span<const std::byte>(reply));
     fake_httpd::instance().clear_sent_frames();
-    g_payload_reads.store(0);
-
-    ingress_t in(809, 2 * kFramesPerDrain + 1, 8);
-    check(wait_until([&] { return parked_after(kFramesPerDrain); }),
-          "the drain parks after two frames: its replies reached the egress bound");
-    check(fake_httpd::instance().sent_frames().size() == kFramesPerDrain,
-          "both replies were written in-call before the park");
-    check(link->stats().rx_drain_waits == 1, "one wait, counted like any other");
-    (void)fake_httpd::run_idle_hooks();
-    check(wait_until([&] { return parked_after(2 * kFramesPerDrain); }),
-          "the next drain ends on its egress again");
-    (void)fake_httpd::run_idle_hooks();
-    check(wait_until([&] { return in.delivered() == 2 * kFramesPerDrain + 1; }),
-          "the last frame finished");
-    check(fake_httpd::instance().sent_frames().size() == 2 * kFramesPerDrain + 1,
-          "every frame was answered; nothing was dropped");
+    check(read_without_idle(809, kFrames), "every frame is read with no idle step");
+    check(fake_httpd::instance().sent_frames().size() == kInCall,
+          "two replies were written in-call: the session's bound (ADR-0085 §7)");
+    check(link->stats().rx_drain_waits == 0, "the drain did not park for the replies (#2942)");
+    while (fake_httpd::instance().run_pending() != 0) {
+    }
+    check(fake_httpd::instance().sent_frames().size() == kFrames,
+          "the rest went out through the session's own queue; nothing was dropped");
+    app.arm(nullptr, {});
     finish(std::move(link));
 }
 
 /**
- * @brief Where a drain of in-call replies parks, by reply size (#2916): each reply is charged
- *        its bytes in exact units with a one-segment floor, so the byte half of the bound
- *        (a quarter of the send buffer, 1440 B on the host's lwIP defaults) and the segment
- *        half (8 replies) each end the drain where they would alone, with no coarse round-up.
+ * @brief Where a session's in-call replies start waiting in its queue, by reply size (#2916,
+ *        #2942): each reply is charged its bytes in exact units with a one-segment floor, so
+ *        the byte half of the bound (a quarter of the send buffer, 1440 B on the host's lwIP
+ *        defaults) and the segment half (8 replies) each end the in-call writes where they
+ *        would alone. The replies after that go out through the session's queue.
  */
 void test_reply_sizes_park_where_the_bound_says() {
-    std::printf("in-call replies park where the segment or byte half of the bound ends:\n");
+    std::printf("in-call replies stop where the segment or byte half of the bound ends:\n");
     struct case_t {
         std::size_t reply;  /**< @brief Bytes per in-call reply. */
-        std::size_t frames; /**< @brief Frames read, each answered, before the drain parks. */
+        std::size_t frames; /**< @brief Replies written in-call before the rest queue. */
     };
     // 1440 B per drain and 8 segments: a small reply is one segment; from 240 B up the bytes
     // decide. 360 and 479 B fit four times (1440 and 1916 B are both past the bound only at
-    // the fourth); 480 B is exactly a third. The old charge (one per reply plus one per 180 B)
-    // parked 200 B replies at four and 360-479 B replies at three.
+    // the fourth); 480 B is exactly a third.
     constexpr case_t kCases[] = {{16, 8},  {200, 8},  {360, 4}, {479, 4},
                                  {480, 3}, {1024, 2}, {1440, 1}};
     int fd = 850;
@@ -649,21 +664,80 @@ void test_reply_sizes_park_where_the_bound_says() {
         const std::vector<std::byte> reply(c.reply, std::byte{0x7E});
         app.arm(peer, std::span<const std::byte>(reply));
         fake_httpd::instance().clear_sent_frames();
-        g_payload_reads.store(0);
-        ingress_t in(fd, c.frames + 1, 8);
+        const bool read = read_without_idle(fd, c.frames + 2);
         char what[96];
-        std::snprintf(what, sizeof(what), "%zu B replies: the drain parks after %zu frames",
-                      c.reply, c.frames);
-        check(wait_until([&] { return parked_after(c.frames); }), what);
-        // The core idles as often as the drain needs, so a case that parked early still ends.
-        check(wait_until([&] {
-                  (void)fake_httpd::run_idle_hooks();
-                  return in.delivered() == c.frames + 1;
-              }),
-              "  then finishes");
+        std::snprintf(what, sizeof(what), "%zu B replies: %zu written in-call, no park", c.reply,
+                      c.frames);
+        check(read && fake_httpd::instance().sent_frames().size() == c.frames &&
+                  link->stats().rx_drain_waits == 0,
+              what);
+        while (fake_httpd::instance().run_pending() != 0) {
+        }
+        check(fake_httpd::instance().sent_frames().size() == c.frames + 2,
+              "  then the queued ones go out");
+        app.arm(nullptr, {});
         finish(std::move(link));
         ++fd;
     }
+}
+
+// ---------------------------------------------------------------------------
+// 13 — replies past a session's bound wait in that session's own queue (#2942): the drain is
+//      not parked for them, so another session is read and answered without waiting.
+// ---------------------------------------------------------------------------
+void test_replies_past_the_bound_do_not_hold_other_sessions() {
+    constexpr std::size_t kReply = 480;  // a third of the byte half: three fit in-call
+    constexpr std::size_t kAsks = 6;
+    std::printf("a session whose replies pass its bound holds no other session back:\n");
+    auto link = fresh_link(860);  // A
+    (void)fake_httpd::instance().run_pending();
+    replier_t app;
+    link->set_peer_receiver(app);
+    tr::net::transport_t* const a = only_peer(*link);
+    claimed_session(861);  // B
+    (void)fake_httpd::instance().run_pending();
+    tr::net::transport_t* const b = newest_peer(*link);
+    check(a != nullptr && b != nullptr, "both sessions resolved to directed endpoints");
+    if (a == nullptr || b == nullptr) {
+        finish(std::move(link));
+        return;
+    }
+    (void)fake_httpd::run_idle_hooks();
+    const std::vector<std::byte> reply(kReply, std::byte{0x7E});
+    fake_httpd::instance().clear_sent_frames();
+    const std::byte body[8] = {};
+    std::atomic<int> step{0};
+    std::thread httpd([&] {
+        // A asks six times, each answered in-call with 480 B: twice what its bound holds.
+        app.arm(a, std::span<const std::byte>(reply));
+        for (std::size_t i = 0; i < kAsks; ++i)
+            (void)fake_httpd::instance().deliver_frame(860, std::span<const std::byte>(body));
+        step.store(1);
+        // B asks once, in the same drain, and is answered.
+        app.arm(b, std::span<const std::byte>(reply));
+        (void)fake_httpd::instance().deliver_frame(861, std::span<const std::byte>(body));
+        step.store(2);
+    });
+    const bool read = wait_until([&] { return step.load() == 2; });
+    if (!read) (void)fake_httpd::run_idle_hooks();  // unpark so the join returns
+    httpd.join();
+    check(read, "A's frames and B's frame are all read with no idle step");
+    check(link->stats().rx_drain_waits == 0, "the shared task never parked for A's replies");
+    std::size_t to_a = 0;
+    std::size_t to_b = 0;
+    for (const auto& f : fake_httpd::instance().sent_frames()) {
+        to_a += f.fd == 860;
+        to_b += f.fd == 861;
+    }
+    check(to_b == 1, "B's reply was written in-call, ahead of A's waiting replies");
+    check(to_a == 3, "A's first three replies were written in-call: its bound");
+    while (fake_httpd::instance().run_pending() != 0) {
+    }
+    to_a = 0;
+    for (const auto& f : fake_httpd::instance().sent_frames()) to_a += f.fd == 860;
+    check(to_a == kAsks, "the other three waited in A's own queue and went out after");
+    app.arm(nullptr, {});
+    finish(std::move(link));
 }
 
 // ---------------------------------------------------------------------------
@@ -688,6 +762,27 @@ void test_full_hook_table_leaves_the_link_unpaced() {
     check(fake_httpd::semaphore_waiters() == 0, "nothing waits on the idle gate");
     check(link->stats().rx_drain_waits == 0,
           "and rx_drain_waits reads 0 — indistinguishable from an unsaturated link");
+    finish(std::move(link));
+    // Its in-call replies are not bounded either: with no drain to charge them to, none of
+    // them is sent to the queue, however many the session draws (#2942).
+    constexpr std::size_t kReplies = 8;  // four times the two 1 KiB replies a hooked core bounds
+    link = fresh_link(806);
+    (void)fake_httpd::instance().run_pending();
+    replier_t app;
+    link->set_peer_receiver(app);
+    const std::byte probe[1] = {std::byte{0}};
+    (void)fake_httpd::instance().deliver_frame(806, std::span<const std::byte>(probe));
+    tr::net::transport_t* const peer = only_peer(*link);
+    check(peer != nullptr, "the peer resolved to a directed endpoint");
+    if (peer != nullptr) {
+        const std::vector<std::byte> reply(1024, std::byte{0x7E});
+        app.arm(peer, std::span<const std::byte>(reply));
+        fake_httpd::instance().clear_sent_frames();
+        check(read_without_idle(806, kReplies), "every frame is read with no idle step");
+        check(fake_httpd::instance().sent_frames().size() == kReplies,
+              "every reply was written in-call, none queued past a bound");
+        app.arm(nullptr, {});
+    }
     finish(std::move(link));
 }
 
@@ -730,6 +825,7 @@ int main(int argc, char** argv) {
         test_sessions_joining_in_turn_stop_at_twice_the_budget();
         test_an_in_call_reply_counts_for_a_stale_destination();
         test_a_session_closing_mid_drain();
+        test_replies_past_the_bound_do_not_hold_other_sessions();
     }
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
