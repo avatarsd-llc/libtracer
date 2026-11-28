@@ -172,7 +172,10 @@ FOOTPRINT_PINS = {
     # stalled session's replies are written without waiting (the part-taken finish in send_now
     # and the three-way send outcome), and a frozen stalled session closes with nothing held.
     # Every other row, the RAM and every httpd_ws_link frame's stack stay at main.
-    "WebSocket (httpd server + client link)": 33621,
+    # 33,621 -> 33,655 B (+34, #2942): an in-call reply past its session's per-drain bound goes
+    # through that session's own queue instead of parking the drain. Every other row, the RAM
+    # and every httpd_ws_link frame's stack stay at main.
+    "WebSocket (httpd server + client link)": 33655,
 }
 
 

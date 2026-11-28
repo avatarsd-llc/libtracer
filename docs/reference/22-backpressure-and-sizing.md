@@ -172,7 +172,9 @@ queue or shed — and what every other stage does instead.
   holds at most `kTxLargePerPeer` (1) block of the large class; a further large frame for it is
   refused and counted, while every other peer takes the block (#2908). A peer that stopped
   reading is closed only by the application's liveness check (`sweep`, #2198). In-call replies
-  bypass the slots.
+  bypass the slots up to the session's per-drain reply bound (a quarter of lwIP's send buffer);
+  past it they take the session's own control lane, so one session's replies never hold the
+  shared httpd task (#2942).
 - **Designated pressure point**: **two**, one per flow — the receiving vertex's ring on the
   best-effort arm for sensor streams, the in-call reply on the reliable arm for control.
 - **Everything else refuses**: the rx arena answers `TLV_NESTING_TOO_DEEP`, the value store
