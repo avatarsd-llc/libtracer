@@ -524,6 +524,61 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         set_tests_properties(httpd_ws_departure_cost
             PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+        # #2959 — the per-session READ budget (#2774, #2865) charged per SESSION over the httpd
+        # link, with two sessions. The budget is a config constant, so this suite needs a core
+        # built with kReadBudget = 3 (the test preset binds 254): a second, minimal library from
+        # the same source groups under its own generated fragment, ahead of the preset on the
+        # include path. The two never link into one binary.
+        file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/read-budget-3/libtracer/config_override.hpp
+"/**
+ * @file
+ * @brief GENERATED test fixture: the peer-named tier on and the READ budget at 3 (#2959).
+ */
+#pragma once
+
+#include <cstdint>
+
+namespace tr::graph {
+
+/** @brief The defaults, with the peer-named tier and a READ budget of 3. */
+struct read_budget_3_config_t : default_config_t {
+    static constexpr bool kBusLinks = true;
+    static constexpr std::uint8_t kReadBudget = 3;
+};
+
+using config_t = read_budget_3_config_t;
+
+}  // namespace tr::graph
+")
+        libtracer_generate_builtin_transports(
+            ${CMAKE_CURRENT_BINARY_DIR}/read-budget-3/builtin_transports.cpp)
+        add_library(libtracer_read_budget_3 STATIC ${LIBTRACER_SOURCES_REQUIRED}
+            ${LIBTRACER_SOURCES_NET_PLANE}
+            ${CMAKE_CURRENT_BINARY_DIR}/read-budget-3/builtin_transports.cpp)
+        target_include_directories(libtracer_read_budget_3 BEFORE PUBLIC
+            ${CMAKE_CURRENT_BINARY_DIR}/read-budget-3)
+        target_include_directories(libtracer_read_budget_3 PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+        target_link_libraries(libtracer_read_budget_3 PUBLIC Threads::Threads)
+        target_compile_features(libtracer_read_budget_3 PUBLIC cxx_std_23)
+        add_executable(httpd_ws_read_budget_test
+            "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_read_budget_test.cpp"
+            "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+            "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+        target_include_directories(httpd_ws_read_budget_test PRIVATE
+            "${LIBTRACER_ESP_DIR}/tests/host"
+            "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+            "${LIBTRACER_ESP_DIR}/libtracer/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_link_libraries(httpd_ws_read_budget_test PRIVATE libtracer_read_budget_3)
+        target_link_options(httpd_ws_read_budget_test PRIVATE
+            "-Wl,--wrap=send" "-Wl,--wrap=sendmsg" "-Wl,--wrap=shutdown")
+        libtracer_test_warnings(httpd_ws_read_budget_test)
+        add_test(NAME httpd_ws_read_budget COMMAND httpd_ws_read_budget_test)
+        # An adopted link keeps its handler gate BY DESIGN (the #815 precedent).
+        set_tests_properties(httpd_ws_read_budget
+            PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
         # #1846 — the JOIN: the subject an in-band ACCEPT binds is the ACL caller context of
         # the session's later frames. A real graph_t + fwd_router_t, because the gate is the
         # graph's; the link only answers which subject a frame writes under.
@@ -2850,6 +2905,7 @@ set(LIBTRACER_BUS_TESTS
     httpd_ws_auth
     httpd_ws_close_peer
     httpd_ws_departure_cost
+    httpd_ws_read_budget
     httpd_ws_drain_budget
     httpd_ws_drain_budget_unhooked
     httpd_ws_eviction_lock
