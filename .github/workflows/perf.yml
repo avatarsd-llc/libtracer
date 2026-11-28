@@ -827,6 +827,49 @@ jobs:
             bench/benchmark_output.json
             bench/benchmark_throughput.json
           retention-days: 90
+      # STORE SIZE (#2937), the same bound #2229 put on bench-local. `dev/bench/data.js`
+      # grows by ~0.2 MB per banked point (both suites) and passed GitHub's 100 MB file
+      # limit at ~970 points, so every push below was rejected (GH001) and no point was
+      # banked. Before the two tracking steps push, keep the newest 150 points per series
+      # live and move older entries into immutable `data-archive-NNN.js` files beside it;
+      # nothing is deleted, and bench/store_load.py (the results page's loader) reads the
+      # archives back. Pruning waits for 200 points (hysteresis: one gh-pages commit per
+      # ~50 points; 150 points of the real store are 32 MB, so the peak is ~43 MB). The
+      # soft alert compares each point with the previous one only, so the live window does
+      # not change what it sees. The guard then fails here, named, if the store nears the
+      # limit anyway.
+      - name: Bound the history store (prune to an archive) + size guard
+        run: |
+          # A failed earlier run must not wedge a persistent runner: clear any leftover
+          # worktree first, and always remove ours on exit.
+          clean() {
+            cd "$GITHUB_WORKSPACE"
+            git worktree remove --force ../ghp-prune-hosted 2>/dev/null || true
+            rm -rf ../ghp-prune-hosted
+            git worktree prune
+          }
+          clean
+          trap clean EXIT
+          git fetch --no-tags --depth=1 origin gh-pages
+          git worktree add ../ghp-prune-hosted FETCH_HEAD
+          cd ../ghp-prune-hosted
+          if [ -f dev/bench/data.js ]; then
+            python3 "$GITHUB_WORKSPACE/bench/store_prune.py" prune --dir dev/bench --keep 150 --trigger 200
+            if [ -n "$(git status --porcelain dev/bench)" ]; then
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add dev/bench
+              git commit -m "bench: archive older points, keep the live store small (#2937)"
+              # The prune is idempotent, so a lost race is not fatal: retry once on a fresh
+              # fetch, else warn and let the next run prune. Banking this point goes on.
+              if ! git push origin HEAD:gh-pages; then
+                git fetch --no-tags --depth=1 origin gh-pages
+                git rebase FETCH_HEAD && git push origin HEAD:gh-pages \
+                  || echo "::warning::the store prune push was rejected; the next run re-prunes"
+              fi
+            fi
+            python3 "$GITHUB_WORKSPACE/bench/store_prune.py" guard --data dev/bench/data.js
+          fi
       - name: Track latency + memory history + soft-alert on drift
         uses: benchmark-action/github-action-benchmark@v1
         with:
